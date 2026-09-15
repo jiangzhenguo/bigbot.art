@@ -1,0 +1,11 @@
+- `char-female.jpg` — "The young asian girl" by My name's axel · License: CC BY-SA · Source: https://www.flickr.com/photos/37611179@N00/2317125646
+- `char-male.jpg` — "Asian grandfather" by Nithi clicks · License: CC BY · Source: https://www.flickr.com/photos/47850033@N08/36119610724
+- `env-valley.jpg` — "Grassland conservation easement on Sand Lake Wetland Management District" by USFWS Mountain Prairie · License: CC BY · Source: https://www.flickr.com/photos/51986662@N05/14466372148
+- `env-dusk.jpg` — "Sunrise" by USFWS Headquarters · License: CC BY · Source: https://www.flickr.com/photos/50838842@N06/8425324450
+- `sb-river.jpg` — "jump stream" by Unknown · License: CC CC0 · Source: https://www.rawpixel.com/image/3290182/free-photo-image-aerial-view-canyon-cave
+- `shot-01.jpg` — "Muskie attempting jump over dam 04-12-2015 076" by Richard Hurd · License: CC BY · Source: https://www.flickr.com/photos/56708607@N04/16609038083
+- `shot-02.jpg` — "Godalming - Oct 2011 - The Magnificent Seven" by Gareth1953 All Right Now · License: CC BY · Source: https://www.flickr.com/photos/40837632@N05/6258849294
+- `eclipse.jpg` — "Total Solar Eclipse 2016 in Indonesia" by skyseeker · License: CC BY · Source: https://www.flickr.com/photos/40422902@N00/26326740195
+- `ink.jpg` — "Snow Piled Up in the Wintry Mountains LACMA M.91.212.1 (2 of 4)" by Fæ · License: CC BY · Source: https://www.flickr.com/photos/50398299@N08/16254455140
+- `prop-bottle.jpg` — "de Havilland Mosquito B Mk 35 bomb aimer's compartment, starboard interior 05_12_34" by wbaiv · License: CC BY-SA · Source: https://www.flickr.com/photos/9998127@N06/8734784372
+- `sb-river.jpg` (v2) — "Jumping over the river" by Tambako the Jaguar · License: CC BY-ND · Source: https://www.flickr.com/photos/8070463@N03/6309601950

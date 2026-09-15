@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- BigBotArt ”(þ:ÑrÒ¹W(.mk ÁLW,--fg #1d1d1f,Ò¦ 30%)
+       …L}r logo-mark glyphÐÖêŸ‹ .side-brand/.nav-brand „ .mk H° -->
+  <rect width="64" height="64" rx="15" fill="#1d1d1f"/>
+  <g fill="none" stroke="#ffffff" stroke-width="4.4" stroke-linecap="round" transform="translate(11.5 11.5) scale(1.708)">
+    <rect x="3" y="3" width="8" height="8" rx="2"/>
+    <rect x="13" y="13" width="8" height="8" rx="2"/>
+    <path d="M11 8h6a4 4 0 0 1 4 4v1" opacity=".65"/>
+  </g>
+</svg>

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "markdown-document",
+  "title": "assets/ATTRIBUTION.md",
+  "entry": "assets/ATTRIBUTION.md",
+  "renderer": "markdown",
+  "status": "complete",
+  "exports": [
+    "md",
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-09-13T11:48:26.808Z",
+  "updatedAt": "2026-09-13T11:48:26.808Z",
+  "metadata": {
+    "inferred": true
+  }
+}

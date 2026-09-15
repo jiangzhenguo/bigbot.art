@@ -1,0 +1,174 @@
+/* ==========================================================================
+   BigBotArt 设计系统 · 色彩与字体基础 (colors_and_type.css)
+   --------------------------------------------------------------------------
+   来源:从源项目「BigBotArt 产品框图设计」(9b401a69) 的 7 个高保真原型页面
+   (index / home / canvas / assets / skills / timeline / settings /
+   onboarding) 中逐字提取的一致 `:root` 令牌块与基础排版规则。
+   全部页面共享同一份令牌,证明其为稳定的设计契约,而非单页巧合。
+
+   用法:在每个页面 <style> 之前引入本文件,或将其 :root 块整体粘贴进
+   页面样式之首,再编写页面级样式。不要在页面内重新定义这些令牌。
+
+   设计语言:Apple(HIG)+ Liquid Glass(WWDC25)。
+   核心规则:玻璃只属于导航 / 控件层;内容层保持实色。详见 DESIGN.md §2。
+   ========================================================================== */
+
+:root {
+  /* ── 色彩:实色层 ─────────────────────────────────────────────────── */
+  --bg:           #ffffff;  /* 页面底色 / 内容卡实色底 */
+  --surface:      #f5f5f7;  /* 侧栏、编组底、次级表面 */
+  --surface-warm: #fbfbfd;  /* 工具条、表头、输入井等近白表面 */
+  --fg:           #1d1d1f;  /* 主文字 / 深色反色块(选中 chip、深色按钮) */
+  --fg-2:         #424245;  /* 次级文字、图标默认色 */
+  --muted:        #6e6e73;  /* 辅助说明文字 */
+  --meta:         #86868b;  /* 元信息、占位符、时间戳 */
+  --border:       #d2d2d7;  /* 明确分隔线 / 输入框描边 */
+  --border-soft:  #e8e8ed;  /* 卡片内分隔、弱描边 */
+
+  /* ── 色彩:单一强调色(高信号,克制使用) ─────────────────────────── */
+  --accent:        #0071e3; /* 主操作、选中态、焦点环、进行中进度 */
+  --accent-on:     #ffffff; /* 强调色上的文字 */
+  --accent-hover:  #0077ed;
+  --accent-active: #0066cc;
+
+  /* ── 色彩:语义状态(仅用于状态,不作装饰) ────────────────────────── */
+  --success: #16a34a;  /* 已就绪 / 完成 / 开关开启 */
+  --warn:    #eab308;  /* 进行中脉冲点、需注意 */
+  --danger:  #dc2626;  /* 危险操作(右键菜单删除等) */
+
+  /* ── 色彩:Liquid Glass 材质层(WWDC25) ────────────────────────────
+     玻璃仅用于:导航栏、侧栏、浮动面板、弹层、按钮、芯片、走带/队列条。
+     内容层(卡片、画布节点、消息、缩略图、设置分组)保持实色 --bg。 */
+  --glass-bg:        rgba(255, 255, 255, .56);  /* 侧栏 / 面板 */
+  --glass-bg-strong: rgba(255, 255, 255, .74);  /* 顶栏 / 弹层 / 向导卡 */
+  --glass-border:    rgba(255, 255, 255, .62);
+  --glass-spec-hi:   rgba(255, 255, 255, .66);  /* 顶部高光(内阴影) */
+  --glass-spec-lo:   rgba(29, 29, 31, .05);     /* 底部暗边(内阴影) */
+  --glass-shadow:    0 14px 44px rgba(0, 0, 0, .13), 0 2px 8px rgba(0, 0, 0, .05);
+  --glass-shadow-lg: 0 24px 70px rgba(0, 0, 0, .16);
+  --glass-spec:      inset 0 1px 0 var(--glass-spec-hi), inset 0 -1px 0 var(--glass-spec-lo);
+  --glass-blur:      blur(24px) saturate(180%);
+  --glass-blur-sm:   blur(14px) saturate(160%);
+  --glass-accent:        color-mix(in oklab, var(--accent) 90%, transparent);
+  --glass-accent-hover:  color-mix(in oklab, var(--accent-hover) 95%, transparent);
+  --glass-well:          color-mix(in oklab, var(--bg) 58%, transparent);
+
+  /* ── 字体族 ────────────────────────────────────────────────────────
+     SF Pro 为 Apple 系统字体,不可再分发,故本包不含 fonts/ 目录;
+     在非 Apple 平台按声明的回退栈降级。 */
+  --font-display: "SF Pro Display", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-body:    "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono:    "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+
+  /* ── 字级(来源:全部原型页共享) ─────────────────────────────────── */
+  --text-xs:   12px;  /* 辅助说明、表格、弹层条目 */
+  --text-sm:   14px;  /* App 界面正文基准 */
+  --text-base: 17px;  /* 营销/总览页正文基准 */
+  --text-lg:   21px;  /* 副标题 */
+  --text-xl:   28px;  /* 区块标题 / 向导页标题 */
+  --text-2xl:  40px;  /* 首页主标题 */
+  --text-3xl:  56px;  /* 总览页 Hero */
+  --text-4xl:  80px;  /* 预留:超大展示 */
+  --leading-body:     1.47;
+  --leading-tight:    1.05;
+  --tracking-display: -0.015em;
+
+  /* ── 间距(4px 基网) ─────────────────────────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-12: 48px;
+  --section-y-desktop: 100px;
+  --section-y-tablet:   64px;
+  --section-y-phone:    40px;
+
+  /* ── 圆角 ────────────────────────────────────────────────────────── */
+  --radius-sm:   8px;   /* 小控件、导航项、缩略图 */
+  --radius-md:  12px;   /* 按钮、弹层、节点、输入框 */
+  --radius-lg:  18px;   /* 内容卡、设置分组 */
+  --radius-pill: 980px; /* 芯片、徽标、胶囊按钮 */
+
+  /* ── 海拔 / 阴影 ─────────────────────────────────────────────────── */
+  --elev-flat:   none;
+  --elev-ring:   0 0 0 1px var(--border);
+  --elev-raised: 0 12px 32px rgba(0, 0, 0, .08);
+  --focus-ring:  0 0 0 4px color-mix(in oklab, var(--accent), transparent 65%);
+
+  /* ── 动效 ────────────────────────────────────────────────────────── */
+  --motion-fast:   150ms;
+  --motion-base:   220ms;
+  --ease-standard: cubic-bezier(.28, 0, .22, 1);
+
+  /* ── 容器 ────────────────────────────────────────────────────────── */
+  --container-max:            1024px;
+  --container-gutter-desktop: 22px;
+  --container-gutter-tablet:  18px;
+  --container-gutter-phone:   16px;
+}
+
+/* ── 降级:不支持 backdrop-filter 时玻璃退化为近实色 ──────────────────
+   来源:每个原型页 Liquid Glass 层末尾的 @supports 回退块。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-bg:        rgba(255, 255, 255, .94);
+    --glass-bg-strong: rgba(255, 255, 255, .97);
+    --glass-well:      var(--surface-warm);
+  }
+}
+
+/* ── 基础排版与工具类(提取自原型页共享 base 块) ────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);       /* App 界面 14px;营销/总览页改 17px */
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img { display: block; max-width: 100%; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; text-align: left; }
+input, textarea { font: inherit; color: inherit; border: 0; outline: none; background: none; width: 100%; }
+textarea { resize: none; }
+::placeholder { color: var(--meta); }
+
+/* 焦点环:所有可聚焦元素统一 4px 强调色环 */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* 等宽数字元信息:模型名、端口、时长、seed */
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* 区块小标签:11px 大写加宽字距(中文环境下表现为加粗灰标签) */
+.lbl {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.mut { color: var(--muted); }
+
+/* 常用 flex 工具 */
+.row { display: flex; align-items: center; }
+.g6 { gap: 6px } .g8 { gap: 8px } .g10 { gap: 10px } .g12 { gap: 12px }
+.grow { flex: 1; min-width: 0; }
+.spacer { flex: 1; }
+
+/* 滚动条:8px 细轨,半透明 thumb */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: color-mix(in oklab, var(--fg) 18%, transparent); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

@@ -1,0 +1,28 @@
+{
+  "name": "bigbotart",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BigBotArt — 无限画布的视频/图片生成 Agent(跨端桌面 App,本地优先)",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter @bigbotart/desktop dev",
+    "build": "pnpm --filter @bigbotart/desktop build",
+    "build:packages": "pnpm -r --filter './packages/*' build",
+    "typecheck": "pnpm -r typecheck",
+    "start": "pnpm --filter @bigbotart/desktop start"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@11.0.8"
+}
