@@ -245,13 +245,6 @@ export default function HomePage({
                 <rect x="14" y="14" width="7" height="7" rx="1.5" />
               </svg>,
             )}
-            {renderSideLink(
-              { label: '时间线 / 导出', page: 'timeline' },
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-                <rect x="2.5" y="5" width="19" height="14" rx="2" />
-                <path d="M7 5v14M17 5v14M2.5 10H7M2.5 14H7M17 10h4.5M17 14h4.5" />
-              </svg>,
-            )}
             <div className="lbl">资源</div>
             {renderSideLink(
               { label: '资产中心', page: 'assets' },

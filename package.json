@@ -9,11 +9,12 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "pnpm --filter @bigbotart/desktop dev",
+    "dev": "BIGBOTART_DRYRUN=0 pnpm --filter @bigbotart/desktop dev",
+    "dev:dry": "BIGBOTART_DRYRUN=1 pnpm --filter @bigbotart/desktop dev",
     "build": "pnpm --filter @bigbotart/desktop build",
     "build:packages": "pnpm -r --filter './packages/*' build",
     "typecheck": "pnpm -r typecheck",
-    "start": "pnpm --filter @bigbotart/desktop start"
+    "start": "BIGBOTART_DRYRUN=0 pnpm --filter @bigbotart/desktop start"
   },
   "engines": {
     "node": ">=22"

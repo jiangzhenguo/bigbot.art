@@ -39,6 +39,7 @@ const api: BigBotArtApi = {
   deleteSkill: (id: string) => ipcRenderer.invoke('delete-skill', id),
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),
   exportStatus: (taskId: string) => ipcRenderer.invoke('export-status', taskId),
+  extractFrame: (videoPath, mode) => ipcRenderer.invoke('extract-frame', videoPath, mode),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('set-settings', patch),
   llmLocalModels: (kind: 'lmstudio' | 'ollama' | 'pimlx') => ipcRenderer.invoke('llm-local-models', kind),

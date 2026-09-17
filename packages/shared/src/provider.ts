@@ -32,7 +32,7 @@ export interface H3ModeCap {
   mode: string;
   label: string;
   /** 该模式需要的参考角色 */
-  refs?: ('first-frame' | 'last-frame' | 'ref-image' | 'ref-audio')[];
+  refs?: ('first-frame' | 'last-frame' | 'ref-image' | 'ref-audio' | 'ref-video')[];
 }
 
 /** Provider 当前健康状态(引导向导用) */

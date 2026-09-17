@@ -1,1572 +1,59 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, LlmSource, Asset, NodeKind, ShotTakeHistory, Take, DebugLogEntry } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, LlmSource, Asset, NodeKind, ShotTakeHistory, Take, DebugLogEntry, TimelineData } from '@bigbotart/shared';
 import CanvasSwitcher from '../components/CanvasSwitcher';
 import MarkdownText from '../components/MarkdownText';
-
-interface CanvasPageProps {
-  onNavigate: (
-    page:
-      | 'home'
-      | 'canvas'
-      | 'assets'
-      | 'skills'
-      | 'timeline'
-      | 'settings'
-      | 'onboarding'
-      | 'projects'
-  ) => void;
-  projectId: string | null;
-  projectName: string;
-  projectCanvases: ProjectCanvases | null;
-  onSaveCanvas: (snap: CanvasSnapshot) => Promise<void> | void;
-  onSwitchCanvas: (canvasId: string) => Promise<CanvasSnapshot | null>;
-  onCreateCanvas: (name?: string) => Promise<CanvasSnapshot | null>;
-  onDeleteCanvas: (canvasId: string) => Promise<string | null>;
-  onRenameCanvas: (canvasId: string, name: string) => Promise<boolean>;
-}
-
-/* ══════════════════════════════════════════════════════════════
-   画布数据结构 —— 与设计稿 canvas.js 的演示数据一一对应
-   ══════════════════════════════════════════════════════════════ */
-
-type EdgeClass = '' | 'stale' | 'ghost';
-
-interface Edge {
-  from: string;
-  to: string;
-  cls: EdgeClass;
-  /** 🆕 语义标签(手册 §9):input-brief / first-frame / last-frame / ref-image / ref-audio / slot-<name> */
-  label?: string;
-}
-
-interface CanvasNode {
-  id: string;
-  title: string;
-  w: number;
-  x: number;
-  y: number;
-  /** 幽灵节点(尚未产出) */
-  ghost?: boolean;
-  /** 上游改动导致过期 */
-  stale?: boolean;
-  /** Agent 正在此节点上重跑 */
-  agentOn?: boolean;
-  /** 节点头部状态点 */
-  st?: 'ok' | 'warn';
-  /** 节点头部背景覆盖(设计稿用 inline style 指定 --bg) */
-  headBg?: string;
-  badge?: string;
-  /** 解析「+」时用于定位的实测高度(px,未缩放) */
-  h?: number;
-  kind?: NodeKind | 'plain';
-  tag?: NodeTag;
-  /** 弹层创建的节点的补充描述行 */
-  extra?: string;
-  /** 真实业务参数(来自 Agent 规划 / 项目画布快照),渲染与生成用 */
-  data?: Record<string, unknown>;
-}
-
-/** 由弹层/节点面板创建的新节点的渲染参数 */
-interface NodeTag {
-  /** 展示层 id(节点库用),与 NodeKind 分开 */
-  id: string;
-  /** 领域层 kind(写入 CanvasNode.kind 与 CanvasSnapshot) */
-  kind: NodeKind;
-  name: string;
-  sub: string;
-  p1?: boolean;
-  /** 🆕 v2 工作流专用节点(显示 WF 角标) */
-  wf?: boolean;
-}
-
-/** 可导出的产物文件路径(右键「另存为」/「在 Finder 中显示」) */
-const FINDER_PATH: Record<string, string> = {
-  brief: 'briefs/草原之河.md',
-  storyboard: 'takes/storyboard_seed88213.png',
-  audio: 'refs/草原环境声.mp3',
-  shot1: 'takes/shot_01_take3.mp4',
-  shot2: 'takes/shot_02_take2.mp4',
-  timeline: 'exports/草原之河_v2.mp4',
-};
-
-const NODE_TYPES: NodeTag[] = [
-  { id: 'doc', kind: 'document', name: '提示词 / 文档', sub: 'Markdown · 五段式/六段式' },
-  { id: 'asset', kind: 'asset', name: '资产引用', sub: '角色 / 环境 / 物品 · 资产中心' },
-  { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
-  { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
-  { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分', p1: true },
-  { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/Ref2VA' },
-  { id: 'director', kind: 'director', name: '导演台', sub: '运镜参考小样', p1: true },
-  { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
-  { id: 'timeline', kind: 'timeline', name: '时间线 / 剪辑', sub: 'FFmpeg 导出', p1: true },
-  { id: 'comfy', kind: 'director', name: 'ComfyUI 工作流', sub: '导入 workflow_api.json', p1: true },
-  { id: 'wf-input', kind: 'workflow-input', name: '工作流入口', sub: '声明输入槽位 · 资源容器', wf: true },
-  { id: 'wf-output', kind: 'workflow-output', name: '工作流出口', sub: '产物汇聚 · 运行收口', wf: true },
-];
-
-const COMPAT: Record<string, string[]> = {
-  brief: ['image', 'shot', 'doc', 'director'],
-  storyboard: ['edit', 'upscale', 'shot', 'timeline'],
-  audio: ['shot', 'timeline'],
-  shot1: ['shot', 'timeline', 'edit'],
-  shot2: ['shot', 'timeline', 'edit'],
-  shot3: ['shot', 'timeline'],
-  timeline: ['doc'],
-  // 🆕 v2:workflow-input 可注入到任何操作节点;任何操作节点可收口到 workflow-output
-  'wf-input': ['doc', 'image', 'edit', 'upscale', 'shot', 'director', 'audio', 'timeline', 'asset'],
-  // 操作节点(除 wf-output 自身)都可作为 wf-output 的上游
-  doc: ['wf-output'],
-  image: ['wf-output'],
-  edit: ['wf-output'],
-  upscale: ['wf-output'],
-  shot: ['wf-output'],
-  director: ['wf-output'],
-  // asset 也可直接收口(素材直接当产物,虽然不推荐,但合法)
-  asset: ['shot', 'edit', 'upscale', 'timeline', 'wf-input', 'wf-output'],
-};
-
-/** 档位 × 画幅白名单(防呆) */
-const RES: Record<string, Record<string, string>> = {
-  预览: { '16:9': '512×288', '9:16': '288×512', '1:1': '384×384' },
-  草稿: { '16:9': '960×540', '9:16': '540×960', '1:1': '720×720' },
-  默认: { '16:9': '1280×720', '9:16': '720×1280', '1:1': '960×960' },
-  参考: { '16:9': '1920×1080' },
-};
-const ETA: Record<string, string> = {
-  预览: '≈2 分钟',
-  草稿: '≈4 分钟',
-  默认: '≈8 分钟',
-  参考: '≈22 分钟',
-};
-
-/** 尺寸白名单提示行 */
-function resLine(aspect: string, tier: string): string {
-  const r = (RES[tier] ?? {})[aspect];
-  if (!r) return '该组合不在白名单 · 已禁用（capabilities）';
-  return `输出 ${r} · 预计 ${ETA[tier]}（capabilities）`;
-}
-
-/* ── Shot 检查器(h3.c 档位 × 画幅,与 packages/providers h3c-command ASPECT_SIZES 对齐) ── */
-const SHOT_ASPECTS = ['16:9', '9:16', '1:1', 'custom'] as const;
-const SHOT_TIERS = ['preview', 'draft', 'default', 'reference'] as const;
-/** 档位 × 画幅 → 宽高(全部 32 倍数合法档,H3_USAGE.md §4.2) */
-const SHOT_SIZES: Record<'16:9' | '9:16' | '1:1', Record<(typeof SHOT_TIERS)[number], { width: number; height: number }>> = {
-  '16:9': {
-    preview: { width: 864, height: 480 },
-    draft: { width: 864, height: 480 },
-    default: { width: 1280, height: 704 },
-    reference: { width: 1536, height: 768 },
-  },
-  '9:16': {
-    preview: { width: 480, height: 864 },
-    draft: { width: 576, height: 1024 },
-    default: { width: 704, height: 1280 },
-    reference: { width: 768, height: 1536 },
-  },
-  '1:1': {
-    preview: { width: 544, height: 544 },
-    draft: { width: 544, height: 544 },
-    default: { width: 768, height: 768 },
-    reference: { width: 1024, height: 1024 },
-  },
-};
-/** 档位预设(F/S/L/R + ETA)— H3_USAGE.md §4.3 四组 preset */
-const SHOT_TIER_PRESETS: Record<(typeof SHOT_TIERS)[number], { label: string; steps: number; layers: number; reuse: number; frames: number; eta: string; note: string }> = {
-  preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', note: '极速草稿(reuse2 防呆安全)' },
-  draft: { label: '草稿', steps: 12, layers: 50, reuse: 2, frames: 56, eta: '≈9 分钟', note: '快速出片' },
-  default: { label: '默认', steps: 20, layers: 50, reuse: 1, frames: 124, eta: '≈15 分钟', note: '5s 段甜点' },
-  reference: { label: '参考', steps: 30, layers: 50, reuse: 1, frames: 124, eta: '≈30 分钟', note: 'high quality · gold 档' },
-};
-const SHOT_MODE_LABEL: Record<string, string> = {
-  text2video: '文生',
-  'first-frame': '首帧',
-  'last-frame': '尾帧',
-  'first-last': '首尾帧',
-  'ref-image': 'Ref2VA',
-};
-/** 参考角色(按 mode 可用的)+ 需要的媒体类型 */
-const SHOT_REF_ROLES: Record<string, Array<{ role: string; label: string; media: 'image' | 'audio' | 'video'; multiple?: boolean }>> = {
-  text2video: [{ role: 'ref-audio', label: '音频参考', media: 'audio' }],
-  'first-frame': [
-    { role: 'first-frame', label: '首帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
-  ],
-  'last-frame': [
-    { role: 'last-frame', label: '尾帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
-  ],
-  'first-last': [
-    { role: 'first-frame', label: '首帧', media: 'image' },
-    { role: 'last-frame', label: '尾帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
-  ],
-  'ref-image': [
-    { role: 'ref-image', label: '参考图(1-9 张)', media: 'image', multiple: true },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
-  ],
-};
-
-interface NodeInfo {
-  t: string;
-  img: string | null;
-  meta: Array<[string, string]>;
-}
-
-/** 检查器:每个节点的参数表(与 canvas.js NODE_INFO 一致) */
-const NODE_INFO_BASE: Record<string, NodeInfo> = {
-  brief: {
-    t: '文档 · Brief',
-    img: null,
-    meta: [
-      ['类型', 'Markdown 提示词文档'],
-      ['结构', '五段式 · 场景/角色/风格'],
-      ['状态', '已编辑 · 下游 2 节点 stale'],
-    ],
-  },
-  storyboard: {
-    t: '图片生成 · 分镜静帧',
-    img: './assets/sb-river.jpg',
-    meta: [
-      ['引擎', 'mlxgen · Z-Image-Turbo'],
-      ['尺寸', '832×480 · 16:9'],
-      ['seed', '批量 ×4 · 88213–88216'],
-    ],
-  },
-  audio: {
-    t: '音频参考',
-    img: null,
-    meta: [
-      ['文件', '草原环境声.mp3 · 02:41'],
-      ['绑定', '--ref-audio · 带声直出'],
-      ['引用', '镜头 02'],
-    ],
-  },
-  shot1: {
-    t: '镜头 01 · 女主跃河',
-    img: './assets/shot-01.jpg',
-    meta: [
-      ['引擎', 'h3.c 0.4.2'],
-      ['模式', '首尾帧 FL2VA'],
-      ['时长', '10s · 带声直出'],
-    ],
-  },
-  shot2: {
-    t: '镜头 02 · 男主踱步',
-    img: './assets/shot-02.jpg',
-    meta: [
-      ['引擎', 'h3.c 0.4.2'],
-      ['模式', '首尾帧 FL2VA'],
-      ['时长', '10s · 带声直出'],
-    ],
-  },
-  shot3: {
-    t: '镜头 03 · 计划中（幽灵）',
-    img: null,
-    meta: [
-      ['引擎', 'h3.c 0.4.2'],
-      ['模式', '首帧'],
-      ['状态', 'Agent 已规划 · 等视频槽位'],
-    ],
-  },
-  timeline: {
-    t: '时间线 / 剪辑',
-    img: null,
-    meta: [
-      ['片段', '5 · 缺镜 02/03'],
-      ['音轨', '保留各 Take 内嵌音轨'],
-      ['导出', 'FFmpeg · MP4 H.264+AAC'],
-    ],
-  },
-};
-
-/** 演示节点(初始 state,取自 canvas.js 的画布初始状态) */
-function initialNodes(): CanvasNode[] {
-  return [
-    {
-      id: 'brief',
-      title: '文档 · Brief',
-      w: 206,
-      x: 40,
-      y: 300,
-      st: 'warn',
-      kind: 'document',
-    },
-    {
-      id: 'storyboard',
-      title: '图片生成 · 分镜静帧',
-      w: 224,
-      x: 320,
-      y: 60,
-      st: 'ok',
-      kind: 'image-gen',
-    },
-    { id: 'audio', title: '音频参考', w: 224, x: 320, y: 420, st: 'ok', kind: 'audio-ref' },
-    { id: 'shot1', title: '镜头 01 · 女主跃河', w: 240, x: 620, y: 40, st: 'ok', kind: 'shot' },
-    {
-      id: 'shot2',
-      title: '镜头 02 · 男主踱步',
-      w: 240,
-      x: 620,
-      y: 310,
-      stale: true,
-      agentOn: true,
-      badge: 'Agent 重跑中 · 剩 06:12',
-      headBg: 'var(--bg)',
-      kind: 'shot',
-    },
-    {
-      id: 'shot3',
-      title: '镜头 03 · 计划中',
-      w: 240,
-      x: 620,
-      y: 580,
-      ghost: true,
-      kind: 'shot',
-    },
-    {
-      id: 'timeline',
-      title: '时间线 / 剪辑',
-      w: 230,
-      x: 960,
-      y: 230,
-      stale: true,
-      headBg: 'var(--bg)',
-      kind: 'timeline',
-    },
-  ];
-}
-
-function initialEdges(): Edge[] {
-  return [
-    { from: 'brief', to: 'storyboard', cls: '' },
-    { from: 'brief', to: 'audio', cls: '' },
-    { from: 'storyboard', to: 'shot1', cls: '' },
-    { from: 'storyboard', to: 'shot2', cls: '' },
-    { from: 'storyboard', to: 'shot3', cls: 'ghost' },
-    { from: 'audio', to: 'shot2', cls: '' },
-    { from: 'shot1', to: 'shot2', cls: 'stale' },
-    { from: 'shot1', to: 'timeline', cls: '' },
-    { from: 'shot2', to: 'timeline', cls: 'stale' },
-    { from: 'shot3', to: 'timeline', cls: 'ghost' },
-  ];
-}
-
-const WAVE_BARS = [10, 18, 26, 14, 22, 30, 16, 24, 12, 20, 28, 14, 22, 10, 18, 26, 16, 12, 20, 8];
-
-/** Agent 规划结果 → Agent 消息气泡内容 */
-function planMsg(plan: { document?: unknown; shots?: unknown[]; report?: string; brief?: string }): React.ReactNode {
-  const doc = plan.document as { data?: { markdown?: string }; label?: string } | undefined;
-  const md = doc?.data?.markdown ?? plan.brief ?? '';
-  const shots = plan.shots ?? [];
-  return (
-    <>
-      <b>执行计划（已落到画布）</b>
-      {md ? (
-        <div className="mut" style={{ marginTop: 4, fontSize: '11px', whiteSpace: 'pre-wrap' }}>
-          {md.slice(0, 240)}
-        </div>
-      ) : null}
-      <div style={{ marginTop: 6 }}>
-        <div className="step">
-          <span className="sm sm-done">✓</span>
-          <div>
-            <b>创建 Brief 文档节点</b>
-            <div className="mut" style={{ fontSize: '11px' }}>
-              画布左侧 · 可编辑后增量重规划
-            </div>
-          </div>
-        </div>
-        <div className="step">
-          <span className="sm sm-done">✓</span>
-          <div>
-            <b>分镜规划 {shots.length} 镜头</b>
-            <div className="mut" style={{ fontSize: '11px' }}>
-              {(plan.report ?? '').split('\n')[0] || '已按 H3 五段式拆分'}
-            </div>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function basenameOf(p: string): string {
-  const parts = p.replace(/\\/g, '/').split('/');
-  return parts[parts.length - 1] ?? p;
-}
-
-/** 绝对产物路径 → bba-output:// 相对 URL(保留 mock/、images/ 等子目录) */
-function outputUrlOf(p: string): string {
-  const norm = p.replace(/\\/g, '/');
-  const markers = ['/.bigbotart/outputs/', '/outputs/'];
-  for (const m of markers) {
-    const i = norm.lastIndexOf(m);
-    if (i >= 0) {
-      const rel = norm.slice(i + m.length);
-      return `bba-output://${rel.split('/').map(encodeURIComponent).join('/')}`;
-    }
-  }
-  return `bba-output://${encodeURIComponent(basenameOf(p))}`;
-}
-
-/** 队列条:单个槽位(视频/图片)的当前任务 */
-function queueItem(slot: 'video' | 'image', jobs: RenderJob[], nodes: CanvasNode[]): React.ReactNode {
-  const job = jobs.find((j) => j.slot === slot && (j.status === 'running' || j.status === 'queued'));
-  const node = job ? nodes.find((n) => n.id === job.nodeId) : undefined;
-  const running = job?.status === 'running';
-  const label = slot === 'video' ? '视频槽位' : '图片槽位';
-  if (!job) {
-    return (
-      <span className="qitem mut">
-        <span className="dot ok"></span>
-        {label}：空闲
-      </span>
-    );
-  }
-  return (
-    <span className="qitem">
-      <span className="dot" style={{ background: 'var(--warn)' }}></span>
-      {label}：{node?.title ?? job.nodeId}
-      {running ? (
-        <span className="pbar" style={{ width: 110 }}>
-          <i style={{ width: `${Math.round((job.progress ?? 0) * 100)}%` }}></i>
-        </span>
-      ) : null}
-      <span className="mono mut">{running ? (job.stage ?? '等待引擎…') : '排队中'}</span>
-    </span>
-  );
-}
-
-/* ══════════════════════════════════════════════════════════════
-   画布 ↔ 项目快照双向转换(shared CanvasNode/CanvasEdge ↔ 本地渲染节点;kind 已对齐 shared NodeKind)
-   ══════════════════════════════════════════════════════════════ */
-
-/** 按手册 §9 推导边 label:brief→input-brief / asset→按角色 / wf-input→slot-<name> */
-function deriveEdgeLabel(src: CanvasNode, dstTag: NodeTag): string | undefined {
-  // document → 下游 prompt
-  if (src.kind === 'document' && ['image-gen', 'image-edit', 'shot', 'director'].includes(dstTag.kind)) {
-    return 'input-brief';
-  }
-  // asset → shot:按 asset.mediaType 映射到 ref 角色
-  if (src.kind === 'asset' && dstTag.kind === 'shot') {
-    const mt = String((src.data as { mediaType?: string })?.mediaType ?? 'image');
-    if (mt === 'audio' || mt === 'video') return 'ref-audio';
-    return 'ref-image';
-  }
-  // asset → image-edit:输入图
-  if (src.kind === 'asset' && dstTag.kind === 'image-edit') return 'input-image';
-  // wf-input → 操作节点:slot-<name>
-  if (src.kind === 'workflow-input') {
-    const slots = (src.data as { slots?: Array<{ name: string; accept: string[] }> })?.slots ?? [];
-    const slot = slots.find((s) => {
-      // 粗略匹配:slot.accept 含下游类型对应媒体
-      if (dstTag.kind === 'shot') return s.accept.includes('text') || s.accept.includes('image') || s.accept.includes('audio');
-      if (dstTag.kind === 'image-gen') return s.accept.includes('text');
-      if (dstTag.kind === 'image-edit') return s.accept.includes('image') || s.accept.includes('text');
-      if (dstTag.kind === 'audio-ref') return s.accept.includes('audio');
-      if (dstTag.kind === 'document') return s.accept.includes('text');
-      return true;
-    });
-    return slot ? `slot-${slot.name}` : `slot-默认`;
-  }
-  return undefined;
-}
-function makeInitialData(t: NodeTag): Record<string, unknown> {
-  switch (t.kind) {
-    case 'document':
-      return { markdown: '' };
-    case 'asset':
-      return { assetId: '', mediaType: 'image' };
-    case 'image-gen':
-      return {
-        engine: 'mlxgen',
-        model: 'AbstractFramework/z-image-turbo-8bit',
-        prompt: '',
-        width: 1024,
-        height: 1024,
-        steps: 24,
-        guidance: 1.0,
-        seeds: [42],
-      };
-    case 'image-edit':
-      return { engine: 'mlxgen', model: 'qwen-image-edit', prompt: '', mode: 'instruction' };
-    case 'image-upscale':
-      return { model: 'AbstractFramework/seedvr2-3b-8bit', scale: 2 };
-    case 'shot':
-      return {
-        engine: 'h3c',
-        mode: 'text2video',
-        prompt: '',
-        width: 1280,
-        height: 720,
-        frames: 124,
-        steps: 30,
-        layers: 50,
-        reuse: 1,
-        tier: 'default',
-        seed: 7,
-        refs: [],
-      };
-    case 'director':
-      return { prompt: '' };
-    case 'timeline':
-      return { shotNodeIds: [] };
-    case 'audio-ref':
-      return { assetId: '' };
-    case 'workflow-input':
-      return { slots: [{ name: '主提示词', accept: ['text'], required: true }] };
-    case 'workflow-output':
-      return { outputs: [{ name: '成片', kind: 'video', sourceNodeIds: [] }] };
-    default:
-      return {};
-  }
-}
-
-/** shared → 本地渲染节点(kind 已对齐,直接透传) */
-function fromSharedNode(cn: { id: string; kind: string; label?: string; position?: { x: number; y: number }; width?: number; data?: unknown }): CanvasNode {
-  return {
-    id: cn.id,
-    title: cn.label ?? cn.id,
-    w: cn.width ?? 236,
-    x: cn.position?.x ?? 40,
-    y: cn.position?.y ?? 40,
-    kind: (cn.kind as NodeKind) ?? 'shot',
-    st: 'ok',
-    data: (cn.data ?? {}) as Record<string, unknown>,
-  };
-}
-
-/** 本地 → shared */
-function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: string; label: string; position: { x: number; y: number }; width?: number; data: unknown; createdAt?: string; updatedAt?: string }> {
-  return ns.map((n) => ({
-    id: n.id,
-    kind: n.kind ?? 'document',
-    label: n.title,
-    position: { x: n.x, y: n.y },
-    width: n.w,
-    data: n.data ?? defaultDataFor(n.kind ?? 'document'),
-  }));
-}
-
-function toLocalEdges(ces: Array<{ id?: string; source: string; target: string; label?: string }>): Edge[] {
-  return ces.map((e) => ({ from: e.source, to: e.target, cls: '', label: e.label }));
-}
-
-function toSharedEdges(es: Edge[]): Array<{ id?: string; source: string; target: string; label?: string }> {
-  return es.map((e) => ({ source: e.from, target: e.to, label: e.label }));
-}
-
-/** 快照节点没有业务数据时给默认参数(便于渲染与生成;与 makeInitialData 一致) */
-function defaultDataFor(kind: string): Record<string, unknown> {
-  return makeInitialData({ id: '', kind: kind as NodeKind, name: '', sub: '' });
-}
-
-interface ModelOption {
-  name: string;
-  sub: string;
-  source?: LlmSource;
-  reset?: boolean;
-}
-
-const MODEL_OPTION_FALLBACK: ModelOption[] = [
-  { name: '全局默认', sub: '跟随设置页 LLM 来源', reset: true },
-];
-
-const SKILLS = ['纸拼贴剧情片', '剧情短片', '电商产品', '科普讲解', '水墨'];
-
-interface ChatMsg {
-  id: number;
-  kind: 'user' | 'agent' | 'sys';
-  /** 纯文本消息 */
-  text?: string;
-  /** 富文本消息(执行计划/工具调用/校验卡) */
-  rich?: React.ReactNode;
-  /** 设计稿里的 data-od-id 标识 */
-  odId?: string;
-  /** 工具调用卡数据(kind=agent 时) */
-  toolCall?: { name: string; args: Record<string, unknown>; status: 'running' | 'success' | 'error'; result?: string; nodeId?: string };
-  /** loading 占位(发送后到回复前) */
-  loading?: boolean;
-}
-
-/* ══ 图标:与设计稿内联 SVG 完全一致 ══ */
-
-const ICON_DOC = (
-  <>
-    <path d="M6 2h9l5 5v15H6Z" />
-    <path d="M14 2v6h6M9 13h8M9 17h5" />
-  </>
-);
-const ICON_DOC_S = (
-  <>
-    <path d="M6 2h9l5 5v15H6Z" />
-    <path d="M14 2v6h6" />
-  </>
-);
-const ICON_IMAGE = (
-  <>
-    <rect x="3" y="4" width="18" height="16" rx="2" />
-    <circle cx="9" cy="10" r="1.8" />
-    <path d="m4.5 18 5-5 3.5 3.5 3-3 3.5 3.5" />
-  </>
-);
-const ICON_EDIT = (
-  <>
-    <path d="M12 20h9" />
-    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-  </>
-);
-const ICON_UPSCALE = <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />;
-const ICON_SHOT = (
-  <>
-    <rect x="2.5" y="5" width="19" height="14" rx="2" />
-    <path d="m10 9.5 5 2.5-5 2.5Z" />
-  </>
-);
-const ICON_DIRECTOR = (
-  <>
-    <circle cx="12" cy="12" r="9" />
-    <path d="m15.5 8.5-2 5-5 2 2-5Z" />
-  </>
-);
-const ICON_AUDIO = (
-  <>
-    <path d="M9 18V6l12-3v12" />
-    <circle cx="6.5" cy="18" r="2.5" />
-    <circle cx="18.5" cy="15" r="2.5" />
-  </>
-);
-const ICON_TIMELINE = (
-  <>
-    <rect x="2.5" y="5" width="19" height="14" rx="2" />
-    <path d="M7 5v14M17 5v14" />
-  </>
-);
-const ICON_COMFY = (
-  <>
-    <rect x="3" y="3" width="7" height="7" rx="1.5" />
-    <rect x="14" y="14" width="7" height="7" rx="1.5" />
-    <path d="M10 6.5h7a3.5 3.5 0 0 1 3.5 3.5v4" />
-  </>
-);
-const ICON_ASSET = (
-  <path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z" />
-);
-const ICON_WF_INPUT = (
-  <>
-    <path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3" />
-    <path d="m16 8 4 4-4 4M20 12H9" />
-  </>
-);
-const ICON_WF_OUTPUT = (
-  <>
-    <path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3" />
-    <path d="m8 8-4 4 4 4M4 12h11" />
-  </>
-);
-
-const PALETTE_ICONS: Record<string, React.ReactNode> = {
-  doc: ICON_DOC,
-  asset: ICON_ASSET,
-  image: ICON_IMAGE,
-  edit: ICON_EDIT,
-  upscale: ICON_UPSCALE,
-  shot: ICON_SHOT,
-  director: ICON_DIRECTOR,
-  audio: ICON_AUDIO,
-  timeline: ICON_TIMELINE,
-  comfy: ICON_COMFY,
-  'wf-input': ICON_WF_INPUT,
-  'wf-output': ICON_WF_OUTPUT,
-};
-
-const TYPE_ICON: Record<string, React.ReactNode> = {
-  document: ICON_DOC_S,
-  asset: ICON_ASSET,
-  'image-gen': ICON_IMAGE,
-  'image-edit': ICON_EDIT,
-  'image-upscale': ICON_UPSCALE,
-  shot: ICON_SHOT,
-  director: ICON_DIRECTOR,
-  'audio-ref': ICON_AUDIO,
-  timeline: ICON_TIMELINE,
-  'workflow-input': ICON_WF_INPUT,
-  'workflow-output': ICON_WF_OUTPUT,
-  plain: ICON_DOC_S,
-};
-
-/* ══════════════════════════════════════════════════════════════ */
-
-/* ── 检查器主体:按 kind 渲染专属表单 ── */
-interface InspectorBodyProps {
-  node: CanvasNode | undefined;
-  infoMap: Record<string, { t: string; img: string | null; meta: Array<[string, string]> }>;
-  setInfoMap: React.Dispatch<React.SetStateAction<Record<string, { t: string; img: string | null; meta: Array<[string, string]> }>>>;
-  setNodes: React.Dispatch<React.SetStateAction<CanvasNode[]>>;
-  toastMsg: (msg: string) => void;
-  projectId: string | null;
-  activeCanvasId: string | null;
-  jobs: RenderJob[];
-  assetsList: Asset[];
-  assetCache: Record<string, string>;
-  runNode: (nodeId: string) => void;
-}
-
-function KV({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="kr">
-      <span>{k}</span>
-      <span className="mono">{v}</span>
-    </div>
-  );
-}
-
-function KVSection({ rows }: { rows: Array<[string, string]> }) {
-  return (
-    <div className="kv">
-      {rows.map(([k, v]) => (
-        <KV key={k} k={k} v={v} />
-      ))}
-    </div>
-  );
-}
-
-function Lbl({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="lbl" style={{ marginBottom: 8 }}>
-      {children}
-    </div>
-  );
-}
-
-function TextAreaField({ label, value, onChange, rows = 4, placeholder }: {
-  label: string; value: string; onChange: (v: string) => void; rows?: number; placeholder?: string;
-}) {
-  return (
-    <div>
-      <Lbl>{label}</Lbl>
-      <textarea
-        className="input-w"
-        rows={rows}
-        style={{ width: '100%', resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12 }}
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </div>
-  );
-}
-
-/* ══════════════════════════════════════════════════════════════
-   Shot 检查器 — 4 态状态面板 + h3.c 完整表单 + Take 历史
-   (对齐 states.html §3 已完成态 + §4;h3 参数对齐 H3_USAGE.md §4)
-   ══════════════════════════════════════════════════════════════ */
-interface ShotInspectorProps {
-  node: CanvasNode;
-  setData: (patch: Record<string, unknown>) => void;
-  projectId: string | null;
-  activeCanvasId: string | null;
-  jobs: RenderJob[];
-  assetsList: Asset[];
-  assetCache: Record<string, string>;
-  runNode: (nodeId: string) => void;
-  toastMsg: (msg: string) => void;
-}
-
-/** 缩略图 src(asset localPath → bba-asset://) */
-function thumbSrc(assetPath: string | undefined): string | null {
-  if (!assetPath) return null;
-  return `bba-asset://${assetPath.split('/').pop()}`;
-}
-
-/** 宽/高 → 合法 32 倍数(小于 32 取 32;h3 硬性要求) */
-function clamp32(v: number, fallback = 544): number {
-  const n = Number.isFinite(v) && v > 0 ? v : fallback;
-  return Math.max(32, Math.round(n / 32) * 32);
-}
-
-/** 视频封面:从 <video> metadata 读真实宽高,按视频比例展示(不再固定 16:9) */
-function VideoThumb({ src, badge }: { src: string; badge?: string }) {
-  const [ar, setAr] = useState<string | undefined>();
-  return (
-    <div className="nthumb" style={{ position: 'relative', background: '#000', aspectRatio: ar ?? '16/9', overflow: 'hidden' }}>
-      <video
-        src={src}
-        preload="metadata"
-        muted
-        playsInline
-        onLoadedMetadata={(e) => {
-          const v = e.currentTarget;
-          if (v.videoWidth && v.videoHeight) setAr(`${v.videoWidth} / ${v.videoHeight}`);
-        }}
-        style={{ width: '100%', height: '100%', objectFit: 'fill', display: 'block' }}
-      />
-      {badge ? (
-        <span
-          className="nmeta mono"
-          style={{ position: 'absolute', left: 6, bottom: 6, margin: 0, background: 'rgba(0,0,0,.55)', color: '#fff', padding: '2px 7px', borderRadius: 6, fontSize: 10 }}
-        >
-          {badge}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function ShotInspector({
-  node,
-  setData,
-  projectId,
-  activeCanvasId,
-  jobs,
-  assetsList,
-  assetCache,
-  runNode,
-  toastMsg,
-}: ShotInspectorProps) {
-  const d = (node.data ?? {}) as Record<string, unknown>;
-  const mode = String(d.mode ?? 'text2video');
-  const tier = (String(d.tier ?? 'default') as (typeof SHOT_TIERS)[number]) in SHOT_TIER_PRESETS ? (String(d.tier ?? 'default') as (typeof SHOT_TIERS)[number]) : 'default';
-  const aspect = (String(d.aspect ?? '16:9') as (typeof SHOT_ASPECTS)[number]) in SHOT_SIZES || String(d.aspect ?? '16:9') === 'custom' ? (String(d.aspect ?? '16:9') as (typeof SHOT_ASPECTS)[number]) : '16:9';
-  const prompt = String(d.prompt ?? '');
-  const seconds = Number(d.seconds ?? 0);
-  const customWidth = Number(d.customWidth ?? 544);
-  const customHeight = Number(d.customHeight ?? 544);
-  const seed = Number(d.seed ?? 42);
-  const refs = (d.refs ?? []) as Array<{ assetId: string; role: string }>;
-
-  const preset = SHOT_TIER_PRESETS[tier];
-  const isCustom = aspect === 'custom';
-  // 推导值(比例 × 档位 / 自定义,32 倍数对齐)
-  const derived = isCustom
-    ? { width: clamp32(customWidth), height: clamp32(customHeight) }
-    : (SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default);
-  // 节点 data 为权威:有 width/height 就尊重(选择 chips 已同步写入);否则回退推导
-  const width = Number(d.width ?? derived.width);
-  const height = Number(d.height ?? derived.height);
-
-  // 当前运行/排队任务
-  const job = jobs.find((j) => j.nodeId === node.id && (j.status === 'queued' || j.status === 'running'));
-  const isRunning = !!job && job.status === 'running';
-  const isQueued = !!job && job.status === 'queued';
-
-  // Take 历史
-  const [hist, setHist] = useState<ShotTakeHistory | null>(null);
-  const refreshHist = useCallback(() => {
-    if (!projectId) return;
-    void window.bigbotart.takesHistory(projectId, node.id).then(setHist).catch(() => setHist(null));
-  }, [projectId, node.id]);
-  useEffect(() => {
-    refreshHist();
-  }, [refreshHist]);
-  const takes = hist?.takes ?? [];
-  const [selTakeId, setSelTakeId] = useState<string | undefined>();
-  const curTake = (selTakeId ? takes.find((t) => t.id === selTakeId) : undefined) ?? takes[0] ?? null; // 默认最新
-
-  // 参考角色(按 mode)
-  const roleDefs = SHOT_REF_ROLES[mode] ?? SHOT_REF_ROLES['text2video'] ?? [];
-
-  /** 添加参考:自动从资产库选第一个未绑定的匹配媒体 */
-  const addRef = (roleDef: { role: string; label: string; media: 'image' | 'audio' | 'video'; multiple?: boolean }) => {
-    if (roleDef.role === 'ref-image') {
-      const count = refs.filter((r) => r.role === 'ref-image').length;
-      if (count >= 9) {
-        toastMsg('参考图最多 9 张');
-        return;
-      }
-    }
-    const candidate = assetsList.find((a) => a.kind === roleDef.media && !refs.some((r) => r.assetId === a.id));
-    if (!candidate) {
-      toastMsg(`没有可用的 ${roleDef.media} 资产 · 先去资产中心导入`);
-      return;
-    }
-    setData({ refs: [...refs, { assetId: candidate.id, role: roleDef.role }] });
-    toastMsg(`已绑定${roleDef.label} · ${candidate.name}`);
-  };
-  const removeRef = (i: number) => setData({ refs: refs.filter((_, j) => j !== i) });
-  const setRefRole = (i: number, role: string) => setData({ refs: refs.map((r, j) => (j === i ? { ...r, role } : r)) });
-
-  /** 提交生成(检查器主按钮):节点参数已在 chips 选择时写入 data,直接提交 */
-  const submit = () => {
-    if (!projectId) {
-      toastMsg('先进一个项目再生成');
-      return;
-    }
-    void runNode(node.id);
-  };
-
-  const aspectLabel = (a: string) => (a === '16:9' ? '16:9 横屏' : a === '9:16' ? '9:16 竖屏' : a === '1:1' ? '1:1 方' : '自定义');
-  const resText = `${width}×${height} · ${aspectLabel(aspect)}`;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* ── 状态面板(ghost → 待生成 · running → 生产中 · 其余 → 已完成) ── */}
-      {isRunning || isQueued ? (
-        <div className="gstate run">
-          <div className="gs-h">
-            <span className="spin" />
-            <b>{isRunning ? '生产中' : '排队中'}</b>
-            <span className="right">{job?.slot === 'video' ? '视频槽位' : '—'}</span>
-          </div>
-          {isRunning ? (
-            <div className="pbar">
-              <i style={{ width: `${Math.round((job?.progress ?? 0) * 100)}%` }} />
-            </div>
-          ) : null}
-          <div className="gs-sub mono">
-            {job?.stage ?? (isQueued ? `队列第 ${(jobs.findIndex((j) => j.id === job?.id) + 1) || '?'} 位` : '')}
-          </div>
-          <div className="gs-act">
-            <button
-              className="btn btn-s btn-sm"
-              onClick={() => {
-                if (job) {
-                  void window.bigbotart.cancelRender('h3c', { providerTaskId: job.id }).catch(() => undefined);
-                  toastMsg('已取消任务');
-                }
-              }}
-            >
-              取消任务
-            </button>
-            <span className="f-hint">修改参数将标 stale,仅重跑受影响节点</span>
-          </div>
-        </div>
-      ) : node.ghost || !curTake ? (
-        <div className="gstate pend">
-          <div className="gs-h">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v5l3.5 2" />
-            </svg>
-            <b>待生成</b>
-            <span className="right">{SHOT_TIER_PRESETS[tier].eta}</span>
-          </div>
-          <div className="gs-sub">h3.c · {SHOT_MODE_LABEL[mode]} · {resText} · 显存 ≈25GB</div>
-          <button className="btn btn-p btn-sm" style={{ width: '100%' }} onClick={submit}>立即生成</button>
-        </div>
-      ) : (
-        <div className="gok">
-          <span className="dot ok" />生成完成 · Take {curTake.attempt} ✓
-          {curTake.durationSec !== undefined ? ` · 耗时 ${Math.round(curTake.durationSec / 60)}分${Math.round(curTake.durationSec % 60)}秒` : ''}
-          <span className="mono">{curTake.resultPath ? curTake.resultPath.split('/').pop() : ''}</span>
-        </div>
-      )}
-
-      {/* 产物视频预览(仅已完成态) */}
-      {curTake?.resultPath ? (
-        <div className="preview">
-          <video
-            src={outputUrlOf(curTake.resultPath)}
-            controls
-            preload="metadata"
-            style={{ width: '100%', height: 'auto', borderRadius: 'var(--radius-md)', display: 'block', background: '#000' }}
-          />
-        </div>
-      ) : null}
-
-      {/* ── 模式 ── */}
-      <div className="f-sec">
-        <div className="lbl">生成模式</div>
-        <div className="f-chips">
-          {Object.keys(SHOT_MODE_LABEL).map((m) => (
-            <span key={m} className={`chip${mode === m ? ' on' : ''}`} onClick={() => setData({ mode: m, refs: refs.filter((r) => SHOT_REF_ROLES[m]?.some((rd) => rd.role === r.role)) })}>
-              {SHOT_MODE_LABEL[m]}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* ── 档位 × 画幅 ── */}
-      <div className="f-sec">
-        <div className="lbl">档位 × 画幅(白名单防呆)</div>
-        <div className="f-row">
-          <span className="f-lbl">比例</span>
-          <div className="f-chips">
-            {SHOT_ASPECTS.map((a) => (
-              <span
-                key={a}
-                className={`chip${aspect === a ? ' on' : ''}`}
-                onClick={() => {
-                  if (a === 'custom') {
-                    setData({ aspect: 'custom', width: clamp32(customWidth), height: clamp32(customHeight) });
-                    return;
-                  }
-                  // 选比例 → 立即按当前档位写入节点参数
-                  const sz = SHOT_SIZES[a as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default;
-                  setData({ aspect: a, width: sz.width, height: sz.height });
-                }}
-              >
-                {a === '16:9' ? '16:9' : a === '9:16' ? '9:16' : a === '1:1' ? '1:1' : '自定义'}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="f-row">
-          <span className="f-lbl">档位</span>
-          <div className="f-chips">
-            {SHOT_TIERS.map((t) => (
-              <span
-                key={t}
-                className={`chip${tier === t ? ' on' : ''}`}
-                onClick={() => {
-                  // 档位改动 → 自动落 F/S/L/R(预设),清空时长,并按当前比例写节点宽高
-                  const p = SHOT_TIER_PRESETS[t];
-                  const sz = isCustom
-                    ? { width: clamp32(customWidth), height: clamp32(customHeight) }
-                    : SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][t] ?? SHOT_SIZES['16:9'].default;
-                  setData({
-                    tier: t,
-                    steps: p.steps,
-                    layers: p.layers,
-                    reuse: p.reuse,
-                    frames: p.frames,
-                    seconds: 0,
-                    width: sz.width,
-                    height: sz.height,
-                  });
-                }}
-              >
-                {SHOT_TIER_PRESETS[t].label}
-              </span>
-            ))}
-          </div>
-        </div>
-        {isCustom ? (
-          <div className="f-row">
-            <span className="f-lbl">宽</span>
-            <input
-              className="f-in"
-              type="number"
-              step={32}
-              value={customWidth}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setData({ customWidth: v, width: clamp32(v) });
-              }}
-            />
-            <span className="f-lbl">高</span>
-            <input
-              className="f-in"
-              type="number"
-              step={32}
-              value={customHeight}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setData({ customHeight: v, height: clamp32(v) });
-              }}
-            />
-            <span className="f-hint" style={{ marginLeft: 4 }}>须为 32 的倍数</span>
-          </div>
-        ) : null}
-        <div className="f-hint">
-          输出 {resText} · 预计 ≈{SHOT_TIER_PRESETS[tier].eta.replace('≈', '')} · {SHOT_TIER_PRESETS[tier].note}
-        </div>
-      </div>
-
-      {/* ── 生成参数 F/S/L/R + seed ── */}
-      <div className="f-sec">
-        <div className="lbl">生成参数(F/S/L/R)</div>
-        <div className="f-grid">
-          <div className="fg">
-            <span>帧数 F</span>
-            <input
-              className="f-in"
-              type="number"
-              value={Number(d.frames ?? 124)}
-              onChange={(e) => {
-                const f = Number(e.target.value);
-                if (Number.isFinite(f) && f > 240) toastMsg('帧数超过 10 秒上限(240) · 建议用时长设置或拆多镜头段落');
-                // 直接改帧数 → 清空时长(避免 seconds 优先覆盖),帧数显式生效
-                setData({ frames: Number.isFinite(f) ? f : 0, seconds: 0 });
-              }}
-            />
-          </div>
-          <div className="fg">
-            <span>步数 S</span>
-            <input className="f-in" type="number" value={Number(d.steps ?? 20)} onChange={(e) => setData({ steps: Number(e.target.value) })} />
-          </div>
-          <div className="fg">
-            <span>层数 L</span>
-            <input className="f-in" type="number" value={Number(d.layers ?? 50)} onChange={(e) => setData({ layers: Number(e.target.value) })} />
-          </div>
-          <div className="fg">
-            <span>复用 R</span>
-            <input className="f-in" type="number" value={Number(d.reuse ?? 1)} onChange={(e) => setData({ reuse: Number(e.target.value) })} />
-          </div>
-        </div>
-        <div className="f-row" style={{ marginTop: 6 }}>
-          <span className="f-lbl">seed</span>
-          <input className="f-in" type="number" value={seed} style={{ width: 76 }} onChange={(e) => setData({ seed: Number(e.target.value) })} />
-          <span className="f-lbl">时长</span>
-          <input
-            className="f-in"
-            type="number"
-            min={1}
-            max={10}
-            value={seconds > 0 ? seconds : ''}
-            placeholder={`${Math.round(Number(d.frames ?? 124) / 24)}s`}
-            style={{ width: 52 }}
-            onChange={(e) => {
-              let s = Number(e.target.value);
-              if (!Number.isFinite(s) || s <= 0) {
-                setData({ seconds: 0 });
-                return;
-              }
-              if (s > 10) {
-                toastMsg('h3.c 单段时长最多 10 秒 · 更长请拆多镜头段落');
-                s = 10;
-              }
-              // 选时长 → 帧数自动填上(24fps)
-              setData({ seconds: s, frames: Math.round(s * 24) });
-            }}
-          />
-          <span className="f-hint">最多 10s(24fps · 10s=240 帧)· 选时长自动填帧数</span>
-        </div>
-      </div>
-
-      {/* ── 提示词 ── */}
-      <div className="f-sec">
-        <div className="lbl">提示词(H3 五段式)</div>
-        <textarea
-          className="f-ta"
-          value={prompt}
-          placeholder={'Scene: …\nAction: …\nCamera: …\nLook: …\nAudio: …'}
-          onChange={(e) => setData({ prompt: e.target.value })}
-        />
-      </div>
-
-      {/* ── 参考绑定(按 mode 出槽位;Ref2VA 多参考) ── */}
-      <div className="f-sec">
-        <div className="lbl">参考绑定</div>
-        {refs.length === 0 ? (
-          <div className="f-hint">绑定首/尾帧、参考图或音频后,生成时自动注入(--ref-* 参数)</div>
-        ) : (
-          refs.map((r, i) => {
-            const path = assetCache[r.assetId];
-            const def = roleDefs.find((rd) => rd.role === r.role);
-            return (
-              <div className="slot" key={`${r.assetId}-${i}`}>
-                {path ? <span className="refprev"><img src={thumbSrc(path) ?? ''} alt="" /></span> : <span className="refprev" />}
-                <span className="grow">
-                  <div className="sname">{def?.label ?? r.role}</div>
-                </span>
-                <span className="sval">{r.assetId.slice(0, 10)}…</span>
-                <button className="btn btn-xs" onClick={() => removeRef(i)} title="移除">×</button>
-              </div>
-            );
-          })
-        )}
-        {roleDefs.map((rd) => {
-          const bound = refs.filter((r) => r.role === rd.role).length;
-          const maxed = rd.role === 'ref-image' && bound >= 9;
-          return (
-            <button
-              key={rd.role}
-              className="btn btn-s btn-sm"
-              disabled={maxed}
-              onClick={() => addRef(rd)}
-              style={{ marginRight: 6 }}
-            >
-              ＋ {rd.label}
-              {rd.multiple ? `(${bound}/9)` : ''}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* ── Take 历史 ── */}
-      {takes.length > 1 ? (
-        <div className="f-sec">
-          <div className="lbl">Take 历史</div>
-          <div className="f-chips">
-            {takes.slice(0, 8).map((t) => (
-              <span
-                key={t.id}
-                className={`chip${t.id === curTake?.id ? ' on' : ''}${t.status === 'failed' ? ' dis' : ''}`}
-                onClick={() => setSelTakeId(t.id)}
-                title={t.resultPath ?? t.error ?? `Take ${t.attempt}`}
-              >
-                T{t.attempt} · {t.status === 'succeeded' ? '✓' : t.status === 'failed' ? '✗' : t.status}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {/* ── 主按钮 ── */}
-      <button className="btn btn-s" style={{ width: '100%' }} onClick={submit}>
-        {curTake ? '重新生成' : '立即生成'}
-      </button>
-    </div>
-  );
-}
-
-function InspectorBody({ node, infoMap, setInfoMap, setNodes, toastMsg, projectId, activeCanvasId, jobs, assetsList, assetCache, runNode }: InspectorBodyProps) {
-  if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
-  const d = (node.data ?? {}) as Record<string, unknown>;
-  const setData = (patch: Record<string, unknown>) => {
-    setNodes((ns) => ns.map((n) => (n.id === node.id ? { ...n, data: { ...(n.data ?? {}), ...patch } } : n)));
-  };
-  const info = infoMap[node.id];
-  const setInfo = (patch: Partial<{ t: string; img: string | null; meta: Array<[string, string]> }>) => {
-    setInfoMap((m) => ({ ...m, [node.id]: { ...(m[node.id] ?? { t: node.title, img: null, meta: [] }), ...patch } }));
-  };
-
-  switch (node.kind) {
-    case 'document': {
-      const md = String(d.markdown ?? '');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField
-            label="Markdown 内容"
-            value={md}
-            rows={10}
-            placeholder="# 标题\n\n场景：…\n角色：…\n风格：…"
-            onChange={(v) => setData({ markdown: v })}
-          />
-          <KVSection rows={[['字符数', String(md.length)], ['行数', String(md.split('\n').length)]]} />
-        </div>
-      );
-    }
-    case 'asset': {
-      const mediaType = String(d.mediaType ?? 'image');
-      const assetId = String(d.assetId ?? '');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>媒体类型</Lbl>
-            <div className="row g6">
-              {(['image', 'video', 'audio', 'document'] as const).map((t) => (
-                <span
-                  key={t}
-                  className={`chip${mediaType === t ? ' on' : ''}`}
-                  onClick={() => setData({ mediaType: t })}
-                >
-                  {t === 'image' ? '图片' : t === 'video' ? '视频' : t === 'audio' ? '音频' : '文档'}
-                </span>
-              ))}
-            </div>
-          </div>
-          <TextAreaField
-            label="资产 ID(从资产中心复制)"
-            value={assetId}
-            rows={1}
-            placeholder="asset-xxxxxxxxxxxx-xxxx"
-            onChange={(v) => setData({ assetId: v })}
-          />
-          <button
-            className="btn btn-s btn-sm"
-            onClick={() => {
-              void window.bigbotart.listAssets().then((all) => {
-                const opts = all.filter((a) => a.kind === mediaType);
-                if (!opts.length) {
-                  toastMsg(`资产库里没有 ${mediaType} 类资产`);
-                  return;
-                }
-                const first = opts[0]!;
-                setData({ assetId: first.id });
-                toastMsg(`已绑定最新 ${mediaType} 资产:${first.name}`);
-              });
-            }}
-          >
-            绑定最新 {mediaType} 资产
-          </button>
-          {info?.meta ? <KVSection rows={info.meta} /> : null}
-        </div>
-      );
-    }
-    case 'image-gen': {
-      const model = String(d.model ?? 'AbstractFramework/z-image-turbo-8bit');
-      const prompt = String(d.prompt ?? '');
-      const w = Number(d.width ?? 1024);
-      const h = Number(d.height ?? 1024);
-      const seeds = (d.seeds as number[]) ?? [42];
-      const steps = Number(d.steps ?? 24);
-      const guidance = Number(d.guidance ?? 1.0);
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField label="提示词" value={prompt} rows={4} placeholder="晨雾弥漫的针叶林,远处湖面反射柔光,电影感广角" onChange={(v) => setData({ prompt: v })} />
-          <div>
-            <Lbl>模型</Lbl>
-            <input
-              className="input-w mono"
-              value={model}
-              onChange={(e) => setData({ model: e.target.value })}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div>
-            <Lbl>宽 × 高</Lbl>
-            <div className="row g6">
-              <input className="input-w mono" type="number" value={w} style={{ width: 90 }} onChange={(e) => setData({ width: Number(e.target.value) })} />
-              <span className="mut">×</span>
-              <input className="input-w mono" type="number" value={h} style={{ width: 90 }} onChange={(e) => setData({ height: Number(e.target.value) })} />
-            </div>
-          </div>
-          <div>
-            <Lbl>步数 / 引导</Lbl>
-            <div className="row g6">
-              <input className="input-w mono" type="number" value={steps} style={{ width: 70 }} onChange={(e) => setData({ steps: Number(e.target.value) })} />
-              <span className="mut">/</span>
-              <input className="input-w mono" type="number" step="0.1" value={guidance} style={{ width: 70 }} onChange={(e) => setData({ guidance: Number(e.target.value) })} />
-            </div>
-          </div>
-          <div>
-            <Lbl>Seeds(逗号分隔)</Lbl>
-            <input
-              className="input-w mono"
-              value={seeds.join(', ')}
-              onChange={(e) =>
-                setData({ seeds: e.target.value.split(/[,\\s]+/).filter(Boolean).map(Number).filter((x) => Number.isFinite(x)) })
-              }
-            />
-          </div>
-          <KVSection rows={[['引擎', 'mlxgen'], ['产物', `${seeds.length} 张 PNG`]]} />
-        </div>
-      );
-    }
-    case 'image-edit': {
-      const mode = String(d.mode ?? 'instruction');
-      const model = String(d.model ?? 'qwen-image-edit');
-      const prompt = String(d.prompt ?? '');
-      const inputAssetId = String(d.inputAssetId ?? '');
-      const maskAssetId = String(d.maskAssetId ?? '');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>编辑模式</Lbl>
-            <div className="row g6" style={{ flexWrap: 'wrap' }}>
-              {(['instruction', 'img2img', 'inpaint', 'outpaint'] as const).map((m) => (
-                <span
-                  key={m}
-                  className={`chip${mode === m ? ' on' : ''}`}
-                  onClick={() => setData({ mode: m })}
-                >
-                  {m === 'instruction' ? '指令编辑' : m === 'img2img' ? 'I2I' : m === 'inpaint' ? 'Inpaint' : 'Outpaint'}
-                </span>
-              ))}
-            </div>
-          </div>
-          <TextAreaField label="指令 / Prompt" value={prompt} rows={3} placeholder="把背景换成日落,保留主体" onChange={(v) => setData({ prompt: v })} />
-          <TextAreaField label="输入图 Asset ID" value={inputAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ inputAssetId: v })} />
-          {mode === 'inpaint' ? (
-            <TextAreaField label="遮罩图 Asset ID(inpaint 必填)" value={maskAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ maskAssetId: v })} />
-          ) : null}
-          <div>
-            <Lbl>模型</Lbl>
-            <input className="input-w mono" value={model} onChange={(e) => setData({ model: e.target.value })} style={{ width: '100%' }} />
-          </div>
-        </div>
-      );
-    }
-    case 'image-upscale': {
-      const scale = Number(d.scale ?? 2);
-      const model = String(d.model ?? 'AbstractFramework/seedvr2-3b-8bit');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>放大倍数</Lbl>
-            <div className="row g6">
-              {[2, 4].map((s) => (
-                <span key={s} className={`chip${scale === s ? ' on' : ''}`} onClick={() => setData({ scale: s })}>
-                  ×{s}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div>
-            <Lbl>模型</Lbl>
-            <input className="input-w mono" value={model} onChange={(e) => setData({ model: e.target.value })} style={{ width: '100%' }} />
-          </div>
-          <KVSection rows={[['引擎', 'mlxgen · SeedVR2'], ['输入', '来自上游节点产物或 asset']]} />
-        </div>
-      );
-    }
-    case 'shot': {
-      return (
-        <ShotInspector
-          node={node}
-          setData={setData}
-          projectId={projectId}
-          activeCanvasId={activeCanvasId}
-          jobs={jobs}
-          assetsList={assetsList}
-          assetCache={assetCache}
-          runNode={(id) => void runNode(id)}
-          toastMsg={toastMsg}
-        />
-      );
-    }
-    case 'director': {
-      const prompt = String(d.prompt ?? '');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField label="导演 prompt(运镜小样)" value={prompt} rows={8} placeholder="机位：低机位仰拍 · 运动：推进 → 拉远 · 景别：中景" onChange={(v) => setData({ prompt: v })} />
-          <KVSection rows={[['引擎', '复用 shot 低档(P1 占位)'], ['产物', '运镜参考小样视频']]} />
-        </div>
-      );
-    }
-    case 'timeline': {
-      const shots = (d.shotNodeIds as string[]) ?? [];
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>入线镜头(shotNodeIds)</Lbl>
-            {shots.length === 0 ? (
-              <div className="mut" style={{ fontSize: 12 }}>通过上游 shot 节点连线自动入线</div>
-            ) : (
-              shots.map((sid, i) => (
-                <div key={sid} className="refrow">
-                  <span className="mono mut">#{i + 1}</span>
-                  <span className="mono">{sid}</span>
-                </div>
-              ))
-            )}
-          </div>
-          <KVSection rows={[['导出', 'FFmpeg · MP4 H.264+AAC'], ['音轨', '保留各 Take 内嵌音轨']]} />
-        </div>
-      );
-    }
-    case 'audio-ref': {
-      const assetId = String(d.assetId ?? '');
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField label="音频资产 ID" value={assetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ assetId: v })} />
-          <button
-            className="btn btn-s btn-sm"
-            onClick={() => {
-              void window.bigbotart.listAssets().then((all) => {
-                const opts = all.filter((a) => a.kind === 'audio' || a.kind === 'video');
-                if (!opts.length) {
-                  toastMsg('资产库里没有音频/视频资产');
-                  return;
-                }
-                const first = opts[0]!;
-                setData({ assetId: first.id });
-                toastMsg(`已绑定:${first.name}`);
-              });
-            }}
-          >
-            绑定最新音频 / 视频资产
-          </button>
-          <KVSection rows={[['用途', '--ref-audio 带声直出']]} />
-        </div>
-      );
-    }
-    case 'workflow-input': {
-      const slots = (d.slots as Array<{ name: string; accept: string[]; required: boolean; value?: unknown }>) ?? [];
-      const updateSlot = (i: number, patch: Record<string, unknown>) => {
-        const next = slots.map((s, j) => (j === i ? { ...s, ...patch } : s));
-        setData({ slots: next });
-      };
-      const removeSlot = (i: number) => setData({ slots: slots.filter((_, j) => j !== i) });
-      const addSlot = () =>
-        setData({ slots: [...slots, { name: `槽位-${slots.length + 1}`, accept: ['text'], required: false }] });
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>输入槽位 ×{slots.length}</Lbl>
-            {slots.map((s, i) => (
-              <div key={i} style={{ border: '1px solid var(--border-soft)', borderRadius: 8, padding: '8px 10px', marginBottom: 6 }}>
-                <div className="row g6">
-                  <input
-                    className="input-w mono"
-                    value={s.name}
-                    style={{ flex: 1, fontWeight: 600 }}
-                    onChange={(e) => updateSlot(i, { name: e.target.value })}
-                  />
-                  <button className="btn btn-g btn-sm" onClick={() => removeSlot(i)}>×</button>
-                </div>
-                <div className="row g6" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                  {(['image', 'video', 'audio', 'document', 'text'] as const).map((t) => (
-                    <span
-                      key={t}
-                      className={`chip${s.accept.includes(t) ? ' on' : ''}`}
-                      style={{ fontSize: 10, padding: '2px 8px' }}
-                      onClick={() => {
-                        const has = s.accept.includes(t);
-                        updateSlot(i, { accept: has ? s.accept.filter((x) => x !== t) : [...s.accept, t] });
-                      }}
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-                <div className="row g6" style={{ marginTop: 6 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
-                    <input
-                      type="checkbox"
-                      checked={s.required}
-                      onChange={(e) => updateSlot(i, { required: e.target.checked })}
-                    />
-                    必填
-                  </label>
-                  <span className="mono mut" style={{ fontSize: 10, marginLeft: 'auto' }}>
-                    {s.value ? '已填充 ✓' : '未填充'}
-                  </span>
-                </div>
-              </div>
-            ))}
-            <button className="btn btn-s btn-sm" onClick={addSlot}>＋ 添加槽位</button>
-          </div>
-          <KVSection rows={[['语义', '工作流入口 · 槽位注入下游节点 data']]} />
-        </div>
-      );
-    }
-    case 'workflow-output': {
-      const outputs = (d.outputs as Array<{ name: string; kind: string; sourceNodeIds: string[] }>) ?? [];
-      const updateOut = (i: number, patch: Record<string, unknown>) =>
-        setData({ outputs: outputs.map((o, j) => (j === i ? { ...o, ...patch } : o)) });
-      const removeOut = (i: number) => setData({ outputs: outputs.filter((_, j) => j !== i) });
-      const addOut = () =>
-        setData({ outputs: [...outputs, { name: `产物-${outputs.length + 1}`, kind: 'video', sourceNodeIds: [] }] });
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>产物汇聚 ×{outputs.length}</Lbl>
-            {outputs.map((o, i) => (
-              <div key={i} style={{ border: '1px solid var(--border-soft)', borderRadius: 8, padding: '8px 10px', marginBottom: 6 }}>
-                <div className="row g6">
-                  <input
-                    className="input-w mono"
-                    value={o.name}
-                    style={{ flex: 1, fontWeight: 600 }}
-                    onChange={(e) => updateOut(i, { name: e.target.value })}
-                  />
-                  <button className="btn btn-g btn-sm" onClick={() => removeOut(i)}>×</button>
-                </div>
-                <div className="row g6" style={{ marginTop: 6 }}>
-                  {(['image', 'video', 'audio', 'document'] as const).map((k) => (
-                    <span
-                      key={k}
-                      className={`chip${o.kind === k ? ' on' : ''}`}
-                      style={{ fontSize: 10, padding: '2px 8px' }}
-                      onClick={() => updateOut(i, { kind: k })}
-                    >
-                      {k}
-                    </span>
-                  ))}
-                </div>
-                <div className="row g6" style={{ marginTop: 6 }}>
-                  <span className="mono mut" style={{ fontSize: 10 }}>×{o.sourceNodeIds.length} 个 source 节点</span>
-                </div>
-              </div>
-            ))}
-            <button className="btn btn-s btn-sm" onClick={addOut}>＋ 添加产物</button>
-          </div>
-          <KVSection rows={[['语义', '工作流出口 · 运行收口 · runs/<runId>/final/']]} />
-        </div>
-      );
-    }
-    default: {
-      return (
-        <div className="mut" style={{ fontSize: 12 }}>
-          {node.extra ?? '该节点类型暂无专属编辑器'}
-        </div>
-      );
-    }
-  }
-}
+import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ModelOption, ChatMsg } from './canvas/types';
+import {
+  FINDER_PATH,
+  NODE_TYPES,
+  RES,
+  ETA,
+  resLine,
+  SHOT_ASPECTS,
+  SHOT_TIERS,
+  SHOT_SIZES,
+  SHOT_TIER_PRESETS,
+  SHOT_MODE_LABEL,
+  SHOT_REF_ROLES,
+  NODE_INFO_BASE,
+  WAVE_BARS,
+  MODEL_OPTION_FALLBACK,
+  SKILLS,
+} from './canvas/constants';
+import {
+  ICON_DOC,
+  ICON_DOC_S,
+  ICON_IMAGE,
+  ICON_EDIT,
+  ICON_UPSCALE,
+  ICON_SHOT,
+  ICON_DIRECTOR,
+  ICON_AUDIO,
+  ICON_TIMELINE,
+  ICON_COMFY,
+  ICON_ASSET,
+  ICON_WF_INPUT,
+  ICON_WF_OUTPUT,
+  PALETTE_ICONS,
+  TYPE_ICON,
+} from './canvas/icons';
+import {
+  deriveEdgeLabel,
+  makeInitialData,
+  fromSharedNode,
+  toSharedNodes,
+  toLocalEdges,
+  toSharedEdges,
+  defaultDataFor,
+  dedupeNodeIds,
+  seedIdCounter,
+} from './canvas/node-mapping';
+import { resolvePort, hasConnector, pickShotSpec, IMAGE_KINDS } from './canvas/connectors';
+import { basenameOf, outputUrlOf, thumbSrc, clamp32, VideoThumb } from './canvas/media';
+import { queueItem } from './canvas/queue';
+import { planMsg } from './canvas/plan-msg';
+import { InspectorBody } from './canvas/inspector/InspectorBody';
+import { TimelineExportPreview } from './canvas/TimelineExportPreview';
 
 export default function CanvasPage({
   onNavigate,
@@ -1598,11 +85,16 @@ export default function CanvasPage({
   viewRef.current = view;
   const [panning, setPanning] = useState(false);
 
-  /* ── 画布数据 ── */
-  const [nodes, setNodes] = useState<CanvasNode[]>(initialNodes);
-  const [edges, setEdges] = useState<Edge[]>(initialEdges);
+  /* ── 画布数据 ──
+   初始为空画布(不播种设计稿演示数据):真实节点一律来自已存盘画布快照。
+   演示节点/连线(initialNodes/initialEdges)仅作 constants 保留,不再作为 state 初始值,
+   否则进画布时会看到测试数据、且自动保存会把演示数据写进真实项目。 */
+  const [nodes, setNodes] = useState<CanvasNode[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
   const [selected, setSelected] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<string | null>(null);
   const [infoMap, setInfoMap] = useState<Record<string, NodeInfo>>(() => ({
@@ -1619,8 +111,21 @@ export default function CanvasPage({
   const [toast, setToast] = useState<{ msg: string; n: number } | null>(null);
   const [inspectTitle, setInspectTitle] = useState('镜头 02 · 男主踱步');
 
-  /* ── 自增 id / 演示附件轮换 ── */
+  /* ── 自增 id / 演示附件轮换 ──
+     id 必须全局唯一:重复 id 会让 React key 冲突、拖拽时同号节点一起动、
+     findFreeSpot 去重失效(表现为新节点与旧节点完全重合、分不开)。
+     useRef 在组件重挂载时会归零,所以这里既扫描已有节点做种子,
+     又保留一个随机后缀兜底(跨卸载重挂载也不会再撞号)。 */
   const nextId = useRef(0);
+  const idSalt = useRef(Math.random().toString(36).slice(2, 6));
+  /** 生成唯一节点 id;已占用的 id 会自动跳过 */
+  const makeNodeId = useCallback((prefix: string): string => {
+    for (let i = 0; i < 200; i++) {
+      const id = `${prefix}${++nextId.current}-${idSalt.current}`;
+      if (!nodesRef.current.some((n) => n.id === id)) return id;
+    }
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  }, []);
   const msgId = useRef(100);
 
   /* ── M1:渲染队列(真实任务) + 画布持久化 ── */
@@ -1639,7 +144,6 @@ export default function CanvasPage({
   const [apSel, setApSel] = useState<string | null>(null);
   const [apAspect, setApAspect] = useState('16:9');
   const [apTier, setApTier] = useState('默认');
-  const [apShowAll, setApShowAll] = useState(false);
 
   /* ── 检查器:档位 × 画幅 ── */
   const [iAspect, setIAspect] = useState('16:9');
@@ -1778,6 +282,163 @@ export default function CanvasPage({
     };
   }, []);
 
+  /* ── 「+」按钮 → 拖拽连接到已有节点(松开命中目标即建边)──
+   * 拖动期间:跟手画临时虚线 + 命中节点高亮(可连=绿,不可连=红);
+   * 命中空白 / 不可连 → 保持原弹层行为;命中可连 → 写边 + 关闭弹层。
+   * 详见 docs/节点手册.md §3 + 连接器设计.md §5。 */
+  type ConnectDrag = {
+    sourceId: string;
+    /** pointerdown 屏幕坐标(用于判断「未拖动」则走 onClick 弹层路径) */
+    sx: number;
+    sy: number;
+    /** 当前屏幕坐标 */
+    cx: number;
+    cy: number;
+    /** 当前命中节点 id(null = 空白) */
+    hitId: string | null;
+    /** 当前命中是否可连 */
+    hitOk: boolean;
+    /** 标记已开始拖动(>4px 才算;否则 onPointerUp 走原 click) */
+    moved: boolean;
+  };
+  const connectDragRef = useRef<ConnectDrag | null>(null);
+  /** 触发重渲染用的镜像 state(每帧由 raf 节流更新一次) */
+  const [connectDrag, setConnectDrag] = useState<ConnectDrag | null>(null);
+
+  /** 由源节点中心 + 当前屏幕坐标 → 临时预览线端点(world 坐标系;跟 edges SVG 一致) */
+  const computeConnectPath = useCallback((srcId: string, cx: number, cy: number): string | null => {
+    const src = nodesRef.current.find((n) => n.id === srcId);
+    if (!src) return null;
+    const v = viewRef.current;
+    const sx = src.x + (src.w ?? 236);
+    const sy = src.y + 36; // 节点头部中点近似
+    const wx = (cx - v.x) / v.z;
+    const wy = (cy - v.y) / v.z;
+    // 中点加一个小弧度让连接线有方向感
+    const mx = (sx + wx) / 2;
+    return `M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${wy}, ${wx} ${wy}`;
+  }, []);
+
+  /** 「+」按下 → 进入 connectDrag 预备态(moved=false) */
+  const beginConnectDrag = useCallback((sourceId: string, sx: number, sy: number) => {
+    const init: ConnectDrag = { sourceId, sx, sy, cx: sx, cy: sy, hitId: null, hitOk: false, moved: false };
+    connectDragRef.current = init;
+    setConnectDrag(init);
+  }, []);
+
+  /** 命中检测:屏幕坐标 → 节点 id */
+  const hitTestNode = useCallback((clientX: number, clientY: number): { id: string; ok: boolean } | null => {
+    const el = document.elementFromPoint(clientX, clientY);
+    if (!el) return null;
+    const nodeEl = (el as HTMLElement).closest('[data-node]') as HTMLElement | null;
+    if (!nodeEl) return null;
+    const id = nodeEl.dataset.node;
+    if (!id || id === connectDragRef.current?.sourceId) return null;
+    const src = nodesRef.current.find((n) => n.id === connectDragRef.current?.sourceId);
+    if (!src) return null;
+    const dst = nodesRef.current.find((n) => n.id === id);
+    if (!dst) return null;
+    const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
+    const port = resolvePort(src, tag.id);
+    return { id, ok: port !== null };
+  }, []);
+
+  /** 写边(命中可连节点) */
+  const commitConnectEdge = useCallback((srcId: string, dstId: string) => {
+    const src = nodesRef.current.find((n) => n.id === srcId);
+    const dst = nodesRef.current.find((n) => n.id === dstId);
+    if (!src || !dst) return;
+    const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
+    const edgeLabel = deriveEdgeLabel(src, tag);
+    if (edgeLabel === undefined) return; // 无连接器(双重保险)
+    setEdges((es) => {
+      // 完全相同边不去重:允许同 src→dst 重复(shot→timeline 多条入线本就支持)
+      // 但若「label 也一样」则跳过,避免无意义的 dup
+      if (es.some((e) => e.from === srcId && e.to === dstId && e.label === edgeLabel)) {
+        toastMsg(`已存在相同连线:${src.title} → ${dst.title}${edgeLabel ? ` · ${edgeLabel}` : ''}`);
+        return es;
+      }
+      // commitConnectEdge 是拖拽连到**已有节点**,边立即可用 → 实线(cls: ''),不用幽灵虚线
+      return [...es, { from: srcId, to: dstId, cls: '', label: edgeLabel }];
+    });
+    toastMsg(`已连线:${src.title} → ${dst.title}${edgeLabel ? ` · ${edgeLabel}` : ''}`);
+    setApOpen(false);
+  }, [toastMsg]);
+
+  /** 全局 pointermove/up/keydown 处理 connectDrag */
+  useEffect(() => {
+    let rafId = 0;
+    let pending: { cx: number; cy: number } | null = null;
+
+    const flush = () => {
+      rafId = 0;
+      const d = connectDragRef.current;
+      const p = pending;
+      pending = null;
+      if (!d || !p) return;
+      const dx = p.cx - d.sx;
+      const dy = p.cy - d.sy;
+      const moved = d.moved || Math.hypot(dx, dy) > 4;
+      const hit = hitTestNode(p.cx, p.cy);
+      const next: ConnectDrag = {
+        ...d,
+        cx: p.cx,
+        cy: p.cy,
+        hitId: hit?.id ?? null,
+        hitOk: hit?.ok ?? false,
+        moved,
+      };
+      connectDragRef.current = next;
+      setConnectDrag({ ...next });
+    };
+
+    const onMove = (e: PointerEvent) => {
+      const d = connectDragRef.current;
+      if (!d) return;
+      pending = { cx: e.clientX, cy: e.clientY };
+      if (!rafId) rafId = requestAnimationFrame(flush);
+    };
+
+    const onUp = (e: PointerEvent) => {
+      const d = connectDragRef.current;
+      if (!d) return;
+      const wasDragging = d.moved;
+      const finalHit = hitTestNode(e.clientX, e.clientY);
+      connectDragRef.current = null;
+      setConnectDrag(null);
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      pending = null;
+      // 仅在「真的拖动过」+ 「命中可连节点」时建边
+      if (wasDragging && finalHit?.ok && finalHit.id) {
+        commitConnectEdge(d.sourceId, finalHit.id);
+      }
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && connectDragRef.current) {
+        connectDragRef.current = null;
+        setConnectDrag(null);
+        if (rafId) cancelAnimationFrame(rafId);
+        rafId = 0;
+        pending = null;
+        setApOpen(false);
+      }
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('keydown', onKey);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [hitTestNode, commitConnectEdge]);
+
   /* ── 空白处拖拽平移 ── */
   const panStartRef = useRef({ sx: 0, sy: 0, vx: 0, vy: 0 });
   const beginPan = (e: React.PointerEvent) => {
@@ -1809,6 +470,9 @@ export default function CanvasPage({
     const stage = stageRef.current;
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
+      // 弹窗/菜单内的滚轮用于滚动它自己的内容(如「+」弹窗的类型列表),不缩放画布
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
       e.preventDefault();
       const rect = stage.getBoundingClientRect();
       setView((v) => {
@@ -1897,7 +561,11 @@ export default function CanvasPage({
   /* ══ 选择节点 → 检查器 ══ */
   const selectNode = useCallback((id: string | null) => {
     setSelected(id);
-    if (!id) return;
+    if (!id) {
+      // 未选任何节点:检查器不应残留上一节点的标题
+      setInspectTitle('未选择节点');
+      return;
+    }
     const info = NODE_INFO_BASE[id];
     setInfoMap((m) => {
       if (m[id] || !info) return m;
@@ -2020,20 +688,23 @@ export default function CanvasPage({
   }, [projectId]);
 
 
-  /** 构建当前画布快照(节点+边)——给保存/切换前 flush-save 用 */
-  const buildActiveSnapshot = useCallback((): CanvasSnapshot | null => {
-    if (!activeCanvas) return null;
-    return {
-      id: activeCanvas.id,
-      projectId: activeCanvas.projectId,
-      name: activeCanvas.name,
-      nodes: toSharedNodes(nodes) as never,
-      edges: toSharedEdges(edges) as never,
-      version: activeCanvas.version,
-      createdAt: activeCanvas.createdAt,
-      updatedAt: new Date().toISOString(),
-    };
-  }, [activeCanvas, nodes, edges]);
+  /** 构建当前画布快照(节点+边)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
+  const buildActiveSnapshot = useCallback(
+    (ns?: CanvasNode[], es?: Edge[]): CanvasSnapshot | null => {
+      if (!activeCanvas) return null;
+      return {
+        id: activeCanvas.id,
+        projectId: activeCanvas.projectId,
+        name: activeCanvas.name,
+        nodes: toSharedNodes(ns ?? nodes) as never,
+        edges: toSharedEdges(es ?? edges) as never,
+        version: activeCanvas.version,
+        createdAt: activeCanvas.createdAt,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+    [activeCanvas, nodes, edges],
+  );
 
   /** 切换画布前先 flush 当前画布的未保存改动 */
   const flushSaveNow = useCallback(() => {
@@ -2055,19 +726,47 @@ export default function CanvasPage({
     [activeCanvasId, activeCanvas, flushSaveNow, onSwitchCanvas],
   );
 
-  /* 挂载 / 切换画布 / 项目切换:把 active 快照装进本地 nodes/edges */
+  /* ⚠️ 卸载前把待写的防抖保存强制落盘。
+     自动保存是 800ms 防抖;组件卸载时 effect cleanup 会 clearTimeout,
+     于是"刚编辑过、还没到 800ms"的内容会被整段丢弃 —— 导航离开、热更新重挂载
+     (开发期改代码)都会命中,表现为「刚填的提示词/参数不见了」。
+     这里用空依赖 effect 的 cleanup 做兜底 flush,保证内存里的最后状态一定写盘。 */
+  const saveFlushRef = useRef<() => void>(() => {});
+  saveFlushRef.current = () => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const snap = buildActiveSnapshot();
+    if (snap) void onSaveCanvas(snap);
+  };
+  useEffect(() => () => saveFlushRef.current(), []);
+
+  /* 挂载 / 切换画布 / 项目切换 / 画布列表就绪:把 active 快照装进本地 nodes/edges
+     依赖带上 projectCanvases:若进入画布时列表尚未就绪(early return),就绪后补加载,
+     避免停留在空画布/演示数据上。 */
   useEffect(() => {
     if (!projectCanvases || !activeCanvas) return;
     bootRef.current = true;
-    setNodes(activeCanvas.nodes.map((n) => fromSharedNode(n as never)));
-    setEdges(toLocalEdges(activeCanvas.edges as never));
+    // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
+    // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
+    const loaded = activeCanvas.nodes.map((n) => fromSharedNode(n as never));
+    const selfHeal = dedupeNodeIds(loaded, toLocalEdges(activeCanvas.edges as never));
+    setNodes(selfHeal.nodes);
+    setEdges(selfHeal.edges);
+    if (selfHeal.changed) {
+      const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
+      if (repaired) void onSaveCanvas(repaired);
+    }
+    nextId.current = seedIdCounter(selfHeal.nodes);
     setSelected(null);
     setFlashId(null);
     setMsgs([{ id: ++msgId.current, kind: 'agent', odId: 'agent-plan', rich: PLAN_MSG }]);
     requestAnimationFrame(() => {
       bootRef.current = false;
     });
-  }, [activeCanvasId, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCanvasId, projectId, projectCanvases]);
 
   /** 物化 sessionStorage 里的 Agent 规划(从首页跳到画布时) */
   useEffect(() => {
@@ -2121,8 +820,15 @@ export default function CanvasPage({
       const pc = await window.bigbotart.loadProjectCanvases(projectId);
       const cur = pc.canvases.find((c) => c.id === activeCanvasId);
       if (!cur) return;
-      setNodes(cur.nodes.map((n) => fromSharedNode(n as never)));
-      setEdges(toLocalEdges(cur.edges as never[]));
+      const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
+      const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
+      setNodes(selfHeal.nodes);
+      setEdges(selfHeal.edges);
+      if (selfHeal.changed) {
+        const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
+        if (repaired) void onSaveCanvas(repaired);
+      }
+      nextId.current = seedIdCounter(selfHeal.nodes);
     } catch (e) {
       console.error('刷新画布失败', e);
     }
@@ -2288,6 +994,29 @@ export default function CanvasPage({
                   : n,
               ),
             );
+            // 节点产出 → 连到它的 ghost 边转正为实线(幽灵边语义:目标有产物即生效)
+            setEdges((es) =>
+              es.map((e) => (e.to === j.nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)),
+            );
+            // 连续性:上游 shot 跑完 → 自动抽尾帧归档(下游镜头 first-frame 的帧源)
+            // 注意:每次新产物都要重新抽(上游重跑后尾帧必须刷新),以 tailFrameFrom 记录来源产物
+            const done = nodesRef.current.find((x) => x.id === j.nodeId);
+            const doneData = (done?.data ?? {}) as Record<string, unknown>;
+            if (done?.kind === 'shot' && j.resultPath && String(doneData.tailFrameFrom ?? '') !== j.resultPath) {
+              void window.bigbotart
+                .extractFrame(j.resultPath, 'last')
+                .then((res) => {
+                  if (!res.ok || !res.path) return;
+                  setNodes((ns) =>
+                    ns.map((x) =>
+                      x.id === j.nodeId
+                        ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: j.resultPath } }
+                        : x,
+                    ),
+                  );
+                })
+                .catch(() => undefined);
+            }
           } else if (j.status === 'failed') {
             setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}` } : n)));
           } else if (j.status === 'running') {
@@ -2313,43 +1042,289 @@ export default function CanvasPage({
     if (el) el.value = chatInput;
   }, [chatInput]);
 
-  /* 连线自动同步 refs:asset → shot 边(label=ref-audio/ref-image)自动写入下游 shot.data.refs
-     (需求 7:音频/图片参考走连线自动注入;手动添加的 refs 保留,按 assetId+role 去重) */
+  /* ══ 统一边分派(P0 · docs/视频节点下游连接规划.md §3)══
+     边 → 下游节点 data 自动填充,删除边时同步移除对应自动项(手动项保留):
+     - asset → shot:refs[role=ref-audio/ref-image](沿用需求 7,auto 标记)
+     - shot → shot:refs[role=first-frame] 指向上游尾帧 PNG(待上游 tailFramePath 就绪后注入)
+     - shot / asset(video|audio) → timeline:shotNodeIds 入线(按边序去重)
+     - 操作节点 → workflow-output:outputs[].sourceNodeIds(按 kind 匹配)
+     - asset / document → workflow-input(label=slot-<name>):slots[name].value
+     - shot → image-edit:inputFrameSource(取帧再编辑的帧源) */
   useEffect(() => {
     const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
-    const patchMap = new Map<string, Array<{ assetId: string; role: string }>>();
+    type RefEntry = { assetId?: string; path?: string; role: string; auto?: boolean };
+    const refPatch = new Map<string, RefEntry[]>();
+    const timelinePatch = new Map<string, string[]>();
+    const outputPatch = new Map<string, Record<string, string[]>>();
+    const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
+    const framePatch = new Map<string, { videoNodeId: string; at: 'first' | 'last' } | null>();
+    const imageFromPatch = new Map<string, { nodeId: string } | null>();
+    const promptFromPatch = new Map<string, { nodeId: string } | null>();
+    /** 镜头画面规格继承(shot → shot):目标节点 → 要写入的规格键值 */
+    const specPatch = new Map<string, Record<string, unknown>>();
+    const specFromPatch = new Map<string, { nodeId: string } | null>();
+    /** 接续/直通自动切换 mode(默认文生 → 首帧) */
+    const modePatch = new Map<string, string>();
+    /** 有「首帧端口」入边的 shot 节点(用于删边后把自动切换的 mode 收回) */
+    const frameEdgeNodes = new Set<string>();
+
     for (const e of edges) {
       const src = byId.get(e.from);
       const dst = byId.get(e.to);
-      if (!src || !dst || dst.kind !== 'shot' || src.kind !== 'asset') continue;
-      const role = e.label === 'ref-audio' ? 'ref-audio' : e.label === 'ref-image' ? 'ref-image' : undefined;
-      if (!role) continue;
-      const assetId = String((src.data as { assetId?: string })?.assetId ?? '');
-      if (!assetId) continue;
-      const entering = patchMap.get(e.to) ?? [];
-      entering.push({ assetId, role });
-      patchMap.set(e.to, entering);
-    }
-    if (patchMap.size === 0) return;
-    setNodes((ns) =>
-      ns.map((n) => {
-        const entering = patchMap.get(n.id);
-        if (!entering) return n;
-        const refs = ((n.data?.refs as Array<{ assetId: string; role: string }> | undefined) ?? []).map((r) => ({ ...r }));
-        for (const r of entering) {
-          if (!refs.some((m) => m.assetId === r.assetId && m.role === r.role)) refs.push(r);
+      if (!src || !dst) continue;
+      const d = (dst.data ?? {}) as Record<string, unknown>;
+      const s = (src.data ?? {}) as Record<string, unknown>;
+      switch (dst.kind) {
+        case 'shot': {
+          const arr = refPatch.get(e.to) ?? [];
+          const modeRaw = String(d.mode ?? 'text2video');
+          const modeOverridden = d.modeOverride === true;
+          const fromShot = src.kind === 'shot';
+          const fromImage = IMAGE_KINDS.includes(src.kind ?? '');
+          const hasFrameEdge = fromShot || fromImage || e.label === 'first-frame';
+          // 只要存在「首帧端口」入边就登记(与是否需要切换 mode 无关),供删边后收回判断
+          if (hasFrameEdge) {
+            frameEdgeNodes.add(e.to);
+            // 下游没显式选过模式(仍是默认文生)时,自动切「首帧」
+            if (modeRaw === 'text2video' && !modeOverridden) modePatch.set(e.to, 'first-frame');
+          }
+          const effMode = modePatch.get(e.to) ?? modeRaw;
+          const frameOk = effMode === 'first-frame' || effMode === 'first-last';
+          /* 自动注入的让位规则(仅单值角色):
+             - 用户已手动绑定同名角色 ⇒ 手动的优先,不再自动注入
+             - 用户在该角色上点过 ×(refsSuppressed)⇒ 尊重停用 */
+          const curRefs = Array.isArray(d.refs) ? (d.refs as Array<{ role?: string; auto?: boolean }>) : [];
+          const suppressedRoles = Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : [];
+          const SINGLE_ROLES = ['first-frame', 'last-frame', 'ref-audio', 'ref-video'];
+          const autoBlocked = (role: string) =>
+            SINGLE_ROLES.includes(role) &&
+            (suppressedRoles.includes(role) || curRefs.some((r) => !r.auto && r.role === role));
+          if (src.kind === 'asset') {
+            const role = e.label === 'ref-audio' ? 'ref-audio' : e.label === 'ref-image' ? 'ref-image' : undefined;
+            const assetId = String(s.assetId ?? '');
+            if (role && assetId && !autoBlocked(role)) arr.push({ assetId, role, auto: true });
+          } else if (fromShot) {
+            // 镜头接续:上游尾帧 → 下游首帧
+            if (frameOk && !autoBlocked('first-frame')) {
+              const tail = String(s.tailFramePath ?? '');
+              if (tail) arr.push({ path: tail, role: 'first-frame', auto: true });
+            }
+            // 画面规格继承:比例 + 档位(三件套)整组取自上游;下游手动改过则不再覆盖
+            if (d.specOverride !== true) {
+              const spec = pickShotSpec(s);
+              if (Object.keys(spec).length) specPatch.set(e.to, spec);
+            }
+            specFromPatch.set(e.to, { nodeId: e.from });
+          } else if (fromImage) {
+            // 静帧直通:图片产物直接当首帧(端口 first-frame)
+            if (frameOk && !autoBlocked('first-frame')) {
+              const img = String(s.resultPath ?? '');
+              if (img) arr.push({ path: img, role: 'first-frame', auto: true });
+            }
+          }
+          if (arr.length) refPatch.set(e.to, arr);
+          // 提示词端口 prompt:document → 下游 prompt(仅自身 prompt 为空时生效,运行期解析)
+          if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
+            const cur = d.promptFrom as { nodeId?: string } | undefined;
+            if (!cur || cur.nodeId !== e.from) promptFromPatch.set(e.to, { nodeId: e.from });
+          }
+          break;
         }
-        return { ...n, data: { ...n.data, refs } };
-      }),
-    );
-  }, [edges]);
+        case 'timeline': {
+          // 入线端口 clip / audio-track:视频、静帧、编排、音轨、音视频素材
+          const asMedia = src.kind === 'asset' && ['video', 'audio'].includes(String(s.mediaType ?? ''));
+          const isClip = src.kind === 'shot' || src.kind === 'director' || src.kind === 'audio-ref' || IMAGE_KINDS.includes(src.kind ?? '');
+          if (isClip || asMedia) {
+            const arr = timelinePatch.get(e.to) ?? [];
+            if (!arr.includes(e.from)) arr.push(e.from);
+            timelinePatch.set(e.to, arr);
+          }
+          break;
+        }
+        case 'workflow-output': {
+          const kindOf: Record<string, string> = {
+            shot: 'video',
+            director: 'video',
+            'image-gen': 'image',
+            'image-edit': 'image',
+            'image-upscale': 'image',
+            'audio-ref': 'audio',
+            asset: String(s.mediaType ?? ''),
+          };
+          const kind = kindOf[src.kind ?? ''];
+          if (!kind || kind === 'document') break;
+          const outputs = Array.isArray(d.outputs) ? (d.outputs as Array<{ name: string; kind: string }>) : [];
+          const mp = outputPatch.get(e.to) ?? {};
+          for (const o of outputs) {
+            if (o.kind !== kind) continue;
+            const arr = mp[o.name] ?? [];
+            if (!arr.includes(e.from)) arr.push(e.from);
+            mp[o.name] = arr;
+          }
+          outputPatch.set(e.to, mp);
+          break;
+        }
+        case 'workflow-input': {
+          if (!e.label?.startsWith('slot-')) break;
+          const name = e.label.slice(5);
+          const slots = Array.isArray(d.slots) ? (d.slots as Array<{ name: string; accept: string[] }>) : [];
+          // 精确槽位名优先;占位 label(slot-<名称>,目标节点创建时尚不知槽位名)按来源类型匹配 accept
+          const srcAccept =
+            src.kind === 'document'
+              ? 'text'
+              : src.kind === 'asset'
+                ? (String(s.mediaType ?? 'image') === 'image' ? 'image' : String(s.mediaType ?? 'image') === 'video' ? 'video' : String(s.mediaType ?? 'image') === 'audio' ? 'audio' : 'document')
+                : undefined;
+          const placeholder = name === '<名称>' || name === '默认';
+          const slot = slots.find((x) => x.name === name)
+            ?? (placeholder && srcAccept ? slots.find((x) => x.accept.includes(srcAccept)) : undefined)
+            ?? (['image', 'video', 'audio', 'text', 'document'].includes(name) ? slots.find((x) => x.accept.includes(name)) : undefined);
+          if (!slot) break;
+          let value: unknown;
+          if (src.kind === 'asset') {
+            const assetId = String(s.assetId ?? '');
+            if (!assetId) break;
+            value = { kind: 'asset', assetId };
+          } else if (src.kind === 'document') {
+            const md = String(s.markdown ?? '');
+            if (!md) break;
+            value = { kind: 'inline-text', text: md };
+          } else break;
+          const arr = slotPatch.get(e.to) ?? [];
+          arr.push({ name: slot.name, value });
+          slotPatch.set(e.to, arr);
+          break;
+        }
+        case 'image-edit': {
+          if (src.kind === 'shot') {
+            const cur = d.inputFrameSource as { videoNodeId?: string; at?: string } | undefined;
+            const next = { videoNodeId: e.from, at: 'first' as const };
+            if (!cur || cur.videoNodeId !== next.videoNodeId || cur.at !== next.at) framePatch.set(e.to, next);
+          } else if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+            // 输入图端口 input:静帧产物直通 / 素材引用;运行期解析(不覆盖手填 inputAssetId)
+            const cur = d.inputImageFrom as { nodeId?: string } | undefined;
+            if (!cur || cur.nodeId !== e.from) imageFromPatch.set(e.to, { nodeId: e.from });
+          }
+          if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
+            const cur = d.promptFrom as { nodeId?: string } | undefined;
+            if (!cur || cur.nodeId !== e.from) promptFromPatch.set(e.to, { nodeId: e.from });
+          }
+          break;
+        }
+        case 'image-gen':
+        case 'director': {
+          // 提示词端口 prompt:document → 下游 prompt
+          if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
+            const cur = d.promptFrom as { nodeId?: string } | undefined;
+            if (!cur || cur.nodeId !== e.from) promptFromPatch.set(e.to, { nodeId: e.from });
+          }
+          break;
+        }
+        case 'image-upscale': {
+          // 输入图端口 input(超分源):静帧产物直通 / 素材引用
+          if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+            const cur = d.inputImageFrom as { nodeId?: string } | undefined;
+            if (!cur || cur.nodeId !== e.from) imageFromPatch.set(e.to, { nodeId: e.from });
+          }
+          break;
+        }
+      }
+    }
+
+    /* 写回:先把所有派生态**无条件**写进克隆的 data,最后用 JSON 内容比对决定是否 setState。
+       这样做的目的:任何"引用不同但内容相同"的误判(曾导致 Maximum update depth 无限重渲染)
+       都不会触发 setState —— 只有内容真的变了才写入。 */
+    let dirty = false;
+    const nextNodes = nodesRef.current.map((n) => {
+      const data = { ...(n.data ?? {}) };
+      const refKey = (r: RefEntry) => (r.assetId ? `${r.assetId}:${r.role}` : `path:${r.path}:${r.role}`);
+
+      if (n.kind === 'shot') {
+        const incoming = refPatch.get(n.id) ?? [];
+        const cur = Array.isArray(data.refs) ? ((data.refs as unknown[]) as RefEntry[]) : [];
+        const manual = cur.filter((r) => !r.auto);
+        const merged = [...manual];
+        for (const r of incoming) {
+          const idx = merged.findIndex((m) => refKey(m) === refKey(r));
+          if (idx >= 0) merged[idx] = r;
+          else merged.push(r);
+        }
+        data.refs = merged;
+        // 画面规格来源标记(检查器显示「继承自上游镜头 X」)
+        const sf = specFromPatch.get(n.id) ?? null;
+        if (sf) data.specFrom = sf;
+        else delete data.specFrom;
+        // 比例 + 档位继承(用户手动改过 ⇒ specOverride=true,不再覆盖)
+        const spec = specPatch.get(n.id);
+        if (spec && data.specOverride !== true) Object.assign(data, spec);
+        // 模式:接续/直通时自动切「首帧」;手动选过模式(modeOverride)则不动
+        if (data.modeOverride !== true) {
+          const wantMode = modePatch.get(n.id);
+          if (wantMode) data.mode = wantMode;
+          else if (!frameEdgeNodes.has(n.id) && data.mode === 'first-frame') data.mode = 'text2video';
+        }
+      }
+      if (n.kind === 'timeline') {
+        // manualOrder=true(用户手动排序/删除过):尊重 data 里的 shotNodeIds,不被入边自动重排覆盖;
+        // 否则仍由入边派生态全权维护(删边即撤销入线)。
+        // 手动模式下仍把新入边追加到末尾,让后续连线依然能入线。
+        const manual = (n.data as { manualOrder?: boolean })?.manualOrder === true;
+        if (manual) {
+          const cur = Array.isArray((n.data as { shotNodeIds?: unknown }).shotNodeIds)
+            ? ((n.data as { shotNodeIds: string[] }).shotNodeIds ?? [])
+            : [];
+          const incoming = timelinePatch.get(n.id) ?? [];
+          const merged = [...cur];
+          for (const id of incoming) {
+            if (!merged.includes(id)) merged.push(id);
+          }
+          data.shotNodeIds = merged;
+        } else {
+          data.shotNodeIds = timelinePatch.get(n.id) ?? [];
+        }
+      }
+      if (n.kind === 'workflow-output') {
+        const incomingMap = outputPatch.get(n.id);
+        const curOut = Array.isArray(data.outputs) ? (data.outputs as Array<{ name: string; kind: string; sourceNodeIds: string[] }>) : [];
+        // 边是 sourceNodeIds 的唯一来源:无入边即空(镜像派生态,删除边即撤销)
+        data.outputs = curOut.map((o) => ({ ...o, sourceNodeIds: incomingMap?.[o.name] ?? [] }));
+      }
+      if (n.kind === 'workflow-input') {
+        const byName = new Map((slotPatch.get(n.id) ?? []).map((x) => [x.name, x.value]));
+        const curSlots = Array.isArray(data.slots) ? (data.slots as Array<{ name: string; accept: string[]; required?: boolean; value?: unknown }>) : [];
+        // value 完全由 slot-<name> 边决定:边删除 → 清回未填充
+        data.slots = curSlots.map((x2) => ({ ...x2, value: byName.has(x2.name) ? byName.get(x2.name) : undefined }));
+      }
+      if (n.kind === 'image-edit') {
+        const target = framePatch.get(n.id) ?? null;
+        if (target) data.inputFrameSource = target;
+        else delete data.inputFrameSource;
+      }
+      // 输入图端口 input(静帧直通 / 素材):与边同步,删除边即撤销
+      if (n.kind === 'image-edit' || n.kind === 'image-upscale') {
+        const target = imageFromPatch.get(n.id) ?? null;
+        if (target) data.inputImageFrom = target;
+        else delete data.inputImageFrom;
+      }
+      // 提示词端口 prompt:与边同步(运行期「自身 prompt 为空才用文档全文」)
+      if (['image-gen', 'image-edit', 'shot', 'director'].includes(n.kind ?? '')) {
+        const target = promptFromPatch.get(n.id) ?? null;
+        if (target) data.promptFrom = target;
+        else delete data.promptFrom;
+      }
+      if (JSON.stringify(data) === JSON.stringify(n.data ?? {})) return n;
+      dirty = true;
+      return { ...n, data };
+    });
+    if (dirty) setNodes(nextNodes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edges, nodes]);
 
   /* ══ 「+」下游节点弹层 ══ */
   const openAddPop = useCallback(
     (nodeId: string) => {
       setApFrom(nodeId);
       setApSel(null);
-      setApShowAll(false);
       setApSearch('');
       setApOpen(true);
       const n = nodesRef.current.find((x) => x.id === nodeId);
@@ -2371,7 +1346,7 @@ export default function CanvasPage({
     const src = nodesRef.current.find((n) => n.id === apFrom);
     const t = NODE_TYPES.find((x) => x.id === apSel);
     if (!src || !t) return;
-    const id = `new${++nextId.current}`;
+    const id = makeNodeId('new');
     const meta =
       apSel === 'shot'
         ? `h3.c · ${apTier}档 · ${apAspect} ${(RES[apTier] ?? {})[apAspect] ?? ''} · 自动连线继承绑定`
@@ -2411,11 +1386,12 @@ export default function CanvasPage({
    * - 若重叠则围绕中心按螺旋向外搜索
    */
   const findFreeSpot = useCallback(
-    (cx: number, cy: number, w: number, h: number): { x: number; y: number } => {
+    (cx: number, cy: number, w: number, h: number, ignoreId?: string): { x: number; y: number } => {
       const PAD = 28;
       const nodes = nodesRef.current;
       const overlap = (x: number, y: number) =>
         nodes.some((n) => {
+          if (n.id === ignoreId) return false; // 排除自身(同一节点不算挡路)
           const nw = n.w ?? 224;
           const nh = nodeH(n);
           // AABB 相交(留 PAD 间隙)
@@ -2466,7 +1442,7 @@ export default function CanvasPage({
     (typeId: string) => {
       const t = NODE_TYPES.find((x) => x.id === typeId);
       if (!t) return;
-      const id = `pal${++nextId.current}`;
+      const id = makeNodeId('pal');
       const w = 224;
       const h = 200;
       // 画布视口中心 → 世界坐标
@@ -2509,7 +1485,7 @@ export default function CanvasPage({
       const h = 200;
       const world = screenToWorld(clientX, clientY);
       const spot = findFreeSpot(world.x, world.y, w, h);
-      const id = `pal${++nextId.current}`;
+      const id = makeNodeId('pal');
       setNodes((ns) => [
         ...ns,
         {
@@ -2533,7 +1509,7 @@ export default function CanvasPage({
     (id: string) => {
       const src = nodesRef.current.find((n) => n.id === id);
       if (!src) return;
-      const nid = `dup${++nextId.current}`;
+      const nid = makeNodeId('dup');
       setNodes((ns) => [
         ...ns,
         {
@@ -2637,33 +1613,144 @@ export default function CanvasPage({
       const slot: 'video' | 'image' = isImage ? 'image' : 'video';
       const engine = String(d.engine ?? (isImage ? 'mlxgen' : 'h3c'));
 
-      // 参考绑定 → Provider references(首/尾帧、参考图、参考音频)
-      const refs = (d.refs as Array<{ assetId: string; role: string }> | undefined) ?? [];
+      // 参考绑定 → Provider references(首/尾帧、参考图、参考音频;shot 接续走 path 直链)
+      const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string }> | undefined) ?? [];
       const references = refs
         .map((r) => {
-          const localPath = assetCache.current[r.assetId];
+          const localPath = r.path ?? assetCache.current[r.assetId ?? ''];
           if (!localPath) return null;
           return {
-            asset: { id: r.assetId, kind: 'image', name: r.assetId, localPath, tags: [], createdAt: new Date().toISOString() },
+            asset: {
+              id: r.assetId ?? `shot-frame:${localPath.split('/').pop() ?? ''}`,
+              kind: 'image',
+              name: r.assetId ?? (localPath.split(/[\\/]/).pop() ?? localPath),
+              localPath,
+              tags: [],
+              createdAt: new Date().toISOString(),
+            },
             role: r.role,
             localPath,
           };
         })
         .filter(Boolean) as never[];
 
+      /* 镜头接续兜底:入边来自上游 shot 但尾帧尚未归档时(旧数据 / 应用重启后),
+         现场抽一次上游产物尾帧,保证「上一段的最后一帧 = 本段首帧」永远成立。
+         已显式绑定首帧(手动或连线派发)时不覆盖用户意图。 */
+      let inheritedFrom: string | null = null;
+      if (n.kind === 'shot') {
+        const hasFirst = refs.some((r) => r.role === 'first-frame');
+        const shotMode = String(d.mode ?? 'text2video');
+        const wantsFrameAnchor = shotMode === 'first-frame' || shotMode === 'first-last';
+        const upShotId = edgesRef.current
+          .filter((e) => e.to === nodeId)
+          .map((e) => e.from)
+          .find((id) => nodesRef.current.find((x) => x.id === id)?.kind === 'shot');
+        if (!hasFirst && (wantsFrameAnchor || !['ref-image', 'last-frame'].includes(shotMode))) {
+          const upId = upShotId;
+          const up = upId ? nodesRef.current.find((x) => x.id === upId) : undefined;
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          let tail = String(upData.tailFramePath ?? '');
+          if (!tail && upData.resultPath) {
+            const res = await window.bigbotart.extractFrame(String(upData.resultPath), 'last');
+            if (res.ok && res.path) {
+              tail = res.path;
+              // 顺手归档到上游节点:检查器可见,后续连线派发也会复用
+              setNodes((ns) =>
+                ns.map((x) =>
+                  x.id === upId
+                    ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: String(upData.resultPath) } }
+                    : x,
+                ),
+              );
+            }
+          }
+          if (tail) {
+            references.push({
+              asset: {
+                id: `shot-tail:${upId}`,
+                kind: 'image',
+                name: `${up?.title ?? upId} · 尾帧`,
+                localPath: tail,
+                tags: [],
+                createdAt: new Date().toISOString(),
+              },
+              role: 'first-frame',
+              localPath: tail,
+            } as never);
+            inheritedFrom = up?.title ?? upId ?? null;
+          }
+        }
+        // 接续意图明确(首帧/首尾帧模式)但拿不到首帧 ⇒ 明确报错,不退化成文生
+        const firstResolved = references.some((r) => (r as { role?: string })?.role === 'first-frame');
+        if (wantsFrameAnchor && !hasFirst && !firstResolved) {
+          toastMsg(
+            upShotId
+              ? '上游镜头还没有产物,取不到首帧:先把上游镜头跑出来,再生成这一段'
+              : '当前是首帧模式但首帧参考未就绪(检查「参考绑定」或上游节点是否已生成)',
+          );
+          return;
+        }
+      }
+
+      /* P0 #3:图片编辑/超分的输入桥接(手册 362 行 TODO)
+         - shot → image-edit(inputFrameSource):从上游视频产物抽帧当输入图
+         - asset 输入图(inputAssetId)/ 遮罩(maskAssetId):走资产库路径 */
+      let inputPath: string | undefined;
+      let maskPath: string | undefined;
+      if (n.kind === 'image-edit' || n.kind === 'image-upscale') {
+        const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
+        if (frameSrc?.videoNodeId) {
+          const vn = nodesRef.current.find((x) => x.id === frameSrc.videoNodeId);
+          const vp = String((vn?.data as Record<string, unknown>)?.resultPath ?? '');
+          if (vp) {
+            const res = await window.bigbotart.extractFrame(vp, frameSrc.at === 'last' ? 'last' : 'first');
+            if (res.ok && res.path) inputPath = res.path;
+          }
+        }
+        if (!inputPath && d.inputAssetId) inputPath = assetCache.current[String(d.inputAssetId)];
+        // 输入图端口 input 的连线来源(静帧直通 / 素材)——手填 inputAssetId 优先
+        const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+        if (!inputPath && imgFrom?.nodeId) {
+          const up = nodesRef.current.find((x) => x.id === imgFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          inputPath = up?.kind === 'asset'
+            ? assetCache.current[String(upData.assetId ?? '')]
+            : String(upData.resultPath ?? '') || undefined;
+        }
+        const maskAssetId = String(d.maskAssetId ?? '');
+        if (maskAssetId) maskPath = assetCache.current[maskAssetId];
+      }
+      if (n.kind === 'image-edit' && !inputPath) {
+        toastMsg('图片编辑需要输入图:连一个 shot / 图片节点 / asset,或在检查器填 Asset ID');
+        return;
+      }
+
+      // 提示词端口 prompt:连线注入的文档全文(自身 prompt 为空时才用,不覆盖用户输入)
+      let promptValue = String(d.prompt ?? '');
+      const promptFrom = d.promptFrom as { nodeId?: string } | undefined;
+      if (promptFrom?.nodeId && !promptValue.trim()) {
+        const dn = nodesRef.current.find((x) => x.id === promptFrom.nodeId);
+        const md = String((dn?.data as Record<string, unknown>)?.markdown ?? '').trim();
+        if (md) promptValue = md;
+      }
+
       const params = isImage
         ? {
-            kind: 'generate',
+            kind: n.kind === 'image-upscale' ? 'upscale' : n.kind === 'image-edit' ? String(d.mode ?? 'instruction') : 'generate',
             model: d.model,
-            prompt: d.prompt,
+            prompt: promptValue,
             width: d.width,
             height: d.height,
             steps: d.steps,
             seeds: d.seeds,
+            inputPath,
+            maskPath,
+            scale: d.scale,
           }
         : {
             kind: 'video',
-            prompt: d.prompt,
+            prompt: promptValue,
             mode: d.mode,
             width: d.width,
             height: d.height,
@@ -2698,7 +1785,7 @@ export default function CanvasPage({
           params,
           references,
         });
-        toastMsg(`已提交 ${engine} 任务 · ${n.title}`);
+        toastMsg(`已提交 ${engine} 任务 · ${n.title}${inheritedFrom ? ` · 已继承「${inheritedFrom}」尾帧作首帧` : ''}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `提交失败 · ${msg}` } : x)));
@@ -2783,138 +1870,39 @@ export default function CanvasPage({
     if (edgesSvgRef.current) edgesSvgRef.current.dataset.ready = '1';
   }, [edgePaths]);
 
-  /* ══ 弹层里的可选类型(按上游输出兼容性过滤) ══ */
-  const compat = apFrom ? COMPAT[apFrom] ?? NODE_TYPES.map((t) => t.id) : [];
+  /* ══ 弹层里的可选类型 ══
+     连接器设计 §10:只列出**有可用连接器**的类型(无连接器 ⇒ 不展示),
+     每行预告「这条边落在哪个目标端口」;不再有「展开全部(含不兼容)」一档 */
+  const apSrc = apFrom ? nodes.find((n) => n.id === apFrom) : undefined;
   const q = apSearch.trim().toLowerCase();
-  const visibleTypes = NODE_TYPES.filter(
-    (t) => (!q || t.name.toLowerCase().includes(q)) && (compat.includes(t.id) || apShowAll),
-  );
-  const hiddenCount = apFrom
-    ? NODE_TYPES.filter(
-        (t) => !compat.includes(t.id) && (!q || t.name.toLowerCase().includes(q)) && !apShowAll,
-      ).length
-    : 0;
-  const apFromLabel = apFrom
-    ? nodes.find((n) => n.id === apFrom)?.title ?? apFrom
-    : '—';
+  const visibleTypes = apSrc
+    ? NODE_TYPES.filter((t) => hasConnector(apSrc, t.id))
+        .filter((t) => !q || t.name.toLowerCase().includes(q))
+    : [];
+  const apFromLabel = apSrc?.title ?? '—';
+  const apSelPort = apSrc && apSel ? resolvePort(apSrc, apSel) : null;
   const apTip = apSel
-    ? `自动连线：${apFromLabel} → ${NODE_TYPES.find((t) => t.id === apSel)?.name ?? ''}`
+    ? `自动连线：${apFromLabel} → ${NODE_TYPES.find((t) => t.id === apSel)?.name ?? ''}${apSelPort ? ` · 落 ${apSelPort.port} 端口` : ''}`
     : '选中后自动连线并继承绑定';
+
+  /* 已连接下游:从边派生(连接器 D1:只见节点与端口语义,不见连接器) */
+  const apOutgoing = apFrom
+    ? edges
+        .filter((e) => e.from === apFrom)
+        .map((e) => ({ edge: e, node: nodes.find((n) => n.id === e.to) }))
+        .filter((x): x is { edge: Edge; node: CanvasNode } => !!x.node)
+    : [];
 
   const zoomPct = `${Math.round(view.z * 100)}%`;
 
-  /* 节点内部渲染(按 kind;demo 节点保留硬编码,新建节点走数据驱动) */
+  /* 节点内部渲染(按 kind)——**一律数据驱动**:
+     卡片内容 = 节点 data 的投影,与检查器同源(不再有"演示节点写死文案"这条旁路,
+     否则会出现「卡片写着首尾帧/默认档,检查器显示文生」这类脱节)。 */
   const renderBody = (n: CanvasNode) => {
-    // ── 演示节点硬编码(保持视觉一致性,不读 data) ──
-    if (n.id === 'brief' && n.kind === 'document') {
-      return (
-        <div className="nb md-preview">
-          <b>草原之河</b>
-          <p>场景：草原 / 宽河 · 角色：女主、男主 · 风格：纸拼贴</p>
-          <div className="nmeta mono">已编辑 · 下游 2 个节点 stale</div>
-        </div>
-      );
-    }
-    if (n.id === 'storyboard' && n.kind === 'image-gen') {
-      return (
-        <div className="nb">
-          <div className="nthumb">
-            <img src="./assets/sb-river.jpg" alt="分镜静帧：女主跃河纸拼贴静帧" />
-          </div>
-          <div className="nmeta mono">Z-Image-Turbo · 832×480 16:9 · seed 批量 ×4</div>
-        </div>
-      );
-    }
-    if (n.id === 'audio' && n.kind === 'audio-ref') {
-      return (
-        <div className="nb">
-          <div className="wave">
-            {WAVE_BARS.map((h, i) => (
-              <i key={i} style={{ height: h }} />
-            ))}
-          </div>
-          <div className="nmeta mono">草原环境声.mp3 · --ref-audio · 带声直出</div>
-        </div>
-      );
-    }
-    if (n.id === 'shot1' && n.kind === 'shot') {
-      return (
-        <div className="nb">
-          <div className="nthumb">
-            <img src="./assets/shot-01.jpg" alt="镜头 01 Take 3 画面：女主跃过河面" />
-            <span className="play">
-              <span>
-                <svg viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5.5v13l11-6.5Z" />
-                </svg>
-              </span>
-            </span>
-          </div>
-          <div className="nmeta mono">h3.c · 首尾帧 · 默认档 · 16:9 1280×720 · 10s · 带声</div>
-          <div className="takes">
-            <span className="chip">Take 1</span>
-            <span className="chip">Take 2</span>
-            <span className="chip on">Take 3 ✓</span>
-          </div>
-        </div>
-      );
-    }
-    if (n.id === 'shot2' && n.kind === 'shot') {
-      return (
-        <div className="nb">
-          <div className="nthumb">
-            <img
-              src="./assets/shot-02.jpg"
-              alt="镜头 02 重跑中画面：男主在岸边踱步"
-              style={{ opacity: 0.55 }}
-            />
-            <span className="prog">
-              <i style={{ width: '34%' }} />
-            </span>
-          </div>
-          <div className="nmeta mono">上游 Brief 已修改 · 连续性：继承镜头 01 尾帧</div>
-        </div>
-      );
-    }
-    if (n.id === 'shot3' && n.kind === 'shot') {
-      return (
-        <div className="nb">
-          <div
-            className="nthumb"
-            style={{
-              border: '1.5px dashed var(--border)',
-              background: 'var(--surface-warm)',
-              aspectRatio: '16/9',
-              display: 'grid',
-              placeItems: 'center',
-              color: 'var(--meta)',
-              fontSize: '11px',
-            }}
-          >
-            待生成 · 排队中
-          </div>
-          <div className="nmeta mono">{agentRunText}</div>
-        </div>
-      );
-    }
-    if (n.id === 'timeline' && n.kind === 'timeline') {
-      return (
-        <div className="nb">
-          <div className="clipstrip">
-            <span className="cs">
-              <img src="./assets/shot-01.jpg" alt="镜1 片段" />
-            </span>
-            <span className="cs">
-              <img src="./assets/shot-02.jpg" alt="镜2 片段" style={{ opacity: 0.55 }} />
-            </span>
-            <span className="cs wait"></span>
-          </div>
-          <div className="nmeta mono">stale · 等镜 02 / 03 完成后更新</div>
-        </div>
-      );
-    }
-    // ── 按 kind 数据驱动渲染(新建/复制/真实节点) ──
     const d = (n.data ?? {}) as Record<string, unknown>;
+    /** 产物路径:节点 data 优先,回退 Take 回填 */
+    const productOf = (node: CanvasNode) =>
+      String((node.data as Record<string, unknown> | undefined)?.resultPath ?? takeResults[node.id] ?? '');
     switch (n.kind) {
       case 'document': {
         const md = String(d.markdown ?? '');
@@ -2964,11 +1952,16 @@ export default function CanvasPage({
         const w = Number(d.width ?? 1024);
         const h = Number(d.height ?? 1024);
         const seeds = (d.seeds as number[]) ?? [];
+        const outImg = productOf(n);
         return (
           <div className="nb">
+            {outImg ? (
+              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="图片产物" /></div>
+            ) : (
             <div className="nthumb" style={{ aspectRatio: '1/1', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               待生成 · {w}×{h}
             </div>
+            )}
             <div className="nmeta mono">
               {prompt ? `${prompt.slice(0, 30)}${prompt.length > 30 ? '…' : ''}` : '未填提示词'} · {model.split('/').pop()}
             </div>
@@ -2980,22 +1973,45 @@ export default function CanvasPage({
         const mode = String(d.mode ?? 'instruction');
         const modeLabel = ({ instruction: '指令编辑', img2img: 'I2I', inpaint: 'Inpaint', outpaint: 'Outpaint' } as Record<string, string>)[mode] ?? mode;
         const prompt = String(d.prompt ?? '');
+        const outImg = productOf(n);
+        // 输入图状态与检查器同源:手填资产 > 连线静帧 > 连线取帧
+        const inputState = String(d.inputAssetId ?? '')
+          ? `输入图 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+          : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
+            ? `输入图 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
+            : (d.inputFrameSource as { videoNodeId?: string } | undefined)?.videoNodeId
+              ? `输入帧 · ${(d.inputFrameSource as { at?: string }).at === 'last' ? '尾帧' : '首帧'}`
+              : '输入图待绑定';
         return (
           <div className="nb">
-            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-              {modeLabel} · 输入图待绑定
-            </div>
+            {outImg ? (
+              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="编辑产物" /></div>
+            ) : (
+              <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+                {modeLabel} · {inputState}
+              </div>
+            )}
             <div className="nmeta mono">{prompt ? `${prompt.slice(0, 30)}…` : '未填指令'}</div>
           </div>
         );
       }
       case 'image-upscale': {
         const scale = Number(d.scale ?? 2);
+        const outImg = productOf(n);
+        const inputState = String(d.inputAssetId ?? '')
+          ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+          : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
+            ? `输入 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
+            : '输入待绑定';
         return (
           <div className="nb">
-            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-              ×{scale} 超分 · 输入待绑定
-            </div>
+            {outImg ? (
+              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="超分产物" /></div>
+            ) : (
+              <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+                ×{scale} 超分 · {inputState}
+              </div>
+            )}
             <div className="nmeta mono">SeedVR2 · ×{scale}</div>
           </div>
         );
@@ -3006,23 +2022,32 @@ export default function CanvasPage({
         const aspect = (String(d.aspect ?? '16:9')) as (typeof SHOT_ASPECTS)[number];
         const prompt = String(d.prompt ?? '');
         const modeLabel = SHOT_MODE_LABEL[mode] ?? mode;
-        // 实际尺寸:aspect + tier 推导(与 h3c-command resolveDimensions 一致),custom 用自定义
-        const size = aspect === 'custom'
-          ? { width: Number(d.customWidth ?? 544), height: Number(d.customHeight ?? 544) }
+        // 尺寸以**节点 data 为权威**(与检查器同一规则);缺失时才按 aspect × tier 推导
+        const derivedSize = aspect === 'custom'
+          ? { width: clamp32(Number(d.customWidth ?? 544)), height: clamp32(Number(d.customHeight ?? 544)) }
           : SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default;
+        const size = { width: Number(d.width ?? derivedSize.width), height: Number(d.height ?? derivedSize.height) };
         const tierLabel = (SHOT_TIER_PRESETS[tier] ?? SHOT_TIER_PRESETS.default).label;
-        // 产物(两层回退:节点 data.resultPath ← 轮询实时写;takeResults ← Take 历史回填)
-        const resultPath = String(takeResults[n.id] ?? (d.resultPath as string) ?? '');
+        const resultPath = productOf(n);
+        const refs = (d.refs as Array<{ role?: string; auto?: boolean }> | undefined) ?? [];
+        const inherited = !!(d.specFrom as { nodeId?: string } | undefined)?.nodeId && d.specOverride !== true;
         return (
           <div className="nb">
             {resultPath ? (
               <VideoThumb src={outputUrlOf(resultPath)} badge={`✓ ${basenameOf(resultPath)}`} />
             ) : (
               <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-                {modeLabel}
+                {modeLabel} · 待生成
               </div>
             )}
-            <div className="nmeta mono">h3.c · {modeLabel} · {tierLabel} · {size.width}×{size.height} · {prompt ? `${prompt.slice(0, 20)}…` : '未填提示词'}</div>
+            <div className="nmeta mono">
+              h3.c · {modeLabel} · {tierLabel} · {size.width}×{size.height}
+              {refs.length ? ` · ${refs.length} 参考` : ''}
+              {inherited ? ' · 继承上游规格' : ''}
+            </div>
+            <div className="nmeta mono" style={{ marginTop: 2 }}>
+              {prompt ? `${prompt.slice(0, 20)}…` : '未填提示词'}
+            </div>
           </div>
         );
       }
@@ -3039,22 +2064,53 @@ export default function CanvasPage({
       }
       case 'timeline': {
         const shots = (d.shotNodeIds as string[]) ?? [];
+        const lastExport = (d.lastExport as TimelineData['lastExport']) ?? undefined;
         return (
           <div className="nb">
-            <div className="clipstrip">
+            {lastExport?.path ? (
+              <TimelineExportPreview lastExport={lastExport} />
+            ) : null}
+            <div className="clipstrip" style={lastExport?.path ? { marginTop: 7 } : undefined}>
               {shots.length === 0 ? (
                 <span className="cs wait" style={{ flex: 1, textAlign: 'center', color: 'var(--meta)', fontSize: 11, padding: '16px 0' }}>
                   拖入镜头节点入线
                 </span>
               ) : (
-                shots.slice(0, 4).map((sid, i) => (
-                  <span key={sid} className="cs" style={{ display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', fontSize: 10 }}>
-                    镜{i + 1}
-                  </span>
-                ))
+                shots.slice(0, 4).map((sid, i) => {
+                  const cover = takeResults[sid];
+                  if (!cover) {
+                    return (
+                      <span key={sid} className="cs wait" title={`镜${i + 1} · 待生成`} style={{ display: 'grid', placeItems: 'center', color: 'var(--meta)', fontSize: 10 }}>
+                        {i + 1}
+                      </span>
+                    );
+                  }
+                  const src = outputUrlOf(cover);
+                  const isVid = /\.(mp4|mov|webm|m4v)$/i.test(src);
+                  return (
+                    <span key={sid} className="cs" title={`镜${i + 1} · 已生成`}>
+                      {isVid ? (
+                        <video
+                          src={src}
+                          muted
+                          loop
+                          playsInline
+                          preload="metadata"
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: '#000' }}
+                        />
+                      ) : (
+                        <img src={src} alt={`镜${i + 1} 片段封面`} />
+                      )}
+                    </span>
+                  );
+                })
               )}
             </div>
-            <div className="nmeta mono">{shots.length} 个镜头入线 · FFmpeg 导出</div>
+            <div className="nmeta mono">
+              {lastExport?.path
+                ? `已生成成片 · ${shots.length} 片段 · ${lastExport.durationSec ? `${lastExport.durationSec.toFixed(1)}s` : ''} · 可预览`
+                : `${shots.length} 个镜头入线 · FFmpeg 导出`}
+            </div>
           </div>
         );
       }
@@ -3328,9 +2384,21 @@ export default function CanvasPage({
                 {edgePaths.map((p) => (
                   <path key={p.key} className={p.cls} d={p.d} />
                 ))}
+                {/* 「+」拖拽期间的临时预览线(连 source 节点 → 当前光标) */}
+                {connectDrag && connectDrag.moved && (() => {
+                  const d = computeConnectPath(connectDrag.sourceId, connectDrag.cx, connectDrag.cy);
+                  if (!d) return null;
+                  const cls = connectDrag.hitId
+                    ? connectDrag.hitOk
+                      ? 'connecting ok'
+                      : 'connecting bad'
+                    : 'connecting';
+                  return <path key="__connecting" className={cls} d={d} />;
+                })()}
               </svg>
 
               {nodes.map((n) => {
+                const isConnectTarget = connectDrag?.hitId === n.id;
                 const cls = [
                   'node',
                   n.ghost ? 'ghost' : '',
@@ -3338,6 +2406,8 @@ export default function CanvasPage({
                   n.agentOn ? 'agent-on' : '',
                   selected === n.id ? 'sel' : '',
                   flashId === n.id ? 'flash' : '',
+                  isConnectTarget && connectDrag?.hitOk ? 'connecting-target-ok' : '',
+                  isConnectTarget && !connectDrag?.hitOk ? 'connecting-target-bad' : '',
                 ]
                   .filter(Boolean)
                   .join(' ');
@@ -3395,12 +2465,20 @@ export default function CanvasPage({
                         {TYPE_ICON[n.kind ?? 'plain']}
                       </svg>
                       {n.title}
-                      {n.st ? (
-                        <span
-                          className={`st dot${n.st === 'ok' ? ' ok' : ''}`}
-                          style={n.st === 'warn' ? { background: 'var(--warn)' } : undefined}
-                        ></span>
-                      ) : null}
+                      {/* 状态点从**真实产物**派生(不再用节点上存的 st —— 它在加载时被写死为 ok):
+                          排队/生成中/失效 = 黄;有产物 = 绿;未生成 = 不显示 */}
+                      {(() => {
+                        const nd = (n.data ?? {}) as Record<string, unknown>;
+                        const hasProduct = !!String(nd.resultPath ?? '') || !!takeResults[n.id];
+                        const st = n.badge || n.stale ? 'warn' : hasProduct ? 'ok' : null;
+                        if (!st) return null;
+                        return (
+                          <span
+                            className={`st dot${st === 'ok' ? ' ok' : ''}`}
+                            style={st === 'warn' ? { background: 'var(--warn)' } : undefined}
+                          ></span>
+                        );
+                      })()}
                     </div>
                     {renderBody(n)}
                     <span className="port"></span>
@@ -3408,10 +2486,21 @@ export default function CanvasPage({
                       className="node-add"
                       data-add={n.id}
                       aria-label="添加下游节点"
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        // 启动拖拽预备态(未拖动仍走 click 弹层路径)
+                        beginConnectDrag(n.id, e.clientX, e.clientY);
+                        e.stopPropagation();
+                      }}
                       onClick={(e) => {
                         e.stopPropagation();
+                        // 未拖动(<4px)才算 click,触发原弹层
+                        const d = connectDragRef.current;
+                        if (d && d.moved) return;
                         if (apOpen && apFrom === n.id) closeAddPop();
                         else openAddPop(n.id);
+                        connectDragRef.current = null;
+                        setConnectDrag(null);
                       }}
                     >
                       +
@@ -3427,6 +2516,7 @@ export default function CanvasPage({
                 style={{ left: apPos.x, top: apPos.y }}
                 onClick={(e) => e.stopPropagation()}
                 onPointerDown={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
               >
                 <div className="ap-h">
                   添加下游节点
@@ -3436,6 +2526,35 @@ export default function CanvasPage({
                   >
                     基于：{apFromLabel}
                   </span>
+                </div>
+                {/* 已连接下游:从边派生,点击定位(连接器 D1:只见节点与端口语义) */}
+                <div className="ap-conn" hidden={apOutgoing.length === 0}>
+                  <div className="ap-conn-h">
+                    已连接下游 · <span>{apOutgoing.length}</span>
+                  </div>
+                  {apOutgoing.map(({ edge, node }) => (
+                    <div
+                      key={edge.to}
+                      className="ap-conn-r"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        locate(node.id);
+                        selectNode(node.id);
+                        closeAddPop();
+                      }}
+                    >
+                      <span className="nm">{node.title}</span>
+                      {edge.label ? <span className="lk">{edge.label}</span> : null}
+                      {node.ghost ? (
+                        <span className="cst">排队中</span>
+                      ) : node.stale ? (
+                        <span className="cst">
+                          <span className="dot" style={{ background: 'var(--warn)' }}></span>待刷新
+                        </span>
+                      ) : null}
+                      <span className="go">定位 →</span>
+                    </div>
+                  ))}
                 </div>
                 <div className="ap-s">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -3450,12 +2569,11 @@ export default function CanvasPage({
                 </div>
                 <div className="ap-list">
                   {visibleTypes.map((t) => {
-                    const ok = compat.includes(t.id);
+                    const rp = apSrc ? resolvePort(apSrc, t.id) : null;
                     return (
                       <div
                         key={t.id}
-                        className={`ap-row${apSel === t.id ? ' sel' : ''}${ok ? '' : ' dim'}`}
-                        style={ok ? undefined : { opacity: 0.45 }}
+                        className={`ap-row${apSel === t.id ? ' sel' : ''}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setApSel(t.id);
@@ -3463,67 +2581,77 @@ export default function CanvasPage({
                       >
                         <div className="grow">
                           <b>{t.name}</b>
-                          <div className="sub">
-                            {t.sub}
-                            {ok ? '' : ' · 输出不兼容'}
-                          </div>
+                          <div className="sub">{t.sub}</div>
+                          {rp ? (
+                            <div className="conn">
+                              <span className="lk">{rp.port}</span>
+                              {rp.desc}
+                            </div>
+                          ) : null}
                         </div>
-                        {t.id === 'shot' && ok ? <span className="rec">推荐</span> : null}
+                        {t.id === 'shot' ? <span className="rec">推荐</span> : null}
                         {t.p1 ? <span className="p1">P1</span> : t.wf ? <span className="p1">WF</span> : null}
                       </div>
                     );
                   })}
-                  {hiddenCount > 0 ? (
-                    <div
-                      className="ap-more"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setApShowAll((v) => !v);
-                      }}
-                    >
-                      其余 {hiddenCount} 类与当前输出不兼容 · {apShowAll ? '收起' : '展开全部'} ▾
+                  {visibleTypes.length === 0 ? (
+                    <div className="ap-empty">
+                      {q ? '无匹配的兼容节点类型' : '当前输出没有可连接的节点类型'}
                     </div>
                   ) : null}
                 </div>
                 <div className="ap-params" hidden={apSel !== 'shot'}>
-                  <div className="ap-prow">
-                    <span className="lbl">比例</span>
-                    {['16:9', '9:16', '1:1'].map((a) => (
-                      <span
-                        key={a}
-                        className={`chip${apAspect === a ? ' on' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setApAspect(a);
-                          setApTier((t) =>
-                            t !== '默认' && !((RES[t] ?? {})[a] ?? null) ? '默认' : t,
+                  {apSrc?.kind === 'shot' ? (
+                    /* 接续上游镜头:比例/档位由上游继承(下游可在检查器改并转为自定义),此处不再给选择 */
+                    <div className="ap-res mono" style={{ borderTop: 'none', paddingTop: 2 }}>
+                      接续上游：画面规格继承自「{apFromLabel}」（
+                      {String(((apSrc.data ?? {}) as Record<string, unknown>).aspect ?? '16:9')} ·{' '}
+                      {String(((apSrc.data ?? {}) as Record<string, unknown>).tier ?? 'default')}档 ·{' '}
+                      {String(((apSrc.data ?? {}) as Record<string, unknown>).width ?? '')}×
+                      {String(((apSrc.data ?? {}) as Record<string, unknown>).height ?? '')}）
+                    </div>
+                  ) : (
+                    <>
+                      <div className="ap-prow">
+                        <span className="lbl">比例</span>
+                        {['16:9', '9:16', '1:1'].map((a) => (
+                          <span
+                            key={a}
+                            className={`chip${apAspect === a ? ' on' : ''}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setApAspect(a);
+                              setApTier((t) =>
+                                t !== '默认' && !((RES[t] ?? {})[a] ?? null) ? '默认' : t,
+                              );
+                            }}
+                          >
+                            {a}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="ap-prow">
+                        <span className="lbl">档位</span>
+                        {['预览', '草稿', '默认', '参考'].map((t) => {
+                          const ok = !!((RES[t] ?? {})[apAspect] ?? null);
+                          return (
+                            <span
+                              key={t}
+                              className={`chip${apTier === t && ok ? ' on' : ''}${ok ? '' : ' dis'}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!ok) return;
+                                setApTier(t);
+                              }}
+                            >
+                              {t}
+                            </span>
                           );
-                        }}
-                      >
-                        {a}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="ap-prow">
-                    <span className="lbl">档位</span>
-                    {['预览', '草稿', '默认', '参考'].map((t) => {
-                      const ok = !!((RES[t] ?? {})[apAspect] ?? null);
-                      return (
-                        <span
-                          key={t}
-                          className={`chip${apTier === t && ok ? ' on' : ''}${ok ? '' : ' dis'}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (!ok) return;
-                            setApTier(t);
-                          }}
-                        >
-                          {t}
-                        </span>
-                      );
-                    })}
-                  </div>
-                  <div className="ap-res mono">{resHint}</div>
+                        })}
+                      </div>
+                      <div className="ap-res mono">{resHint}</div>
+                    </>
+                  )}
                 </div>
                 <div className="ap-f">
                   <span className="grow">{apTip}</span>
@@ -3687,48 +2815,57 @@ export default function CanvasPage({
 
             </div>
 
-            {/* 检查器 pane:按 kind 渲染专属表单 */}
+            {/* 检查器 pane:按 kind 渲染专属表单;未选节点时无任何组件 */}
             <div
               className={`insp${tab === 'insp' ? ' on' : ''}`}
               data-od-id="inspector"
             >
-              <div>
-                <div className="lbl" style={{ marginBottom: 8 }}>
-                  {inspectTitle}
-                </div>
-                {selInfo && selInfo.img ? (
-                  <div className="preview">
-                    <img src={selInfo.img} alt="选中节点预览" />
+              {selected && selNode ? (
+                <div>
+                  <div className="lbl" style={{ marginBottom: 8 }}>
+                    {inspectTitle}
                   </div>
-                ) : null}
-              </div>
-              <InspectorBody
-                node={selNode}
-                infoMap={infoMap}
-                setInfoMap={setInfoMap}
-                setNodes={setNodes}
-                toastMsg={toastMsg}
-                projectId={projectId}
-                activeCanvasId={activeCanvasId}
-                jobs={jobs}
-                assetsList={assetsList}
-                assetCache={assetCache.current}
-                runNode={(id) => void runNode(id)}
-              />
-              <button
-                className="btn btn-s"
-                style={{ width: '100%' }}
-                onClick={() => {
-                  if (selected) {
-                    void runNode(selected);
-                    toastMsg(`已提交重跑 · ${inspectTitle}`);
-                  } else {
-                    toastMsg('请先在画布上选中一个节点');
+                  {selInfo && selInfo.img ? (
+                    <div className="preview">
+                      <img src={selInfo.img} alt="选中节点预览" />
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {selected && selNode ? (
+                <InspectorBody
+                  node={selNode}
+                  infoMap={infoMap}
+                  setInfoMap={setInfoMap}
+                  setNodes={setNodes}
+                  toastMsg={toastMsg}
+                  projectId={projectId}
+                  activeCanvasId={activeCanvasId}
+                  jobs={jobs}
+                  assetsList={assetsList}
+                  assetCache={assetCache.current}
+                  runNode={(id) => void runNode(id)}
+                  nodes={nodes}
+                  onOpenTimelinePage={() => onNavigate('timeline')}
+                  onRemoveEdge={(srcId, dstId) =>
+                    setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)))
                   }
-                }}
-              >
-                仅重跑该节点
-              </button>
+                />
+              ) : null}
+              {selected && (
+                <button
+                  className="btn btn-s"
+                  style={{ width: '100%' }}
+                  onClick={() => {
+                    if (selected) {
+                      void runNode(selected);
+                      toastMsg(`已提交重跑 · ${inspectTitle}`);
+                    }
+                  }}
+                >
+                  仅重跑该节点
+                </button>
+              )}
             </div>
 
             {/* 输入区 */}

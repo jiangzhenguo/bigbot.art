@@ -78,7 +78,17 @@ export default function App() {
     }
   }
 
-  const handleNavigate = useCallback((page: Page) => setCurrentPage(page), []);
+  const handleNavigate = useCallback(
+    (page: Page) => {
+      // 画布必须有项目上下文:未选项目时先去项目列表,避免空白页
+      if (page === 'canvas' && !projectId) {
+        setCurrentPage('projects');
+        return;
+      }
+      setCurrentPage(page);
+    },
+    [projectId],
+  );
 
   const handleGenerate = async (brief: string) => {
     try {
@@ -249,7 +259,13 @@ export default function App() {
       )}
       {currentPage === 'assets' && <AssetsPage onNavigate={handleNavigate} />}
       {currentPage === 'skills' && <SkillsPage onNavigate={handleNavigate} />}
-      {currentPage === 'timeline' && <TimelinePage onNavigate={handleNavigate} />}
+      {currentPage === 'timeline' && (
+        <TimelinePage
+          onNavigate={handleNavigate}
+          projectId={projectId}
+          projectName={projects.find((p) => p.id === projectId)?.name ?? null}
+        />
+      )}
       {currentPage === 'settings' && <SettingsPage onNavigate={handleNavigate} />}
       {currentPage === 'onboarding' && <OnboardingPage onNavigate={handleNavigate} />}
       {currentPage === 'projects' && (

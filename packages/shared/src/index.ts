@@ -68,6 +68,11 @@ export interface BigBotArtApi {
   // 时间线导出(FFmpeg)
   exportTimeline(req: import('./domain').TimelineExportRequest): Promise<{ ok: boolean; taskId?: string; error?: string }>;
   exportStatus(taskId: string): Promise<import('./domain').ExportTask>;
+  /** 视频取帧:抽首/尾帧 PNG(镜头接续尾帧归档 / shot→image-edit 取帧源) */
+  extractFrame(
+    videoPath: string,
+    mode: 'first' | 'last',
+  ): Promise<{ ok: boolean; path?: string; error?: string }>;
   // 设置
   getSettings(): Promise<import('./domain').AppSettings>;
   setSettings(patch: Partial<import('./domain').AppSettings>): Promise<import('./domain').AppSettings>;

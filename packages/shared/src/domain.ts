@@ -126,7 +126,7 @@ export interface NodeDataMap {
   'image-upscale': { model: string; scale: number };
   shot: ShotParams;
   director: { prompt: string };
-  timeline: { shotNodeIds: string[] };
+  timeline: TimelineData;
   'audio-ref': { assetId: string };
   /** 🆕 v2 工作流入口:声明输入槽位,值由用户填充(资产/文件/内联文本) */
   'workflow-input': {
@@ -160,6 +160,64 @@ export interface NodeDataMap {
 
 /** union helper */
 export type NodeData = NodeDataMap[NodeKind];
+
+/**
+ * 时间线 / 剪辑节点数据 — P0 完成版
+ *
+ * 设计要点:
+ * - shotNodeIds 是入边派生态唯一来源,Inspector 可手动 override 顺序(manualOrder=true)
+ * - picks / trim / transitions / audio / exportPreset 全可选,缺省走合理默认
+ * - 旧快照(只有 shotNodeIds)零迁移成本
+ */
+export interface TimelineData {
+  /** 入线镜头节点 id 列表(按时间线顺序;渲染层按边派生态自动写入) */
+  shotNodeIds: string[];
+  /** 用户手动调过顺序时为 true(不再被入边自动重排覆盖) */
+  manualOrder?: boolean;
+  /** 每个镜头被选中的 Take:shotNodeId → takeId;未设 = 该镜头 currentTakeId */
+  picks?: Record<string, string>;
+  /** 每个镜头的入出点裁切(秒);未设 = 整段 */
+  trim?: Record<string, { inSec: number; outSec: number }>;
+  /** 镜头间转场,长度 = shotNodeIds.length - 1 */
+  transitions?: TimelineTransition[];
+  /** 音轨与响度 */
+  audio?: TimelineAudio;
+  /** 导出预设 */
+  exportPreset?: TimelineExportPreset;
+  /** 🆕 最近一次导出成片(画布 timeline 节点体内嵌预览用;导出成功后由渲染层回写) */
+  lastExport?: {
+    path: string; // 成片文件路径(bba-output:// 可解析)
+    name?: string; // 导出文件名
+    format?: TimelineExportPreset['format'];
+    resolution?: string; // 如 1920×1080 / 素材原始
+    durationSec?: number;
+    createdAt: string;
+  };
+}
+
+/** 镜头间转场(在 #i 与 #i+1 镜头之间,0-indexed) */
+export interface TimelineTransition {
+  afterIndex: number;
+  kind: 'cut' | 'crossfade' | 'fade-black';
+  /** 仅 crossfade / fade-black 生效;cut 忽略 */
+  durationMs?: number;
+}
+
+/** 时间线音轨 */
+export interface TimelineAudio {
+  /** 单段独立音量 0~2,默认 1;key = shotNodeId */
+  perClipVolume?: Record<string, number>;
+  /** 响度统一 −14 LUFS(默认开) */
+  loudnessNormalize?: boolean;
+}
+
+/** 时间线导出预设 */
+export interface TimelineExportPreset {
+  format?: 'mp4-h264' | 'prores';
+  resolution?: '1920x1080' | '1280x720' | 'source';
+  /** P2 多平台版本(裁切/缩放/去字幕),目前仅记录 */
+  platforms?: Array<'9:16' | '1:1' | 'no-subtitle'>;
+}
 
 /** 图片生成参数(mlxgen) */
 export interface ImageGenParams {
@@ -211,8 +269,14 @@ export interface ShotParams {
   reuse: number;
   tier: QualityTier;
   seed: number;
-  /** 引用绑定:资产 id → 角色(映射 --ref-image / --first-frame 等) */
-  refs: { assetId: string; role: 'first-frame' | 'last-frame' | 'ref-image' | 'ref-audio' }[];
+  /** 引用绑定:资产 id 或直连文件路径 → 角色(映射 --ref-image / --first-frame / --ref-video 等)
+   *  - assetId:资产中心的引用(由连线自动注入或手动添加)
+   *  - path:直连文件路径(如上游 shot 抽出的尾帧 PNG),优先于 assetId 解析 */
+  refs: {
+    assetId?: string;
+    path?: string;
+    role: 'first-frame' | 'last-frame' | 'ref-image' | 'ref-audio' | 'ref-video';
+  }[];
   promptTemplate?: string;
 }
 
@@ -337,7 +401,7 @@ export interface Skill {
 /** 时间线导出请求 */
 export interface TimelineExportRequest {
   projectId: string;
-  /** 按时间线顺序的媒体片段 */
+  /** 简化路径清单(老接口,无编排时使用,纯 concat) */
   clips: Array<{
     path: string;
     label?: string;
@@ -345,6 +409,21 @@ export interface TimelineExportRequest {
     nodeId?: string;
     takeId?: string;
   }>;
+  /** 🆕 编排序列(与 timeline 节点 data 一一对应);提供时优先于 clips 解析路径 */
+  sequence?: Array<{
+    shotNodeId: string;
+    /** 缺省 = shot 的 currentTakeId */
+    takeId?: string;
+    trim?: { inSec: number; outSec: number };
+    /** 0~2,默认 1 */
+    volume?: number;
+  }>;
+  /** 🆕 转场表(长度 = sequence.length - 1);未提供则全部硬切 */
+  transitions?: TimelineTransition[];
+  /** 🆕 音轨与响度统一 */
+  audio?: TimelineAudio;
+  /** 🆕 导出预设 */
+  exportPreset?: TimelineExportPreset;
   outputName?: string;
 }
 

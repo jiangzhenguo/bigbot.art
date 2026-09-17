@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ShotTakeHistory, Take } from '@bigbotart/shared';
+import { probeMedia } from './assets.js';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 
@@ -78,6 +79,11 @@ export class TakeStore {
       if (next.durationSec === undefined && next.createdAt) {
         next.durationSec = Math.max(0, (Date.parse(next.finishedAt) - Date.parse(next.createdAt)) / 1000);
       }
+    }
+    // 成功且有产物:用 ffprobe 探测**真实视频时长**覆盖 durationSec(生成耗时只作失败兜底,不作为媒体时长)
+    if (next.status === 'succeeded' && next.resultPath && existsSync(next.resultPath)) {
+      const meta = probeMedia(next.resultPath, 'video');
+      if (meta.durationSec !== undefined) next.durationSec = meta.durationSec;
     }
     doc.takes[idx] = next;
     this.save(projectId);

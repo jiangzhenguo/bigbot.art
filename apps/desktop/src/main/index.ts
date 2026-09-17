@@ -13,6 +13,7 @@ import { SettingsStore } from './settings';
 import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
+import { extractFrame } from './frames';
 import { RenderQueue } from './render-queue';
 import { MemoryStore } from './memory';
 import { ToolHandlers } from './tool-handlers';
@@ -63,16 +64,24 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-// 引擎:尊重 BIGBOTART_DRYRUN(默认 dry-run);RenderQueue 再按 demo/real 路由
-// h3 开启 onLog:调试面板实时显示 h3 进度行;outDir 保持默认
+// 引擎:BIGBOTART_DRYRUN=0 时真实 spawn h3;未设或非 0 则 dry-run 占位
+// h3 开启 onLog:调试面板实时显示 h3 进度行
 const logger = new DebugLogger();
-logger.log('info', `BigBotArt 启动 · BIGBOTART_DRYRUN=${process.env.BIGBOTART_DRYRUN ?? '(未设→dry-run)'} · outputs=${H3_OUTPUTS_DIR}`);
+const dryRun = process.env.BIGBOTART_DRYRUN !== '0';
+logger.log(
+  'info',
+  `BigBotArt 启动 · BIGBOTART_DRYRUN=${process.env.BIGBOTART_DRYRUN ?? '(未设→dry-run)'} · dryRun=${dryRun} · outputs=${H3_OUTPUTS_DIR} · h3=${process.env.BIGBOTART_H3_BIN ?? '(默认)'}`,
+);
 const registry = createRegistry({
   h3c: {
+    dryRun,
+    binaryPath: process.env.BIGBOTART_H3_BIN,
+    modelDir: process.env.BIGBOTART_H3_MODEL,
     onLog: (line) => logger.log('h3', line),
     outputDir: H3_OUTPUTS_DIR,
   },
   mlxgen: {
+    dryRun,
     outputDir: process.env.BIGBOTART_MLXGEN_OUTPUTS ?? join(DATA_DIR, 'outputs', 'images'),
   },
 });
@@ -81,8 +90,8 @@ const settings = new SettingsStore();
 const store = new ProjectStore();
 const assets = new AssetStore();
 const skills = new SkillStore();
-const exportSvc = new ExportService();
 const takes = new TakeStore();
+const exportSvc = new ExportService(takes);
 const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory);
@@ -380,6 +389,9 @@ ipcMain.handle('export-timeline', (_e, req) => {
   }
 });
 ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId));
+
+// ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑) ----------
+ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last') => extractFrame(videoPath, mode));
 
 // ---------- IPC:设置 ----------
 ipcMain.handle('get-settings', async () => {

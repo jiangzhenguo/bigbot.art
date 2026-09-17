@@ -39,9 +39,13 @@ function resolveOutputsDir(): string {
 /** 渲染产物根(与主进程 H3_OUTPUTS_DIR / mock / mlxgen 对齐) */
 export const OUTPUTS_DIR = resolveOutputsDir();
 
-/** bba-output 查找根:当前 OUTPUTS_DIR + 其它已知产物目录(旧路径兼容) */
+/** bba-output 查找根:当前 OUTPUTS_DIR + 导出目录 + 其它已知产物目录(旧路径兼容) */
 export function outputSearchRoots(): string[] {
-  const roots = new Set<string>([resolve(OUTPUTS_DIR)]);
+  const roots = new Set<string>([
+    resolve(OUTPUTS_DIR),
+    resolve(join(DATA_DIR, 'exports')),
+    resolve(join(process.cwd(), '.bigbotart', 'exports')),
+  ]);
   for (const c of [
     join(DATA_DIR, 'outputs'),
     join(process.cwd(), '.bigbotart', 'outputs'),

@@ -261,20 +261,44 @@ export class ToolHandlers {
     'continuity.check': async (_a, ctx) => {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      const shots = (cur?.nodes ?? []).filter((n) => n.kind === 'shot');
+      const nodes = cur?.nodes ?? [];
+      const byId = new Map(nodes.map((n) => [n.id, n]));
+      const shots = nodes.filter((n) => n.kind === 'shot');
       if (shots.length < 2) return { ok: true, result: '镜头不足 2 个,无需连续性校验' };
-      const issues: string[] = [];
-      for (let i = 0; i < shots.length - 1; i++) {
-        const sA = shots[i];
-        const sB = shots[i + 1];
-        if (!sA || !sB) continue;
-        const a2 = sA.data as { resultPath?: string };
-        const b2 = sB.data as { resultPath?: string };
-        if (!a2.resultPath || !b2.resultPath) continue;
-        // TODO: 真视觉比对(ffmpeg 抽尾帧/首帧 + 像素差异);骨架期基于文件存在性提示
-        issues.push(`镜${i + 1}→镜${i + 2}:尾帧/首帧均已产出,建议人眼抽检或后续接入视觉比对`);
+      // 基于图边:shot→shot 的接续边才是连续性依据(不再按节点数组顺序推断)
+      const edges = (cur?.edges ?? []).filter((e) => {
+        const s = byId.get(e.source);
+        const t = byId.get(e.target);
+        return s?.kind === 'shot' && t?.kind === 'shot';
+      });
+      if (edges.length === 0) {
+        return {
+          ok: true,
+          result: `存在 ${shots.length} 个镜头但无 shot→shot 接续边 · 建议把镜头连成链后重跑校验`,
+        };
       }
-      return { ok: true, result: issues.length ? issues.join('\n') : '连续性:所有相邻镜头的尾帧/首帧都齐备' };
+      const issues: string[] = [];
+      for (const e of edges) {
+        const sA = byId.get(e.source);
+        const sB = byId.get(e.target);
+        const a2 = (sA?.data ?? {}) as { resultPath?: string; tailFramePath?: string };
+        const b2 = (sB?.data ?? {}) as { resultPath?: string };
+        const name = sB?.label?.slice(0, 12) || e.target;
+        if (!a2.resultPath) {
+          issues.push(`建议先重跑上游镜头(尾帧未产出),再校验「${name}」接续`);
+          continue;
+        }
+        if (!a2.tailFramePath) {
+          issues.push(`上游尾帧未归档(待抽帧),「${name}」首帧参考缺失`);
+          continue;
+        }
+        if (!b2.resultPath) {
+          issues.push(`「${name}」未生成,首帧参考已备(上游尾帧)但缺镜头本体`);
+          continue;
+        }
+        issues.push(`尾帧 → 「${name}」首帧:均已产出 ✓(骨架期仅查文件,建议人眼抽检)`);
+      }
+      return { ok: true, result: issues.length ? issues.join('\n') : '连续性:所有 shot→shot 接续边尾帧/首帧齐备' };
     },
   };
 
