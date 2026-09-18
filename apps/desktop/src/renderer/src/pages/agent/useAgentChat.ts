@@ -305,13 +305,25 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
         if (r.role === 'tool' && r.toolName === 'ask.user') {
           // ask.user 暂停卡(被 worker 拦截,不经工具桥):恢复成可点选的确认卡,而不是丢成纯文本
           flushTools();
-          const args = (r.toolArgs ?? {}) as { question?: string; options?: import('@bigbotart/shared').AskOption[] };
-          if (args.question && args.options?.length) {
+          const args = (r.toolArgs ?? {}) as { question?: string; options?: unknown };
+          // 容错:LLM 可能把 options 序列化成 JSON 字符串(真实事故:字符串有 .length 属性,
+          // 旧判定误放行 → AskCard options.map 崩溃白屏);非数组一律降级为纯文本
+          let opts: unknown = args.options;
+          if (typeof opts === 'string') {
+            try {
+              opts = JSON.parse(opts);
+            } catch {
+              opts = null;
+            }
+          }
+          if (args.question && Array.isArray(opts) && opts.length >= 2) {
             // 去重:recall 里 assistant 正文与 ask 问题是同一段文本(与实时渲染「不重复推 reply」对齐)。
             // 注意 recall 顺序是 [assistant 文本, …工具记录, ask.user],要往前找最近一条同文本文本消息
             const dupIdx = restored.findLastIndex((x) => x.kind === 'agent' && x.text === args.question);
             if (dupIdx >= 0) restored.splice(dupIdx, 1);
-            restored.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: args.question, options: args.options } });
+            restored.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: args.question, options: opts as import('@bigbotart/shared').AskOption[] } });
+          } else {
+            restored.push({ id: ++msgId.current, kind: 'agent', text: r.content });
           }
         } else if (r.role === 'tool' && r.toolName) {
           (toolGroup ??= []).push({ name: r.toolName, args: r.toolArgs ?? {}, status: 'success', result: r.toolResult });

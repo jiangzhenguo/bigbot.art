@@ -38,7 +38,8 @@ export function AskCard({
   onPick: (label: string) => void;
 }) {
   const [picked, setPicked] = useState<string | null>(null);
-  const opts = options.map(normalize).slice(0, 6);
+  // 最后一道防线:任何来源(实时/恢复/异常协议)给到非数组 options 都不允许崩——空选项只显示问题
+  const opts = (Array.isArray(options) ? options : []).map(normalize).slice(0, 6);
 
   return (
     <div className={`ask${picked ? ' done' : ''}`} data-od-id="agent-ask">

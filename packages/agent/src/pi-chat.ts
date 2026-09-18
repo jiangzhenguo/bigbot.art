@@ -54,6 +54,43 @@ function splitThink(raw: string): { text: string; thinking?: string } {
   return { text: cleaned.trim(), thinking: thinks.length > 0 ? thinks.join('\n\n') : undefined };
 }
 
+/**
+ * ask.user 选项归一化:字符串 → {label};对象 → {label, sub?, recommended?}(协议扩展,见 tool-defs.ts ask.user)。
+ * 容忍 LLM 把整个数组序列化成 JSON 字符串(真实事故:options 是 string 时 Array.isArray 失败 →
+ * 漏拦截落到工具桥报「未知工具:ask.user」,模型连着重试烧轮次,recall 里的字符串 options 还把渲染层搞白屏)。
+ */
+function normalizeAskOptions(raw: unknown): AskOption[] {
+  let list: unknown = raw;
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((o): AskOption | null => {
+      if (typeof o === 'string') {
+        const label = o.trim();
+        return label ? { label } : null;
+      }
+      if (o && typeof o === 'object') {
+        const r = o as { label?: unknown; sub?: unknown; recommended?: unknown };
+        const label = String(r.label ?? '').trim();
+        if (!label) return null;
+        const opt: AskOption = { label };
+        const sub = String(r.sub ?? '').trim();
+        if (sub) opt.sub = sub;
+        if (r.recommended === true) opt.recommended = true;
+        return opt;
+      }
+      return null;
+    })
+    .filter((o): o is AskOption => o !== null)
+    .slice(0, 6);
+}
+
 export class PiChatSession {
   private planner = new PiPlanner();
   private abort: AbortController | null = null;
@@ -167,31 +204,9 @@ export class PiChatSession {
       // 结构化提问拦截:ask.user → 暂停本轮,返回 {ask},等待用户在确认卡片选择后继续
       const askCall = calls.find((c) => c.name === 'ask.user');
       if (askCall) {
-        const args = (askCall.arguments ?? {}) as { question?: string; options?: unknown[] };
+        const args = (askCall.arguments ?? {}) as { question?: string; options?: unknown };
         const question = String(args.question ?? '').trim() || '需要你确认一下';
-        // 选项归一化:字符串 → {label};对象 → {label, sub?, recommended?}(协议扩展,见 tool-defs.ts ask.user)
-        const options: AskOption[] = Array.isArray(args.options)
-          ? args.options
-              .map((o): AskOption | null => {
-                if (typeof o === 'string') {
-                  const label = o.trim();
-                  return label ? { label } : null;
-                }
-                if (o && typeof o === 'object') {
-                  const raw = o as { label?: unknown; sub?: unknown; recommended?: unknown };
-                  const label = String(raw.label ?? '').trim();
-                  if (!label) return null;
-                  const opt: AskOption = { label };
-                  const sub = String(raw.sub ?? '').trim();
-                  if (sub) opt.sub = sub;
-                  if (raw.recommended === true) opt.recommended = true;
-                  return opt;
-                }
-                return null;
-              })
-              .filter((o): o is AskOption => o !== null)
-              .slice(0, 6)
-          : [];
+        const options = normalizeAskOptions(args.options);
         if (options.length >= 2 && !signal.aborted) {
           const ask = { question, options };
           // 提问本身也作为一次"用户可见回复",便于渲染层只渲染卡片即可

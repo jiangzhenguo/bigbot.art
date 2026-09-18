@@ -10,7 +10,7 @@ import { createRegistry } from '@bigbotart/providers';
 import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots } from './assets';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachmentsToProject } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
 import { extractFrame } from './frames';
@@ -537,9 +537,29 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
   memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'user', content: visibleText });
   logger.log('info', `agent.chat 开始 · "${req.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
 
-  // 附件注入:资产 id 告诉 LLM,Agent 可用 assets.get 查详情 / canvas.create_node 引用
-  const attNote = atts.length
-    ? `\n\n[用户附件 · 已在资产库,可用 assets.get 查看详情,或用 canvas.create_node(kind=asset) 引用到画布:\n${atts.map((a) => `- ${a.name}(${a.kind},assetId=${a.id})`).join('\n')}]`
+  // 附件先拷入项目文件夹(projects/<pid>/assets/),Agent 一律使用项目内副本——
+  // 项目自包含、可迁移;路径在 DATA_DIR 白名单内,下游 headless 导入/引用均合法
+  const projAtts = copyAttachmentsToProject(
+    req.projectId,
+    atts.map((a) => {
+      const full = assets.get(a.id);
+      return {
+        ...a,
+        localPath: full?.localPath ?? a.localPath,
+        width: full?.width,
+        height: full?.height,
+        durationSec: full?.durationSec,
+      };
+    }),
+  );
+  // 附件注入:项目内路径 + 尺寸元数据直接给 LLM(免去 assets.get 往返,也避免"信息太简略看不出内容")
+  const attNote = projAtts.length
+    ? `\n\n[用户附件 · 已拷入项目文件夹,可直接作为参考图/素材使用(也可用 canvas.create_node(kind=asset) 引用到画布):\n${projAtts
+        .map(
+          (a) =>
+            `- ${a.name}(${a.kind},assetId=${a.id}${a.width ? `,${a.width}×${a.height}` : ''}${a.durationSec ? `,${a.durationSec}s` : ''}) → ${a.projectPath}${a.copied ? '' : '(源文件缺失,未拷入项目)'}`,
+        )
+        .join('\n')}]`
     : '';
 
   try {

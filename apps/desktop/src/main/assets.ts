@@ -14,6 +14,8 @@ import type { Asset, AssetImportResult } from '@bigbotart/shared';
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 export const ASSETS_DIR = join(DATA_DIR, 'assets');
 const ASSETS_FILE = join(DATA_DIR, 'assets.json');
+/** 项目文件夹根:projects/<projectId>/——发给 Agent 的附件先拷入此处,项目自包含、可迁移 */
+export const PROJECTS_DIR = join(DATA_DIR, 'projects');
 /** 单文件大小上限(2GB)——超出拒绝,避免无意复制巨型文件撑爆磁盘 */
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 
@@ -81,7 +83,39 @@ export function isUnderRoot(filePath: string, root: string): boolean {
 export function importAllowRoots(): string[] {
   const mockOut = process.env.BIGBOTART_MOCK_OUTPUTS ?? join(OUTPUTS_DIR, 'mock');
   const imgOut = process.env.BIGBOTART_MLXGEN_OUTPUTS ?? join(OUTPUTS_DIR, 'images');
+  // DATA_DIR 已覆盖 projects/<pid>/ 项目文件夹
   return [DATA_DIR, OUTPUTS_DIR, mockOut, imgOut];
+}
+
+/** 项目资产目录(不存在则创建) */
+export function projectAssetsDir(projectId: string): string {
+  // projectId 由应用生成(proj-<ts>-<rand>),仍过滤路径分隔符防注入
+  const safe = projectId.replace(/[/\\]/g, '_');
+  const dir = join(PROJECTS_DIR, safe, 'assets');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * 把对话附件拷入项目文件夹并返回项目内副本路径。
+ * 幂等:目标已存在(同资产 id)直接复用,不重复拷贝;源文件缺失时回退原路径并在结果标注。
+ */
+export function copyAttachmentsToProject<T extends { id: string; localPath: string }>(
+  projectId: string,
+  atts: T[],
+): Array<T & { projectPath: string; copied: boolean }> {
+  if (!atts.length) return [];
+  const dir = projectAssetsDir(projectId);
+  return atts.map((a) => {
+    const dest = join(dir, `${a.id}${extname(a.localPath).toLowerCase()}`);
+    try {
+      if (!existsSync(dest)) copyFileSync(a.localPath, dest);
+      return { ...a, projectPath: dest, copied: true };
+    } catch {
+      // 源文件已不在(资产被外部删掉等):回退原路径,由调用方决定是否仍引用
+      return { ...a, projectPath: a.localPath, copied: false };
+    }
+  });
 }
 
 /** 提取媒体元数据(ffprobe;图片/视频取宽高与时长,音频取时长,失败不阻断) */

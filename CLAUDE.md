@@ -62,6 +62,7 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
 - **Agent 子进程隔离**:`AgentManager.inline` 默认 false,worker 通过 `spawn(process.execPath, [worker.js])` 独立运行(pi 崩溃不污染主进程)。`inline=true` 仅供调试,直接走 `deterministicPlanner`。
 - **LLM 优先级**(worker 内):远端 OpenAI 兼容端点(由 `BIGBOTART_LLM_BASE_URL` 触发)→ 本地 LM Studio(1234)→ 确定性模板兜底。`.env.example` 列出了 DeepSeek / GLM / Kimi / MiniMax 等可选项。
 - **画布持久化**:`ProjectStore` 用 JSON 文件 + `mkdirSync(BIGBOTART_HOME ?? ~/.bigbotart)`,接口已抽象,Electron 31 内置 Node 20 暂不支持 `node:sqlite`。
+- **项目文件夹**:对话发给 Agent 的附件先拷入 `~/.bigbotart/projects/<projectId>/assets/`(`copyAttachmentsToProject`,按资产 id 幂等复用),Agent 一律使用项目内副本——项目自包含、可迁移;全局资产库在 `~/.bigbotart/assets/`。
 - **IPC 契约**:`BigBotArtApi`(`packages/shared/src/index.ts`)是主进程与渲染进程的类型化合同,preload 通过 `contextBridge` 暴露到 `window.bigbotart`。
 
 ## 环境变量
