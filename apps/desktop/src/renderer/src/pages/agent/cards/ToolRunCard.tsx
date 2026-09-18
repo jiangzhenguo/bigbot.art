@@ -8,7 +8,7 @@
  * - 有 nodeId 的行带「定位 →」
  */
 import React, { useEffect, useRef, useState } from 'react';
-import type { ToolRun } from '../pages/canvas/types';
+import type { ToolRun } from '../types';
 
 const ARG_TRUNCATE = 240;
 

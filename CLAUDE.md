@@ -39,6 +39,7 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
   - `src/main/store.ts` — `ProjectStore`(JSON 文件持久化,接口预留 SQLite 替换)
   - `src/preload/index.ts` — `contextBridge` 暴露类型化 `bigbotart` API
   - `src/renderer/src/App.tsx` — 三栏布局(节点库侧栏 + React Flow 无限画布 + Agent 控制台),首次启动建默认项目并探测引擎
+  - `src/renderer/src/pages/agent/` — Agent 对话面板:`useAgentChat.ts`(消息流/发送/SSE 聚合/模型回显,全部状态与副作用)+ `AgentChatView`/`AgentComposer`(展示层)+ `cards/`(ToolRunCard/AskCard/ErrorCard/ThinkingBlock/ContinuityCard/PlanCard,纯展示)
   - `electron.vite.config.ts` — 三个独立构建(main / preload / renderer)
 - **packages/shared** — 领域类型(画布、节点、Shot、Take、Provider、引擎状态、IPC 契约 `BigBotArtApi`)
 - **packages/providers** — Provider 抽象与实现

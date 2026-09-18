@@ -8,7 +8,7 @@
  */
 import React, { useState } from 'react';
 import type { AskOption } from '@bigbotart/shared';
-import MarkdownText from './MarkdownText';
+import MarkdownText from '../../../components/MarkdownText';
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 

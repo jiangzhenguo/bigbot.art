@@ -1,4 +1,4 @@
-import type { NodeTag, CanvasNode, Edge, NodeInfo, ModelOption } from './types';
+import type { NodeTag, CanvasNode, Edge, NodeInfo } from './types';
 
 /** 可导出的产物文件路径(右键「另存为」/「在 Finder 中显示」) */
 export const FINDER_PATH: Record<string, string> = {
@@ -269,8 +269,3 @@ export function initialEdges(): Edge[] {
 
 export const WAVE_BARS = [10, 18, 26, 14, 22, 30, 16, 24, 12, 20, 28, 14, 22, 10, 18, 26, 16, 12, 20, 8];
 
-export const MODEL_OPTION_FALLBACK: ModelOption[] = [
-  { name: '全局默认', sub: '跟随设置页 LLM 来源', reset: true },
-];
-
-export const SKILLS = ['纸拼贴剧情片', '剧情短片', '电商产品', '科普讲解', '水墨'];

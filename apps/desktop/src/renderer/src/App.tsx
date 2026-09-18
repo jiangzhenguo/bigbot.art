@@ -7,6 +7,7 @@ import TimelinePage from './pages/TimelinePage';
 import SettingsPage from './pages/SettingsPage';
 import OnboardingPage from './pages/OnboardingPage';
 import ProjectsPage from './pages/ProjectsPage';
+import ErrorBoundary from './components/ErrorBoundary';
 import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
@@ -234,50 +235,74 @@ export default function App() {
   return (
     <>
       {currentPage === 'home' && (
-        <HomePage
-          onNavigate={handleNavigate}
-          onGenerate={handleGenerate}
-          onNewProject={handleNewProject}
-          projects={projects}
-          onSelectProject={handleSelectProject}
-          onDeleteProject={handleDeleteProject}
-          onRenameProject={handleRenameProject}
-          engineStatus={engineStatus}
-        />
+        <ErrorBoundary name="首页">
+          <HomePage
+            onNavigate={handleNavigate}
+            onGenerate={handleGenerate}
+            onNewProject={handleNewProject}
+            projects={projects}
+            onSelectProject={handleSelectProject}
+            onDeleteProject={handleDeleteProject}
+            onRenameProject={handleRenameProject}
+            engineStatus={engineStatus}
+          />
+        </ErrorBoundary>
       )}
       {currentPage === 'canvas' && projectId && (
-        <CanvasPage
-          onNavigate={handleNavigate}
-          projectId={projectId}
-          projectName={projects.find((p) => p.id === projectId)?.name ?? '未命名项目'}
-          projectCanvases={projectCanvases}
-          onSaveCanvas={handleSaveCanvas}
-          onSwitchCanvas={handleSwitchCanvas}
-          onCreateCanvas={handleCreateCanvas}
-          onDeleteCanvas={handleDeleteCanvas}
-          onRenameCanvas={handleRenameCanvas}
-        />
+        <ErrorBoundary name="画布">
+          <CanvasPage
+            onNavigate={handleNavigate}
+            projectId={projectId}
+            projectName={projects.find((p) => p.id === projectId)?.name ?? '未命名项目'}
+            projectCanvases={projectCanvases}
+            onSaveCanvas={handleSaveCanvas}
+            onSwitchCanvas={handleSwitchCanvas}
+            onCreateCanvas={handleCreateCanvas}
+            onDeleteCanvas={handleDeleteCanvas}
+            onRenameCanvas={handleRenameCanvas}
+          />
+        </ErrorBoundary>
       )}
-      {currentPage === 'assets' && <AssetsPage onNavigate={handleNavigate} />}
-      {currentPage === 'skills' && <SkillsPage onNavigate={handleNavigate} />}
+      {currentPage === 'assets' && (
+        <ErrorBoundary name="资产">
+          <AssetsPage onNavigate={handleNavigate} />
+        </ErrorBoundary>
+      )}
+      {currentPage === 'skills' && (
+        <ErrorBoundary name="技能">
+          <SkillsPage onNavigate={handleNavigate} />
+        </ErrorBoundary>
+      )}
       {currentPage === 'timeline' && (
-        <TimelinePage
-          onNavigate={handleNavigate}
-          projectId={projectId}
-          projectName={projects.find((p) => p.id === projectId)?.name ?? null}
-        />
+        <ErrorBoundary name="时间线">
+          <TimelinePage
+            onNavigate={handleNavigate}
+            projectId={projectId}
+            projectName={projects.find((p) => p.id === projectId)?.name ?? null}
+          />
+        </ErrorBoundary>
       )}
-      {currentPage === 'settings' && <SettingsPage onNavigate={handleNavigate} />}
-      {currentPage === 'onboarding' && <OnboardingPage onNavigate={handleNavigate} />}
+      {currentPage === 'settings' && (
+        <ErrorBoundary name="设置">
+          <SettingsPage onNavigate={handleNavigate} />
+        </ErrorBoundary>
+      )}
+      {currentPage === 'onboarding' && (
+        <ErrorBoundary name="引导">
+          <OnboardingPage onNavigate={handleNavigate} />
+        </ErrorBoundary>
+      )}
       {currentPage === 'projects' && (
-        <ProjectsPage
-          projects={projects}
-          onSelectProject={handleSelectProject}
-          onDeleteProject={handleDeleteProject}
-          onRenameProject={handleRenameProject}
-          onNewProject={handleNewProject}
-          onNavigate={handleNavigate}
-        />
+        <ErrorBoundary name="项目">
+          <ProjectsPage
+            projects={projects}
+            onSelectProject={handleSelectProject}
+            onDeleteProject={handleDeleteProject}
+            onRenameProject={handleRenameProject}
+            onNewProject={handleNewProject}
+            onNavigate={handleNavigate}
+          />
+        </ErrorBoundary>
       )}
     </>
   );

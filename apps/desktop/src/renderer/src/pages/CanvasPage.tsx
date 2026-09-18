@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, LlmSource, Asset, NodeKind, ShotTakeHistory, Take, DebugLogEntry, TimelineData, PromptSource, AppSettings } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, LlmSource, Asset, NodeKind, ShotTakeHistory, Take, DebugLogEntry, TimelineData, PromptSource } from '@bigbotart/shared';
 import {
   parseGfmTable,
   docMarkers,
@@ -13,10 +13,7 @@ import {
   tableToGfm,
 } from '@bigbotart/shared';
 import CanvasSwitcher from '../components/CanvasSwitcher';
-import MarkdownText from '../components/MarkdownText';
-import ToolRunCard from '../components/ToolRunCard';
-import AskCard from '../components/AskCard';
-import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ModelOption, ChatMsg, ToolRun } from './canvas/types';
+import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo } from './canvas/types';
 import {
   FINDER_PATH,
   NODE_TYPES,
@@ -31,8 +28,6 @@ import {
   SHOT_REF_ROLES,
   NODE_INFO_BASE,
   WAVE_BARS,
-  MODEL_OPTION_FALLBACK,
-  SKILLS,
 } from './canvas/constants';
 import {
   ICON_DOC,
@@ -66,9 +61,11 @@ import { resolvePort, hasConnector, pickShotSpec, IMAGE_KINDS } from './canvas/c
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, outputUrlOf, thumbSrc, clamp32, VideoThumb } from './canvas/media';
 import { queueItem } from './canvas/queue';
-import { planMsg } from './canvas/plan-msg';
 import { InspectorBody } from './canvas/inspector/InspectorBody';
 import { TimelineExportPreview } from './canvas/TimelineExportPreview';
+import { useAgentChat } from './agent/useAgentChat';
+import { AgentChatView } from './agent/AgentChatView';
+import { AgentComposer } from './agent/AgentComposer';
 
 export default function CanvasPage({
   onNavigate,
@@ -85,8 +82,6 @@ export default function CanvasPage({
   const worldRef = useRef<HTMLDivElement | null>(null);
   const edgesSvgRef = useRef<SVGSVGElement | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const chatRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const gripRef = useRef<HTMLButtonElement | null>(null);
   const agentRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<HTMLDivElement | null>(null);
@@ -141,20 +136,12 @@ export default function CanvasPage({
     }
     return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   }, []);
-  const msgId = useRef(100);
-  /** 🆕 本轮工具聚合卡(ToolRunCard)的消息 id;一轮对话一张卡,SSE 实时更新,回复到达后对账 */
-  const liveToolCardId = useRef<number | null>(null);
-  /** 消息流是否贴底(用户在底部附近时新消息自动跟随;往上翻则不打扰) */
-  const pinToBottom = useRef(true);
-
   /* ── M1:渲染队列(真实任务) + 画布持久化 ── */
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const bootRef = useRef(true); // 挂载期跳过首轮保存(等加载/规划落地)
   const prevJobState = useRef<Record<string, string>>({});
   const assetCache = useRef<Record<string, string>>({}); // assetId → localPath
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
-  /* ── Agent 对话:发送中/工具事件 ── */
-  const [sending, setSending] = useState(false);
 
   /* ── 「+」下游节点弹层 ── */
   const [apFrom, setApFrom] = useState<string | null>(null);
@@ -168,92 +155,7 @@ export default function CanvasPage({
   const [iAspect, setIAspect] = useState('16:9');
   const [iTier, setITier] = useState('默认');
 
-  /* ── Agent 面板 ── */
-  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [model, setModel] = useState('Ornith-1.5-35B · 本地');
-  /** 当前显示的模型是否来自项目级覆盖(false = 全局默认) */
-  const [modelOverridden, setModelOverridden] = useState(false);
-  /* 模型选择器:真实清单(已加载本地模型 + 已启用云端供应商模型),打开弹层时刷新 */
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>(MODEL_OPTION_FALLBACK);
-  const loadModelOptions = useCallback(async (): Promise<void> => {
-    const opts: ModelOption[] = [];
-    try {
-      const kinds = [
-        ['lmstudio', 'LM Studio', 'lmstudio'],
-        ['ollama', 'Ollama', 'ollama'],
-        ['pimlx', 'pi-mlx', 'mlx-provider'],
-      ] as const;
-      const runtimes = await Promise.all(
-        kinds.map(([k]) => window.bigbotart.llmLocalModels(k).catch(() => null)),
-      );
-      runtimes.forEach((rt, i) => {
-        const k = kinds[i];
-        if (!rt?.available || !k) return;
-        const [, label, sourceKind] = k;
-        rt.models
-          .filter((m) => m.loaded)
-          .forEach((m) => {
-            const dn = m.displayName ?? m.id;
-            opts.push({
-              name: `${dn} · 本地`,
-              sub: `${dn} · ${label}`,
-              source: { kind: sourceKind, model: m.id } as LlmSource,
-            });
-          });
-      });
-      const s = await window.bigbotart.getSettings();
-      for (const p of s.cloudProviders ?? []) {
-        if (!p.enabled || !p.models.length) continue;
-        p.models.forEach((mid) =>
-          opts.push({
-            name: `${mid} · ${p.name}`,
-            sub: `${mid} · ${p.name}${p.hasKey ? '' : ' · 缺 Key'}`,
-            source: { kind: 'cloud', provider: p.id, model: mid },
-          }),
-        );
-      }
-    } catch {
-      /* 清单拉取失败:保留全局默认兜底 */
-    }
-    opts.push(...MODEL_OPTION_FALLBACK);
-    setModelOptions(opts);
-  }, []);
-
-  /* 模型回显:进入项目时读取持久化的项目级覆盖(无则回退全局设置),修复「重启后丢回默认」 */
-  useEffect(() => {
-    if (!projectId) return;
-    let alive = true;
-    void Promise.all([window.bigbotart.listProjects(), window.bigbotart.getSettings()])
-      .then(([projects, s]) => {
-        if (!alive) return;
-        const proj = projects.find((p) => p.id === projectId);
-        if (proj?.llmOverride) {
-          setModel(llmDisplayName(proj.llmOverride, s));
-          setModelOverridden(true);
-        } else {
-          setModel(s.llm ? llmDisplayName(s.llm, s) : 'Ornith-1.5-35B · 本地');
-          setModelOverridden(false);
-        }
-      })
-      .catch((e) => console.error('读取项目 LLM 配置失败', e));
-    return () => {
-      alive = false;
-    };
-  }, [projectId]);
-  const [skill, setSkill] = useState('无技能');
-  const skillOn = !!skill && skill !== '无技能';
-
-  /* 消息流自动贴底:用户在底部附近时,新消息(回复/工具行/loading)到达即滚到底;往上翻查历史则不打扰 */
-  useEffect(() => {
-    const el = chatRef.current;
-    if (!el || !pinToBottom.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [msgs]);
-
-  /* ── 附件(真资产库导入) ── */
-  const [attachments, setAttachments] = useState<Asset[]>([]);
-
+  /* Agent 对话面板:全部状态/副作用在 pages/agent/useAgentChat(本组件只持有返回值) */
   const resHint = resLine(apAspect, apTier);
   const inspHint = `${resLine(iAspect, iTier)} · 改动将标 stale，仅重跑受影响节点`;
   const selInfo = selected ? infoMap[selected] : undefined;
@@ -627,153 +529,9 @@ export default function CanvasPage({
     setTab('insp');
   }, []);
 
-  /* ══ 对话发送 / 打断 ══ */
-  const autoGrow = (el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  };
-
-  /* 把 Agent 规划物化为画布节点(保留已有节点,新增 Brief/镜头并连线) */
   /* 当前活动画布 id(派生自 props) */
   const activeCanvasId = projectCanvases?.activeCanvasId ?? '';
   const activeCanvas = projectCanvases?.canvases.find((c) => c.id === activeCanvasId);
-
-  const materializePlan = useCallback(
-    (plan: { document: unknown; shots: unknown[]; edges: Array<{ source: string; target: string }> }) => {
-      const docNode = fromSharedNode(plan.document as never);
-      const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
-      const all = [...shotNodes, docNode];
-      const idSet = new Set(nodesRef.current.map((n) => n.id));
-      const toAdd = all.filter((n) => !idSet.has(n.id));
-      if (toAdd.length === 0) return;
-      setNodes((ns) => [...ns, ...toAdd]);
-      setEdges((es) => [
-        ...es,
-        ...plan.edges
-          .filter((e) => { const a = idSet.has(e.source) || toAdd.some((n) => n.id === e.source); const b = idSet.has(e.target) || toAdd.some((n) => n.id === e.target); return a && b; })
-          .map((e) => ({ from: e.source, to: e.target, cls: '' as const })),
-      ]);
-      toastMsg(`已新增 ${toAdd.length} 个节点到画布`);
-    },
-    [toastMsg],
-  );
-
-  const send = useCallback(
-    (overrideText?: string) => {
-      const v = (overrideText ?? chatInput).trim();
-      if (!v || sending) return;
-      const pid = projectId;
-      const cid = activeCanvasId;
-      if (!pid || !cid) {
-        toastMsg('请先进入一个项目画布');
-        return;
-      }
-      setMsgs((m) => [...m, { id: ++msgId.current, kind: 'user', text: v }]);
-      setChatInput('');
-      pinToBottom.current = true;
-      if (inputRef.current) {
-        inputRef.current.value = '';
-        autoGrow(inputRef.current);
-      }
-      // 新一轮开始:重置聚合卡指针(SSE tool-start 会建一张新卡)
-      liveToolCardId.current = null;
-      // loading 气泡
-      const loadingId = ++msgId.current;
-      setSending(true);
-      setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '思考中…' }]);
-      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-
-      window.bigbotart
-        .agentChat({ projectId: pid, canvasId: cid, text: v })
-        .then((res) => {
-          // StrictMode 下 setMsgs updater 会双跑:ref 的读与清必须在 updater 外完成,
-          // 否则第二趟跑到时 ref 已被第一趟清空 → 对账失败 → 重复建卡
-          const liveId = liveToolCardId.current;
-          liveToolCardId.current = null;
-          setMsgs((m) => {
-            const rest = m.filter((x) => x.id !== loadingId);
-            const out: ChatMsg[] = [...rest];
-            // 工具调用聚合卡:res.toolCalls 为权威列表——实时卡已存在则原地对账替换(避免与 SSE 行重复),否则补一张
-            if (res.toolCalls?.length) {
-              const runs: ToolRun[] = res.toolCalls.map((tc) => ({
-                name: tc.name,
-                args: tc.args,
-                status: tc.ok ? 'success' : 'error',
-                result: tc.result,
-                nodeId: tc.nodeId,
-              }));
-              const li = liveId != null ? out.findIndex((x) => x.id === liveId && x.toolRuns) : -1;
-              const liveCard = li >= 0 ? out[li] : undefined;
-              if (liveCard) out[li] = { ...liveCard, toolRuns: runs };
-              else out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: runs });
-            }
-            if (res.aborted) {
-              // 打断:把仍 running 的行标为失败,避免永久转圈
-              for (let i = 0; i < out.length; i++) {
-                const msg = out[i];
-                if (!msg?.toolRuns?.some((r) => r.status === 'running')) continue;
-                out[i] = {
-                  ...msg,
-                  toolRuns: msg.toolRuns.map((r) => (r.status === 'running' ? { ...r, status: 'error' as const, result: '已打断' } : r)),
-                };
-              }
-              out.push({ id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改' });
-            } else if (res.ask && res.ask.options.length >= 2) {
-              // 结构化提问:渲染确认卡片(不重复推 reply 文本,卡片已含问题);思考内容折叠展示
-              if (res.thinking) out.push({ id: ++msgId.current, kind: 'agent', thinking: res.thinking });
-              out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: res.ask.question, options: res.ask.options } });
-            } else if (res.ok && (res.reply || res.thinking)) {
-              out.push({ id: ++msgId.current, kind: 'agent', text: res.reply, thinking: res.thinking });
-            } else if (!res.ok) {
-              // 错误卡(LLM 不可达等):红头 + 原因 + 重试/去设置;本轮未执行的工具不受影响
-              const detail = res.error ?? '未知错误';
-              out.push({
-                id: ++msgId.current,
-                kind: 'agent',
-                error: {
-                  title: /不可达|不可用|超时|timeout|ECONNREFUSED|fetch failed|connect/i.test(detail) ? '对话服务不可达' : '对话失败',
-                  detail,
-                  retryText: v,
-                },
-              });
-            }
-            return out;
-          });
-        })
-        .catch((e) => {
-          liveToolCardId.current = null;
-          const detail = e instanceof Error ? e.message : String(e);
-          setMsgs((m) => [
-            ...m.filter((x) => x.id !== loadingId),
-            { id: ++msgId.current, kind: 'agent', error: { title: '对话服务不可达', detail, retryText: v } },
-          ]);
-        })
-        .finally(() => {
-          setSending(false);
-          // 画布可能被工具改动:重新加载当前画布
-          void window.bigbotart.loadProjectCanvases(pid).then(() => {
-            // 触发 activeCanvasId 变化 effect 由 App 的 projectCanvases 刷新驱动;
-            // 这里直接刷新本地节点(工具已改 store,重拉)
-            void refreshCanvasFromStore();
-          });
-          if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-        });
-    },
-    [chatInput, projectId, activeCanvasId, sending],
-  );
-
-  /** 真实打断:中止 worker 内 LLM 请求 */
-  const interrupt = useCallback(() => {
-    if (!projectId) return;
-    void window.bigbotart.agentCancel(projectId);
-    setMsgs((m) => [
-      ...m.filter((x) => !x.loading),
-      { id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改,Agent 将基于当前画布增量重规划' },
-    ]);
-    setSending(false);
-  }, [projectId]);
-
 
   /** 构建当前画布快照(节点+边)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
   const buildActiveSnapshot = useCallback(
@@ -848,8 +606,6 @@ export default function CanvasPage({
     nextId.current = seedIdCounter(selfHeal.nodes);
     setSelected(null);
     setFlashId(null);
-    // 对话区清空,真实历史由 memoryGet 恢复 effect 填充(不再放演示计划卡)
-    setMsgs([]);
     requestAnimationFrame(() => {
       bootRef.current = false;
     });
@@ -878,14 +634,10 @@ export default function CanvasPage({
         setNodes([sbNode, ...imgNodes, ...shotNodes]);
         setEdges(toLocalEdges(plan.edges ?? []));
         setSelected(shotNodes[0]?.id ?? sbNode.id);
-        setMsgs((m) => [
-          ...m,
-          {
-            id: ++msgId.current,
-            kind: 'sys',
-            text: `Agent 已生成分镜表 · ${plan.report ?? ''} · 选中分镜表可在检查器改表后一键铺节点`,
-          },
-        ]);
+        chat.pushMsg({
+          kind: 'sys',
+          text: `Agent 已生成分镜表 · ${plan.report ?? ''} · 选中分镜表可在检查器改表后一键铺节点`,
+        });
       } else {
         // 旧模式(Brief):document + shots
         const docNode = fromSharedNode(plan.document as never);
@@ -893,10 +645,7 @@ export default function CanvasPage({
         setNodes([docNode, ...shotNodes]);
         setEdges(toLocalEdges(plan.edges ?? []));
         setSelected(shotNodes[0]?.id ?? docNode.id);
-        setMsgs((m) => [
-          ...m,
-          { id: ++msgId.current, kind: 'agent', odId: 'agent-plan', rich: planMsg(plan as never) },
-        ]);
+        chat.pushMsg({ kind: 'agent', odId: 'agent-plan', plan: plan as never });
       }
     } catch (e) {
       console.error('规划落地失败', e);
@@ -943,111 +692,13 @@ export default function CanvasPage({
     }
   }, [projectId, activeCanvasId]);
 
-  /** 挂载时恢复当前画布的对话历史(recall) */
-  useEffect(() => {
-    if (!projectId || !activeCanvasId) return;
-    let alive = true;
-    void window.bigbotart.memoryGet(projectId).then((mem) => {
-      if (!alive) return;
-      const recent = mem.recall
-        .filter((r) => r.canvasId === activeCanvasId)
-        .slice(-20);
-      if (recent.length === 0) return;
-      // 连续的 tool 记录聚合为一组 toolRuns(一轮一张卡);user/assistant 保持原样
-      const restored: ChatMsg[] = [];
-      let toolGroup: ToolRun[] | null = null;
-      const flushTools = () => {
-        if (toolGroup?.length) {
-          restored.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: toolGroup });
-        }
-        toolGroup = null;
-      };
-      for (const r of recent) {
-        if (r.role === 'tool' && r.toolName) {
-          (toolGroup ??= []).push({ name: r.toolName, args: r.toolArgs ?? {}, status: 'success', result: r.toolResult });
-        } else {
-          flushTools();
-          restored.push({ id: ++msgId.current, kind: r.role === 'user' ? 'user' : 'agent', text: r.content });
-        }
-      }
-      flushTools();
-      setMsgs((m) => [...restored, ...m]);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [projectId, activeCanvasId]);
-
-  /** 订阅 Agent 实时事件(工具开始/结束 → 工具卡状态;连续性校验 → 校验卡) */
-  useEffect(() => {
-    const off = window.bigbotart.onAgentEvent((ev) => {
-      if (ev.projectId && projectId && ev.projectId !== projectId) return;
-      if (ev.canvasId && activeCanvasId && ev.canvasId !== activeCanvasId) return;
-      if (ev.kind === 'tool-start' && ev.toolName) {
-        const row: ToolRun = { name: ev.toolName!, args: ev.toolArgs ?? {}, status: 'running' };
-        // StrictMode 下 updater 双跑:id 与 ref 在 updater 外一次分配,避免重复建卡
-        const liveId = liveToolCardId.current;
-        const newId = liveId == null ? ++msgId.current : null;
-        if (newId != null) liveToolCardId.current = newId;
-        setMsgs((m) => {
-          const li = liveId != null ? m.findIndex((x) => x.id === liveId && x.toolRuns) : -1;
-          const card = li >= 0 ? m[li] : undefined;
-          if (card?.toolRuns) {
-            // 本轮聚合卡已存在 → 追加一行
-            const next = [...m];
-            next[li] = { ...card, toolRuns: [...card.toolRuns, row] };
-            return next;
-          }
-          // 本轮第一张聚合卡:插在「思考中」loading 之前——加载指示始终停在流底部,直到整轮完全结束
-          const cardMsg: ChatMsg = { id: newId ?? ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: [row] };
-          const loadingIdx = m.findIndex((x) => x.loading);
-          if (loadingIdx >= 0) return [...m.slice(0, loadingIdx), cardMsg, ...m.slice(loadingIdx)];
-          return [...m, cardMsg];
-        });
-      } else if (ev.kind === 'tool-end' && ev.toolName) {
-        setMsgs((m) => {
-          // 找本轮聚合卡中最后一条同名 running 行,更新为 success/error
-          const liveId = liveToolCardId.current;
-          const li = liveId != null ? m.findIndex((x) => x.id === liveId && x.toolRuns) : -1;
-          const card = li >= 0 ? m[li] : undefined;
-          if (!card?.toolRuns) return m;
-          const runs = [...card.toolRuns];
-          const rev = [...runs].reverse().findIndex((r) => r.name === ev.toolName && r.status === 'running');
-          if (rev < 0) return m;
-          const ri = runs.length - 1 - rev;
-          const prev = runs[ri];
-          if (!prev) return m;
-          runs[ri] = { ...prev, status: ev.ok ? ('success' as const) : ('error' as const), result: ev.result, nodeId: ev.nodeId };
-          const next = [...m];
-          next[li] = { ...card, toolRuns: runs };
-          return next;
-        });
-        // 工具改了画布:刷新节点
-        if (ev.toolName.startsWith('canvas.')) void refreshCanvasFromStore();
-      } else if (ev.kind === 'continuity') {
-        setMsgs((m) => [
-          ...m,
-          {
-            id: ++msgId.current,
-            kind: 'agent',
-            odId: 'agent-check',
-            rich: (
-              <>
-                <b className="mut">校验 Agent（自动）</b>
-                <div className="mut" style={{ marginTop: 4, fontSize: '11px' }}>
-                  {ev.issues?.length ? ev.issues.join('；') : (ev.result ?? '连续性校验通过')}
-                </div>
-              </>
-            ),
-          },
-        ]);
-      } else if (ev.kind === 'aborted') {
-        setMsgs((m) => m.filter((x) => !x.loading));
-      }
-      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-    });
-    return off;
-  }, [projectId, activeCanvasId, refreshCanvasFromStore]);
+  /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
+  const chat = useAgentChat({
+    projectId,
+    canvasId: activeCanvasId,
+    onCanvasMutated: () => void refreshCanvasFromStore(),
+    toastMsg,
+  });
 
   /* 画布自动持久化(防抖 800ms;只在 active canvas 有内容时写) */
   useEffect(() => {
@@ -1159,11 +810,6 @@ export default function CanvasPage({
       if (queueTimer.current) window.clearInterval(queueTimer.current);
     };
   }, [refreshTakeResults]);
-
-  useEffect(() => {
-    const el = inputRef.current;
-    if (el) el.value = chatInput;
-  }, [chatInput]);
 
   /* ══ 统一边分派(P0 · docs/视频节点下游连接规划.md §3)══
      边 → 下游节点 data 自动填充,删除边时同步移除对应自动项(手动项保留):
@@ -2154,14 +1800,14 @@ export default function CanvasPage({
         setNodes((ns) => [...ns, sb]);
         setEdges((es) => [...es, { from: docNode.id, to: sb.id, cls: '', label: 'prompt' }]);
         setSelected(sb.id);
-        setMsgs((m) => [...m, { id: ++msgId.current, kind: 'sys', text: `Agent 已生成分镜表 · ${plan.report}` }]);
+        chat.pushMsg({ kind: 'sys', text: `Agent 已生成分镜表 · ${plan.report}` });
         toastMsg(`已生成分镜表 · ${plan.report}`);
       } catch (e) {
         console.error('生成分镜表失败', e);
         toastMsg(`生成分镜表失败:${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [projectId, setNodes, setEdges, setSelected, setMsgs, toastMsg],
+    [projectId, setNodes, setEdges, setSelected, chat, toastMsg],
   );
 
   /* 调试面板:主进程日志总线(拉历史 + 订阅实时) */
@@ -3181,118 +2827,13 @@ export default function CanvasPage({
                 <span className="dot ok"></span>pi · 运行中
               </span>
             </div>
-            <div className="agent-llm mono">LLM:{model} · {modelOverridden ? '项目级覆盖' : '全局默认'}</div>
-
-            {/* 对话 pane */}
-            <div
-              className="chat"
-              ref={chatRef}
-              style={{ display: tab === 'chat' ? undefined : 'none' }}
-              onScroll={(e) => {
-                // 距底 80px 内视为贴底:跟随新消息;往上翻则松开
-                const el = e.currentTarget;
-                pinToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-              }}
-            >
-              {msgs.map((m) => {
-                if (m.kind === 'user') {
-                  return (
-                    <div className="msg-user" key={m.id}>
-                      {m.text}
-                    </div>
-                  );
-                }
-                if (m.kind === 'sys') {
-                  return (
-                    <div className="msg-sys" key={m.id}>
-                      {m.loading ? <span className="spin" style={{ marginRight: 6 }} /> : null}
-                      {m.text}
-                    </div>
-                  );
-                }
-                if (m.error) {
-                  // 错误卡:LLM 不可达/对话失败(工具执行失败不走这里,走 ToolRunCard 失败行)
-                  return (
-                    <div className="msg-agent err" key={m.id} data-od-id="agent-error">
-                      <div className="eh">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <path d="M12 4 2.8 19.2h18.4L12 4Z" />
-                          <path d="M12 10v4" />
-                          <circle cx="12" cy="16.6" r=".9" fill="currentColor" stroke="none" />
-                        </svg>
-                        {m.error.title}
-                      </div>
-                      <div className="mut" style={{ marginTop: 4, fontSize: '11px' }}>{m.error.detail}</div>
-                      <div className="row g8" style={{ marginTop: 8 }}>
-                        {m.error.retryText ? (
-                          <button className="btn btn-s btn-sm" onClick={() => send(m.error!.retryText)}>
-                            重试本轮
-                          </button>
-                        ) : null}
-                        <button className="btn btn-g btn-sm" onClick={() => onNavigate('settings')}>
-                          打开设置
-                        </button>
-                      </div>
-                    </div>
-                  );
-                }
-                if (m.ask) {
-                  // 确认卡片(Agent 调 ask.user):点选选项作为你的答复继续对话
-                  return <AskCard key={m.id} question={m.ask.question} options={m.ask.options} onPick={(label) => send(label)} />;
-                }
-                if (m.toolRuns) {
-                  // 🆕 工具聚合卡:一轮调用一张卡(设计文档 §3)
-                  return <ToolRunCard key={m.id} runs={m.toolRuns} onLocate={locate} />;
-                }
-                if (m.toolCall) {
-                  const tc = m.toolCall;
-                  return (
-                    <div className="msg-agent" key={m.id} data-od-id="agent-tools">
-                      <div className="tool">
-                        <div className="th">
-                          <span className="mono" style={{ fontSize: '11px' }}>
-                            {tc.name}
-                          </span>
-                          <span className="badge" style={{ marginLeft: 'auto' }}>
-                            {tc.status === 'running' ? (
-                              <>
-                                <span className="dot" style={{ background: 'var(--warn)' }}></span>
-                                运行中
-                              </>
-                            ) : tc.status === 'success' ? (
-                              '成功'
-                            ) : (
-                              '失败'
-                            )}
-                          </span>
-                          {tc.nodeId ? (
-                            <span className="locate" onClick={() => locate(tc.nodeId!)}>
-                              定位到节点 →
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="tb mono">
-                          {tc.result ?? JSON.stringify(tc.args).slice(0, 140)}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <div className="msg-agent" key={m.id} data-od-id={m.odId}>
-                    {m.thinking ? (
-                      <details className="think">
-                        <summary>思考过程</summary>
-                        <pre>{m.thinking}</pre>
-                      </details>
-                    ) : null}
-                    {m.rich ?? (m.text ? <MarkdownText text={m.text} /> : null)}
-                  </div>
-                );
-              })}
-
-
-            </div>
+            {/* Agent 对话页签(pages/agent/AgentChatView;检查器 pane 保持在本文件) */}
+            <AgentChatView
+              chat={chat}
+              hidden={tab !== 'chat'}
+              onLocate={locate}
+              onOpenSettings={() => onNavigate('settings')}
+            />
 
             {/* 检查器 pane:按 kind 渲染专属表单;未选节点时无任何组件 */}
             <div
@@ -3351,212 +2892,8 @@ export default function CanvasPage({
               )}
             </div>
 
-            {/* 输入区 */}
-            <div className="composer" data-od-id="agent-composer">
-              <div className="attach-row">
-                {attachments.map((a, i) => (
-                  <span className="attach" key={a.id} title={a.localPath}>
-                    <span className="thumb">
-                      {a.kind === 'image' ? (
-                        <img src={`bba-asset://${a.localPath.split('/').pop()}`} alt="" />
-                      ) : (
-                        <span className={`attach-kind attach-kind--${a.kind}`}>
-                          {a.kind === 'video' ? '🎬' : a.kind === 'audio' ? '🎵' : '📄'}
-                        </span>
-                      )}
-                    </span>
-                    <span>{a.name}</span>
-                    <span className="mono mut" style={{ fontSize: '10px' }}>
-                      {a.kind}
-                      {a.width ? ` · ${a.width}×${a.height}` : ''}
-                      {a.durationSec ? ` · ${a.durationSec}s` : ''}
-                    </span>
-                    <button
-                      className="x"
-                      aria-label="移除附件"
-                      onClick={() =>
-                        setAttachments((list) => list.filter((x) => x.id !== a.id))
-                      }
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2.4}
-                      >
-                        <path d="M6 6l12 12M18 6 6 18" />
-                      </svg>
-                    </button>
-                  </span>
-                ))}
-              </div>
-              <div className="input-box">
-                {skillOn ? (
-                  <span className="skill-tag" data-od-id="composer-skill-tag">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-                    </svg>
-                    <span>
-                      技能：<b style={{ fontWeight: 600 }}>{skill}</b>
-                    </span>
-                    <button
-                      className="x"
-                      aria-label="移除技能"
-                      onClick={() => setSkill('无技能')}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={2.4}
-                      >
-                        <path d="M6 6l12 12M18 6 6 18" />
-                      </svg>
-                    </button>
-                  </span>
-                ) : null}
-                <textarea
-                  rows={2}
-                  ref={inputRef}
-                  placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…"
-                  onChange={(e) => {
-                    setChatInput(e.target.value);
-                    autoGrow(e.target);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      send();
-                    }
-                  }}
-                />
-              </div>
-              <div className="toolrow">
-                <button
-                  className="chip"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // dev/E2E 钩子:若 window.__bbaDevImportPaths 存在则用它,跳过 Finder(测试用)
-                    const paths = (window as unknown as { __bbaDevImportPaths?: string[] }).__bbaDevImportPaths;
-                    void window.bigbotart
-                      .importAssets(paths?.length ? { paths } : undefined)
-                      .then((res) => {
-                        if (res.canceled || !res.assets?.length) return;
-                        setAttachments((list) => [...list, ...res.assets]);
-                        if (res.failed.length) {
-                          toastMsg(`已导入 ${res.assets.length} 个;失败 ${res.failed.length}:${res.failed.map((f) => f.name).join(', ')}`);
-                        }
-                      });
-                  }}
-                >
-                  ＋ 参考图 / 文件
-                </button>
-                <button
-                  className="chip"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const opening = openPop !== 'modelPop';
-                    setOpenPop((p) => (p === 'modelPop' ? null : 'modelPop'));
-                    if (opening) void loadModelOptions();
-                  }}
-                >
-                  模型:{model}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path d="m6 9 6 6 6-6" />
-                  </svg>
-                </button>
-                <div
-                  className={`pop${openPop === 'modelPop' ? ' open' : ''}`}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {modelOptions.map((m) => (
-                    <div
-                      className="pop-it"
-                      key={m.name}
-                      onClick={() => {
-                        setModelOverridden(!m.reset);
-                        setOpenPop(null);
-                        if (m.reset) {
-                          // 回退全局:显示真实的全局模型名,而不是「全局默认」占位
-                          void window.bigbotart
-                            .getSettings()
-                            .then((s) => setModel(s.llm ? llmDisplayName(s.llm, s) : 'Ornith-1.5-35B · 本地'))
-                            .catch(() => setModel(m.name));
-                        } else {
-                          setModel(m.name);
-                        }
-                        if (!projectId) return;
-                        void window.bigbotart
-                          .setProjectLlm(projectId, m.reset ? null : (m.source ?? null))
-                          .then(() => toastMsg(m.reset ? '已回退全局 LLM 默认' : `项目级 LLM 已切换 · ${m.name}`))
-                          .catch((e) => console.error('设置项目 LLM 失败', e));
-                      }}
-                    >
-                      {m.sub}
-                      {model === m.name ? <span className="ck">✓</span> : null}
-                    </div>
-                  ))}
-                  <div
-                    className="pop-it dim"
-                    style={{
-                      borderTop: '1px solid var(--border-soft)',
-                      marginTop: 4,
-                      paddingTop: 9,
-                    }}
-                  >
-                    项目级覆盖 · 规划时优先使用该 LLM
-                  </div>
-                </div>
-                <button
-                  className="chip"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setOpenPop((p) => (p === 'skillPop' ? null : 'skillPop'));
-                  }}
-                >
-                  ＋ 技能
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path d="m6 9 6 6 6-6" />
-                  </svg>
-                </button>
-                <div
-                  className={`pop${openPop === 'skillPop' ? ' open' : ''}`}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div
-                    className="pop-it"
-                    onClick={() => {
-                      setSkill('无技能');
-                      setOpenPop(null);
-                    }}
-                  >
-                    无技能 · 自由编排
-                    {skill === '无技能' ? <span className="ck">✓</span> : null}
-                  </div>
-                  {SKILLS.map((s) => (
-                    <div
-                      className="pop-it"
-                      key={s}
-                      onClick={() => {
-                        setSkill(s);
-                        setOpenPop(null);
-                      }}
-                    >
-                      {s}
-                      {skill === s ? <span className="ck">✓</span> : null}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="composer-actions">
-                <button className="btn btn-g btn-sm" onClick={interrupt}>
-                  打断并改画布
-                </button>
-                <button className="btn btn-p btn-sm" onClick={() => send()}>
-                  发送
-                </button>
-              </div>
-            </div>
+            {/* 输入区(pages/agent/AgentComposer) */}
+            <AgentComposer chat={chat} toastMsg={toastMsg} />
           </aside>
 
           {/* Agent 面板宽度拖拽把手 */}
@@ -3756,23 +3093,3 @@ function isCtxGhost(
   return !!n?.ghost;
 }
 
-/** LLM 来源 → 面板显示名(与模型选择器 ModelOption.name 的命名规则保持一致) */
-function llmDisplayName(src: LlmSource | null | undefined, settings: AppSettings | null): string {
-  if (!src) return 'Ornith-1.5-35B · 本地';
-  switch (src.kind) {
-    case 'cloud': {
-      const prov = settings?.cloudProviders?.find((p) => p.id === src.provider);
-      const mid = src.model ?? prov?.models[0] ?? '';
-      return `${mid} · ${prov?.name ?? src.provider}`;
-    }
-    case 'lmstudio':
-      return `${src.model ?? settings?.lmStudioModel ?? '默认模型'} · 本地`;
-    case 'ollama':
-    case 'mlx-provider':
-      return `${src.model ?? '默认模型'} · 本地`;
-    case 'openai-compatible':
-      return `${src.model ?? '默认模型'} · 自定义端点`;
-    case 'none':
-      return '未配置 LLM';
-  }
-}

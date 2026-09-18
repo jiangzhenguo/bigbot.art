@@ -384,10 +384,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .atab.on{color:var(--fg);font-weight:600;border-color:var(--fg)}
 .pg-canvas .agent-llm{padding:7px 12px;border-bottom:1px solid var(--border-soft);font-size:11px;color:var(--muted)}
 .pg-canvas .chat{flex:1;overflow:auto;padding:14px 12px;display:flex;flex-direction:column;gap:12px;background:var(--bg)}
+/* 关键:子项禁止收缩。卡片(.trc/.ask 带 overflow:hidden)的 min-height:auto 会算成 0,
+   默认 flex-shrink 会把卡片压扁成一条线、列表失去滚动——所有直接子项一律 flex:none */
+.pg-canvas .chat > *{flex:none}
 .pg-canvas .msg-user{margin-left:auto;max-width:92%;background:color-mix(in oklab,var(--fg) 8%,transparent);border-radius:16px 16px 4px 16px;padding:10px 13px;font-size:var(--text-xs);line-height:1.55}
 .pg-canvas .msg-agent{max-width:100%;background:var(--bg);border:1px solid var(--border-soft);border-radius:16px 16px 16px 4px;padding:11px 13px;font-size:var(--text-xs);line-height:1.55;box-shadow:0 1px 3px rgba(0,0,0,.04)}
-.pg-canvas .msg-sys{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);line-height:1.5;text-align:center}
-.pg-canvas .msg-sys::before,.pg-canvas .msg-sys::after{content:"";flex:1;height:1px;background:var(--border-soft)}
+.pg-canvas .msg-sys{text-align:center;font-size:11px;color:var(--muted);line-height:1.5}
 .pg-canvas .tool{border:1px solid var(--border-soft);border-radius:var(--radius-sm);margin-top:8px;background:var(--surface-warm)}
 .pg-canvas .tool .th{display:flex;align-items:center;gap:7px;padding:6px 9px;border-bottom:1px solid var(--border-soft)}
 .pg-canvas .tool .tb{padding:7px 10px;color:var(--muted);font-size:11px}

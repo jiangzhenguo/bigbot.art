@@ -65,20 +65,35 @@ pnpm build                       # electron-vite build
 - 注释与文档用中文;标识符用英文;环境变量统一 `BIGBOTART_` 前缀
 - 主进程模块化:新能力优先加到 `src/main/` 下的独立模块(assets/export/frames/llm/memory/settings/skills/store/takes 已是先例),不要继续堆 `index.ts`(已 645 行)
 - renderer 的 React Flow 画布逻辑集中在 `src/renderer/src/pages/canvas/`;新节点类型要同步 `node-mapping.ts` / `connectors.ts` / `constants.ts`
+- renderer 的 Agent 对话面板在 `src/renderer/src/pages/agent/`:`useAgentChat.ts`(全部状态与副作用)+ `AgentChatView`/`AgentComposer`(展示)+ `cards/`(消息卡片,纯展示)
 
-## 5. 文档同步义务
+## 5. React 开发规范(渲染层强制)
+
+以下规则来自本项目的真实事故,违反会在评审中被指出:
+
+1. **setState updater 必须纯**。禁止在 updater 里改 ref、自增 id、发请求——本项目开 StrictMode,dev 下 updater 会**双跑**,副作用会执行两次(真实事故:updater 内清 ref 导致工具卡对账失败、重复建卡)。id/ref 分配一律在 updater 外一次完成。
+2. **容器/展示分离**。页面组件(容器)只组合与接线;状态+副作用收敛到自定义 hook(`useXxx`);展示组件(如 `pages/agent/cards/*`)只接 props,**不直接调 `window.bigbotart`**。
+3. **消息/列表数据只存可序列化数据,不存 ReactNode**。渲染分派集中在列表组件(如 `ChatMessageList`),新增消息类型 = 加一个数据字段 + 一张卡片组件,禁止往消息里塞 JSX。
+4. **文件规模红线**:单个 tsx 超过 300 行考虑拆分;超过 500 行必须拆(拆出 hook 或子组件)。CanvasPage 曾是 3700+ 行的反面教材。
+5. **effect 纪律**:订阅类 effect 必须返回清理函数;依赖数组如实填写(确需省略时用 eslint-disable 注释说明原因)。
+6. **样式**:只用设计 token(`var(--fg)`/`--border-soft`/`--accent` 等),禁止新增硬编码色值;新卡片/交互组件带 `data-od-id` 便于设计稿对照与 E2E 定位。
+7. **列表渲染**:key 用稳定 id,不用数组索引。
+8. **可滚动的 flex 列容器必须给子项 `flex:none`**(如 `.chat > *{flex:none}`)。带 `overflow:hidden` 的卡片(圆角收边常用)`min-height:auto` 会算成 0,默认 `flex-shrink:1` 会把它压扁成一条线且列表失去滚动——本项目真实事故(工具卡/确认卡被压成空胶囊)。
+9. **非受控 DOM 组件(contentEditable 表格等)在"构建 html 字符串"阶段禁止读 live DOM**。如 TableEditor 的 `rowHtml` 曾在 `innerHTML` 写入前读 `tHead.rows` 取列数,首挂时 `tHead=null` 直接白屏;构建参数必须显式传参,live DOM 读取一律可选链兜底。页面级 `ErrorBoundary`(`components/ErrorBoundary.tsx`)已就位,新页面/大区域直接复用——任何组件错误只降级为错误面板,不允许整窗白屏。
+
+## 6. 文档同步义务
 
 - 改了架构、命令、环境变量 ⇒ 同步 `CLAUDE.md` 的对应小节(它是多数 AI 工具的第一入口)
 - 改了节点/连接器行为 ⇒ 同步 `docs/节点手册.md`(**不要改 `节点手册_副本.md`**,它是历史快照,禁止以副本为准)
 - 新增环境变量 ⇒ 同步 `.env.example`(占位符)+ `CLAUDE.md` 环境变量表
 
-## 6. Git 纪律
+## 7. Git 纪律
 
 - 工作分支按 `git-branch-workflow` 约定(时间戳_jzgX);不直接在主干上堆未提交修改
 - 提交信息中文、祈使句,说明"为什么"而非复述 diff
 - AI 代理**不主动执行 `git push` / `git commit --amend` / `git reset --hard`**,除非用户当次明确要求
 
-## 7. 给 AI 的提问义务(宁可问,不要猜)
+## 8. 给 AI 的提问义务(宁可问,不要猜)
 
 遇到以下情况必须先问用户,而不是自行假设:
 - 任务要求"真实推理 / 关掉 dry-run / 跑一下 h3 看看效果"

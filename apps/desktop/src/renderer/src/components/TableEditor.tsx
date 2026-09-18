@@ -98,15 +98,16 @@ export default function TableEditor({
     };
 
     const matrix = (): TableMatrix => {
-      const headCells = Array.from(gridEl.tHead!.rows[0]!.cells);
+      const headCells = Array.from(gridEl.tHead?.rows[0]?.cells ?? []);
       const h = headCells.map((th) => th.textContent!.trim()).slice(1);
       let body = bodyRows().map((tr) => Array.from(tr.cells).map(cellText));
       if (!snIsData) body = body.map((r) => r.slice(1));
       return { head: h, body };
     };
 
-    const rowHtml = (vals?: readonly string[]): string => {
-      const n = (gridEl.tHead!.rows[0]!.cells.length || 1) - 1;
+    /** cols 显式传列数:build() 拼 html 时 thead 尚未写入 DOM,不能从 live DOM 读(首挂 tHead=null → 白屏事故) */
+    const rowHtml = (vals?: readonly string[], cols?: number): string => {
+      const n = cols ?? (gridEl.tHead?.rows[0]?.cells.length ?? 1) - 1;
       let tr = '<tr><td class="sn"></td>';
       for (let i = 0; i < n; i++) {
         const v = vals && vals[i] != null ? String(vals[i]) : '';
@@ -134,7 +135,7 @@ export default function TableEditor({
       });
       html += '</tr></thead><tbody>';
       r.forEach((row) => {
-        html += rowHtml(row);
+        html += rowHtml(row, h.length);
       });
       html += '</tbody>';
       gridEl.innerHTML = html;

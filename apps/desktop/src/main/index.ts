@@ -136,13 +136,19 @@ agent.toolExecutor = async (req) => {
     projectId: req.params.projectId || currentToolCtx?.projectId || '',
     canvasId: req.params.canvasId || currentToolCtx?.canvasId || '',
   };
-  console.error(`[tool-bridge] 收到工具调用: ${req.params.tool} id=${req.id} ctx=${ctx.projectId.slice(-8)}/${ctx.canvasId.slice(-8)}`);
+  const argsBrief = JSON.stringify(req.params.args ?? {}).slice(0, 120);
+  logger.log('info', `agent.tool → ${req.params.tool}(${argsBrief})`);
   const res = await tools.call(req.params.tool, req.params.args, ctx);
-  console.error(`[tool-bridge] 执行完成: ${req.params.tool} ok=${res.ok} → 回写 worker`);
+  logger.log(res.ok ? 'info' : 'error', `agent.tool ${res.ok ? '✓' : '✕'} ${req.params.tool} → ${(res.result ?? '').slice(0, 160)}`);
   return { id: req.id, result: res };
 };
-/* Agent 实时事件 → 渲染层推送 */
+/* Agent 实时事件 → 渲染层推送 + 日志总线 */
 agent.onEvent = (ev: AgentEvent) => {
+  if (ev.kind === 'continuity') {
+    logger.log(ev.issues?.length ? 'warn' : 'info', `agent.continuity ${ev.issues?.length ? `发现 ${ev.issues.length} 处连续性问题` : '通过'}`);
+  } else if (ev.kind === 'aborted') {
+    logger.log('warn', 'agent.chat 已被用户打断');
+  }
   win?.webContents.send('agent-event', {
     ...ev,
     projectId: ev.projectId || currentToolCtx?.projectId || '',
@@ -525,17 +531,29 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
 
-  // 记录用户消息到 recall
-  memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'user', content: req.text });
+  // 记录用户消息到 recall(附件名一并留痕)
+  const atts = req.attachments ?? [];
+  const visibleText = req.text + (atts.length ? ` 📎${atts.map((a) => a.name).join('、')}` : '');
+  memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'user', content: visibleText });
+  logger.log('info', `agent.chat 开始 · "${req.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
+
+  // 附件注入:资产 id 告诉 LLM,Agent 可用 assets.get 查详情 / canvas.create_node 引用
+  const attNote = atts.length
+    ? `\n\n[用户附件 · 已在资产库,可用 assets.get 查看详情,或用 canvas.create_node(kind=asset) 引用到画布:\n${atts.map((a) => `- ${a.name}(${a.kind},assetId=${a.id})`).join('\n')}]`
+    : '';
 
   try {
     const result = await agent.chat({
       projectId: req.projectId,
       canvasId: req.canvasId,
-      text: req.text,
+      text: req.text + attNote,
       context: ctx,
       llm,
     });
+    logger.log(
+      'info',
+      `agent.chat 完成 · 工具 ${result.toolCalls.length} 个${result.ask ? ' · 暂停待用户确认(ask.user)' : ''}${result.aborted ? ' · 已打断' : ''} · 回复 ${result.reply.length} 字`,
+    );
     // assistant 回复记入 recall
     if (result.reply) {
       memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'assistant', content: result.reply });
@@ -548,8 +566,19 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
         toolName: tc.name, toolArgs: tc.args, toolResult: tc.result,
       });
     }
+    // ask.user 暂停卡也记入 recall(被 worker 拦截、不经工具桥):刷新/切换后恢复成可点选的确认卡,而不是丢成纯文本
+    if (result.ask) {
+      memory.addRecall(req.projectId, {
+        canvasId: req.canvasId, role: 'tool',
+        content: `ask.user(${result.ask.question.slice(0, 120)})`,
+        toolName: 'ask.user',
+        toolArgs: { question: result.ask.question, options: result.ask.options },
+        toolResult: '(已暂停,等待用户选择)',
+      });
+    }
     return { ok: true, reply: result.reply, thinking: result.thinking, toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted };
   } catch (e) {
+    logger.log('error', `agent.chat 失败:${(e as Error).message}`);
     return { ok: false, error: (e as Error).message };
   } finally {
     activeToolCtx.delete(chatKey);

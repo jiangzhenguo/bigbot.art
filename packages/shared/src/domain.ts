@@ -551,6 +551,8 @@ export interface AgentChatRequest {
   projectId: string;
   canvasId: string;
   text: string;
+  /** 用户从资产库挑选的附件(已在资产库,Agent 可按 id 引用/连线) */
+  attachments?: Array<{ id: string; name: string; kind: string; localPath: string }>;
 }
 /** ask.user 结构化提问选项(🆕 支持副说明与推荐徽标;worker 已把字符串归一化为对象) */
 export interface AskOption {

@@ -1,12 +1,16 @@
+/**
+ * PlanCard — 执行计划卡(agentPlan / 首页规划落地后的消息)
+ * 由 canvas/plan-msg.tsx 迁移:消息只存 PlanData,渲染归本组件。
+ */
 import React from 'react';
+import type { PlanData } from '../types';
 
-/** Agent 规划结果 → Agent 消息气泡内容 */
-export function planMsg(plan: { document?: unknown; shots?: unknown[]; report?: string; brief?: string }): React.ReactNode {
+export function PlanCard({ plan }: { plan: PlanData }) {
   const doc = plan.document as { data?: { markdown?: string }; label?: string } | undefined;
   const md = doc?.data?.markdown ?? plan.brief ?? '';
   const shots = plan.shots ?? [];
   return (
-    <>
+    <div className="msg-agent" data-od-id="agent-plan">
       <b>执行计划（已落到画布）</b>
       {md ? (
         <div className="mut" style={{ marginTop: 4, fontSize: '11px', whiteSpace: 'pre-wrap' }}>
@@ -33,6 +37,8 @@ export function planMsg(plan: { document?: unknown; shots?: unknown[]; report?: 
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
+
+export default PlanCard;

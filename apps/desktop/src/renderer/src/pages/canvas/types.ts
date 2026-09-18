@@ -1,5 +1,4 @@
-import type { NodeKind, LlmSource, CanvasSnapshot, ProjectCanvases, AskOption } from '@bigbotart/shared';
-import type React from 'react';
+import type { NodeKind, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export interface CanvasPageProps {
   onNavigate: (
@@ -77,43 +76,4 @@ export interface NodeInfo {
   t: string;
   img: string | null;
   meta: Array<[string, string]>;
-}
-
-export interface ModelOption {
-  name: string;
-  sub: string;
-  source?: LlmSource;
-  reset?: boolean;
-}
-
-/** 🆕 工具执行行(ToolRunCard 聚合卡的一行) */
-export interface ToolRun {
-  name: string;
-  args: Record<string, unknown>;
-  status: 'running' | 'success' | 'error';
-  result?: string;
-  nodeId?: string;
-}
-
-export interface ChatMsg {
-  id: number;
-  kind: 'user' | 'agent' | 'sys';
-  /** 纯文本消息 */
-  text?: string;
-  /** 模型思考内容(折叠展示;不进记忆) */
-  thinking?: string;
-  /** 富文本消息(执行计划/工具调用/校验卡) */
-  rich?: React.ReactNode;
-  /** 设计稿里的 data-od-id 标识 */
-  odId?: string;
-  /** 工具调用卡数据(旧格式,逐条平铺;保留仅为兼容历史快照渲染) */
-  toolCall?: { name: string; args: Record<string, unknown>; status: 'running' | 'success' | 'error'; result?: string; nodeId?: string };
-  /** 🆕 本轮工具执行聚合(一张 ToolRunCard,替代逐条 toolCall 平铺;设计文档 §3.3) */
-  toolRuns?: ToolRun[];
-  /** 确认卡片(Agent 调 ask.user 暂停,等待用户点选);options 已归一化为 AskOption */
-  ask?: { question: string; options: AskOption[] };
-  /** 🆕 错误卡(LLM 不可达等;retryText 存在时显示「重试本轮」) */
-  error?: { title: string; detail: string; retryText?: string };
-  /** loading 占位(发送后到回复前) */
-  loading?: boolean;
 }
