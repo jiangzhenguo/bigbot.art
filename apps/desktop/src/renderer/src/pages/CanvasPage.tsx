@@ -1,51 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, LlmSource, Asset, NodeKind, ShotTakeHistory, Take, DebugLogEntry, TimelineData, PromptSource } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, NodeKind, Take, DebugLogEntry, PromptSource } from '@bigbotart/shared';
 import {
   parseGfmTable,
-  docMarkers,
   inferPromptSource,
   resolvePromptFromSource,
   assembleH3Prompt,
   assembleZImagePrompt,
   rowNeedsImage,
   rowSeconds,
-  sbStats,
   tableToGfm,
 } from '@bigbotart/shared';
-import CanvasSwitcher from '../components/CanvasSwitcher';
-import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo } from './canvas/types';
+import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
 import {
-  FINDER_PATH,
   NODE_TYPES,
   RES,
-  ETA,
-  resLine,
-  SHOT_ASPECTS,
-  SHOT_TIERS,
-  SHOT_SIZES,
-  SHOT_TIER_PRESETS,
-  SHOT_MODE_LABEL,
-  SHOT_REF_ROLES,
   NODE_INFO_BASE,
-  WAVE_BARS,
 } from './canvas/constants';
-import {
-  ICON_DOC,
-  ICON_DOC_S,
-  ICON_IMAGE,
-  ICON_EDIT,
-  ICON_UPSCALE,
-  ICON_SHOT,
-  ICON_DIRECTOR,
-  ICON_AUDIO,
-  ICON_TIMELINE,
-  ICON_COMFY,
-  ICON_ASSET,
-  ICON_WF_INPUT,
-  ICON_WF_OUTPUT,
-  PALETTE_ICONS,
-  TYPE_ICON,
-} from './canvas/icons';
 import {
   deriveEdgeLabel,
   makeInitialData,
@@ -53,19 +23,23 @@ import {
   toSharedNodes,
   toLocalEdges,
   toSharedEdges,
-  defaultDataFor,
   dedupeNodeIds,
   seedIdCounter,
 } from './canvas/node-mapping';
-import { resolvePort, hasConnector, pickShotSpec, IMAGE_KINDS } from './canvas/connectors';
+import { resolvePort, pickShotSpec, IMAGE_KINDS } from './canvas/connectors';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
-import { basenameOf, outputUrlOf, thumbSrc, clamp32, VideoThumb } from './canvas/media';
-import { queueItem } from './canvas/queue';
-import { InspectorBody } from './canvas/inspector/InspectorBody';
-import { TimelineExportPreview } from './canvas/TimelineExportPreview';
+import { basenameOf } from './canvas/media';
+import { Toolbar } from './canvas/Toolbar';
+import { Palette } from './canvas/Palette';
+import { StageView } from './canvas/StageView';
+import { AddNodePopover } from './canvas/AddNodePopover';
+import { AgentPane } from './canvas/AgentPane';
+import { InspectorPane } from './canvas/InspectorPane';
+import { ContextMenu } from './canvas/ContextMenu';
+import { DebugPanel } from './canvas/DebugPanel';
+import { QueueBar } from './canvas/QueueBar';
 import { useAgentChat } from './agent/useAgentChat';
-import { AgentChatView } from './agent/AgentChatView';
-import { AgentComposer } from './agent/AgentComposer';
+
 
 export default function CanvasPage({
   onNavigate,
@@ -146,18 +120,10 @@ export default function CanvasPage({
   /* ── 「+」下游节点弹层 ── */
   const [apFrom, setApFrom] = useState<string | null>(null);
   const [apOpen, setApOpen] = useState(false);
-  const [apSearch, setApSearch] = useState('');
-  const [apSel, setApSel] = useState<string | null>(null);
-  const [apAspect, setApAspect] = useState('16:9');
-  const [apTier, setApTier] = useState('默认');
-
-  /* ── 检查器:档位 × 画幅 ── */
-  const [iAspect, setIAspect] = useState('16:9');
-  const [iTier, setITier] = useState('默认');
+  /** 「+」弹层打开计数:每次打开 +1(AddNodePopover 用它重置内部搜索/选中) */
+  const [apOpenCount, setApOpenCount] = useState(0);
 
   /* Agent 对话面板:全部状态/副作用在 pages/agent/useAgentChat(本组件只持有返回值) */
-  const resHint = resLine(apAspect, apTier);
-  const inspHint = `${resLine(iAspect, iTier)} · 改动将标 stale，仅重跑受影响节点`;
   const selInfo = selected ? infoMap[selected] : undefined;
   const selNode = selected ? nodes.find((n) => n.id === selected) : undefined;
 
@@ -238,21 +204,6 @@ export default function CanvasPage({
    * 拖动期间:跟手画临时虚线 + 命中节点高亮(可连=绿,不可连=红);
    * 命中空白 / 不可连 → 保持原弹层行为;命中可连 → 写边 + 关闭弹层。
    * 详见 docs/节点手册.md §3 + 连接器设计.md §5。 */
-  type ConnectDrag = {
-    sourceId: string;
-    /** pointerdown 屏幕坐标(用于判断「未拖动」则走 onClick 弹层路径) */
-    sx: number;
-    sy: number;
-    /** 当前屏幕坐标 */
-    cx: number;
-    cy: number;
-    /** 当前命中节点 id(null = 空白) */
-    hitId: string | null;
-    /** 当前命中是否可连 */
-    hitOk: boolean;
-    /** 标记已开始拖动(>4px 才算;否则 onPointerUp 走原 click) */
-    moved: boolean;
-  };
   const connectDragRef = useRef<ConnectDrag | null>(null);
   /** 触发重渲染用的镜像 state(每帧由 raf 节流更新一次) */
   const [connectDrag, setConnectDrag] = useState<ConnectDrag | null>(null);
@@ -1102,9 +1053,8 @@ export default function CanvasPage({
   const openAddPop = useCallback(
     (nodeId: string) => {
       setApFrom(nodeId);
-      setApSel(null);
-      setApSearch('');
       setApOpen(true);
+      setApOpenCount((c) => c + 1);
       const n = nodesRef.current.find((x) => x.id === nodeId);
       if (n) {
         const x = Math.min(n.x + (n.w ?? 236) + 18, 1600 - 290);
@@ -1118,40 +1068,43 @@ export default function CanvasPage({
   const [apPos, setApPos] = useState({ x: 0, y: 0 });
   const closeAddPop = useCallback(() => setApOpen(false), []);
 
-  /* 创建并连线 */
-  const createFromPop = useCallback(() => {
-    if (!apSel || !apFrom) return;
-    const src = nodesRef.current.find((n) => n.id === apFrom);
-    const t = NODE_TYPES.find((x) => x.id === apSel);
-    if (!src || !t) return;
-    const id = makeNodeId('new');
-    const meta =
-      apSel === 'shot'
-        ? `h3.c · ${apTier}档 · ${apAspect} ${(RES[apTier] ?? {})[apAspect] ?? ''} · 自动连线继承绑定`
-        : t.sub;
-    // 按 kind 初始化 data(写入 CanvasSnapshot;生成时走 RenderQueue)
-    const initData = makeInitialData(t);
-    setNodes((ns) => [
-      ...ns,
-      {
-        id,
-        title: t.name,
-        w: 224,
-        x: src.x + (src.w ?? 236) + 90,
-        y: src.y + 40,
-        ghost: true,
-        kind: t.kind,
-        tag: t,
-        extra: meta,
-        data: initData,
-      } as CanvasNode,
-    ]);
-    // 按手册 §9 边 label:brief→input-brief / asset→按角色 / wf-input→slot-<name> / 其他不标
-    const edgeLabel = deriveEdgeLabel(src, t);
-    setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
-    setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
-    closeAddPop();
-  }, [apAspect, apFrom, apSel, apTier, closeAddPop]);
+  /* 创建并连线(类型/画幅/档位由 AddNodePopover 回传) */
+  const createFromPop = useCallback(
+    (typeId: string, aspect: string, tier: string) => {
+      if (!apFrom) return;
+      const src = nodesRef.current.find((n) => n.id === apFrom);
+      const t = NODE_TYPES.find((x) => x.id === typeId);
+      if (!src || !t) return;
+      const id = makeNodeId('new');
+      const meta =
+        typeId === 'shot'
+          ? `h3.c · ${tier}档 · ${aspect} ${(RES[tier] ?? {})[aspect] ?? ''} · 自动连线继承绑定`
+          : t.sub;
+      // 按 kind 初始化 data(写入 CanvasSnapshot;生成时走 RenderQueue)
+      const initData = makeInitialData(t);
+      setNodes((ns) => [
+        ...ns,
+        {
+          id,
+          title: t.name,
+          w: 224,
+          x: src.x + (src.w ?? 236) + 90,
+          y: src.y + 40,
+          ghost: true,
+          kind: t.kind,
+          tag: t,
+          extra: meta,
+          data: initData,
+        } as CanvasNode,
+      ]);
+      // 按手册 §9 边 label:brief→input-brief / asset→按角色 / wf-input→slot-<name> / 其他不标
+      const edgeLabel = deriveEdgeLabel(src, t);
+      setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
+      setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
+      closeAddPop();
+    },
+    [apFrom, closeAddPop],
+  );
 
   /* 左侧面板:双击添加 + 拖拽添加
      双击:添加到当前画布视口中心附近、不与现有节点重叠;
@@ -1865,17 +1818,6 @@ export default function CanvasPage({
      连接器设计 §10:只列出**有可用连接器**的类型(无连接器 ⇒ 不展示),
      每行预告「这条边落在哪个目标端口」;不再有「展开全部(含不兼容)」一档 */
   const apSrc = apFrom ? nodes.find((n) => n.id === apFrom) : undefined;
-  const q = apSearch.trim().toLowerCase();
-  const visibleTypes = apSrc
-    ? NODE_TYPES.filter((t) => hasConnector(apSrc, t.id))
-        .filter((t) => !q || t.name.toLowerCase().includes(q))
-    : [];
-  const apFromLabel = apSrc?.title ?? '—';
-  const apSelPort = apSrc && apSel ? resolvePort(apSrc, apSel) : null;
-  const apTip = apSel
-    ? `自动连线：${apFromLabel} → ${NODE_TYPES.find((t) => t.id === apSel)?.name ?? ''}${apSelPort ? ` · 落 ${apSelPort.port} 端口` : ''}`
-    : '选中后自动连线并继承绑定';
-
   /* 已连接下游:从边派生(连接器 D1:只见节点与端口语义,不见连接器) */
   const apOutgoing = apFrom
     ? edges
@@ -1885,549 +1827,65 @@ export default function CanvasPage({
     : [];
 
   const zoomPct = `${Math.round(view.z * 100)}%`;
-
-  /* 节点内部渲染(按 kind)——**一律数据驱动**:
-     卡片内容 = 节点 data 的投影,与检查器同源(不再有"演示节点写死文案"这条旁路,
-     否则会出现「卡片写着首尾帧/默认档,检查器显示文生」这类脱节)。 */
-  const renderBody = (n: CanvasNode) => {
-    const d = (n.data ?? {}) as Record<string, unknown>;
-    /** 产物路径:节点 data 优先,回退 Take 回填 */
-    const productOf = (node: CanvasNode) =>
-      String((node.data as Record<string, unknown> | undefined)?.resultPath ?? takeResults[node.id] ?? '');
-    switch (n.kind) {
-      case 'document': {
-        const md = String(d.markdown ?? '');
-        const tb = parseGfmTable(md);
-        const mk = docMarkers(md);
-        return (
-          <div className="nb md-preview">
-            {tb ? (
-              <>
-                <div style={{ overflowX: 'auto' }}>
-                  <table className="tbl-mini">
-                    <thead>
-                      <tr>
-                        {tb.head.slice(0, 3).map((h) => (
-                          <th key={h}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tb.rows.slice(0, 2).map((r, i) => (
-                        <tr key={i}>
-                          {tb.head.slice(0, 3).map((_, c) => (
-                            <td key={c}>{r[c] ?? ''}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="rowsum">
-                  <span className="badge">{tb.rows.length} 行 · {tb.head.length} 列</span>
-                  {mk.prompt ? (
-                    <span className="mkblock">```prompt 块 → 已命中</span>
-                  ) : mk.shot ? (
-                    <span className="mkblock">标题块 → 已命中</span>
-                  ) : (
-                    <span className="mkblock" style={{ borderStyle: 'dashed', background: 'transparent' }}>无标记 · 全文兜底</span>
-                  )}
-                </div>
-              </>
-            ) : md ? (
-              <>
-                <b style={{ display: 'block', marginBottom: 4 }}>{md.split('\n')[0]?.replace(/^#+\s*/, '') || '文档'}</b>
-                <p style={{ fontSize: 11, color: 'var(--muted)', margin: 0 }}>{md.slice(0, 120)}{md.length > 120 ? '…' : ''}</p>
-              </>
-            ) : (
-              <div style={{ color: 'var(--meta)', fontSize: 11, padding: '8px 0' }}>空白文档 · 检查器里填写 Markdown</div>
-            )}
-          </div>
-        );
-      }
-      case 'storyboard': {
-        const md = String(d.markdown ?? '');
-        const tb = parseGfmTable(md);
-        const rows = tb?.rows ?? [];
-        const head = tb?.head ?? [];
-        const st = sbStats(head, rows);
-        const matRows = sbMaterializedRows(n.id, nodes);
-        const dirty = sbDirty(n, nodes);
-        const base = String(d.basePrompt ?? '');
-        const more = rows.length > 3 ? `+${rows.length - 3} 行未显示` : '';
-        const stateLine = matRows.length
-          ? `已铺 ${matRows.length} shot${sbImgCount(n.id, nodes) ? ` + ${sbImgCount(n.id, nodes)} image-gen` : ''} · 未触发运行${dirty ? ' · 表格已改' : ''}`
-          : `待铺节点 · ${st.n} shot + ${st.imgs} image-gen`;
-        return (
-          <div className="nb">
-            {tb ? (
-              <>
-                <div style={{ overflowX: 'auto' }}>
-                  <table className="tbl-mini">
-                    <thead>
-                      <tr>
-                        <th style={{ width: 26 }}>镜</th>
-                        <th>画面描述</th>
-                        <th style={{ width: 36 }}>时长</th>
-                        <th style={{ width: 40 }}>配图</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.slice(0, 3).map((r, i) => (
-                        <tr key={i}>
-                          <td className="n">{r[0] ?? i + 1}</td>
-                          <td>{r[1] ?? ''}</td>
-                          <td>{r[5] ?? ''}s</td>
-                          <td>{rowNeedsImage(r, head) ? '是' : '否'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="rowsum">
-                  <span className="badge">{st.n} 行</span>
-                  <span className="badge">需配图 {st.imgs}</span>
-                  <span className="more">合计 {st.secs}s</span>
-                  <span className="more">{more}</span>
-                </div>
-                {base ? <div className="nparams">basePrompt · {base}</div> : null}
-              </>
-            ) : (
-              <div style={{ color: 'var(--meta)', fontSize: 11, padding: '8px 0' }}>分镜表 · 检查器里编辑表格</div>
-            )}
-            <div className="nmeta mono">{stateLine}</div>
-          </div>
-        );
-      }
-      case 'asset': {
-        const mediaType = String(d.mediaType ?? 'image');
-        const assetId = String(d.assetId ?? '');
-        const emoji = mediaType === 'image' ? '🖼' : mediaType === 'video' ? '🎬' : mediaType === 'audio' ? '🎵' : '📄';
-        return (
-          <div className="nb">
-            <div
-              className="nthumb"
-              style={{
-                aspectRatio: '16/9',
-                display: 'grid',
-                placeItems: 'center',
-                background: 'var(--surface-warm)',
-                border: assetId ? 'none' : '1.5px dashed var(--border)',
-                fontSize: 22,
-              }}
-            >
-              {assetId ? (
-                <span style={{ opacity: 0.85 }}>{emoji}</span>
-              ) : (
-                <span style={{ opacity: 0.5 }}>{emoji}</span>
-              )}
-            </div>
-            <div className="nmeta mono">{assetId ? `资产 ${assetId.slice(0, 14)}… · ${mediaType}` : '未绑定资产 · 检查器里选择'}</div>
-          </div>
-        );
-      }
-      case 'image-gen': {
-        const prompt = String(d.prompt ?? '');
-        const model = String(d.model ?? 'mlxgen');
-        const w = Number(d.width ?? 1024);
-        const h = Number(d.height ?? 1024);
-        const seeds = (d.seeds as number[]) ?? [];
-        const outImg = productOf(n);
-        return (
-          <div className="nb">
-            {outImg ? (
-              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="图片产物" /></div>
-            ) : (
-            <div className="nthumb" style={{ aspectRatio: '1/1', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-              待生成 · {w}×{h}
-            </div>
-            )}
-            <div className="nmeta mono">
-              {prompt ? `${prompt.slice(0, 30)}${prompt.length > 30 ? '…' : ''}` : '未填提示词'} · {model.split('/').pop()}
-            </div>
-            {seeds.length > 1 ? <div className="nmeta mono" style={{ marginTop: 2 }}>seed 批量 ×{seeds.length}</div> : null}
-          </div>
-        );
-      }
-      case 'image-edit': {
-        const mode = String(d.mode ?? 'instruction');
-        const modeLabel = ({ instruction: '指令编辑', img2img: 'I2I', inpaint: 'Inpaint', outpaint: 'Outpaint' } as Record<string, string>)[mode] ?? mode;
-        const prompt = String(d.prompt ?? '');
-        const outImg = productOf(n);
-        // 输入图状态与检查器同源:手填资产 > 连线静帧 > 连线取帧
-        const inputState = String(d.inputAssetId ?? '')
-          ? `输入图 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
-          : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
-            ? `输入图 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
-            : (d.inputFrameSource as { videoNodeId?: string } | undefined)?.videoNodeId
-              ? `输入帧 · ${(d.inputFrameSource as { at?: string }).at === 'last' ? '尾帧' : '首帧'}`
-              : '输入图待绑定';
-        return (
-          <div className="nb">
-            {outImg ? (
-              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="编辑产物" /></div>
-            ) : (
-              <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-                {modeLabel} · {inputState}
-              </div>
-            )}
-            <div className="nmeta mono">{prompt ? `${prompt.slice(0, 30)}…` : '未填指令'}</div>
-          </div>
-        );
-      }
-      case 'image-upscale': {
-        const scale = Number(d.scale ?? 2);
-        const outImg = productOf(n);
-        const inputState = String(d.inputAssetId ?? '')
-          ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
-          : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
-            ? `输入 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
-            : '输入待绑定';
-        return (
-          <div className="nb">
-            {outImg ? (
-              <div className="nthumb"><img src={outputUrlOf(outImg)} alt="超分产物" /></div>
-            ) : (
-              <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-                ×{scale} 超分 · {inputState}
-              </div>
-            )}
-            <div className="nmeta mono">SeedVR2 · ×{scale}</div>
-          </div>
-        );
-      }
-      case 'shot': {
-        const mode = String(d.mode ?? 'text2video');
-        const tier = (String(d.tier ?? 'default')) as (typeof SHOT_TIERS)[number];
-        const aspect = (String(d.aspect ?? '16:9')) as (typeof SHOT_ASPECTS)[number];
-        const prompt = String(d.prompt ?? '');
-        const modeLabel = SHOT_MODE_LABEL[mode] ?? mode;
-        // 尺寸以**节点 data 为权威**(与检查器同一规则);缺失时才按 aspect × tier 推导
-        const derivedSize = aspect === 'custom'
-          ? { width: clamp32(Number(d.customWidth ?? 544)), height: clamp32(Number(d.customHeight ?? 544)) }
-          : SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default;
-        const size = { width: Number(d.width ?? derivedSize.width), height: Number(d.height ?? derivedSize.height) };
-        const tierLabel = (SHOT_TIER_PRESETS[tier] ?? SHOT_TIER_PRESETS.default).label;
-        const resultPath = productOf(n);
-        const refs = (d.refs as Array<{ role?: string; auto?: boolean }> | undefined) ?? [];
-        const inherited = !!(d.specFrom as { nodeId?: string } | undefined)?.nodeId && d.specOverride !== true;
-        return (
-          <div className="nb">
-            {resultPath ? (
-              <VideoThumb src={outputUrlOf(resultPath)} badge={`✓ ${basenameOf(resultPath)}`} />
-            ) : (
-              <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-                {modeLabel} · 待生成
-              </div>
-            )}
-            <div className="nmeta mono">
-              h3.c · {modeLabel} · {tierLabel} · {size.width}×{size.height}
-              {refs.length ? ` · ${refs.length} 参考` : ''}
-              {inherited ? ' · 继承上游规格' : ''}
-            </div>
-            <div className="nmeta mono" style={{ marginTop: 2 }}>
-              {prompt ? `${prompt.slice(0, 20)}…` : '未填提示词'}
-            </div>
-          </div>
-        );
-      }
-      case 'director': {
-        const prompt = String(d.prompt ?? '');
-        return (
-          <div className="nb">
-            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
-              运镜参考小样
-            </div>
-            <div className="nmeta mono">{prompt ? `${prompt.slice(0, 40)}…` : '未填导演 prompt'}</div>
-          </div>
-        );
-      }
-      case 'timeline': {
-        const shots = (d.shotNodeIds as string[]) ?? [];
-        const lastExport = (d.lastExport as TimelineData['lastExport']) ?? undefined;
-        return (
-          <div className="nb">
-            {lastExport?.path ? (
-              <TimelineExportPreview lastExport={lastExport} />
-            ) : null}
-            <div className="clipstrip" style={lastExport?.path ? { marginTop: 7 } : undefined}>
-              {shots.length === 0 ? (
-                <span className="cs wait" style={{ flex: 1, textAlign: 'center', color: 'var(--meta)', fontSize: 11, padding: '16px 0' }}>
-                  拖入镜头节点入线
-                </span>
-              ) : (
-                shots.slice(0, 4).map((sid, i) => {
-                  const cover = takeResults[sid];
-                  if (!cover) {
-                    return (
-                      <span key={sid} className="cs wait" title={`镜${i + 1} · 待生成`} style={{ display: 'grid', placeItems: 'center', color: 'var(--meta)', fontSize: 10 }}>
-                        {i + 1}
-                      </span>
-                    );
-                  }
-                  const src = outputUrlOf(cover);
-                  const isVid = /\.(mp4|mov|webm|m4v)$/i.test(src);
-                  return (
-                    <span key={sid} className="cs" title={`镜${i + 1} · 已生成`}>
-                      {isVid ? (
-                        <video
-                          src={src}
-                          muted
-                          loop
-                          playsInline
-                          preload="metadata"
-                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: '#000' }}
-                        />
-                      ) : (
-                        <img src={src} alt={`镜${i + 1} 片段封面`} />
-                      )}
-                    </span>
-                  );
-                })
-              )}
-            </div>
-            <div className="nmeta mono">
-              {lastExport?.path
-                ? `已生成成片 · ${shots.length} 片段 · ${lastExport.durationSec ? `${lastExport.durationSec.toFixed(1)}s` : ''} · 可预览`
-                : `${shots.length} 个镜头入线 · FFmpeg 导出`}
-            </div>
-          </div>
-        );
-      }
-      case 'audio-ref': {
-        const assetId = String(d.assetId ?? '');
-        return (
-          <div className="nb">
-            <div className="wave">
-              {WAVE_BARS.map((h, i) => (
-                <i key={i} style={{ height: h }} />
-              ))}
-            </div>
-            <div className="nmeta mono">{assetId ? `资产 ${assetId.slice(0, 12)}… · --ref-audio` : '未绑定音频 · 检查器里选择'}</div>
-          </div>
-        );
-      }
-      case 'workflow-input': {
-        const slots = (d.slots as Array<{ name: string; accept: string[]; required: boolean; value?: { kind: string } }>) ?? [];
-        return (
-          <div className="nb">
-            <div className="nmeta mono" style={{ marginBottom: 6, color: 'var(--muted)' }}>输入槽位 ×{slots.length}</div>
-            {slots.map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 11 }}>
-                <span style={{ fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-                {s.accept.slice(0, 2).map((a) => (
-                  <span key={a} className="badge" style={{ fontSize: 9, padding: '1px 5px' }}>{a}</span>
-                ))}
-                {s.required ? <span className="badge" style={{ fontSize: 9, padding: '1px 5px', background: 'color-mix(in oklab,var(--danger) 10%,transparent)', color: 'var(--danger)' }}>必填</span> : null}
-                {s.value ? <span style={{ color: 'var(--success)', fontSize: 10 }}>✓</span> : <span style={{ color: 'var(--meta)', fontSize: 10 }}>—</span>}
-              </div>
-            ))}
-          </div>
-        );
-      }
-      case 'workflow-output': {
-        const outputs = (d.outputs as Array<{ name: string; kind: string; sourceNodeIds: string[] }>) ?? [];
-        return (
-          <div className="nb">
-            <div className="nmeta mono" style={{ marginBottom: 6, color: 'var(--muted)' }}>产物汇聚 ×{outputs.length}</div>
-            {outputs.map((o, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 11 }}>
-                <span style={{ fontWeight: 600, flex: 1 }}>{o.name}</span>
-                <span className="badge" style={{ fontSize: 9, padding: '1px 5px' }}>{o.kind}</span>
-                <span className="mono mut" style={{ fontSize: 9 }}>×{o.sourceNodeIds.length}</span>
-              </div>
-            ))}
-          </div>
-        );
-      }
-      default: {
-        if (n.extra) {
-          return (
-            <div className="nb">
-              <div
-                className="nthumb"
-                style={{
-                  border: '1.5px dashed var(--border)',
-                  background: 'var(--surface-warm)',
-                  aspectRatio: '16/9',
-                  display: 'grid',
-                  placeItems: 'center',
-                  color: 'var(--meta)',
-                  fontSize: '11px',
-                }}
-              >
-                待生成 · 排队中
-              </div>
-              <div className="nmeta mono">{n.extra}</div>
-            </div>
-          );
-        }
-        return (
-          <div className="nb">
-            <div className="nmeta mono">新节点 · 拖动画布标题栏调整位置，点「+」连接下游</div>
-          </div>
-        );
-      }
-    }
-  };
-
-
   return (
     <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}`}>
       <div className={`app${palCollapsed ? ' palette-collapsed' : ''}`} data-od-id="canvas-app">
-        {/* 顶部工具条 */}
-        <header className="topbar" data-od-id="canvas-toolbar">
-          <button className="btn btn-g btn-sm" onClick={() => onNavigate('home')}>
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2.2}
-            >
-              <path d="m14 6-6 6 6 6" />
-            </svg>
-            {projectName || '未命名项目'}
-          </button>
-          <CanvasSwitcher
-            projectCanvases={projectCanvases}
-            onSwitchCanvas={switchCanvas}
-            onCreateCanvas={onCreateCanvas}
-            onDeleteCanvas={onDeleteCanvas}
-            onRenameCanvas={onRenameCanvas}
-          />
-          <span className="sep"></span>
-          <button className="ibtn" title="撤销">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              <path d="M8 5 3 10l5 5" />
-              <path d="M3 10h11a7 7 0 0 1 0 14h-3" />
-            </svg>
-          </button>
-          <button className="ibtn" title="重做">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              <path d="m16 5 5 5-5 5" />
-              <path d="M21 10H10a7 7 0 0 0 0 14h3" />
-            </svg>
-          </button>
-          <span className="sep"></span>
-          <button className="btn btn-g btn-sm">框选</button>
-          <button className="btn btn-g btn-sm">连线</button>
-          <span className="spacer"></span>
-          <button
-            className="chip"
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpenPop((p) => (p === 'branchPop' ? null : 'branchPop'));
-            }}
-          >
-            分支：v2 实验
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </button>
-          <div
-            className={`pop${openPop === 'branchPop' ? ' open' : ''}`}
-            style={{ top: 46, right: 210 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="pop-it">main · 主版本</div>
-            <div className="pop-it">
-              v2 实验 · 当前<span className="ck">✓</span>
-            </div>
-            <div className="pop-it dim">＋ 从当前画布新建分支…</div>
-          </div>
-          <button
-            className="btn btn-s btn-sm"
-            data-od-id="rerun-affected"
-            disabled={rerunDone}
-            style={rerunDone ? { opacity: 0.55 } : undefined}
-            onClick={rerunAffected}
-          >
-            {rerunDone ? '重跑已排队 ✓' : `仅重跑受影响（${nodesRef.current.filter((n) => n.stale || n.agentOn).length}）`}
-          </button>
-          <button className="btn btn-s btn-sm" data-od-id="run-all" onClick={runAll}>
-            运行全部
-          </button>
-          <button
-            className="btn btn-s btn-sm"
-            data-od-id="debug-toggle"
-            style={dbgOpen ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
-            onClick={() => setDbgOpen((v) => !v)}
-          >
-            {dbgOpen ? '调试面板 ▲' : '调试日志'}
-          </button>
-        </header>
+        <Toolbar
+          projectName={projectName}
+          onNavigate={onNavigate}
+          projectCanvases={projectCanvases}
+          onSwitchCanvas={switchCanvas}
+          onCreateCanvas={onCreateCanvas}
+          onDeleteCanvas={onDeleteCanvas}
+          onRenameCanvas={onRenameCanvas}
+          openPop={openPop}
+          setOpenPop={setOpenPop}
+          rerunDone={rerunDone}
+          staleCount={nodesRef.current.filter((n) => n.stale || n.agentOn).length}
+          onRerunAffected={rerunAffected}
+          onRunAll={runAll}
+          dbgOpen={dbgOpen}
+          onToggleDebug={() => setDbgOpen((v) => !v)}
+        />
 
         <div className="work">
           {/* 左:节点面板 */}
-          <aside className="palette" data-od-id="canvas-palette">
-            <div className="pal-head">
-              <span className="lbl">节点面板 · 点击添加</span>
-              <button
-                className="pal-fold"
-                title="收起节点面板"
-                aria-label="收起节点面板"
-                data-od-id="palette-collapse"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setPalCollapsed(true);
-                }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
-                  <path d="m14 6-6 6 6 6" />
-                </svg>
-              </button>
-            </div>
-            {NODE_TYPES.map((t) => (
-              <div
-                className="pal-it"
-                key={t.id}
-                draggable
-                title="双击添加到画布中心 · 或拖到画布内"
-                onDoubleClick={() => addFromPaletteDbl(t.id)}
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = 'copy';
-                  e.dataTransfer.setData('application/x-bigbotart-palette', t.id);
-                }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                  {PALETTE_ICONS[t.id]}
-                </svg>
-                <div>
-                  <b>{t.name}</b>
-                  <span>{t.sub}</span>
-                </div>
-                {t.p1 ? <span className="p1">P1</span> : t.wf ? <span className="p1">WF</span> : null}
-              </div>
-            ))}
-          </aside>
-
-          <button
-            className="pal-expand"
-            title="展开节点面板"
-            aria-label="展开节点面板"
-            data-od-id="palette-expand"
-            onClick={() => setPalCollapsed(false)}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
-              <path d="m10 6 6 6-6 6" />
-            </svg>
-            节点面板
-          </button>
+          <Palette
+            collapsed={palCollapsed}
+            onCollapse={() => setPalCollapsed(true)}
+            onExpand={() => setPalCollapsed(false)}
+            onAddByDoubleClick={addFromPaletteDbl}
+          />
 
           {/* 中:画布 */}
-          <section
-            className={`stage${panning ? ' panning' : ''}`}
-            data-od-id="canvas-stage"
-            ref={(el) => {
-              stageRef.current = el;
+          <StageView
+            view={view}
+            panning={panning}
+            nodes={nodes}
+            edgePaths={edgePaths}
+            selected={selected}
+            flashId={flashId}
+            connectDrag={connectDrag}
+            takeResults={takeResults}
+            connectPath={computeConnectPath}
+            zoomPct={zoomPct}
+            onZoomBy={(d) =>
+              setView((v) => ({ ...v, z: Math.min(1.3, Math.max(0.4, v.z + d)) }))
+            }
+            onZoomReset={() => setView((v) => ({ ...v, x: 20, y: 10, z: 0.86 }))}
+            stageRef={stageRef}
+            edgesSvgRef={edgesSvgRef}
+            minimapRef={minimapRef}
+            worldRef={worldRef}
+            onStagePointerDown={() => undefined}
+            onStageClick={() => {
+              setSelected(null);
+              closeAddPop();
+              setCtx(null);
             }}
-            onPointerDown={(e) => {
-              const t = e.target as HTMLElement;
-              if (t !== e.currentTarget && !t.classList.contains('world') && t.tagName !== 'svg')
-                return;
-              beginPan(e);
+            onWorldClick={() => {
+              setSelected(null);
+              closeAddPop();
             }}
             onDragOver={(e) => {
               if (e.dataTransfer.types.includes('application/x-bigbotart-palette')) {
@@ -2441,470 +1899,70 @@ export default function CanvasPage({
               e.preventDefault();
               dropFromPalette(typeId, e.clientX, e.clientY);
             }}
-            onClick={() => {
-              setSelected(null);
+            onBeginPan={beginPan}
+            onNodeSelect={(n) => selectNode(n.id)}
+            onNodeContextMenu={(e, n) => {
+              e.preventDefault();
+              e.stopPropagation();
               closeAddPop();
-              setCtx(null);
+              setOpenPop(null);
+              selectNode(n.id);
+              setCtx({ x: e.clientX, y: e.clientY, id: n.id });
             }}
-          >
-            <div
-              className="world"
-              ref={worldRef}
-              style={{
-                transform: `translate(${view.x}px,${view.y}px) scale(${view.z})`,
-              }}
-              onClick={(e) => {
-                if (e.target === e.currentTarget) {
-                  setSelected(null);
-                  closeAddPop();
-                }
-              }}
-            >
-              <svg className="edges" ref={edgesSvgRef}>
-                {edgePaths.map((p) => (
-                  <path key={p.key} className={p.cls} d={p.d} />
-                ))}
-                {/* 「+」拖拽期间的临时预览线(连 source 节点 → 当前光标) */}
-                {connectDrag && connectDrag.moved && (() => {
-                  const d = computeConnectPath(connectDrag.sourceId, connectDrag.cx, connectDrag.cy);
-                  if (!d) return null;
-                  const cls = connectDrag.hitId
-                    ? connectDrag.hitOk
-                      ? 'connecting ok'
-                      : 'connecting bad'
-                    : 'connecting';
-                  return <path key="__connecting" className={cls} d={d} />;
-                })()}
-              </svg>
-
-              {nodes.map((n) => {
-                const isConnectTarget = connectDrag?.hitId === n.id;
-                const cls = [
-                  'node',
-                  n.ghost ? 'ghost' : '',
-                  n.stale ? 'stale' : '',
-                  n.agentOn ? 'agent-on' : '',
-                  selected === n.id ? 'sel' : '',
-                  flashId === n.id ? 'flash' : '',
-                  isConnectTarget && connectDrag?.hitOk ? 'connecting-target-ok' : '',
-                  isConnectTarget && !connectDrag?.hitOk ? 'connecting-target-bad' : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
-                return (
-                  <div
-                    key={n.id}
-                    className={cls}
-                    data-node={n.id}
-                    ref={(el) => {
-                      if (el) nodeRefs.current.set(n.id, el);
-                      else nodeRefs.current.delete(n.id);
-                    }}
-                    style={{ left: n.x, top: n.y, width: n.w }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      selectNode(n.id);
-                      e.stopPropagation();
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      closeAddPop();
-                      setOpenPop(null);
-                      selectNode(n.id);
-                      setCtx({ x: e.clientX, y: e.clientY, id: n.id });
-                    }}
-                  >
-                    {n.badge ? (
-                      <span className="node-badge">
-                        <span className="spin"></span>
-                        {n.badge}
-                      </span>
-                    ) : null}
-                    <div
-                      className="nh"
-                      style={n.headBg ? { background: n.headBg } : undefined}
-                      onPointerDown={(e) => {
-                        if (e.button !== 0) return;
-                        dragRef.current = {
-                          id: n.id,
-                          sx: e.clientX,
-                          sy: e.clientY,
-                          ox: n.x,
-                          oy: n.y,
-                        };
-                        e.stopPropagation();
-                      }}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth={1.7}
-                      >
-                        {TYPE_ICON[n.kind ?? 'plain']}
-                      </svg>
-                      {n.title}
-                      {/* 状态点从**真实产物**派生(不再用节点上存的 st —— 它在加载时被写死为 ok):
-                          排队/生成中/失效 = 黄;有产物 = 绿;未生成 = 不显示 */}
-                      {(() => {
-                        const nd = (n.data ?? {}) as Record<string, unknown>;
-                        const hasProduct = !!String(nd.resultPath ?? '') || !!takeResults[n.id];
-                        const st = n.badge || n.stale ? 'warn' : hasProduct ? 'ok' : null;
-                        if (!st) return null;
-                        return (
-                          <span
-                            className={`st dot${st === 'ok' ? ' ok' : ''}`}
-                            style={st === 'warn' ? { background: 'var(--warn)' } : undefined}
-                          ></span>
-                        );
-                      })()}
-                    </div>
-                    {renderBody(n)}
-                    <span className="port"></span>
-                    <button
-                      className="node-add"
-                      data-add={n.id}
-                      aria-label="添加下游节点"
-                      onPointerDown={(e) => {
-                        if (e.button !== 0) return;
-                        // 启动拖拽预备态(未拖动仍走 click 弹层路径)
-                        beginConnectDrag(n.id, e.clientX, e.clientY);
-                        e.stopPropagation();
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // 未拖动(<4px)才算 click,触发原弹层
-                        const d = connectDragRef.current;
-                        if (d && d.moved) return;
-                        if (apOpen && apFrom === n.id) closeAddPop();
-                        else openAddPop(n.id);
-                        connectDragRef.current = null;
-                        setConnectDrag(null);
-                      }}
-                    >
-                      +
-                    </button>
-                  </div>
-                );
-              })}
-
-              {/* 「+」下游节点弹层 */}
-              <div
-                className={`add-pop${apOpen ? ' open' : ''}`}
-                data-od-id="node-add-popover"
-                style={{ left: apPos.x, top: apPos.y }}
-                onClick={(e) => e.stopPropagation()}
-                onPointerDown={(e) => e.stopPropagation()}
-                onWheel={(e) => e.stopPropagation()}
-              >
-                <div className="ap-h">
-                  添加下游节点
-                  <span
-                    className="mono mut"
-                    style={{ marginLeft: 'auto', fontSize: '10.5px', fontWeight: 400 }}
-                  >
-                    基于：{apFromLabel}
-                  </span>
-                </div>
-                {/* 已连接下游:从边派生,点击定位(连接器 D1:只见节点与端口语义) */}
-                <div className="ap-conn" hidden={apOutgoing.length === 0}>
-                  <div className="ap-conn-h">
-                    已连接下游 · <span>{apOutgoing.length}</span>
-                  </div>
-                  {apOutgoing.map(({ edge, node }) => (
-                    <div
-                      key={edge.to}
-                      className="ap-conn-r"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        locate(node.id);
-                        selectNode(node.id);
-                        closeAddPop();
-                      }}
-                    >
-                      <span className="nm">{node.title}</span>
-                      {edge.label ? <span className="lk">{edge.label}</span> : null}
-                      {node.ghost ? (
-                        <span className="cst">排队中</span>
-                      ) : node.stale ? (
-                        <span className="cst">
-                          <span className="dot" style={{ background: 'var(--warn)' }}></span>待刷新
-                        </span>
-                      ) : null}
-                      <span className="go">定位 →</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="ap-s">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <circle cx="11" cy="11" r="7" />
-                    <path d="m20 20-3.5-3.5" />
-                  </svg>
-                  <input
-                    placeholder="搜索节点类型…"
-                    value={apSearch}
-                    onChange={(e) => setApSearch(e.target.value)}
-                  />
-                </div>
-                <div className="ap-list">
-                  {visibleTypes.map((t) => {
-                    const rp = apSrc ? resolvePort(apSrc, t.id) : null;
-                    return (
-                      <div
-                        key={t.id}
-                        className={`ap-row${apSel === t.id ? ' sel' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setApSel(t.id);
-                        }}
-                      >
-                        <div className="grow">
-                          <b>{t.name}</b>
-                          <div className="sub">{t.sub}</div>
-                          {rp ? (
-                            <div className="conn">
-                              <span className="lk">{rp.port}</span>
-                              {rp.desc}
-                            </div>
-                          ) : null}
-                        </div>
-                        {t.id === 'shot' ? <span className="rec">推荐</span> : null}
-                        {t.p1 ? <span className="p1">P1</span> : t.wf ? <span className="p1">WF</span> : null}
-                      </div>
-                    );
-                  })}
-                  {visibleTypes.length === 0 ? (
-                    <div className="ap-empty">
-                      {q ? '无匹配的兼容节点类型' : '当前输出没有可连接的节点类型'}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="ap-params" hidden={apSel !== 'shot'}>
-                  {apSrc?.kind === 'shot' ? (
-                    /* 接续上游镜头:比例/档位由上游继承(下游可在检查器改并转为自定义),此处不再给选择 */
-                    <div className="ap-res mono" style={{ borderTop: 'none', paddingTop: 2 }}>
-                      接续上游：画面规格继承自「{apFromLabel}」（
-                      {String(((apSrc.data ?? {}) as Record<string, unknown>).aspect ?? '16:9')} ·{' '}
-                      {String(((apSrc.data ?? {}) as Record<string, unknown>).tier ?? 'default')}档 ·{' '}
-                      {String(((apSrc.data ?? {}) as Record<string, unknown>).width ?? '')}×
-                      {String(((apSrc.data ?? {}) as Record<string, unknown>).height ?? '')}）
-                    </div>
-                  ) : (
-                    <>
-                      <div className="ap-prow">
-                        <span className="lbl">比例</span>
-                        {['16:9', '9:16', '1:1'].map((a) => (
-                          <span
-                            key={a}
-                            className={`chip${apAspect === a ? ' on' : ''}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setApAspect(a);
-                              setApTier((t) =>
-                                t !== '默认' && !((RES[t] ?? {})[a] ?? null) ? '默认' : t,
-                              );
-                            }}
-                          >
-                            {a}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="ap-prow">
-                        <span className="lbl">档位</span>
-                        {['预览', '草稿', '默认', '参考'].map((t) => {
-                          const ok = !!((RES[t] ?? {})[apAspect] ?? null);
-                          return (
-                            <span
-                              key={t}
-                              className={`chip${apTier === t && ok ? ' on' : ''}${ok ? '' : ' dis'}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (!ok) return;
-                                setApTier(t);
-                              }}
-                            >
-                              {t}
-                            </span>
-                          );
-                        })}
-                      </div>
-                      <div className="ap-res mono">{resHint}</div>
-                    </>
-                  )}
-                </div>
-                <div className="ap-f">
-                  <span className="grow">{apTip}</span>
-                  <button
-                    className="btn btn-p btn-sm"
-                    disabled={!apSel}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      createFromPop();
-                    }}
-                  >
-                    创建并连线
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="minimap" aria-hidden="true" ref={minimapRef}>
-              <i style={{ left: 8, top: 34, width: 18, height: 12 }}></i>
-              <i style={{ left: 32, top: 10, width: 20, height: 14 }}></i>
-              <i style={{ left: 32, top: 48, width: 20, height: 12 }}></i>
-              <i style={{ left: 62, top: 8, width: 22, height: 16 }}></i>
-              <i style={{ left: 62, top: 36, width: 22, height: 16 }}></i>
-              <i style={{ left: 62, top: 66, width: 22, height: 14 }}></i>
-              <i style={{ left: 96, top: 28, width: 22, height: 14 }}></i>
-              <span className="view" style={{ left: 24, top: 14, width: 76, height: 56 }}></span>
-            </div>
-            <div className="zoomctl">
-              <button
-                className="ibtn"
-                style={{ width: 26, height: 26 }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setView((v) => ({ ...v, z: Math.max(0.4, v.z - 0.1) }));
-                }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path d="M5 12h14" />
-                </svg>
-              </button>
-              <span
-                className="zv mono mut"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setView((v) => ({ ...v, x: 20, y: 10, z: 0.86 }));
-                }}
-                title="复位视图"
-              >
-                {zoomPct}
-              </span>
-              <button
-                className="ibtn"
-                style={{ width: 26, height: 26 }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setView((v) => ({ ...v, z: Math.min(1.3, v.z + 0.1) }));
-                }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-              </button>
-            </div>
-          </section>
-
-          {/* 右:Agent 面板 */}
-          <aside
-            className="agent"
-            data-od-id="agent-panel"
-            ref={(el) => {
-              agentRef.current = el;
+            onNodeHeaderPointerDown={(e, n) => {
+              if (e.button !== 0) return;
+              dragRef.current = { id: n.id, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y };
+              e.stopPropagation();
             }}
-            style={{ width: agentW }}
-            onClick={() => setCtx(null)}
-          >
-            <div className="agent-tabs">
-              <button
-                className={`atab${tab === 'chat' ? ' on' : ''}`}
-                data-od-id="tab-chat"
-                onClick={() => setTab('chat')}
-              >
-                Agent 对话
-              </button>
-              <button
-                className={`atab${tab === 'insp' ? ' on' : ''}`}
-                data-od-id="tab-inspector"
-                onClick={() => setTab('insp')}
-              >
-                检查器
-              </button>
-              <span className="spacer"></span>
-              <span className="row g6 mono mut" style={{ fontSize: '10.5px' }}>
-                <span className="dot ok"></span>pi · 运行中
-              </span>
-            </div>
-            {/* Agent 对话页签(pages/agent/AgentChatView;检查器 pane 保持在本文件) */}
-            <AgentChatView
-              chat={chat}
-              hidden={tab !== 'chat'}
-              onLocate={locate}
-              onOpenSettings={() => onNavigate('settings')}
-            />
+            onNodeAddPointerDown={(e, n) => {
+              if (e.button !== 0) return;
+              // 启动拖拽预备态(未拖动仍走 click 弹层路径)
+              beginConnectDrag(n.id, e.clientX, e.clientY);
+              e.stopPropagation();
+            }}
+            onNodeAddClick={(e, n) => {
+              e.stopPropagation();
+              // 未拖动(<4px)才算 click,触发原弹层
+              const d2 = connectDragRef.current;
+              if (d2 && d2.moved) return;
+              if (apOpen && apFrom === n.id) closeAddPop();
+              else openAddPop(n.id);
+              connectDragRef.current = null;
+              setConnectDrag(null);
+            }}
+            registerNodeRef={(id, el) => {
+              if (el) nodeRefs.current.set(id, el);
+              else nodeRefs.current.delete(id);
+            }}
+            popover={
+              /* 「+」下游节点弹层 */
+              <AddNodePopover
+                open={apOpen}
+                pos={apPos}
+                src={apSrc}
+                srcLabel={apSrc?.title ?? '—'}
+                outgoing={apOutgoing}
+                openCount={apOpenCount}
+                onLocate={locate}
+                onSelectNode={selectNode}
+                onClose={closeAddPop}
+                onCreate={createFromPop}
+              />
+            }
+          />
 
-            {/* 检查器 pane:按 kind 渲染专属表单;未选节点时无任何组件 */}
-            <div
-              className={`insp${tab === 'insp' ? ' on' : ''}`}
-              data-od-id="inspector"
-            >
-              {selected && selNode ? (
-                <div>
-                  <div className="lbl" style={{ marginBottom: 8 }}>
-                    {inspectTitle}
-                  </div>
-                  {selInfo && selInfo.img ? (
-                    <div className="preview">
-                      <img src={selInfo.img} alt="选中节点预览" />
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {selected && selNode ? (
-                <InspectorBody
-                  node={selNode}
-                  infoMap={infoMap}
-                  setInfoMap={setInfoMap}
-                  setNodes={setNodes}
-                  toastMsg={toastMsg}
-                  projectId={projectId}
-                  activeCanvasId={activeCanvasId}
-                  jobs={jobs}
-                  assetsList={assetsList}
-                  assetCache={assetCache.current}
-                  runNode={(id) => void runNode(id)}
-                  nodes={nodes}
-                  onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}
-                  onUndoStoryboard={(sbNode) => undoStoryboard(sbNode)}
-                  onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
-                  onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
-                  onOpenTimelinePage={() => onNavigate('timeline')}
-                  onRemoveEdge={(srcId, dstId) =>
-                    setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)))
-                  }
-                />
-              ) : null}
-              {selected && (
-                <button
-                  className="btn btn-s"
-                  style={{ width: '100%' }}
-                  onClick={() => {
-                    if (selected) {
-                      void runNode(selected);
-                      toastMsg(`已提交重跑 · ${inspectTitle}`);
-                    }
-                  }}
-                >
-                  仅重跑该节点
-                </button>
-              )}
-            </div>
-
-            {/* 输入区(pages/agent/AgentComposer) */}
-            <AgentComposer chat={chat} toastMsg={toastMsg} />
-          </aside>
-
-          {/* Agent 面板宽度拖拽把手 */}
-          <button
-            className="agent-grip"
-            aria-label="拖拽调整 Agent 面板宽度"
-            title="拖拽调整面板宽度 · 双击复位"
-            data-od-id="agent-resize-handle"
-            ref={gripRef}
-            style={{ right: 12 + agentW - 6 }}
-            onPointerDown={(e) => {
+          {/* 右:Agent 面板 + 检查器 */}
+          <AgentPane
+            chat={chat}
+            agentW={agentW}
+            tab={tab}
+            onTabChange={setTab}
+            onOpenSettings={() => onNavigate('settings')}
+            onLocate={locate}
+            toastMsg={toastMsg}
+            onBackgroundClick={() => setCtx(null)}
+            gripRef={gripRef}
+            onGripPointerDown={(e) => {
               if (e.button !== 0) return;
               agentDragRef.current = { sx: e.clientX, w: agentW };
               gripRef.current?.classList.add('on');
@@ -2912,11 +1970,11 @@ export default function CanvasPage({
               e.preventDefault();
               e.stopPropagation();
             }}
-            onDoubleClick={() => {
+            onGripDoubleClick={() => {
               setAgentWidth(344, true);
               toastMsg('面板宽度已重置为默认');
             }}
-            onKeyDown={(e) => {
+            onGripKeyDown={(e) => {
               if (e.key === 'ArrowLeft') {
                 e.preventDefault();
                 setAgentWidth(agentW + 16, true);
@@ -2925,110 +1983,55 @@ export default function CanvasPage({
                 setAgentWidth(agentW - 16, true);
               }
             }}
-          ></button>
+            inspector={
+              <InspectorPane
+                tab={tab}
+                selected={selected}
+                selNode={selNode}
+                inspectTitle={inspectTitle}
+                selInfo={selInfo}
+                infoMap={infoMap}
+                setInfoMap={setInfoMap}
+                setNodes={setNodes}
+                toastMsg={toastMsg}
+                projectId={projectId}
+                activeCanvasId={activeCanvasId}
+                jobs={jobs}
+                assetsList={assetsList}
+                assetCache={assetCache.current}
+                runNode={(id) => void runNode(id)}
+                nodes={nodes}
+                onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}
+                onUndoStoryboard={(sbNode) => undoStoryboard(sbNode)}
+                onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
+                onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
+                onOpenTimelinePage={() => onNavigate('timeline')}
+                onRemoveEdge={(srcId, dstId) =>
+                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)))
+                }
+                onRerunSelected={() => {
+                  if (!selected) return;
+                  void runNode(selected);
+                  toastMsg(`已提交重跑 · ${inspectTitle}`);
+                }}
+              />
+            }
+          />
         </div>
 
         {/* 底部队列条(真实队列状态) */}
-        <footer className="queue" data-od-id="canvas-queue">
-          <span className="lbl">队列</span>
-          {queueItem('video', jobs, nodes)}
-          {queueItem('image', jobs, nodes)}
-          <span className="spacer"></span>
-          <span className="mono mut" style={{ fontSize: '11px' }}>
-            {jobs.filter((j) => j.status === 'queued').length > 0
-              ? `${jobs.filter((j) => j.status === 'queued').length} 个排队 · FIFO 串行执行`
-              : 'FIFO · 预览档可插队（需确认）'}
-          </span>
-        </footer>
+        <QueueBar jobs={jobs} nodes={nodes} />
       </div>
 
       {/* 节点右键菜单 */}
-      <div
-        className={`pop ctx${ctx ? ' open' : ''}`}
-        role="menu"
-        data-od-id="node-context-menu"
-        style={
-          ctx
-            ? {
-                left: Math.max(8, Math.min(ctx.x, window.innerWidth - 212 - 8)),
-                top: Math.max(8, Math.min(ctx.y, window.innerHeight - 210 - 8)),
-              }
-            : undefined
-        }
-        onClick={(e) => e.stopPropagation()}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        }}
-      >
-        <button className="pop-it" data-od-id="ctx-duplicate" onClick={onCtxDuplicate(ctx, duplicateNode)}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-            <rect x="9" y="9" width="12" height="12" rx="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          复制<span className="sc">⌘D</span>
-        </button>
-        <button
-          className={`pop-it${isCtxGhost(ctx, nodes) ? ' dim' : ''}`}
-          data-od-id="ctx-save-as"
-          onClick={() => {
-            if (!ctx || isCtxGhost(ctx, nodes)) return;
-            const info = NODE_INFO_BASE[ctx.id];
-            setCtx(null);
-            if (info?.img) {
-              const name = info.img.split('/').pop() ?? 'output.png';
-              const a = document.createElement('a');
-              a.href = info.img;
-              a.download = name;
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-              toastMsg(`已导出「${name}」· 演示使用本地素材`);
-            } else {
-              toastMsg('该节点暂无可导出的产物文件（演示）');
-            }
-          }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-            <path d="M12 3v11m0 0 4.2-4.2M12 14l-4.2-4.2" />
-            <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
-          </svg>
-          另存为…
-        </button>
-        <button
-          className={`pop-it${isCtxGhost(ctx, nodes) ? ' dim' : ''}`}
-          data-od-id="ctx-reveal-finder"
-          onClick={() => {
-            if (!ctx || isCtxGhost(ctx, nodes)) return;
-            const id = ctx.id;
-            setCtx(null);
-            toastMsg(
-              `已在 Finder 中显示 · ~/BigBotArt/草原之河/${FINDER_PATH[id] ?? 'takes/'}（演示）`,
-            );
-          }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
-          </svg>
-          在 Finder 中显示
-        </button>
-        <div className="ctx-sep"></div>
-        <button
-          className="pop-it danger"
-          data-od-id="ctx-delete"
-          onClick={() => {
-            if (!ctx) return;
-            const id = ctx.id;
-            setCtx(null);
-            deleteNode(id);
-          }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-            <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m3 0-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 7" />
-          </svg>
-          删除<span className="sc">⌫</span>
-        </button>
-      </div>
+      <ContextMenu
+        ctx={ctx}
+        nodes={nodes}
+        toastMsg={toastMsg}
+        onDuplicate={duplicateNode}
+        onDelete={deleteNode}
+        onClose={() => setCtx(null)}
+      />
 
       <div className={`toast${toast ? ' show' : ''}`} role="status" aria-live="polite">
         {toast?.msg ?? ''}
@@ -3037,59 +2040,13 @@ export default function CanvasPage({
       <span hidden data-project={projectId ?? ''}></span>
 
       {/* ── 调试面板(右下):主进程日志总线 ── */}
-      {dbgOpen ? (
-        <div className="dbg-panel" data-od-id="debug-panel">
-          <div className="dbg-head">
-            <span className="lbl">调试日志 · 实时(主进程)</span>
-            <div className="dbg-acts">
-              <button
-                className="btn btn-s btn-xs"
-                onClick={() => void window.bigbotart.debugClear().catch(() => undefined)}
-              >
-                清空
-              </button>
-              <button className="btn btn-s btn-xs" onClick={() => setDbgOpen(false)}>
-                ✕
-              </button>
-            </div>
-          </div>
-          <div className="dbg-body mono" ref={dbgBodyRef}>
-            {dbgLogs.length === 0 ? (
-              <div className="mut">暂无日志 · 点「立即生成」后这里会实时显示队列 / h3 进度</div>
-            ) : (
-              dbgLogs.map((e, i) => (
-                <div key={i} className={`dbg-line lv-${e.level}`}>
-                  <span className="dbg-ts">{e.ts.slice(11, 23)}</span>
-                  <span className="dbg-lv">{e.level}</span>
-                  <span className="dbg-msg">{e.msg}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      ) : null}
+      <DebugPanel
+        open={dbgOpen}
+        logs={dbgLogs}
+        bodyRef={dbgBodyRef}
+        onClear={() => void window.bigbotart.debugClear().catch(() => undefined)}
+        onClose={() => setDbgOpen(false)}
+      />
     </div>
   );
 }
-
-/** 「复制」菜单项的处理(无选中节点时空操作) */
-function onCtxDuplicate(
-  ctx: { x: number; y: number; id: string } | null,
-  fn: (id: string) => void,
-) {
-  return () => {
-    if (!ctx) return;
-    fn(ctx.id);
-  };
-}
-
-/** 幽灵节点(尚无产物)在菜单里禁用导出类动作 */
-function isCtxGhost(
-  ctx: { x: number; y: number; id: string } | null,
-  nodes: CanvasNode[],
-): boolean {
-  if (!ctx) return false;
-  const n = nodes.find((x) => x.id === ctx.id);
-  return !!n?.ghost;
-}
-

@@ -77,3 +77,20 @@ export interface NodeInfo {
   img: string | null;
   meta: Array<[string, string]>;
 }
+
+/** 「+」按钮 → 拖拽连接的状态(StageView 渲染预览线/命中高亮用,拆分自 CanvasPage) */
+export interface ConnectDrag {
+  sourceId: string;
+  /** pointerdown 屏幕坐标(用于判断「未拖动」则走 onClick 弹层路径) */
+  sx: number;
+  sy: number;
+  /** 当前屏幕坐标 */
+  cx: number;
+  cy: number;
+  /** 当前命中节点 id(null = 空白) */
+  hitId: string | null;
+  /** 当前命中是否可连 */
+  hitOk: boolean;
+  /** 标记已开始拖动(>4px 才算;否则 onPointerUp 走原 click) */
+  moved: boolean;
+}
