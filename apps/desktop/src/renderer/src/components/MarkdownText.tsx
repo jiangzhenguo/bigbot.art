@@ -1,9 +1,10 @@
 /**
  * MarkdownText — 轻量 Markdown 渲染(无第三方依赖)
- * 支持:标题 #/##/### · 加粗 ** · 行内代码 ` · 代码块 ```lang · 无序列表 -/* · 有序列表 1. · 链接 · 分隔线 --- · 段落
+ * 支持:标题 #/##/### · 加粗 ** · 行内代码 ` · 代码块 ```lang · 无序列表 -/* · 有序列表 1. · 链接 · 分隔线 --- · 段落 · GFM 表格
  * 样式沿用设计稿 CSS 变量(var(--fg)/var(--muted)/var(--border)/var(--font-mono) 等)
  */
 import React from 'react';
+import { parseGfmTable } from '@bigbotart/shared';
 
 /* ── 行内解析:**bold** / `code` / [text](url) / *italic* ── */
 function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
@@ -183,6 +184,72 @@ export default function MarkdownText({ text }: { text: string }) {
         </ol>,
       );
       continue;
+    }
+
+    // GFM 表格块(表头行 + 分隔行 + 数据行)
+    if (line && /^\s*\|.*\|\s*$/.test(line)) {
+      // 从当前行起找表格:表头(index) + 分隔(index+1) + 数据行
+      let li = i;
+      while (li < lines.length && /^\s*\|.*\|\s*$/.test(lines[li] ?? '')) li++;
+      const slice = lines.slice(i, li).join('\n');
+      const tb = parseGfmTable(slice);
+      if (tb && tb.start === 0) {
+        i = li;
+        blocks.push(
+          <div key={key++} style={{ overflowX: 'auto', margin: '6px 0' }}>
+            <table
+              className="md-table"
+              style={{
+                borderCollapse: 'collapse',
+                fontSize: 11,
+                lineHeight: 1.5,
+                minWidth: '100%',
+              }}
+            >
+              <thead>
+                <tr>
+                  {tb.head.map((h, k) => (
+                    <th
+                      key={k}
+                      style={{
+                        border: '1px solid var(--border-soft)',
+                        background: 'var(--surface)',
+                        padding: '4px 8px',
+                        textAlign: 'left',
+                        whiteSpace: 'nowrap',
+                        fontWeight: 600,
+                        color: 'var(--fg-2)',
+                      }}
+                    >
+                      {renderInline(h, `th${key}-${k}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tb.rows.map((r, k) => (
+                  <tr key={k}>
+                    {tb.head.map((_, c) => (
+                      <td
+                        key={c}
+                        style={{
+                          border: '1px solid var(--border-soft)',
+                          padding: '4px 8px',
+                          color: 'var(--fg-2)',
+                          verticalAlign: 'top',
+                        }}
+                      >
+                        {renderInline(r[c] ?? '', `td${key}-${k}-${c}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+        continue;
+      }
     }
 
     // 空行

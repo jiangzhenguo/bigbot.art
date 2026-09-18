@@ -12,6 +12,7 @@ export const FINDER_PATH: Record<string, string> = {
 
 export const NODE_TYPES: NodeTag[] = [
   { id: 'doc', kind: 'document', name: '提示词 / 文档', sub: 'Markdown · 五段式/六段式' },
+  { id: 'storyboard', kind: 'storyboard', name: '分镜表', sub: '脚本 · 一行 = 一个分镜' },
   { id: 'asset', kind: 'asset', name: '资产引用', sub: '角色 / 环境 / 物品 · 资产中心' },
   { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
@@ -26,8 +27,8 @@ export const NODE_TYPES: NodeTag[] = [
 ];
 
 export const COMPAT: Record<string, string[]> = {
-  brief: ['image', 'shot', 'doc', 'director'],
-  storyboard: ['edit', 'upscale', 'shot', 'timeline'],
+  brief: ['image', 'shot', 'doc', 'director', 'storyboard'],
+  storyboard: ['image', 'shot', 'edit', 'timeline', 'director'],
   audio: ['shot', 'timeline'],
   shot1: ['shot', 'timeline', 'edit'],
   shot2: ['shot', 'timeline', 'edit'],

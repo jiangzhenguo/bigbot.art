@@ -13,8 +13,9 @@
 import { createModels, createProvider, type Context, type Message } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import type { CanvasEdge, CanvasNode, LlmSource } from '@bigbotart/shared';
-import type { PlanParams, PlanResult } from './protocol.js';
-import { planDeterministic } from './plan.js';
+import { STORYBOARD_HEAD, tableToGfm, storyboardMarkdown } from '@bigbotart/shared';
+import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
+import { planDeterministic, planStoryboardDeterministic, buildStoryboardMaterialized } from './plan.js';
 
 let seq = 0;
 const nid = (p: string) => `${p}-${Date.now()}-${++seq}`;
@@ -35,6 +36,23 @@ export interface LlmPlanOutput {
   report: string;
 }
 
+/** LLM 结构化输出 schema(分镜表) */
+export interface LlmStoryboardOutput {
+  title: string;
+  intro: string;
+  basePrompt?: string;
+  rows: {
+    画面描述: string;
+    对白?: string;
+    景别?: string;
+    运镜?: string;
+    时长?: number;
+    需配图?: boolean;
+    提示词?: string;
+  }[];
+  report: string;
+}
+
 /** 系统提示:把用户需求拆成可拍摄镜头的 H3 五段式 */
 const SYSTEM_PROMPT = `你是 BigBotArt 的视频导演 Agent。把用户的创作需求拆解为一组可拍摄的视频镜头。
 
@@ -44,6 +62,16 @@ const SYSTEM_PROMPT = `你是 BigBotArt 的视频导演 Agent。把用户的创�
 3. 短视频 1-2 镜,叙事长片 3-6 镜;每个镜头建议 2-6 秒。
 4. 返回 JSON(不要输出 markdown 代码块):{"brief": string, "shots": [{scene, action, camera, look, audio, durationHintSec?, width?, height?}], "report": string}
 5. report 用一句话说明拆镜思路,写给人类用户看。`;
+
+/** 系统提示:分镜表(plan-storyboard) */
+const STORYBOARD_SYSTEM_PROMPT = `你是 BigBotArt 的分镜导演 Agent。把用户的创作需求拆成一张分镜表(表格的一行 = 一个分镜)。
+
+规则:
+1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 提示词?: string}], "report": string(写给人类的一句话)}
+2. 每个镜头 2-6 秒;短剧 3-8 行,长片按时长切片。
+3. 涉及人物时在「画面描述」显式锁定身份:同一人物全程长相/服装一致、面部不变形。
+4. 「需配图」默认 true(该行需要关键帧/首帧图);对白较多或纯转场镜头可为 false。
+5. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。`;
 
 /** 解析后的 LLM 端点配置 */
 export interface LlmEndpoint {
@@ -141,6 +169,110 @@ export class PiPlanner {
       console.warn('[pi-planner] LLM 规划失败,回退确定性规划:', (e as Error).message);
       return planDeterministic(params);
     }
+  }
+
+  /** 分镜表规划(plan-storyboard);失败回退确定性模板 */
+  async planStoryboard(params: PlanStoryboardParams, llm?: LlmSource): Promise<PlanStoryboardResult> {
+    const ep = this.resolveEndpoint(llm);
+    try {
+      const ok = await this.endpointAvailable(ep);
+      if (!ok) {
+        console.warn(`[pi-planner] 端点不可达(${ep.baseUrl}),回退确定性分镜表`);
+        return planStoryboardDeterministic(params);
+      }
+      const out = await this.generateStoryboard(ep, params.brief);
+      return this.toStoryboardPlanResult(params, out);
+    } catch (e) {
+      console.warn('[pi-planner] LLM 分镜表规划失败,回退确定性模板:', (e as Error).message);
+      return planStoryboardDeterministic(params);
+    }
+  }
+
+  private async generateStoryboard(ep: LlmEndpoint, brief: string): Promise<LlmStoryboardOutput> {
+    const model = {
+      id: ep.modelId,
+      name: ep.modelId,
+      api: 'openai-completions' as const,
+      provider: 'bigbotart-llm' as const,
+      baseUrl: ep.baseUrl,
+      reasoning: false,
+      input: ['text'] as ('text' | 'image')[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 32000,
+      maxTokens: 2400,
+    };
+    const provider = createProvider({
+      id: 'bigbotart-llm',
+      name: 'BigBotArt LLM',
+      baseUrl: ep.baseUrl,
+      auth: { apiKey: { name: 'BigBotArt LLM', resolve: async () => ({ auth: {} }) } },
+      models: [model],
+      api: openAICompletionsApi(),
+    });
+    const models = createModels();
+    models.setProvider(provider);
+
+    const messages: Message[] = [
+      { role: 'user', content: `创作需求:\n${brief}\n\n请按分镜导演规则输出 JSON 分镜表。`, timestamp: Date.now() },
+    ];
+    const context: Context = { systemPrompt: STORYBOARD_SYSTEM_PROMPT, messages };
+
+    const assistant = await models.complete(models.getModel('bigbotart-llm', ep.modelId)!, context, {
+      maxTokens: 2400,
+      temperature: 0.7,
+      apiKey: ep.apiKey ?? 'unused',
+    });
+    const blocks = assistant.content ?? [];
+    const textContent = blocks
+      .filter((c) => c.type === 'text')
+      .map((c) => ('text' in c ? c.text : ''))
+      .join('');
+    const thinkingContent = blocks
+      .filter((c) => c.type === 'thinking')
+      .map((c) => ('thinking' in c ? c.thinking : ''))
+      .join('');
+    let parsed = this.parseJson(textContent);
+    if (!parsed) {
+      parsed = this.parseJson(textContent + thinkingContent);
+    }
+    if (!parsed) throw new Error('LLM 输出不是合法 JSON');
+    return parsed as unknown as LlmStoryboardOutput;
+  }
+
+  private toStoryboardPlanResult(params: PlanStoryboardParams, out: LlmStoryboardOutput): PlanStoryboardResult {
+    const head = [...STORYBOARD_HEAD] as string[];
+    const rows = (out.rows ?? []).map((r, i) => [
+      String(i + 1),
+      String(r.画面描述 ?? ''),
+      String(r.对白 ?? ''),
+      String(r.景别 ?? '中景'),
+      String(r.运镜 ?? '固定'),
+      String(typeof r.时长 === 'number' ? r.时长 : 5),
+      r.需配图 === false ? '否' : '是',
+      String(r.提示词 ?? ''),
+    ]);
+    const gfm = tableToGfm(head, rows);
+    const title = out.title || '新分镜 · 分镜表';
+    const basePrompt = out.basePrompt ?? params.basePrompt ?? '';
+    const storyboard: CanvasNode = {
+      id: nid('sb'),
+      kind: 'storyboard',
+      position: { x: 420, y: 80 },
+      label: title,
+      data: {
+        markdown: storyboardMarkdown(title, out.intro || '', head, rows),
+        basePrompt,
+        lastTable: gfm,
+        aspect: '16:9',
+        tier: 'default',
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const { images, shots, edges } = params.autoMaterialize
+      ? buildStoryboardMaterialized(storyboard.id, head, rows, params.basePrompt)
+      : { images: [], shots: [], edges: [] };
+    return { storyboard, images, shots, edges, report: out.report || `已生成分镜表:${rows.length} 行` };
   }
 
   private async generate(ep: LlmEndpoint, brief: string): Promise<LlmPlanOutput> {

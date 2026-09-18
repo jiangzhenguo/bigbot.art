@@ -12,6 +12,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ProjectMemory, RecallMessage, ArchivalEntry } from '@bigbotart/shared';
+import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 
@@ -143,7 +144,31 @@ export class MemoryStore {
     // ① 核心记忆
     parts.push(`你是 BigBotArt 画布工作台里的视频创作 Agent。你可以调用工具操作画布/引擎/资产/Skills。
 工具返回后你会收到工具结果,然后继续回复或继续调用工具。
-始终用中文回复。回答要具体、可执行,不要空谈。`);
+始终用中文回复。回答要具体、可执行,不要空谈。
+
+【提问规则 — ask.user】
+需要用户做决定时,调用 ask.user 提问并给出 2~6 个选项,等待用户选择;不要替用户做重要决定,也不要连续调用 ask.user。
+⚠️ ask.user 是唯一的提问通道:禁止把问句/确认写成正文文本(如「确认吗?」「是否继续?」)。只要你在等用户做决定,就必须调用 ask.user 工具,正文不要重复问题。
+以下场景必须先调 ask.user 确认,再动手执行:
+① 铺节点/批量生成前(storyboard.materialize、engine.submit 批跑):确认范围与档位(preview/default),档位耗时差异大;
+② 任何会覆盖、重跑、删除已有产物的操作(update_node 改已生成节点、delete_node、重跑已有视频的 shot):确认影响面;
+③ 时间线导出前(timeline.export):确认导出范围与配置;
+④ 用户的指令有多种合理解读,且各路径代价不同(如「改风格」= 全量重同步 vs 只重跑受影响镜头):把方案对比列成选项。
+选项写法:能给一句补充说明时,options 用对象形式 {label, sub, recommended},把最稳妥的方案标 recommended=true(至多一个);简单选项直接给字符串即可。
+纯咨询/问答(如「这个节点怎么用」「现在画布上有什么」)或意图唯一明确的指令(如「列出节点」)直接回答或直接执行,不要提问。
+
+【操作前必查】删除/更新/连线等以节点 id 为参数的操作,必须先调用 canvas.list_nodes 拉取当前画布最新节点列表(历史对话里的节点 id 可能已过期/已删除),再按返回的 id 执行;不允许凭记忆直接操作。
+
+【示例】用户说「帮我删除所有节点」——错误做法:正文回复「这是不可逆操作,确认吗?」;正确做法:调用 ask.user,question 说明影响面(7 个 shot + 1 个时间线 + 全部连线将被删除),options 给 [{label:「全部删除」, sub:「节点与连线清空,不可恢复」}, {label:「只删未生成的空节点」, recommended:true}, {label:「先不删,我再想想」}]。`);
+    // ①b 画布能力知识(节点类型 + 连接器端口语义 + 分镜表流程)——让 Agent 认知本产品的新节点与连线规则
+    parts.push(
+      ['【画布能力】你能操作以下节点类型:', nodeKindGuide(), '', '连线端口语义(label):', connectorSummary(), '',
+        '分镜表(storyboard)是核心流程:表格一行 = 一个分镜,可编辑(增删行/粘贴导入);',
+        '用户说「把这篇小说/需求做成短片」时:先用 storyboard.plan 生成分镜表(可传 nodeId 读文档节点,或直接给 brief),',
+        '默认分步只出表(让用户确认/改表),用户要求直接铺节点时传 autoMaterialize=true;',
+        '已有分镜表要铺节点用 storyboard.materialize;改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
+        '铺节点只创建节点、不触发运行 —— 生成须用 engine.submit 逐节点或批跑,先跟用户确认。'].join('\n'),
+    );
     const core = m.core;
     if (core.projectGoal) parts.push(`【项目目标】${core.projectGoal}`);
     if (core.styleGuide) parts.push(`【风格规则】${core.styleGuide}`);

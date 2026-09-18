@@ -7,8 +7,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { AgentProcessState, LlmSource, AgentEvent } from '@bigbotart/shared';
-import type { AgentRequest, AgentResponse, PlanParams, PlanResult, ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
-import { deterministicPlanner } from './plan.js';
+import type { AgentRequest, AgentResponse, PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult, ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
+import { deterministicPlanner, planStoryboardDeterministic } from './plan.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** worker 入口(编译产物) */
@@ -137,6 +137,32 @@ export class AgentManager {
     return res.result!;
   }
 
+  /** 一句话起活 → 分镜表(plan-storyboard;默认分步只出表,autoMaterialize 时同时铺节点) */
+  async planStoryboard(
+    brief: string,
+    llm?: LlmSource,
+    ctx?: { projectName?: string; basePrompt?: string; autoMaterialize?: boolean },
+  ): Promise<PlanStoryboardResult> {
+    if (this.inline) {
+      return planStoryboardDeterministic({
+        brief,
+        projectName: ctx?.projectName,
+        basePrompt: ctx?.basePrompt,
+        autoMaterialize: ctx?.autoMaterialize,
+      });
+    }
+    await this.start();
+    const res = await this.request<PlanStoryboardParams, PlanStoryboardResult>('plan-storyboard', {
+      brief,
+      projectName: ctx?.projectName,
+      basePrompt: ctx?.basePrompt,
+      autoMaterialize: ctx?.autoMaterialize,
+      llm,
+    });
+    if (res.error) throw new Error(`agent plan-storyboard 失败: ${res.error.message}`);
+    return res.result!;
+  }
+
   /** worker 工具调用 → 主进程工具桥执行 → 结果回写 worker stdin */
   private async handleToolCall(req: ToolCallRequest): Promise<void> {
     if (!this.child || this.child.killed) return;
@@ -208,4 +234,4 @@ export class AgentManager {
 }
 
 export * from './protocol.js';
-export { planDeterministic, deterministicPlanner } from './plan.js';
+export { planDeterministic, deterministicPlanner, planStoryboardDeterministic, deterministicStoryboardPlanner, buildStoryboardMaterialized } from './plan.js';

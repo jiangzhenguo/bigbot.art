@@ -3,7 +3,7 @@
  * 消息 = 单行 JSON,换行分隔。
  */
 
-export type AgentMethod = 'plan' | 'ping' | 'chat' | 'cancel';
+export type AgentMethod = 'plan' | 'plan-storyboard' | 'ping' | 'chat' | 'cancel';
 
 export interface AgentRequest<R = unknown> {
   id: number;
@@ -34,6 +34,27 @@ export interface PlanResult {
   /** 拆出的镜头节点 */
   shots: import('@bigbotart/shared').CanvasNode[];
   /** 连线(Brief → 各镜头) */
+  edges: import('@bigbotart/shared').CanvasEdge[];
+  report: string;
+}
+
+/** plan-storyboard 请求:从文档/小说生成分镜表(文档 §7) */
+export interface PlanStoryboardParams extends PlanParams {
+  /** 全局质感段(铺节点时注入每行) */
+  basePrompt?: string;
+  /** true=自动档:同时铺出 image-gen/shot 节点;false=分步(默认,只出表) */
+  autoMaterialize?: boolean;
+}
+
+/** plan-storyboard 结果:分镜表节点 + (自动档)铺出的生成节点 */
+export interface PlanStoryboardResult {
+  /** 分镜表节点(kind='storyboard',markdown = 标题+说明+表格) */
+  storyboard: import('@bigbotart/shared').CanvasNode;
+  /** 需配图行的 image-gen 节点(分步模式为空) */
+  images: import('@bigbotart/shared').CanvasNode[];
+  /** 每行一个 shot 节点(分步模式为空) */
+  shots: import('@bigbotart/shared').CanvasNode[];
+  /** 连线(storyboard→* / image-gen→shot first-frame) */
   edges: import('@bigbotart/shared').CanvasEdge[];
   report: string;
 }
@@ -74,7 +95,11 @@ export interface ToolCallResponse {
 /** chat 结果 */
 export interface ChatResult {
   reply: string;
+  /** 模型的思考内容(reasoning 块 / <think> 段;前端折叠展示,不进记忆) */
+  thinking?: string;
   toolCalls: Array<{ name: string; args: Record<string, unknown>; ok: boolean; result: string; nodeId?: string }>;
+  /** 🆕 结构化提问(Agent 调 ask.user 暂停,等用户在确认卡片选择);options 已归一化为对象 */
+  ask?: { question: string; options: import('@bigbotart/shared').AskOption[] };
   aborted?: boolean;
 }
 

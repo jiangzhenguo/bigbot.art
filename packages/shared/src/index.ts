@@ -103,6 +103,17 @@ export interface BigBotArtApi {
     edges: import('./domain').CanvasEdge[];
     report: string;
   }>;
+  /** 分镜表规划:从文档/小说生成分镜表节点;默认分步只出表,autoMaterialize 同时铺节点 */
+  agentPlanStoryboard(
+    brief: string,
+    opts?: { projectId?: string; projectName?: string; basePrompt?: string; autoMaterialize?: boolean },
+  ): Promise<{
+    storyboard: import('./domain').CanvasNode;
+    images: import('./domain').CanvasNode[];
+    shots: import('./domain').CanvasNode[];
+    edges: import('./domain').CanvasEdge[];
+    report: string;
+  }>;
   /** 画布页多轮对话(带工具调用 + 记忆上下文 + AbortSignal 打断) */
   agentChat(req: import('./domain').AgentChatRequest): Promise<import('./domain').AgentChatResponse>;
   /** 真实打断当前对话(中止 LLM 请求) */
@@ -134,3 +145,6 @@ export interface BigBotArtApi {
 export * from './domain.js';
 export * from './provider.js';
 export * from './tool-defs.js';
+export * from './table.js';
+export * from './prompt.js';
+export * from './connector-map.js';

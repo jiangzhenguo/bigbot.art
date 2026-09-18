@@ -1,4 +1,5 @@
 import type { NodeKind } from '@bigbotart/shared';
+import { defaultStoryboardMarkdown } from '@bigbotart/shared';
 import type { CanvasNode, NodeTag, Edge } from './types';
 import { resolvePort } from './connectors';
 
@@ -30,6 +31,14 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
   switch (t.kind) {
     case 'document':
       return { markdown: '' };
+    case 'storyboard':
+      return {
+        markdown: defaultStoryboardMarkdown(),
+        basePrompt: '',
+        lastTable: '',
+        aspect: '16:9',
+        tier: 'default',
+      };
     case 'asset':
       return { assetId: '', mediaType: 'image' };
     case 'image-gen':

@@ -1,8 +1,10 @@
 import React from 'react';
-import type { RenderJob, Asset, TimelineData } from '@bigbotart/shared';
+import type { RenderJob, Asset, TimelineData, PromptSource } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { ShotInspector } from './ShotInspector';
 import { TimelineInspector } from './TimelineInspector';
+import DocumentInspector from './DocumentInspector';
+import StoryboardInspector from './StoryboardInspector';
 import { KVSection, Lbl, TextAreaField } from './fields';
 
 export interface InspectorBodyProps {
@@ -23,6 +25,14 @@ export interface InspectorBodyProps {
   onOpenTimelinePage?: () => void;
   /** 删除一条边(timeline 检查器「移出时间线」= 断开对应连线) */
   onRemoveEdge?: (sourceId: string, targetId: string) => void;
+  /** 分镜表:铺节点(只建不跑) */
+  onMaterializeStoryboard?: (sbNode: CanvasNode, aspect: string, tier: string) => void;
+  /** 分镜表:整体撤销铺节点 */
+  onUndoStoryboard?: (sbNode: CanvasNode) => void;
+  /** 分镜表:按当前表重组提示词写回 */
+  onResyncStoryboard?: (sbNode: CanvasNode) => void;
+  /** 文档节点:「生成分镜表」→ Agent plan-storyboard */
+  onPlanStoryboard?: (docNode: CanvasNode) => void;
 }
 
 export function InspectorBody({
@@ -40,6 +50,10 @@ export function InspectorBody({
   nodes,
   onOpenTimelinePage,
   onRemoveEdge,
+  onMaterializeStoryboard,
+  onUndoStoryboard,
+  onResyncStoryboard,
+  onPlanStoryboard,
 }: InspectorBodyProps) {
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
@@ -53,18 +67,26 @@ export function InspectorBody({
 
   switch (node.kind) {
     case 'document': {
-      const md = String(d.markdown ?? '');
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField
-            label="Markdown 内容"
-            value={md}
-            rows={10}
-            placeholder="# 标题\n\n场景：…\n角色：…\n风格：…"
-            onChange={(v) => setData({ markdown: v })}
-          />
-          <KVSection rows={[['字符数', String(md.length)], ['行数', String(md.split('\n').length)]]} />
-        </div>
+        <DocumentInspector
+          node={node}
+          setData={setData}
+          toastMsg={toastMsg}
+          onPlanStoryboard={onPlanStoryboard}
+        />
+      );
+    }
+    case 'storyboard': {
+      return (
+        <StoryboardInspector
+          node={node}
+          setData={setData}
+          nodes={nodes ?? []}
+          toastMsg={toastMsg}
+          onMaterializeStoryboard={onMaterializeStoryboard}
+          onUndoStoryboard={onUndoStoryboard}
+          onResyncStoryboard={onResyncStoryboard}
+        />
       );
     }
     case 'asset': {
@@ -172,7 +194,7 @@ export function InspectorBody({
       const maskAssetId = String(d.maskAssetId ?? '');
       const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
       const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
-      const promptFrom = d.promptFrom as { nodeId?: string } | undefined;
+      const promptFrom = d.promptFrom as PromptSource | undefined;
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
@@ -220,7 +242,9 @@ export function InspectorBody({
           )}
           {promptFrom?.nodeId ? (
             <div className="mut" style={{ fontSize: 11 }}>
-              提示词由文档节点 {promptFrom.nodeId.slice(0, 10)} 注入(自身 prompt 为空时生效)
+              提示词由文档节点 {promptFrom.nodeId.slice(0, 10)} 注入
+              {(promptFrom.mode ?? 'full') !== 'full' ? ` · ${promptFrom.mode === 'block' ? `选段 ${promptFrom.blockId ?? ''}` : `表格行 ${promptFrom.row ?? ''}`}` : ' · 全文'}
+              (自身 prompt 为空时生效)
             </div>
           ) : null}
           {mode === 'inpaint' ? (

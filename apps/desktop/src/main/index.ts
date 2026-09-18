@@ -94,7 +94,28 @@ const takes = new TakeStore();
 const exportSvc = new ExportService(takes);
 const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();
-const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory);
+const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
+  // 分镜表规划:工具调用(对话里让 Agent 出分镜表)→ agent.planStoryboard(真 LLM,失败回退确定性模板)
+  // LLM 来源与 agent-plan 同口径:项目级覆盖 → 全局设置 → worker 默认
+  planStoryboard: async (brief, opts) => {
+    let llm: LlmSource | undefined;
+    const project = opts?.projectId ? store.getProject(opts.projectId) : undefined;
+    if (project?.llmOverride) llm = project.llmOverride;
+    else if (settings.get().llm) llm = settings.get().llm;
+    try {
+      const ep = await resolveLlmEndpoint(settings.get(), llm);
+      llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    } catch (e) {
+      console.warn(`[tool storyboard.plan] LLM 来源解析失败,回退确定性分镜表: ${(e as Error).message}`);
+      llm = { kind: 'none' };
+    }
+    return agent.planStoryboard(brief, llm, {
+      projectName: project?.name,
+      basePrompt: opts?.basePrompt,
+      autoMaterialize: opts?.autoMaterialize,
+    });
+  },
+});
 
 const agent = new AgentManager({
   // ✓ pi 以子进程隔离运行:worker 内嵌 pi-ai(远端 env 端点优先,否则本地 LM Studio)
@@ -464,6 +485,25 @@ ipcMain.handle('agent-plan', async (_e, brief: string, opts?: { projectId?: stri
   );
   return { document, shots, edges, report };
 });
+ipcMain.handle('agent-plan-storyboard', async (_e, brief: string, opts?: { projectId?: string; projectName?: string; basePrompt?: string; autoMaterialize?: boolean }) => {
+  let llm: LlmSource | undefined;
+  const project = opts?.projectId ? store.getProject(opts.projectId) : undefined;
+  if (project?.llmOverride) llm = project.llmOverride;
+  else if (settings.get().llm) llm = settings.get().llm;
+  try {
+    const ep = await resolveLlmEndpoint(settings.get(), llm);
+    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+  } catch (e) {
+    console.warn(`[agent-plan-storyboard] LLM 来源解析失败,回退确定性分镜表: ${(e as Error).message}`);
+    llm = { kind: 'none' };
+  }
+  const result = await agent.planStoryboard(brief, llm, {
+    projectName: opts?.projectName ?? project?.name,
+    basePrompt: opts?.basePrompt,
+    autoMaterialize: opts?.autoMaterialize,
+  });
+  return result;
+});
 
 /* ---------- IPC:Agent 对话(多轮 + 工具 + 记忆) ---------- */
 ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentChatResponse> => {
@@ -508,7 +548,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
         toolName: tc.name, toolArgs: tc.args, toolResult: tc.result,
       });
     }
-    return { ok: true, reply: result.reply, toolCalls: result.toolCalls, aborted: result.aborted };
+    return { ok: true, reply: result.reply, thinking: result.thinking, toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   } finally {

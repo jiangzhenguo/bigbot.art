@@ -11,17 +11,55 @@
  */
 import { createModels, createProvider, type Context, type Message, type AssistantMessage, type ToolCall } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import type { LlmSource } from '@bigbotart/shared';
+import type { LlmSource, AskOption } from '@bigbotart/shared';
 import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
 
 const MAX_TOOL_ROUNDS = 8;
 
+/**
+ * 敏感操作强制确认闸(结构兜底,与 memory.ts 的提问规则对应)。
+ * 模型不守 prompt、用纯文本提问/直接执行时,由这里拦截:不执行,改发 ask.user 确认卡。
+ * 用户点选确认后,下一轮 chat 凭选项文本授权放行。
+ */
+const SENSITIVE_TOOLS = new Set(['canvas.delete_node', 'storyboard.materialize', 'timeline.export', 'engine.submit']);
+/** 否定/取消类选项(用户选了这些 = 未授权) */
+const NEGATIVE_RE = /不|取消|算了|想想|保持|别/;
+
+/** 把敏感工具调用描述成一行人话(确认卡清单用) */
+function describeAction(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case 'canvas.delete_node':
+      return `删除节点 ${args.nodeId ?? ''}`;
+    case 'storyboard.materialize':
+      return `按分镜表 ${args.nodeId ?? ''} 铺节点`;
+    case 'timeline.export':
+      return `导出时间线${args.outputName ? `(${args.outputName})` : ''}`;
+    case 'engine.submit':
+      return `提交生成 ${args.nodeId ?? ''}`;
+    default:
+      return `${name}(${JSON.stringify(args).slice(0, 60)})`;
+  }
+}
+
+/** 从正文拆出思考内容(reasoning 模型经 OpenAI 兼容端点常把 <think> 漏进 text;兼容未闭合) */
+function splitThink(raw: string): { text: string; thinking?: string } {
+  const thinks: string[] = [];
+  const cleaned = raw.replace(/<think>([\s\S]*?)(?:<\/think>|$)/g, (_m, inner: string) => {
+    const t = inner.trim();
+    if (t) thinks.push(t);
+    return '';
+  });
+  return { text: cleaned.trim(), thinking: thinks.length > 0 ? thinks.join('\n\n') : undefined };
+}
+
 export class PiChatSession {
   private planner = new PiPlanner();
   private abort: AbortController | null = null;
   private toolCallSeq = 0;
+  /** 确认闸:挂起的敏感操作确认(用户点选后,下一轮 chat 用选项文本放行) */
+  private pendingConfirm: { options: string[] } | null = null;
   /** worker → 主进程的工具调用回调(由 worker.ts 注入) */
   onToolCall: ((req: ToolCallRequest) => Promise<ToolCallResponse>) | null = null;
 
@@ -52,6 +90,18 @@ export class PiChatSession {
     models.setProvider(provider);
 
     // 历史消息:pi-ai 的 AssistantMessage.content 必须是块数组(string 会触发 flatMap 错误)
+    // 确认闸判定:上一轮挂起了敏感操作确认 → 本轮用户消息若是其中的确认类选项,放行敏感工具
+    let sensitiveApproved = false;
+    let userText = params.text;
+    if (this.pendingConfirm) {
+      const picked = this.pendingConfirm.options.find((o) => o === params.text.trim());
+      if (picked && !NEGATIVE_RE.test(picked)) {
+        sensitiveApproved = true;
+        // 给模型一个明确授权信号,防止它再追问一轮
+        userText = `${params.text}\n\n(系统:用户已在确认卡片中授权本次操作,请直接执行对应工具,不要再追问)`;
+      }
+      this.pendingConfirm = null;
+    }
     const messages: Message[] = [
       ...params.context.messages.map((m) => {
         if (m.role === 'assistant') {
@@ -63,7 +113,7 @@ export class PiChatSession {
         }
         return { role: 'user', content: m.content, timestamp: Date.now() } as Message;
       }),
-      { role: 'user', content: params.text, timestamp: Date.now() } as Message,
+      { role: 'user', content: userText, timestamp: Date.now() } as Message,
     ];
 
     const tools = toolDefinitions() as never;
@@ -94,22 +144,92 @@ export class PiChatSession {
       const blocks = assistant.content ?? [];
       console.error(`[pi-chat] round=${round} stop=${assistant.stopReason} blocks=${blocks.map((b) => b.type).join(',')} err=${assistant.errorMessage ?? ''}`);
 
+      // 收集本轮思考内容(thinking 块 + 漏进 text 的 <think> 段),供前端折叠展示
+      const collectThinking = (): string | undefined => {
+        const fromBlocks = blocks
+          .filter((c) => c.type === 'thinking')
+          .map((c) => ('thinking' in c ? c.thinking : ''))
+          .join('')
+          .trim();
+        const fromText = splitThink(
+          blocks
+            .filter((c) => c.type === 'text')
+            .map((c) => ('text' in c ? c.text : ''))
+            .join(''),
+        ).thinking;
+        const all = [fromBlocks, fromText].filter(Boolean).join('\n\n').trim();
+        return all || undefined;
+      };
+
       // 收集本轮 toolCalls 并执行
       const calls = blocks.filter((c): c is ToolCall => c.type === 'toolCall');
-      if (calls.length === 0) {
-        // 无工具调用 → 最终回复(text 块;thinking 模型若 text 空则回退 thinking 摘要)
-        let reply = blocks
-          .filter((c) => c.type === 'text')
-          .map((c) => ('text' in c ? c.text : ''))
-          .join('');
-        if (!reply.trim()) {
-          const thinking = blocks
-            .filter((c) => c.type === 'thinking')
-            .map((c) => ('thinking' in c ? c.thinking : ''))
-            .join('');
-          reply = thinking.trim() ? `(思考中) ${thinking.slice(0, 400)}` : '';
+
+      // 结构化提问拦截:ask.user → 暂停本轮,返回 {ask},等待用户在确认卡片选择后继续
+      const askCall = calls.find((c) => c.name === 'ask.user');
+      if (askCall) {
+        const args = (askCall.arguments ?? {}) as { question?: string; options?: unknown[] };
+        const question = String(args.question ?? '').trim() || '需要你确认一下';
+        // 选项归一化:字符串 → {label};对象 → {label, sub?, recommended?}(协议扩展,见 tool-defs.ts ask.user)
+        const options: AskOption[] = Array.isArray(args.options)
+          ? args.options
+              .map((o): AskOption | null => {
+                if (typeof o === 'string') {
+                  const label = o.trim();
+                  return label ? { label } : null;
+                }
+                if (o && typeof o === 'object') {
+                  const raw = o as { label?: unknown; sub?: unknown; recommended?: unknown };
+                  const label = String(raw.label ?? '').trim();
+                  if (!label) return null;
+                  const opt: AskOption = { label };
+                  const sub = String(raw.sub ?? '').trim();
+                  if (sub) opt.sub = sub;
+                  if (raw.recommended === true) opt.recommended = true;
+                  return opt;
+                }
+                return null;
+              })
+              .filter((o): o is AskOption => o !== null)
+              .slice(0, 6)
+          : [];
+        if (options.length >= 2 && !signal.aborted) {
+          const ask = { question, options };
+          // 提问本身也作为一次"用户可见回复",便于渲染层只渲染卡片即可
+          return { reply: question, thinking: collectThinking(), toolCalls, ask };
         }
-        return { reply, toolCalls };
+        // options 不足 2 个 → 不当提问处理,继续当普通回复(防 Agent 滥用)
+      }
+
+      if (calls.length === 0) {
+        // 无工具调用 → 最终回复;思考内容拆出单独字段(前端折叠展示,不混进正文)
+        const thinking = collectThinking();
+        const reply = splitThink(
+          blocks
+            .filter((c) => c.type === 'text')
+            .map((c) => ('text' in c ? c.text : ''))
+            .join(''),
+        ).text;
+        return { reply, thinking, toolCalls };
+      }
+
+      // 敏感操作确认闸(结构兜底):未授权时一个都不执行,改发 ask.user 确认卡
+      // —— 防模型绕过 prompt 直接 delete/materialize/export/submit
+      const sensitiveCalls = calls.filter((c) => SENSITIVE_TOOLS.has(c.name));
+      if (sensitiveCalls.length > 0 && !sensitiveApproved && !signal.aborted) {
+        const lines = sensitiveCalls.slice(0, 5).map((c) => describeAction(c.name, (c.arguments ?? {}) as Record<string, unknown>));
+        const more = sensitiveCalls.length > 5 ? `\n- … 共 ${sensitiveCalls.length} 项` : '';
+        const question = `即将执行 ${sensitiveCalls.length} 项不可轻易撤销的操作:${lines.map((l) => `\n- ${l}`).join('')}${more}\n\n确认继续吗?`;
+        const confirmLabel = '确认执行';
+        const cancelLabel = '先不执行';
+        this.pendingConfirm = { options: [confirmLabel, cancelLabel] };
+        const ask = {
+          question,
+          options: [
+            { label: confirmLabel, sub: '按上述清单执行,产物变更/删除不可自动恢复' },
+            { label: cancelLabel, sub: '不执行,返回继续讨论方案', recommended: true },
+          ],
+        };
+        return { reply: question, thinking: collectThinking(), toolCalls, ask };
       }
 
       // 执行每个工具调用(反向 RPC 到主进程)

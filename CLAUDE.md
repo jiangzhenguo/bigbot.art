@@ -79,6 +79,8 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
 
 ## 文档入口
 
+- **AI 代理强制规范:`AGENTS.md`(红线/联动修改清单/验证纪律,动手前先读)**
+- 人类协作者 AI 使用规范:`docs/AI使用规范.md`
 - 产品 PRD:`PRD-BigBotArt-无限画布视频图片生成Agent.md`
 - 调研报告:`docs/调研报告-MiniMaxDesign与本地模型接入方案.md`
 - 用户入口文档:`README.md`

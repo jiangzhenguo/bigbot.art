@@ -69,6 +69,21 @@ rl.on('line', async (line) => {
         respond({ id: r.id, result });
         break;
       }
+      case 'plan-storyboard': {
+        const params = r.params as { brief: string; projectName?: string; existingNodeIds?: string[]; basePrompt?: string; autoMaterialize?: boolean; llm?: import('@bigbotart/shared').LlmSource };
+        const result = await planner.planStoryboard(
+          {
+            brief: params?.brief ?? '',
+            projectName: params?.projectName,
+            existingNodeIds: params?.existingNodeIds,
+            basePrompt: params?.basePrompt,
+            autoMaterialize: params?.autoMaterialize,
+          },
+          params?.llm,
+        );
+        respond({ id: r.id, result });
+        break;
+      }
       case 'chat': {
         const params = r.params as Parameters<PiChatSession['chat']>[0];
         const result = await chatSession.chat(params);

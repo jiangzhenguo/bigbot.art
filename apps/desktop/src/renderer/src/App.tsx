@@ -102,7 +102,8 @@ export default function App() {
       }
       const st = await window.bigbotart.agentStart();
       if (!st.running) throw new Error('Agent 启动失败');
-      const plan = await window.bigbotart.agentPlan(brief, { projectId: pid });
+      // 新模式(分镜表):Agent 先出分镜表(表格可干预),进画布确认后一键铺节点
+      const plan = await window.bigbotart.agentPlanStoryboard(brief, { projectId: pid });
       sessionStorage.setItem('bba.plan', JSON.stringify(plan));
       setCurrentPage('canvas');
     } catch (e) {

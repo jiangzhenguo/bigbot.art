@@ -72,6 +72,14 @@ const BY_KIND: Record<string, Record<string, PortRow>> = {
     edit: ['prompt', '提示词 · 全文注入'],
     doc: ['prompt', '文档引用'],
     director: ['prompt', '编排依据 · 全文注入'],
+    storyboard: ['prompt', '分镜依据 · 全文注入'],
+  },
+  storyboard: {
+    image: ['prompt', '提示词 · 按行注入(铺节点物化)'],
+    shot: ['prompt', '提示词 · 按行注入(铺节点物化)'],
+    edit: ['prompt', '提示词 · 按行注入'],
+    timeline: ['sequence', '分镜序列 · 按行入轨'],
+    director: ['prompt', '编排依据 · 按行注入'],
   },
   director: {
     timeline: ['sequence', '镜头编排 · 入轨'],

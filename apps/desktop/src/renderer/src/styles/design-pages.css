@@ -386,7 +386,8 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .chat{flex:1;overflow:auto;padding:14px 12px;display:flex;flex-direction:column;gap:12px;background:var(--bg)}
 .pg-canvas .msg-user{margin-left:auto;max-width:92%;background:color-mix(in oklab,var(--fg) 8%,transparent);border-radius:16px 16px 4px 16px;padding:10px 13px;font-size:var(--text-xs);line-height:1.55}
 .pg-canvas .msg-agent{max-width:100%;background:var(--bg);border:1px solid var(--border-soft);border-radius:16px 16px 16px 4px;padding:11px 13px;font-size:var(--text-xs);line-height:1.55;box-shadow:0 1px 3px rgba(0,0,0,.04)}
-.pg-canvas .msg-sys{text-align:center;font-size:11px;color:var(--muted)}
+.pg-canvas .msg-sys{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);line-height:1.5;text-align:center}
+.pg-canvas .msg-sys::before,.pg-canvas .msg-sys::after{content:"";flex:1;height:1px;background:var(--border-soft)}
 .pg-canvas .tool{border:1px solid var(--border-soft);border-radius:var(--radius-sm);margin-top:8px;background:var(--surface-warm)}
 .pg-canvas .tool .th{display:flex;align-items:center;gap:7px;padding:6px 9px;border-bottom:1px solid var(--border-soft)}
 .pg-canvas .tool .tb{padding:7px 10px;color:var(--muted);font-size:11px}
@@ -399,6 +400,80 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .sm-wait{border:1px solid var(--border);color:var(--muted)}
 @keyframes canvas-spin{to{transform:rotate(360deg)}}
 .pg-canvas .spin{width:12px;height:12px;border:1.5px solid color-mix(in oklab,var(--accent),transparent 65%);border-top-color:var(--accent);border-radius:50%;animation:canvas-spin .9s linear infinite}
+.pg-canvas .spin.sm{width:10px;height:10px}
+
+/* ─── ToolRunCard:本轮工具执行聚合卡(设计文档 §3 / agent-cards.html ②)─── */
+.pg-canvas .trc{border:1px solid var(--border-soft);border-radius:var(--radius-md);background:var(--surface-warm);overflow:hidden;max-width:100%}
+.pg-canvas .trc.err{border-color:color-mix(in oklab,var(--danger) 42%,var(--border-soft));background:color-mix(in oklab,var(--danger) 4%,var(--surface-warm))}
+.pg-canvas .trc-head{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px 7px 10px;cursor:pointer;user-select:none;transition:background var(--motion-fast)}
+.pg-canvas .trc-head:hover{background:color-mix(in oklab,var(--fg) 5%,transparent)}
+.pg-canvas .trc-ic{width:13px;height:13px;color:var(--fg-2);flex:none}
+.pg-canvas .trc-dot{width:7px;height:7px;border-radius:50%;background:var(--danger);flex:none}
+.pg-canvas .trc-sum{flex:1;min-width:0;font-family:var(--font-mono);font-size:11px;color:var(--fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .trc-sum b{color:var(--fg);font-weight:600}
+.pg-canvas .trc-sum .err-n{color:var(--danger);font-weight:600}
+.pg-canvas .trc-chev{width:11px;height:11px;color:var(--meta);flex:none;transition:transform var(--motion-base) var(--ease-standard)}
+.pg-canvas .trc.open .trc-chev{transform:rotate(180deg)}
+.pg-canvas .trc-body{display:none;border-top:1px solid var(--border-soft);padding:5px 6px 6px}
+.pg-canvas .trc.open .trc-body{display:block}
+.pg-canvas .tr-row{border-radius:var(--radius-sm)}
+.pg-canvas .tr-rh{display:flex;align-items:center;gap:7px;width:100%;padding:5px 7px;border-radius:var(--radius-sm);cursor:pointer;user-select:none;transition:background var(--motion-fast)}
+.pg-canvas .tr-rh:hover{background:color-mix(in oklab,var(--fg) 5%,transparent)}
+.pg-canvas .tr-chev{width:9px;height:9px;color:var(--meta);flex:none;transition:transform var(--motion-base) var(--ease-standard)}
+.pg-canvas .tr-row.open .tr-chev{transform:rotate(90deg)}
+.pg-canvas .tr-nm{flex:0 1 auto;min-width:0;font-family:var(--font-mono);font-size:11px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .tr-st{margin-left:auto;flex:none;display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;color:var(--muted)}
+.pg-canvas .tr-st svg{width:11px;height:11px;flex:none}
+.pg-canvas .tr-row.ok .tr-st{color:color-mix(in oklab,var(--success) 70%,var(--fg))}
+.pg-canvas .tr-row.err .tr-nm{color:var(--danger)}
+.pg-canvas .tr-row.err .tr-st{color:var(--danger)}
+.pg-canvas .tr-row.err .tr-rh{background:color-mix(in oklab,var(--danger) 5%,transparent)}
+.pg-canvas .tr-row.err .tr-rh:hover{background:color-mix(in oklab,var(--danger) 8%,transparent)}
+.pg-canvas .tr-row.running .tr-st{color:color-mix(in oklab,var(--accent) 82%,var(--fg))}
+.pg-canvas .tr-arg{padding:0 7px 5px 23px;font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .tr-row.open .tr-arg{display:none}
+.pg-canvas .tr-detail{margin:1px 7px 6px 23px;padding:8px 10px;border:1px solid var(--border-soft);border-radius:var(--radius-sm);background:var(--bg)}
+.pg-canvas .tr-sec+.tr-sec{margin-top:8px}
+.pg-canvas .tr-k{font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+.pg-canvas .tr-v{margin:0;font-family:var(--font-mono);font-size:10.5px;line-height:1.6;color:var(--fg-2);white-space:pre-wrap;word-break:break-word}
+.pg-canvas .tr-v.err{color:var(--danger)}
+
+/* ─── AskCard:ask.user 确认卡片(agent-cards.html ③)─── */
+.pg-canvas .ask{border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg);box-shadow:0 1px 3px rgba(0,0,0,.05);overflow:hidden;max-width:100%}
+.pg-canvas .ask-h{display:flex;align-items:center;gap:7px;padding:7px 12px;border-bottom:1px solid var(--border-soft);background:var(--surface)}
+.pg-canvas .ask-h svg{width:12px;height:12px;color:var(--fg-2);flex:none}
+.pg-canvas .ask-h b{font-size:11px;font-weight:600;color:var(--fg-2)}
+.pg-canvas .ask-h .tag{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--meta)}
+.pg-canvas .ask-b{padding:11px 12px 12px}
+.pg-canvas .ask .ask-q{display:block;font-size:var(--text-xs);line-height:1.6;color:var(--fg)}
+.pg-canvas .ask-opts{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.pg-canvas .ask-opt{display:flex;align-items:flex-start;gap:9px;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);cursor:pointer;text-align:left;transition:border-color var(--motion-fast) var(--ease-standard),background var(--motion-fast)}
+.pg-canvas .ask-opt:hover{border-color:var(--meta);background:var(--surface-warm)}
+.pg-canvas .ask-opt .ix{flex:none;width:18px;height:18px;margin-top:1px;border:1.5px solid var(--border);border-radius:50%;display:grid;place-items:center;font-family:var(--font-mono);font-size:10px;color:var(--muted);transition:border-color var(--motion-fast),color var(--motion-fast)}
+.pg-canvas .ask-opt:hover .ix{border-color:var(--meta);color:var(--fg-2)}
+.pg-canvas .ask-opt .tx{flex:1;min-width:0;font-size:var(--text-xs);line-height:1.5;color:var(--fg)}
+.pg-canvas .ask-opt .tx .sub{display:block;margin-top:1px;font-size:10.5px;color:var(--muted);line-height:1.45}
+.pg-canvas .ask-opt .rec{flex:none;margin-top:2px;padding:1px 8px;border-radius:var(--radius-pill);font-size:10px;font-weight:600;background:color-mix(in oklab,var(--fg) 7%,transparent);color:var(--fg-2)}
+.pg-canvas .ask-done{display:none;align-items:center;gap:7px;margin-top:10px;padding:7px 10px;border-radius:var(--radius-sm);background:color-mix(in oklab,var(--success) 9%,transparent);font-size:11px;color:var(--fg)}
+.pg-canvas .ask-done svg{width:13px;height:13px;color:color-mix(in oklab,var(--success) 70%,var(--fg));flex:none}
+.pg-canvas .ask-done b{font-weight:600}
+.pg-canvas .ask-done .rst{margin-left:auto;flex:none;font-size:11px;color:var(--fg-2);cursor:pointer;padding:2px 7px;border-radius:6px}
+.pg-canvas .ask-done .rst:hover{color:var(--fg);background:color-mix(in oklab,var(--fg) 8%,transparent)}
+.pg-canvas .ask.done .ask-opts{display:none}
+.pg-canvas .ask.done .ask-done{display:flex}
+
+/* ─── 思考内容折叠块(reasoning 模型;默认收起,点开看全文)─── */
+.pg-canvas .think{margin:-3px 0 8px;border:1px dashed var(--border-soft);border-radius:var(--radius-sm);background:var(--surface-warm)}
+.pg-canvas .think summary{padding:5px 9px;font-size:10.5px;font-weight:600;color:var(--meta);cursor:pointer;user-select:none;list-style:none;display:flex;align-items:center;gap:5px}
+.pg-canvas .think summary::before{content:"▸";font-size:9px;transition:transform var(--motion-base) var(--ease-standard)}
+.pg-canvas .think[open] summary::before{transform:rotate(90deg)}
+.pg-canvas .think summary:hover{color:var(--fg-2)}
+.pg-canvas .think pre{margin:0;padding:2px 10px 9px;font-family:var(--font-mono);font-size:10.5px;line-height:1.6;color:var(--muted);white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto}
+
+/* ─── 错误卡:LLM 不可达等(agent-cards.html ④);工具失败走 .trc 失败行,不用此卡 ─── */
+.pg-canvas .msg-agent.err{border-color:color-mix(in oklab,var(--danger) 40%,var(--border-soft))}
+.pg-canvas .msg-agent.err .eh{display:flex;align-items:center;gap:7px;font-weight:600;font-size:var(--text-xs);color:var(--danger)}
+.pg-canvas .msg-agent.err .eh svg{width:13px;height:13px;flex:none}
 .pg-canvas .composer{border-top:1px solid var(--border-soft);padding:12px 14px 13px;background:var(--surface)}
 .pg-canvas .attach-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .pg-canvas .attach{display:inline-flex;align-items:center;gap:7px;padding:4px 8px 4px 4px;background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--radius-sm);font-size:11px}
@@ -969,3 +1044,75 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .dbg-ts{flex:none;font-size:9.5px;color:var(--meta)}
 .pg-canvas .dbg-lv{flex:none;width:34px;font-size:9px;color:var(--meta);text-transform:uppercase}
 .pg-canvas .dbg-msg{flex:1;word-break:break-all;white-space:pre-wrap}
+
+/* ────────────────────────────────────────────────────────────────
+   文本节点 / 分镜表节点(文档 §4 §5)— 表格渲染、TableEditor、铺节点区
+   参考 Open Design 原型 document-storyboard-inspector.html / storyboard-table.html
+   ──────────────────────────────────────────────────────────────── */
+
+/* 节点卡片迷你表格 */
+.pg-canvas .tbl-mini,
+.tbl-mini{width:100%;border-collapse:collapse;font-size:10px;table-layout:fixed;margin-top:2px}
+.pg-canvas .tbl-mini th,.tbl-mini th,
+.pg-canvas .tbl-mini td,.tbl-mini td{border:1px solid var(--border-soft);padding:3px 5px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .tbl-mini th,.tbl-mini th{background:var(--surface);font-weight:600;font-size:9.5px;color:var(--fg-2)}
+.pg-canvas .tbl-mini td,.tbl-mini td{color:var(--muted)}
+.pg-canvas .tbl-mini td.n,.tbl-mini td.n{width:26px;text-align:center;font-family:var(--font-mono);color:var(--fg-2)}
+.pg-canvas .rowsum,.rowsum{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:7px}
+.pg-canvas .rowsum .badge,.rowsum .badge{font-size:9.5px;padding:1px 7px}
+.pg-canvas .rowsum .more,.rowsum .more{font-size:10px;color:var(--muted);font-family:var(--font-mono)}
+.pg-canvas .mkblock,.mkblock{display:inline-flex;align-items:center;gap:4px;margin-top:7px;padding:2px 8px;border-radius:6px;font-family:var(--font-mono);font-size:10px;border:1px solid color-mix(in oklab,var(--accent) 40%,var(--border));color:var(--fg);background:color-mix(in oklab,var(--accent) 8%,transparent)}
+.pg-canvas .nparams,.nparams{margin-top:7px;padding:4px 8px;border-radius:7px;background:var(--surface);font-family:var(--font-mono);font-size:10px;color:var(--fg-2);line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .insp-h,.insp-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* TableEditor */
+.pg-canvas .te,.te{border:1px solid var(--border-soft);border-radius:var(--radius-md,12px);overflow:hidden;background:var(--bg)}
+.pg-canvas .te-bar,.te-bar{display:flex;align-items:center;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border-soft);background:var(--surface-warm);flex-wrap:wrap}
+.pg-canvas .tb,.tb{font-size:10.5px;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg-2);white-space:nowrap;cursor:pointer;transition:border-color var(--motion-fast,150ms),background var(--motion-fast,150ms),color var(--motion-fast,150ms)}
+.pg-canvas .tb:hover,.tb:hover{border-color:var(--meta);background:var(--surface);color:var(--fg)}
+.pg-canvas .te-div,.te-div{width:1px;height:14px;background:var(--border);margin:0 3px;flex:none}
+.pg-canvas .te-msg,.te-msg{margin-left:auto;font-size:10px;color:var(--muted);font-family:var(--font-mono);padding-left:6px}
+.pg-canvas .te-scroll,.te-scroll{overflow-x:auto}
+.pg-canvas .te-grid,.te-grid{border-collapse:collapse;width:100%;font-size:11px}
+.pg-canvas .te-grid.w8,.te-grid.w8{min-width:680px}
+.pg-canvas .te-grid th,.te-grid th,.pg-canvas .te-grid td,.te-grid td{border:1px solid var(--border-soft);padding:5px 7px;text-align:left;vertical-align:top;line-height:1.45}
+.pg-canvas .te-grid th,.te-grid th{background:var(--surface);font-weight:600;font-size:10.5px;white-space:nowrap;color:var(--fg)}
+.pg-canvas .te-grid td,.te-grid td{color:var(--fg-2)}
+.pg-canvas .te-grid [contenteditable]:hover,.te-grid [contenteditable]:hover{background:color-mix(in oklab,var(--accent) 6%,transparent)}
+.pg-canvas .te-grid [contenteditable]:focus,.te-grid [contenteditable]:focus{outline:none;box-shadow:inset 0 0 0 2px var(--accent);background:var(--bg);color:var(--fg)}
+.pg-canvas .te-grid .sn,.te-grid .sn{width:46px;text-align:center;font-family:var(--font-mono);color:var(--fg-2);background:var(--surface-warm);user-select:none}
+.pg-canvas .te-grid tbody .sn,.te-grid tbody .sn{cursor:pointer}
+.pg-canvas .te-grid tbody .sn:hover,.te-grid tbody .sn:hover{background:var(--surface);color:var(--fg)}
+.pg-canvas .te-grid tr.on td,.te-grid tr.on td{background:color-mix(in oklab,var(--accent) 7%,transparent)}
+.pg-canvas .te-grid tr.on .sn,.te-grid tr.on .sn{background:var(--fg);color:var(--bg)}
+.pg-canvas .te-grid .c-img,.te-grid .c-img{width:70px}
+.pg-canvas .ynm,.ynm{display:inline-flex;align-items:center;font-size:10px;line-height:1.6;padding:1px 9px;border-radius:var(--radius-pill,980px);border:1px solid var(--border);color:var(--muted);background:var(--bg);cursor:pointer;transition:border-color var(--motion-fast,150ms),background var(--motion-fast,150ms),color var(--motion-fast,150ms)}
+.pg-canvas .ynm:hover,.ynm:hover{border-color:var(--meta)}
+.pg-canvas .ynm.on,.ynm.on{background:var(--fg);border-color:var(--fg);color:var(--bg)}
+.pg-canvas .te-paste,.te-paste{display:none;align-items:center;gap:8px;padding:7px 9px;border-top:1px solid var(--border-soft);background:color-mix(in oklab,var(--accent) 6%,transparent);font-size:10.5px;color:var(--fg-2);flex-wrap:wrap}
+.pg-canvas .te-paste.show,.te-paste.show{display:flex}
+.pg-canvas .te-paste .grow,.te-paste .grow{min-width:110px}
+.pg-canvas .te-foot,.te-foot{display:flex;align-items:center;gap:8px;padding:8px 9px;border-top:1px solid var(--border-soft);background:var(--surface-warm);font-size:10px;color:var(--muted);font-family:var(--font-mono);flex-wrap:wrap}
+
+/* 铺节点区(storyboard 检查器) */
+.pg-canvas .gstate,.gstate{border-radius:var(--radius-md,12px);padding:11px 12px;display:flex;flex-direction:column;gap:8px}
+.pg-canvas .gstate.pend,.gstate.pend{border:1.5px dashed var(--border);background:var(--surface-warm)}
+.pg-canvas .gstate.warn,.gstate.warn{border:1.5px dashed color-mix(in oklab,var(--warn) 55%,var(--border));background:color-mix(in oklab,var(--warn) 7%,transparent)}
+.pg-canvas .gs-h{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--fg)}
+.pg-canvas .gs-h b{font-weight:600}
+.pg-canvas .gs-h .right{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--muted)}
+.pg-canvas .gs-sub{font-size:10.5px;color:var(--muted);line-height:1.5}
+.pg-canvas .gs-act{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.pg-canvas .psrc,.psrc{border:1px solid var(--border-soft);border-radius:var(--radius-md,12px);padding:11px 12px;display:flex;flex-direction:column;gap:9px;background:var(--surface-warm)}
+.pg-canvas .psrc-h{display:flex;align-items:center;gap:7px;font-size:11.5px;flex-wrap:wrap}
+.pg-canvas .psrc-h b{font-weight:600}
+.pg-canvas .psrc-h .mono{margin-left:auto;font-size:10px;color:var(--muted)}
+.pg-canvas .psrc pre{margin:0;font-family:var(--font-mono);font-size:10.5px;line-height:1.7;color:var(--fg-2);background:var(--bg);border:1px solid var(--border-soft);border-radius:8px;padding:9px 10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.pg-canvas .mat,.mat{border:1px solid color-mix(in oklab,var(--accent) 34%,var(--border));border-radius:var(--radius-md,12px);padding:11px 12px;display:none;flex-direction:column;gap:9px;background:color-mix(in oklab,var(--accent) 5%,transparent)}
+.pg-canvas .mat.show,.mat.show{display:flex}
+.pg-canvas .mat ul,.mat ul{margin:0;padding-left:16px;font-size:11px;color:var(--fg-2);line-height:1.7}
+.pg-canvas .mat ul .mono,.mat ul .mono{font-size:10.5px}
+
+/* 已铺行圆点 */
+.pg-canvas .mdot,.mdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--success);margin-left:6px;vertical-align:1px}
+.pg-canvas .mdot.stale,.mdot.stale{background:var(--warn)}

@@ -6,6 +6,18 @@
  * 设计原则:每个工具返回 { ok, result(人读摘要), nodeId? } — 渲染层据此画工具卡
  */
 import type { CanvasNode, CanvasEdge, CanvasSnapshot } from '@bigbotart/shared';
+import {
+  connectorSummary,
+  nodeKindGuide,
+  parseGfmTable,
+  tableToGfm,
+  assembleH3Prompt,
+  assembleZImagePrompt,
+  rowNeedsImage,
+  rowSeconds,
+  SB_SIZE,
+  type PromptSource,
+} from '@bigbotart/shared';
 import type { ProjectStore } from './store';
 import type { AssetStore } from './assets';
 import type { SkillStore } from './skills';
@@ -29,7 +41,23 @@ type Handler = (args: Record<string, unknown>, ctx: ToolContext) => Promise<Tool
 
 const nid = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
+/** 分镜表规划服务(由主进程注入,内部走 agent.planStoryboard → LLM / 确定性兜底) */
+export interface StoryboardPlanFn {
+  (
+    brief: string,
+    opts?: { projectId?: string; basePrompt?: string; autoMaterialize?: boolean },
+  ): Promise<{
+    storyboard: CanvasNode;
+    images: CanvasNode[];
+    shots: CanvasNode[];
+    edges: CanvasEdge[];
+    report: string;
+  }>;
+}
+
 export class ToolHandlers {
+  private planStoryboard?: StoryboardPlanFn;
+
   constructor(
     private store: ProjectStore,
     private assets: AssetStore,
@@ -37,7 +65,10 @@ export class ToolHandlers {
     private exportSvc: ExportService,
     private queue: RenderQueue,
     private memory: MemoryStore,
-  ) {}
+    opts: { planStoryboard?: StoryboardPlanFn } = {},
+  ) {
+    this.planStoryboard = opts.planStoryboard;
+  }
 
   /** 工具路由表 */
   private handlers: Record<string, Handler> = {
@@ -48,6 +79,144 @@ export class ToolHandlers {
       if (!cur) return { ok: false, result: '画布不存在' };
       const lines = cur.nodes.map((n) => `- ${n.id} [${n.kind}] ${n.label}`).join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
+    },
+    'canvas.get_node': async (a, ctx) => {
+      const nodeId = String(a.nodeId ?? '');
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      const node = cur?.nodes.find((n) => n.id === nodeId);
+      if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      const ins = (cur?.edges ?? [])
+        .filter((e) => e.target === nodeId)
+        .map((e) => `  ← ${e.source}${e.label ? ` [${e.label}]` : ''}`)
+        .join('\n');
+      const outs = (cur?.edges ?? [])
+        .filter((e) => e.source === nodeId)
+        .map((e) => `  → ${e.target}${e.label ? ` [${e.label}]` : ''}`)
+        .join('\n');
+      const dataJson = JSON.stringify(node.data ?? {}, null, 1);
+      const dataTrunc =
+        dataJson.length > 1600 ? `${dataJson.slice(0, 1600)}\n…(内容截断,完整内容在检查器/表格编辑)` : dataJson;
+      return {
+        ok: true,
+        result:
+          `节点 ${nodeId}\n[${node.kind}] ${node.label}\n` +
+          `位置 (${node.position.x}, ${node.position.y})\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}\ndata:\n${dataTrunc}`,
+      };
+    },
+    'canvas.connectors': async () => ({
+      ok: true,
+      result: `节点类型:\n${nodeKindGuide()}\n\n可连线关系与端口语义:\n${connectorSummary()}`,
+    }),
+    'storyboard.plan': async (a, ctx) => {
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      let brief = String(a.brief ?? '');
+      const nodeId = String(a.nodeId ?? '');
+      if (!brief.trim() && nodeId) {
+        const src = cur.nodes.find((n) => n.id === nodeId);
+        brief = String((src?.data as { markdown?: string } | undefined)?.markdown ?? '');
+      }
+      if (!brief.trim()) {
+        return { ok: false, result: '需要 brief 文本,或 nodeId 指向一个有 markdown 的 document 节点' };
+      }
+      if (!this.planStoryboard) return { ok: false, result: '分镜表规划服务未注入(主进程未接线)' };
+      const res = await this.planStoryboard(brief, {
+        projectId: ctx.projectId,
+        basePrompt: a.basePrompt ? String(a.basePrompt) : undefined,
+        autoMaterialize: a.autoMaterialize === true,
+      });
+      const now = new Date().toISOString();
+      const sb = res.storyboard;
+      cur.nodes.push(sb);
+      if (nodeId && cur.nodes.some((n) => n.id === nodeId)) {
+        cur.edges.push({ id: nid('edge'), source: nodeId, target: sb.id, label: 'prompt' });
+      }
+      for (const n of [...res.images, ...res.shots]) cur.nodes.push(n);
+      for (const e of res.edges) cur.edges.push(e);
+      cur.updatedAt = now;
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+      const extra =
+        res.shots.length || res.images.length
+          ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen`
+          : '';
+      return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
+    },
+    'storyboard.materialize': async (a, ctx) => {
+      const nodeId = String(a.nodeId ?? '');
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const sb = cur.nodes.find((n) => n.id === nodeId && n.kind === 'storyboard');
+      if (!sb) return { ok: false, result: `节点 ${nodeId} 不是分镜表(storyboard)节点` };
+      const sd = (sb.data ?? {}) as Record<string, unknown>;
+      const tb = parseGfmTable(String(sd.markdown ?? ''));
+      if (!tb) return { ok: false, result: '分镜表缺少表格块 · 无法铺节点' };
+      // 已铺行:由下游节点 promptFrom(与渲染层同口径)派生
+      const doneRows = new Set<number>();
+      for (const n of cur.nodes) {
+        const ps = (n.data as { promptFrom?: PromptSource }).promptFrom;
+        if (ps?.nodeId === nodeId && ps.mode === 'row' && typeof ps.row === 'number') doneRows.add(ps.row);
+      }
+      const base = String(sd.basePrompt ?? '');
+      const aspect = String(a.aspect ?? sd.aspect ?? '16:9');
+      const tier = String(a.tier ?? sd.tier ?? 'default');
+      const size = SB_SIZE[aspect] ?? SB_SIZE['16:9']!;
+      const now = new Date().toISOString();
+      const gfm = tableToGfm(tb.head, tb.rows);
+      const anchorX = sb.position.x ?? 60;
+      const anchorY = sb.position.y ?? 80;
+      let created = 0;
+      let imgs = 0;
+      tb.rows.forEach((row, r) => {
+        const rowNo = r + 1;
+        if (doneRows.has(rowNo)) return;
+        const shotId = nid('shot');
+        const p = assembleH3Prompt(row, tb.head, base);
+        cur.nodes.push({
+          id: shotId, kind: 'shot', label: `镜头 ${String(rowNo).padStart(2, '0')}`,
+          position: { x: anchorX + 560, y: anchorY + r * 186 }, width: 250,
+          data: {
+            engine: 'mock', mode: 'text2video', prompt: p.text,
+            width: size.width, height: size.height,
+            seconds: rowSeconds(row, tb.head) || undefined,
+            steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
+            promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
+          } as CanvasNode['data'],
+          createdAt: now, updatedAt: now,
+        });
+        cur.edges.push({ id: nid('edge'), source: nodeId, target: shotId, label: 'prompt' });
+        created++;
+        if (rowNeedsImage(row, tb.head)) {
+          imgs++;
+          const imgId = nid('img');
+          const z = assembleZImagePrompt(row, tb.head, base);
+          cur.nodes.push({
+            id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
+            position: { x: anchorX + 300, y: anchorY + r * 186 }, width: 232,
+            data: {
+              engine: 'mlxgen', model: 'AbstractFramework/z-image-turbo-8bit', prompt: z.text,
+              width: size.width, height: size.height, steps: 24, guidance: 1.0, seeds: [42],
+              promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
+            } as CanvasNode['data'],
+            createdAt: now, updatedAt: now,
+          });
+          cur.edges.push({ id: nid('edge'), source: nodeId, target: imgId, label: 'prompt' });
+          cur.edges.push({ id: nid('edge'), source: imgId, target: shotId, label: 'first-frame' });
+        }
+      });
+      if (!created && !imgs) return { ok: true, result: '当前行均已铺出 · 新增行后可追加铺' };
+      sb.data = { ...sd, lastTable: gfm } as CanvasNode['data'];
+      sb.updatedAt = now;
+      cur.updatedAt = now;
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+      return {
+        ok: true,
+        result: `已从分镜表铺出 ${created} shot${imgs ? ` + ${imgs} image-gen` : ''}(共 ${created + imgs} 节点)· 未触发运行 · 改表后需「重新同步」`,
+      };
     },
     'canvas.create_node': async (a, ctx) => {
       const kind = String(a.kind ?? 'document');

@@ -56,6 +56,7 @@ const api: BigBotArtApi = {
   agentStart: (modelSource?: LlmSource) => ipcRenderer.invoke('agent-start', modelSource),
   agentStop: () => ipcRenderer.invoke('agent-stop'),
   agentPlan: (brief, opts) => ipcRenderer.invoke('agent-plan', brief, opts),
+  agentPlanStoryboard: (brief, opts) => ipcRenderer.invoke('agent-plan-storyboard', brief, opts),
   agentChat: (req) => ipcRenderer.invoke('agent-chat', req),
   agentCancel: (projectId: string) => ipcRenderer.invoke('agent-cancel', projectId),
   onAgentEvent: (cb) => {

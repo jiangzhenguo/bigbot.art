@@ -2,6 +2,7 @@
  * BigBotArt 领域实体类型 — 画布、节点、资产、镜头、项目
  * 领域设计参考 H3Mise(story/shot/take/continuity/timeline),独立实现。
  */
+import type { PromptSource } from './prompt.js';
 
 /** 画布节点类型(节点-连线工作流图) */
 export type NodeKind =
@@ -14,6 +15,7 @@ export type NodeKind =
   | 'director' // 运镜调度小样(占位)
   | 'timeline' // 时间线/剪辑
   | 'audio-ref' // 音频参考(--ref-audio)
+  | 'storyboard' // 🆕 分镜表(脚本)节点:Markdown 表格为数据载体,一行 = 一个分镜
   | 'workflow-input' // 🆕 v2 工作流入口(资源容器,声明输入槽位)
   | 'workflow-output'; // 🆕 v2 工作流出口(产物汇聚,运行收口)
 
@@ -128,6 +130,8 @@ export interface NodeDataMap {
   director: { prompt: string };
   timeline: TimelineData;
   'audio-ref': { assetId: string };
+  /** 🆕 分镜表(脚本)节点:markdown 为唯一真源(标题+说明+GFM 表格块) */
+  storyboard: StoryboardData;
   /** 🆕 v2 工作流入口:声明输入槽位,值由用户填充(资产/文件/内联文本) */
   'workflow-input': {
     slots: Array<{
@@ -160,6 +164,26 @@ export interface NodeDataMap {
 
 /** union helper */
 export type NodeData = NodeDataMap[NodeKind];
+
+/**
+ * 分镜表(脚本)节点数据 — 文档 §4.2
+ *
+ * 设计要点:
+ * - markdown 是唯一真源:标题 + 说明 + 一个 GFM 表格块(表格编辑原位回写表格块)
+ * - lastTable = 上次铺节点/重新同步时的表格 GFM 快照;当前表 ≠ lastTable 且已铺节点 → stale
+ * - aspect / tier 为铺节点默认值(可随节点持久化)
+ */
+export interface StoryboardData {
+  markdown: string;
+  /** 全局质感段:铺节点时注入每一行 prompt 组装 */
+  basePrompt?: string;
+  /** 上次铺节点/重新同步时的表格 GFM 快照(dirty 判定) */
+  lastTable?: string;
+  /** 铺节点默认画幅 */
+  aspect?: '16:9' | '9:16' | '1:1';
+  /** 铺节点默认档位 */
+  tier?: QualityTier;
+}
 
 /**
  * 时间线 / 剪辑节点数据 — P0 完成版
@@ -230,6 +254,8 @@ export interface ImageGenParams {
   guidance?: number;
   /** 多 seed 批量 */
   seeds: number[];
+  /** 🆕 提示词来源追溯(文档标记选段 / 分镜表某行) */
+  promptFrom?: PromptSource;
 }
 
 /** 图片编辑参数(mlxgen:指令编辑 / I2I / Inpaint / Outpaint) */
@@ -245,6 +271,8 @@ export interface ImageEditParams {
   inputAssetId?: string;
   maskAssetId?: string;
   outpaintSides?: { top: number; bottom: number; left: number; right: number };
+  /** 🆕 提示词来源追溯 */
+  promptFrom?: PromptSource;
 }
 
 /** 视频镜头参数(h3.c) */
@@ -278,6 +306,8 @@ export interface ShotParams {
     role: 'first-frame' | 'last-frame' | 'ref-image' | 'ref-audio' | 'ref-video';
   }[];
   promptTemplate?: string;
+  /** 🆕 提示词来源追溯(分镜表某行 mode=row) */
+  promptFrom?: PromptSource;
 }
 
 /** 一次生成结果 = Take(保留历史,不覆盖) */
@@ -522,12 +552,26 @@ export interface AgentChatRequest {
   canvasId: string;
   text: string;
 }
+/** ask.user 结构化提问选项(🆕 支持副说明与推荐徽标;worker 已把字符串归一化为对象) */
+export interface AskOption {
+  /** 选项主文案(点选后作为用户消息回传) */
+  label: string;
+  /** 灰色补充说明行(可选) */
+  sub?: string;
+  /** 推荐徽标(可选,至多一个) */
+  recommended?: boolean;
+}
+
 export interface AgentChatResponse {
   ok: boolean;
   /** assistant 最终回复文本 */
   reply?: string;
+  /** 模型思考内容(渲染层折叠展示;不进 recall 记忆) */
+  thinking?: string;
   /** 本轮执行的工具调用(渲染层据此画工具卡) */
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; ok: boolean; result: string; nodeId?: string }>;
+  /** 🆕 结构化提问(Agent 调用 ask.user 暂停,等待用户在确认卡片选择) */
+  ask?: { question: string; options: AskOption[] };
   /** 连续性校验结果(引擎任务完成后自动触发) */
   continuity?: { checked: boolean; issues: string[] };
   error?: string;

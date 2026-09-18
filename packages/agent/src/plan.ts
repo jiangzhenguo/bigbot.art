@@ -5,9 +5,20 @@
  * - 生成 1 个 Brief 文档节点
  * - 按句子/时长启发式拆 1~3 个镜头(default 档 h3 参数)
  * - 连线 Brief → 各镜头
+ * - plan-storyboard:把需求拆成一张分镜表(表格),默认只出表(分步),autoMaterialize 时同时铺节点
  */
 import type { CanvasEdge, CanvasNode, LlmSource } from '@bigbotart/shared';
-import type { PlanParams, PlanResult } from './protocol.js';
+import {
+  assembleH3Prompt,
+  assembleZImagePrompt,
+  rowNeedsImage,
+  rowSeconds,
+  storyboardMarkdown,
+  tableToGfm,
+  STORYBOARD_HEAD,
+  SB_SIZE,
+} from '@bigbotart/shared';
+import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 
 let seq = 0;
 const nid = (p: string) => `${p}-${Date.now()}-${++seq}`;
@@ -86,3 +97,119 @@ function splitIntoShots(lines: string[], count: number): string[] {
 /** 骨架期暴露给外部:将来 pi 到来时替换实现,签名保持一致 */
 export type Planner = (params: PlanParams, llm?: LlmSource) => Promise<PlanResult>;
 export const deterministicPlanner: Planner = async (params) => planDeterministic(params);
+
+/* ═══ plan-storyboard:确定性模板(分镜表) ═══ */
+
+/** 自动档:按表格铺出 shot/image-gen 节点与连线(与渲染层 materialize 同构) */
+export function buildStoryboardMaterialized(
+  storyboardId: string,
+  head: string[],
+  rows: string[][],
+  basePrompt?: string,
+): { images: CanvasNode[]; shots: CanvasNode[]; edges: CanvasEdge[] } {
+  const images: CanvasNode[] = [];
+  const shots: CanvasNode[] = [];
+  const edges: CanvasEdge[] = [];
+  const size = SB_SIZE['16:9']!;
+  rows.forEach((row, r) => {
+    const rowNo = r + 1;
+    const shot: CanvasNode = {
+      id: nid('shot'),
+      kind: 'shot',
+      position: { x: 880, y: 80 + r * 186 },
+      label: `镜头 ${String(rowNo).padStart(2, '0')}`,
+      data: {
+        engine: 'mock',
+        mode: 'text2video',
+        prompt: assembleH3Prompt(row, head, basePrompt).text,
+        width: size.width,
+        height: size.height,
+        seconds: rowSeconds(row, head) || undefined,
+        steps: 30,
+        layers: 50,
+        reuse: 1,
+        tier: 'default',
+        seed: 42 + r,
+        refs: [],
+        promptFrom: { nodeId: storyboardId, mode: 'row', row: rowNo },
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    shots.push(shot);
+    edges.push({ id: nid('edge'), source: storyboardId, target: shot.id, label: 'prompt' });
+    if (rowNeedsImage(row, head)) {
+      const img: CanvasNode = {
+        id: nid('img'),
+        kind: 'image-gen',
+        position: { x: 620, y: 80 + r * 186 },
+        label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
+        data: {
+          engine: 'mlxgen',
+          model: 'AbstractFramework/z-image-turbo-8bit',
+          prompt: assembleZImagePrompt(row, head, basePrompt).text,
+          width: size.width,
+          height: size.height,
+          steps: 24,
+          guidance: 1.0,
+          seeds: [42],
+          promptFrom: { nodeId: storyboardId, mode: 'row', row: rowNo },
+        },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      images.push(img);
+      edges.push({ id: nid('edge'), source: storyboardId, target: img.id, label: 'prompt' });
+      edges.push({ id: nid('edge'), source: img.id, target: shot.id, label: 'first-frame' });
+    }
+  });
+  return { images, shots, edges };
+}
+
+export function planStoryboardDeterministic(params: PlanStoryboardParams): PlanStoryboardResult {
+  const { brief, projectName, basePrompt } = params;
+  const lines = brief
+    .split(/[\n。！？!?]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const count = Math.max(1, Math.min(4, lines.length >= 6 ? 4 : lines.length >= 3 ? 3 : 2));
+  const segments = splitIntoShots(lines, count);
+  const head = [...STORYBOARD_HEAD] as string[];
+  const rows = segments.map((seg, i) => [
+    String(i + 1),
+    seg || `场景片段 ${i + 1}`,
+    '',
+    '中景',
+    '固定',
+    String(4 + (i % 3)),
+    '是',
+    '',
+  ]);
+  const gfm = tableToGfm(head, rows);
+  const noun = projectName ? `《${projectName}》` : '新分镜';
+  const md = storyboardMarkdown(
+    `${noun} · 分镜表`,
+    `由需求拆解为 ${count} 个镜头;人物镜头沿用 reuse 1 / layers 50,身份措辞显式锁定。`,
+    head,
+    rows,
+  );
+  const storyboard: CanvasNode = {
+    id: nid('sb'),
+    kind: 'storyboard',
+    position: { x: 420, y: 80 },
+    label: `${noun} · 分镜表`,
+    data: { markdown: md, basePrompt: basePrompt ?? '', lastTable: gfm, aspect: '16:9', tier: 'default' },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const { images, shots, edges } = params.autoMaterialize
+    ? buildStoryboardMaterialized(storyboard.id, head, rows, basePrompt)
+    : { images: [], shots: [], edges: [] };
+  const report = `已生成分镜表:${count} 行 · ${rows.filter((r) => rowNeedsImage(r, head)).length} 行需配图${
+    params.autoMaterialize ? ` · 已铺出 ${shots.length} shot + ${images.length} image-gen` : ' · 分步模式(未铺节点)'
+  }`;
+  return { storyboard, images, shots, edges, report };
+}
+
+export type StoryboardPlanner = (params: PlanStoryboardParams, llm?: LlmSource) => Promise<PlanStoryboardResult>;
+export const deterministicStoryboardPlanner: StoryboardPlanner = async (params) => planStoryboardDeterministic(params);
