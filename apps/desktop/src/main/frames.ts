@@ -19,7 +19,20 @@ export interface FrameExtractResult {
   error?: string;
 }
 
+/** 全局串行链:多个任务同时完成触发抽帧时逐个执行,避免多个 ffmpeg 同时抢 CPU/IO */
+let extractChain: Promise<unknown> = Promise.resolve();
+
 export function extractFrame(
+  videoPath: string,
+  mode: 'first' | 'last',
+): Promise<FrameExtractResult> {
+  const run = extractChain.then(() => doExtract(videoPath, mode));
+  // 链上任何一次失败都不影响后续任务继续执行
+  extractChain = run.catch(() => undefined);
+  return run;
+}
+
+function doExtract(
   videoPath: string,
   mode: 'first' | 'last',
 ): Promise<FrameExtractResult> {

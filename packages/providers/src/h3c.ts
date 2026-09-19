@@ -137,8 +137,11 @@ export class H3cProvider implements Provider {
 
     const outPath = `${this.outDir}/${req.nodeId}_${Date.now()}.mp4`;
     const seconds = Number(p.seconds ?? 0);
+    // 🚀 加速 LoRA:主进程 submit-render 已把 accel 解析为 params.modelDir / steps;
+    // 这里兼容任何直接调用方带 modelDir 覆盖(未带则用构造时的默认模型)
+    const modelDir = String(p.modelDir ?? '') || this.modelDir;
     const args = buildH3Args({
-      modelDir: this.modelDir,
+      modelDir,
       prompt: String(p.prompt ?? ''),
       outputPath: outPath,
       width: Number(p.width ?? 768),
@@ -154,26 +157,27 @@ export class H3cProvider implements Provider {
       refImages: refImgs,
       refVideo,
       refAudio,
+      ssdStreaming: p.ssdStreaming === true,
     });
 
     const taskId = `h3c-${Date.now()}`;
     this.outPaths.set(taskId, outPath);
-    // 粗估 ETA:按档位 etaMin + 分辨率系数(544²≈1x,576²≈1.7x,704²≈3.3x)
+    // 粗估 ETA:按档位 etaMin + 分辨率系数(544²≈1x,576²≈1.7x,704²≈3.3x);
+    // 加速 LoRA(蒸馏模型包)省时:4 步 ≈×0.2,8 步 ≈×0.35(手册 §3.1 实测)
     const tier = String(p.tier ?? 'default') as keyof typeof TIER_PRESETS;
     const baseEtaMin = TIER_PRESETS[tier]?.etaMin ?? 15;
     const areaFactor = Math.max(0.5, (Number(p.width ?? 544) * Number(p.height ?? 544)) / (544 * 544));
-    const etaSec = Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor));
+    const accel = (p.accel ?? undefined) as { enabled?: boolean; steps?: number } | undefined;
+    const accelOn = accel?.enabled === true && !!modelDir;
+    const accelFactor = accelOn ? (accel?.steps === 4 ? 0.2 : 0.35) : 1;
+    const etaSec = Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor) * accelFactor);
     this.progress.set(taskId, { startedAt: Date.now(), etaSec });
     if (this.dryRun) {
-      // 骨架期:不真实推理,写可播放占位 MP4,便于 UI 预览闭环
+      // 骨架期:不真实推理,写可播放占位 MP4(异步 spawn,不阻塞主进程),便于 UI 预览闭环
       mkdirSync(this.outDir, { recursive: true });
-      const { status } = spawnSync('ffmpeg', [
-        '-f', 'lavfi', '-i', 'color=c=0x3a4a6c:s=512x512:d=1',
-        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest',
-        '-y', outPath,
-      ], { stdio: 'ignore' });
-      if (status !== 0) {
+      const ok = await runFfmpegPlaceholder(outPath);
+      if (!ok) {
+        // ffmpeg 不可用:写文本占位,不影响队列/预览闭环
         writeFileSync(outPath, JSON.stringify({ dryRun: true, nodeId: req.nodeId }, null, 2));
       }
       this.running.set(taskId, 'dryrun' as unknown as ChildProcess);
@@ -247,7 +251,31 @@ export class H3cProvider implements Provider {
 
   async cancel(handle: RenderJobHandle): Promise<void> {
     const child = this.running.get(handle.providerTaskId);
-    if (child && child !== ('dryrun' as unknown)) child.kill('SIGTERM');
+    if (child && child !== ('dryrun' as unknown)) {
+      child.kill('SIGTERM');
+      // h3 结尾会派生 ffmpeg 做编码;尽力把它的直接子进程(如 ffmpeg)也清掉,
+      // 避免取消后残留编码进程继续写几秒(清理失败不影响主体取消)
+      const pid = child.pid;
+      if (pid) {
+        try {
+          const out = spawnSync('pgrep', ['-P', String(pid)], { encoding: 'utf-8', timeout: 1500 });
+          if (out.status === 0 && out.stdout) {
+            for (const l of out.stdout.split('\n')) {
+              const p = Number(l.trim());
+              if (Number.isFinite(p) && p > 0) {
+                try {
+                  process.kill(p, 'SIGTERM');
+                } catch {
+                  /* 已退出则忽略 */
+                }
+              }
+            }
+          }
+        } catch {
+          /* pgrep 不可用则只杀主体 */
+        }
+      }
+    }
     this.running.delete(handle.providerTaskId);
   }
 }
@@ -272,5 +300,19 @@ function runAndCapture(cmd: string, args: string[], timeoutMs: number, cwd?: str
       clearTimeout(timer);
       reject(e);
     });
+  });
+}
+
+/** Dry-run 占位 MP4(纯色 512² + 440Hz 音轨):异步 ffmpeg,避免 spawnSync 阻塞主进程 */
+function runFfmpegPlaceholder(outPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn('ffmpeg', [
+      '-f', 'lavfi', '-i', 'color=c=0x3a4a6c:s=512x512:d=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest',
+      '-y', outPath,
+    ], { stdio: 'ignore' });
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
   });
 }

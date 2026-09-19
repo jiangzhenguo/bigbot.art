@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, NodeKind, Take, DebugLogEntry, PromptSource } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, AssetCategory, NodeKind, Take, DebugLogEntry, PromptSource } from '@bigbotart/shared';
 import {
   parseGfmTable,
   resolvePromptFromSource,
@@ -25,19 +25,21 @@ import {
   dedupeNodeIds,
   seedIdCounter,
 } from './canvas/node-mapping';
-import { resolvePort } from './canvas/connectors';
+import { resolvePort, resolvePortOptions, type PortResolution } from './canvas/connectors';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
-import { basenameOf } from './canvas/media';
+import { basenameOf, thumbSrc } from './canvas/media';
 import { nodesReducer } from './canvas/edge-dispatch';
 import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
 import { AddNodePopover } from './canvas/AddNodePopover';
+import { PortPickPop } from './canvas/PortPickPop';
 import { AgentPane } from './canvas/AgentPane';
 import { InspectorPane } from './canvas/InspectorPane';
 import { ContextMenu } from './canvas/ContextMenu';
 import { DebugPanel } from './canvas/DebugPanel';
 import { QueueBar } from './canvas/QueueBar';
+import { AssetPickerPop } from './canvas/AssetPickerPop';
 import { useAgentChat } from './agent/useAgentChat';
 
 
@@ -131,6 +133,10 @@ export default function CanvasPage({
   const prevJobState = useRef<Record<string, string>>({});
   const assetCache = useRef<Record<string, string>>({}); // assetId → localPath
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
+  const [categories, setCategories] = useState<AssetCategory[]>([]);
+  /** 资产选择弹层(「更换资产…」/检查器选资产):null = 关闭,值 = 目标 asset 节点 id */
+  const [assetPickFor, setAssetPickFor] = useState<string | null>(null);
+  const [assetPopPos, setAssetPopPos] = useState<{ x: number; y: number } | null>(null);
 
   /* ── 「+」下游节点弹层 ── */
   const [apFrom, setApFrom] = useState<string | null>(null);
@@ -261,13 +267,13 @@ export default function CanvasPage({
     return { id, ok: port !== null };
   }, []);
 
-  /** 写边(命中可连节点) */
-  const commitConnectEdge = useCallback((srcId: string, dstId: string) => {
+  /** 写边(命中可连节点);port 给定时显式指定端口角色(多端口组合,如 asset 图 → shot) */
+  const commitConnectEdge = useCallback((srcId: string, dstId: string, port?: string) => {
     const src = nodesRef.current.find((n) => n.id === srcId);
     const dst = nodesRef.current.find((n) => n.id === dstId);
     if (!src || !dst) return;
     const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
-    const edgeLabel = deriveEdgeLabel(src, tag);
+    const edgeLabel = deriveEdgeLabel(src, tag, port);
     if (edgeLabel === undefined) return; // 无连接器(双重保险)
     setEdges((es) => {
       // 完全相同边不去重:允许同 src→dst 重复(shot→timeline 多条入线本就支持)
@@ -331,7 +337,21 @@ export default function CanvasPage({
       pending = null;
       // 仅在「真的拖动过」+ 「命中可连节点」时建边
       if (wasDragging && finalHit?.ok && finalHit.id) {
-        commitConnectEdge(d.sourceId, finalHit.id);
+        const srcN = nodesRef.current.find((n) => n.id === d.sourceId);
+        const dstN = nodesRef.current.find((n) => n.id === finalHit.id);
+        const tag: NodeTag = dstN?.tag ?? {
+          id: dstN?.kind ?? 'plain',
+          kind: (dstN?.kind ?? 'document') as NodeKind,
+          name: dstN?.title ?? '',
+          sub: '',
+        };
+        const opts = srcN ? resolvePortOptions(srcN, tag.id) : [];
+        // 多端口组合(asset 图 → shot 首帧/参考图):先弹角色选择,选定后写边;单端口直接连
+        if (opts.length > 1) {
+          setPortPick({ from: d.sourceId, to: finalHit.id, x: e.clientX, y: e.clientY, options: opts });
+        } else {
+          commitConnectEdge(d.sourceId, finalHit.id);
+        }
       }
     };
 
@@ -618,15 +638,19 @@ export default function CanvasPage({
     }
   }, []);
 
-  /** 资产本地路径缓存(挂载时拉取) */
+  /** 资产本地路径缓存 + 分类字典(挂载时拉取) */
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const list = await window.bigbotart.listAssets();
+        const [list, cats] = await Promise.all([
+          window.bigbotart.listAssets(),
+          window.bigbotart.listAssetCategories(),
+        ]);
         if (alive) {
           assetCache.current = Object.fromEntries(list.map((a) => [a.id, a.localPath]));
           setAssetsList(list);
+          setCategories(cats);
         }
       } catch {
         /* 资产可为空 */
@@ -636,6 +660,54 @@ export default function CanvasPage({
       alive = false;
     };
   }, [projectId]);
+
+  /** assetId → 展示元信息(asset 节点渲染:缩略图/分类/媒体) */
+  const assetMeta = useMemo(() => {
+    const m: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }> = {};
+    for (const a of assetsList) {
+      const cat = categories.find((c) => c.id === a.categoryId);
+      m[a.id] = { name: a.name, kind: a.kind, categoryName: cat?.name, src: thumbSrc(a.localPath) };
+    }
+    return m;
+  }, [assetsList, categories]);
+
+  /** 本项目资源计数(顶栏「资源」入口角标) */
+  const assetCount = useMemo(
+    () => assetsList.filter((a) => a.projectId === projectId).length,
+    [assetsList, projectId],
+  );
+
+  /** 资产选择弹层候选:项目资源在前,后补全局共享 */
+  const pickerAssets = useMemo(() => {
+    const proj = assetsList.filter((a) => a.projectId === projectId);
+    const rest = assetsList.filter((a) => a.projectId !== projectId);
+    return [...proj, ...rest];
+  }, [assetsList, projectId]);
+
+  /** 打开资产选择弹层(锚定到节点右上) */
+  const openAssetPicker = useCallback((nodeId: string) => {
+    const el = nodeRefs.current.get(nodeId);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setAssetPopPos({ x: Math.round(r.right + 8), y: Math.round(r.top) });
+    setAssetPickFor(nodeId);
+  }, []);
+
+  /** 换绑资产到节点:更新 assetId + mediaType 锁定为资产 kind(「不可自变」) */
+  const bindAssetToNode = useCallback(
+    (nodeId: string, asset: Asset) => {
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...(n.data ?? {}), assetId: asset.id, mediaType: asset.kind } }
+            : n,
+        ),
+      );
+      toastMsg(`已更换为「${asset.name}」 · 下游绑定同步更新`);
+      setAssetPickFor(null);
+    },
+    [setNodes, toastMsg],
+  );
 
   /** 工具改画布后:从 store 重新拉当前画布刷新节点 */
   const refreshCanvasFromStore = useCallback(async () => {
@@ -705,74 +777,85 @@ export default function CanvasPage({
     void refreshTakeResults();
   }, [refreshTakeResults]);
 
-  /* 渲染队列轮询(1.2s)+ 任务完成时更新节点状态 */
+  /* 渲染队列订阅:主进程变更推送(节流合并)+ 8s 兜底轮询(事件丢包/窗口重载恢复);
+     无实质变化(签名相同)时跳过 setJobs,避免 1.2s 全量轮询带来的无谓整树重渲染 */
   useEffect(() => {
     let alive = true;
+    let lastSig = '';
+    const apply = (list: RenderJob[]) => {
+      const sig = list.map((j) => `${j.id}:${j.status}:${j.progress ?? ''}:${j.stage ?? ''}:${j.resultPath ?? ''}`).join('|');
+      if (sig === lastSig) return;
+      lastSig = sig;
+      setJobs(list);
+      // 完成/失败的任务回写节点:成功取 Take 缩略图,失败置 stale
+      for (const j of list) {
+        const prev = prevJobState.current[j.id];
+        if (prev === j.status) continue;
+        prevJobState.current[j.id] = j.status;
+        if (j.status === 'succeeded') {
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === j.nodeId
+                ? {
+                    ...n,
+                    ghost: false,
+                    stale: false,
+                    badge: undefined,
+                    extra: j.resultPath ? `✓ ${basenameOf(j.resultPath)}` : '✓ 生成完成',
+                    // 产物路径存进节点 data(节点卡/检查器渲染视频用)
+                    data: { ...(n.data ?? {}), resultPath: j.resultPath ?? (n.data as Record<string, unknown>)?.resultPath },
+                  }
+                : n,
+            ),
+          );
+          // 节点产出 → 连到它的 ghost 边转正为实线(幽灵边语义:目标有产物即生效)
+          setEdges((es) =>
+            es.map((e) => (e.to === j.nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)),
+          );
+          // 连续性:上游 shot 跑完 → 自动抽尾帧归档(下游镜头 first-frame 的帧源)
+          // 注意:每次新产物都要重新抽(上游重跑后尾帧必须刷新),以 tailFrameFrom 记录来源产物
+          const done = nodesRef.current.find((x) => x.id === j.nodeId);
+          const doneData = (done?.data ?? {}) as Record<string, unknown>;
+          if (done?.kind === 'shot' && j.resultPath && String(doneData.tailFrameFrom ?? '') !== j.resultPath) {
+            void window.bigbotart
+              .extractFrame(j.resultPath, 'last')
+              .then((res) => {
+                if (!res.ok || !res.path) return;
+                setNodes((ns) =>
+                  ns.map((x) =>
+                    x.id === j.nodeId
+                      ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: j.resultPath } }
+                      : x,
+                  ),
+                );
+              })
+              .catch(() => undefined);
+          }
+        } else if (j.status === 'failed') {
+          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}` } : n)));
+        } else if (j.status === 'running') {
+          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: j.stage ?? '生成中…' } : n)));
+        }
+      }
+      // 任务状态变化后刷新镜头产物回填(完成后立即在节点卡显示视频)
+      void refreshTakeResults();
+    };
     const poll = async () => {
       try {
         const list = await window.bigbotart.queueStatus();
-        if (!alive) return;
-        setJobs(list);
-        // 完成/失败的任务回写节点:成功取 Take 缩略图,失败置 stale
-        for (const j of list) {
-          const prev = prevJobState.current[j.id];
-          if (prev === j.status) continue;
-          prevJobState.current[j.id] = j.status;
-          if (j.status === 'succeeded') {
-            setNodes((ns) =>
-              ns.map((n) =>
-                n.id === j.nodeId
-                  ? {
-                      ...n,
-                      ghost: false,
-                      stale: false,
-                      badge: undefined,
-                      extra: j.resultPath ? `✓ ${basenameOf(j.resultPath)}` : '✓ 生成完成',
-                      // 产物路径存进节点 data(节点卡/检查器渲染视频用)
-                      data: { ...(n.data ?? {}), resultPath: j.resultPath ?? (n.data as Record<string, unknown>)?.resultPath },
-                    }
-                  : n,
-              ),
-            );
-            // 节点产出 → 连到它的 ghost 边转正为实线(幽灵边语义:目标有产物即生效)
-            setEdges((es) =>
-              es.map((e) => (e.to === j.nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)),
-            );
-            // 连续性:上游 shot 跑完 → 自动抽尾帧归档(下游镜头 first-frame 的帧源)
-            // 注意:每次新产物都要重新抽(上游重跑后尾帧必须刷新),以 tailFrameFrom 记录来源产物
-            const done = nodesRef.current.find((x) => x.id === j.nodeId);
-            const doneData = (done?.data ?? {}) as Record<string, unknown>;
-            if (done?.kind === 'shot' && j.resultPath && String(doneData.tailFrameFrom ?? '') !== j.resultPath) {
-              void window.bigbotart
-                .extractFrame(j.resultPath, 'last')
-                .then((res) => {
-                  if (!res.ok || !res.path) return;
-                  setNodes((ns) =>
-                    ns.map((x) =>
-                      x.id === j.nodeId
-                        ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: j.resultPath } }
-                        : x,
-                    ),
-                  );
-                })
-                .catch(() => undefined);
-            }
-          } else if (j.status === 'failed') {
-            setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}` } : n)));
-          } else if (j.status === 'running') {
-            setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: j.stage ?? '生成中…' } : n)));
-          }
-        }
-        // 任务状态变化后刷新镜头产物回填(完成后立即在节点卡显示视频)
-        void refreshTakeResults();
+        if (alive) apply(list);
       } catch {
         /* 轮询失败静默 */
       }
     };
+    const unsub = window.bigbotart.onQueueChanged((list) => {
+      if (alive) apply(list);
+    });
     void poll();
-    queueTimer.current = window.setInterval(poll, 1200);
+    queueTimer.current = window.setInterval(poll, 8000);
     return () => {
       alive = false;
+      unsub();
       if (queueTimer.current) window.clearInterval(queueTimer.current);
     };
   }, [refreshTakeResults]);
@@ -806,9 +889,12 @@ export default function CanvasPage({
   const [apPos, setApPos] = useState({ x: 0, y: 0 });
   const closeAddPop = useCallback(() => setApOpen(false), []);
 
-  /* 创建并连线(类型/画幅/档位由 AddNodePopover 回传) */
+  /** 拖拽连线命中多端口组合(asset 图 → shot)时的角色选择:指针位置 + 候选端口 */
+  const [portPick, setPortPick] = useState<{ from: string; to: string; x: number; y: number; options: PortResolution[] } | null>(null);
+
+  /* 创建并连线(类型/画幅/档位/端口角色由 AddNodePopover 回传) */
   const createFromPop = useCallback(
-    (typeId: string, aspect: string, tier: string) => {
+    (typeId: string, aspect: string, tier: string, port?: string) => {
       if (!apFrom) return;
       const src = nodesRef.current.find((n) => n.id === apFrom);
       const t = NODE_TYPES.find((x) => x.id === typeId);
@@ -835,8 +921,8 @@ export default function CanvasPage({
           data: initData,
         } as CanvasNode,
       ]);
-      // 按手册 §9 边 label:brief→input-brief / asset→按角色 / wf-input→slot-<name> / 其他不标
-      const edgeLabel = deriveEdgeLabel(src, t);
+      // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
+      const edgeLabel = deriveEdgeLabel(src, t, port);
       setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
       setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
       closeAddPop();
@@ -1012,6 +1098,37 @@ export default function CanvasPage({
       toastMsg('已复制节点 · 副本不携带连线与运行状态');
     },
     [selectNode, toastMsg],
+  );
+
+  /** 右键「在 Finder 中显示」:解析节点真实产物路径 → 主进程 shell 定位(文件缺失回退最近目录) */
+  const revealNodeInFinder = useCallback(
+    async (nodeId: string) => {
+      const n = nodesRef.current.find((x) => x.id === nodeId);
+      if (!n) return;
+      const d = (n.data ?? {}) as Record<string, unknown>;
+      let path: string | undefined;
+      // 1) 节点 data 里任务完成时回填的产物路径(shot / image 通用)
+      if (typeof d.resultPath === 'string' && d.resultPath) path = d.resultPath;
+      // 2) asset 节点:绑定资产的本地文件
+      if (!path && n.kind === 'asset') {
+        const assetId = typeof d.assetId === 'string' ? d.assetId : undefined;
+        if (assetId) path = assetCache.current[assetId];
+      }
+      // 3) shot 节点:Take 历史里最新成功产物的 resultPath(节点 data 可能缺)
+      if (!path && n.kind === 'shot') path = takeResults[nodeId];
+      if (!path) {
+        toastMsg('该节点还没有产物文件 · 运行生成后再试');
+        return;
+      }
+      try {
+        const r = await window.bigbotart.revealInFinder({ path });
+        if (r.ok) toastMsg(`已在 Finder 中显示 · ${basenameOf(r.revealed)}`);
+        else toastMsg(`无法在 Finder 中显示:${r.error ?? '未知错误'}`);
+      } catch (e) {
+        toastMsg(`无法在 Finder 中显示:${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [takeResults, toastMsg],
   );
 
   const deleteNode = useCallback(
@@ -1241,6 +1358,8 @@ export default function CanvasPage({
             reuse: Number(d.reuse ?? 1),
             tier: d.tier,
             seed: d.seed,
+            // 🚀 加速 LoRA:传给主进程,提交时解析为 modelDir(-d)+ steps
+            accel: d.accel,
           };
 
       setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', ghost: false } : x)));
@@ -1580,6 +1699,7 @@ export default function CanvasPage({
           setOpenPop={setOpenPop}
           rerunDone={rerunDone}
           staleCount={nodesRef.current.filter((n) => n.stale || n.agentOn).length}
+          assetCount={assetCount}
           onRerunAffected={rerunAffected}
           onRunAll={runAll}
           dbgOpen={dbgOpen}
@@ -1605,6 +1725,7 @@ export default function CanvasPage({
             flashId={flashId}
             connectDrag={connectDrag}
             takeResults={takeResults}
+            assetMeta={assetMeta}
             connectPath={computeConnectPath}
             zoomPct={zoomPct}
             onZoomBy={(d) =>
@@ -1752,6 +1873,7 @@ export default function CanvasPage({
                   void runNode(selected);
                   toastMsg(`已提交重跑 · ${inspectTitle}`);
                 }}
+                onOpenAssetPicker={openAssetPicker}
               />
             }
           />
@@ -1769,6 +1891,32 @@ export default function CanvasPage({
         onDuplicate={duplicateNode}
         onDelete={deleteNode}
         onClose={() => setCtx(null)}
+        onCtxChangeAsset={openAssetPicker}
+        onReveal={revealNodeInFinder}
+      />
+
+      {/* 连线角色选择(拖拽命中多端口组合:asset 图 → shot 首帧/参考图) */}
+      <PortPickPop
+        pos={portPick ? { x: portPick.x, y: portPick.y } : null}
+        options={portPick?.options ?? []}
+        onPick={(port) => {
+          if (portPick) commitConnectEdge(portPick.from, portPick.to, port);
+        }}
+        onClose={() => setPortPick(null)}
+      />
+
+      {/* 资产选择弹层(asset 节点「更换资产…」/ 检查器选资产) */}
+      <AssetPickerPop
+        open={!!assetPickFor}
+        pos={assetPopPos}
+        assets={pickerAssets}
+        categories={categories}
+        projectId={projectId}
+        onPick={(a) => {
+          if (assetPickFor) bindAssetToNode(assetPickFor, a);
+        }}
+        onManage={() => onNavigate('assets')}
+        onClose={() => setAssetPickFor(null)}
       />
 
       <div className={`toast${toast ? ' show' : ''}`} role="status" aria-live="polite">

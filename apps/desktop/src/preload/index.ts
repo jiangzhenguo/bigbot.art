@@ -17,6 +17,11 @@ const api: BigBotArtApi = {
   renderStatus: (provider, handle) => ipcRenderer.invoke('render-status', provider, handle),
   cancelRender: (provider, handle) => ipcRenderer.invoke('cancel-render', provider, handle),
   queueStatus: () => ipcRenderer.invoke('queue-status'),
+  onQueueChanged: (cb) => {
+    const listener = (_e: unknown, jobs: unknown) => cb(jobs as never);
+    ipcRenderer.on('render-queue-changed', listener);
+    return () => ipcRenderer.removeListener('render-queue-changed', listener);
+  },
   listProjects: () => ipcRenderer.invoke('list-projects'),
   createProject: (name: string) => ipcRenderer.invoke('create-project', name),
   deleteProject: (id: string) => ipcRenderer.invoke('delete-project', id),
@@ -30,9 +35,22 @@ const api: BigBotArtApi = {
   deleteCanvas: (projectId: string, canvasId: string) => ipcRenderer.invoke('delete-canvas', projectId, canvasId),
   switchActiveCanvas: (projectId: string, canvasId: string) => ipcRenderer.invoke('switch-active-canvas', projectId, canvasId),
   setProjectLlm: (projectId: string, llm: LlmSource | null) => ipcRenderer.invoke('set-project-llm', projectId, llm),
-  importAssets: (opts?: { paths?: string[] }) => ipcRenderer.invoke('import-assets', opts),
-  listAssets: () => ipcRenderer.invoke('list-assets'),
+  importAssets: (opts?: { paths?: string[]; projectId?: string }) => ipcRenderer.invoke('import-assets', opts),
+  listAssets: (projectId?: string) => ipcRenderer.invoke('list-assets', projectId),
   deleteAsset: (id: string) => ipcRenderer.invoke('delete-asset', id),
+  updateAsset: (id: string, patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) =>
+    ipcRenderer.invoke('update-asset', id, patch),
+  listAssetCategories: () => ipcRenderer.invoke('list-asset-categories'),
+  createAssetCategory: (name: string, projectId?: string) => ipcRenderer.invoke('create-asset-category', name, projectId),
+  renameAssetCategory: (id: string, name: string) => ipcRenderer.invoke('rename-asset-category', id, name),
+  deleteAssetCategory: (id: string) => ipcRenderer.invoke('delete-asset-category', id),
+  assetRefs: (assetId: string) => ipcRenderer.invoke('asset-refs', assetId),
+  listTrash: () => ipcRenderer.invoke('list-trash'),
+  restoreAsset: (id: string) => ipcRenderer.invoke('restore-asset', id),
+  emptyTrash: () => ipcRenderer.invoke('empty-trash'),
+  archiveProducts: (input: { projectId: string; items: Array<{ nodeId: string; path: string }>; categoryId?: string }) =>
+    ipcRenderer.invoke('archive-products', input),
+  listArchivableProducts: (projectId: string) => ipcRenderer.invoke('list-archivable-products', projectId),
   listSkills: () => ipcRenderer.invoke('list-skills'),
   saveSkill: (input: { name: string; projectId: string }) => ipcRenderer.invoke('save-skill', input),
   applySkill: (skillId: string, projectName: string) => ipcRenderer.invoke('apply-skill', skillId, projectName),
@@ -40,8 +58,13 @@ const api: BigBotArtApi = {
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),
   exportStatus: (taskId: string) => ipcRenderer.invoke('export-status', taskId),
   extractFrame: (videoPath, mode) => ipcRenderer.invoke('extract-frame', videoPath, mode),
+  revealInFinder: (target: { path: string }) => ipcRenderer.invoke('reveal-in-finder', target),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('set-settings', patch),
+  accelList: () => ipcRenderer.invoke('accel-list'),
+  accelInstall: (input) => ipcRenderer.invoke('accel-install', input),
+  accelRemove: (id) => ipcRenderer.invoke('accel-remove', id),
+  accelSetDefault: (id) => ipcRenderer.invoke('accel-set-default', id),
   llmLocalModels: (kind: 'lmstudio' | 'ollama' | 'pimlx') => ipcRenderer.invoke('llm-local-models', kind),
   llmLoadModel: (kind: 'lmstudio' | 'ollama' | 'pimlx', modelId: string) =>
     ipcRenderer.invoke('llm-load-model', kind, modelId),

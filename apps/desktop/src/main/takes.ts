@@ -68,21 +68,25 @@ export class TakeStore {
     return take;
   }
 
-  /** 更新一条 Take(状态变化 / 写 resultPath / finishedAt / durationSec / error) */
-  patch(projectId: string, takeId: string, patch: Partial<Take>): Take | null {
+  /** 更新一条 Take(状态变化 / 写 resultPath / finishedAt / elapsedSec / durationSec / error) */
+  async patch(projectId: string, takeId: string, patch: Partial<Take>): Promise<Take | null> {
     const doc = this.load(projectId);
     const idx = doc.takes.findIndex((t) => t.id === takeId);
     if (idx < 0) return null;
     const next = { ...doc.takes[idx], ...patch } as Take;
     if (next.status === 'succeeded' || next.status === 'failed' || next.status === 'cancelled') {
       if (!next.finishedAt) next.finishedAt = new Date().toISOString();
-      if (next.durationSec === undefined && next.createdAt) {
-        next.durationSec = Math.max(0, (Date.parse(next.finishedAt) - Date.parse(next.createdAt)) / 1000);
+      // 生成耗时(墙钟)始终记入 elapsedSec;durationSec 只作无产物时的兜底
+      if (next.createdAt) {
+        next.elapsedSec = Math.max(0, (Date.parse(next.finishedAt) - Date.parse(next.createdAt)) / 1000);
+        if (next.durationSec === undefined) next.durationSec = next.elapsedSec;
       }
     }
-    // 成功且有产物:用 ffprobe 探测**真实视频时长**覆盖 durationSec(生成耗时只作失败兜底,不作为媒体时长)
+    // 成功且有产物:媒体时长(ffprobe 异步探测,不阻塞主进程)记入 durationSec(时间线/剪辑用真实视频长度);
+    // 生成耗时保留在 elapsedSec 不被覆盖。历史记录里旧 Take 的 durationSec 可能是生成耗时,
+    // 时间线侧已有 metadata 兜底纠正,这里语义统一为「媒体时长」
     if (next.status === 'succeeded' && next.resultPath && existsSync(next.resultPath)) {
-      const meta = probeMedia(next.resultPath, 'video');
+      const meta = await probeMedia(next.resultPath, 'video');
       if (meta.durationSec !== undefined) next.durationSec = meta.durationSec;
     }
     doc.takes[idx] = next;

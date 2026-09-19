@@ -35,6 +35,8 @@ export interface BigBotArtApi {
   cancelRender(provider: string, handle: { providerTaskId: string }): Promise<void>;
   /** 渲染队列:当前全部任务(含排队位置/进度) */
   queueStatus(): Promise<import('./domain').RenderJob[]>;
+  /** 渲染队列变更推送(主进程同 tick 去抖合并,推送精简视图;返回退订函数;首次全量用 queueStatus()) */
+  onQueueChanged(cb: (jobs: import('./domain').RenderJob[]) => void): () => void;
   // 项目 / 画布
   listProjects(): Promise<import('./domain').Project[]>;
   createProject(name: string): Promise<import('./domain').Project>;
@@ -57,9 +59,37 @@ export interface BigBotArtApi {
   /** 切换活动画布;只改 active 指针,不返回画布内容(前端已持有完整列表) */
   switchActiveCanvas(projectId: string, canvasId: string): Promise<{ ok: boolean }>;
   // 资产中心
-  importAssets(opts?: { paths?: string[] }): Promise<import('./domain').AssetImportResult>;
-  listAssets(): Promise<import('./domain').Asset[]>;
-  deleteAsset(id: string): Promise<{ ok: boolean; error?: string }>;
+  /** 导入资产:paths 给定时走白名单 headless;缺省弹系统对话框。projectId 给定时归入项目视图 */
+  importAssets(opts?: { paths?: string[]; projectId?: string }): Promise<import('./domain').AssetImportResult>;
+  /** 列资产:projectId 给定 = 项目视图(该项目的资源);缺省 = 总资源库(全部) */
+  listAssets(projectId?: string): Promise<import('./domain').Asset[]>;
+  /** 软删除 → 回收站(文件移入 trash,7 天后清理);被画布引用时返回引用列表供前端展示警告 */
+  deleteAsset(id: string): Promise<{ ok: boolean; error?: string; refs?: import('./domain').AssetRef[] }>;
+  /** 资源更新:重命名 / 改分类(null=未分类) / 改归属(null=总资源库) / 改标签 */
+  updateAsset(
+    id: string,
+    patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] },
+  ): Promise<{ ok: boolean; error?: string }>;
+  /** 分类字典(项目分类 + 全局分类;过滤由渲染层按 projectId 做) */
+  listAssetCategories(): Promise<import('./domain').AssetCategory[]>;
+  createAssetCategory(name: string, projectId?: string): Promise<import('./domain').AssetCategory>;
+  renameAssetCategory(id: string, name: string): Promise<{ ok: boolean; error?: string }>;
+  /** 删除分类:分类下资源转「未分类」,原资源文件保留 */
+  deleteAssetCategory(id: string): Promise<{ ok: boolean; error?: string }>;
+  /** 资源被画布引用位置(删除安全警告 / 「定位画布」) */
+  assetRefs(assetId: string): Promise<import('./domain').AssetRef[]>;
+  /** 回收站:软删资源列表(最新在前) */
+  listTrash(): Promise<import('./domain').Asset[]>;
+  restoreAsset(id: string): Promise<{ ok: boolean; error?: string }>;
+  emptyTrash(): Promise<{ ok: boolean }>;
+  /** 画布产物归档:复制产物文件进资产库并登记(source='product',归入 projectId) */
+  archiveProducts(input: {
+    projectId: string;
+    items: Array<{ nodeId: string; path: string }>;
+    categoryId?: string;
+  }): Promise<{ ok: boolean; assets: import('./domain').Asset[]; error?: string }>;
+  /** 列项目画布中「有产物」的节点(「从画布产物导入」弹层的候选项) */
+  listArchivableProducts(projectId: string): Promise<Array<{ nodeId: string; name: string; path: string; meta: string }>>;
   // Skills 库
   listSkills(): Promise<import('./domain').Skill[]>;
   saveSkill(input: { name: string; projectId: string }): Promise<import('./domain').Skill>;
@@ -73,6 +103,9 @@ export interface BigBotArtApi {
     videoPath: string,
     mode: 'first' | 'last',
   ): Promise<{ ok: boolean; path?: string; error?: string }>;
+  // 系统 / 文件
+  /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
+  revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;
   // 设置
   getSettings(): Promise<import('./domain').AppSettings>;
   setSettings(patch: Partial<import('./domain').AppSettings>): Promise<import('./domain').AppSettings>;
@@ -89,6 +122,15 @@ export interface BigBotArtApi {
   credentialSet(providerId: string, apiKey: string): Promise<{ ok: boolean; error?: string }>;
   /** 删除供应商凭据 */
   credentialDelete(providerId: string): Promise<{ ok: boolean }>;
+  // 加速 LoRA(蒸馏模型包)管理 —— h3.c 加速 = 蒸馏模型目录(-d)+ 4/8 步,非挂载 LoRA
+  /** 列出已安装的加速模型包(主进程回填 exists 目录校验;设置页列表用) */
+  accelList(): Promise<import('./domain').AccelPack[]>;
+  /** 安装加速模型包:校验目录存在且含 FL2VA/ 后登记入 settings.accelPacks */
+  accelInstall(input: { name: string; path: string; steps?: number }): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
+  /** 删除登记(只注销,不删磁盘) */
+  accelRemove(id: string): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
+  /** 设默认包(id=null 清除默认);镜头开启加速未选包时用默认包 */
+  accelSetDefault(id: string | null): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
   // Agent 内核
   agentStatus(): Promise<AgentProcessState>;
   agentStart(modelSource?: import('./domain').LlmSource): Promise<AgentProcessState>;

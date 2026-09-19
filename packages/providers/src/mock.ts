@@ -3,7 +3,7 @@
  * 任何任务都立即"成功",产出占位文件(PNG 或带纯色帧的 MP4 via ffmpeg 若可用)。
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -55,7 +55,7 @@ export class MockProvider implements Provider {
   async submit(req: RenderRequest): Promise<RenderJobHandle> {
     const kind = String((req.params as Record<string, unknown>).kind ?? 'video');
     const id = `mock-${Date.now()}`;
-    const path = this.writePlaceholder(id, kind);
+    const path = await this.writePlaceholder(id, kind);
     this.results.set(id, path);
     return { providerTaskId: id };
   }
@@ -71,19 +71,14 @@ export class MockProvider implements Provider {
 
   async cancel(): Promise<void> {}
 
-  private writePlaceholder(id: string, kind: string): string {
+  private async writePlaceholder(id: string, kind: string): Promise<string> {
     const OUT_DIR = mockOutDir();
     mkdirSync(OUT_DIR, { recursive: true });
     if (kind === 'video') {
       const path = resolve(OUT_DIR, `${id}.mp4`);
-      // 用 ffmpeg 生成 1s 纯色测试视频(带声时加 sine 音频轨,模拟带声直出)
-      const { status } = spawnSync('ffmpeg', [
-        '-f', 'lavfi', '-i', 'color=c=0x2a3a5c:s=512x512:d=1',
-        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest',
-        '-y', path,
-      ], { stdio: 'ignore' });
-      if (status !== 0) {
+      // 用 ffmpeg 生成 1s 纯色测试视频(带声时加 sine 音频轨,模拟带声直出);异步 spawn 不阻塞主进程
+      const ok = await runFfmpegPlaceholder(path, '0x2a3a5c');
+      if (!ok) {
         // ffmpeg 不可用时写个文本占位
         writeFileSync(path, JSON.stringify({ mock: true, kind }, null, 2));
       }
@@ -98,4 +93,18 @@ export class MockProvider implements Provider {
     writeFileSync(path, png);
     return path;
   }
+}
+
+/** 生成 1s 纯色 + 440Hz 音的占位 MP4;ffmpeg 不可用/失败返回 false(调用方写文本占位) */
+function runFfmpegPlaceholder(outPath: string, color: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn('ffmpeg', [
+      '-f', 'lavfi', '-i', `color=c=${color}:s=512x512:d=1`,
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest',
+      '-y', outPath,
+    ], { stdio: 'ignore' });
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
 }

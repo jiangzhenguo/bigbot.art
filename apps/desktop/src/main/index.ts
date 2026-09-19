@@ -4,13 +4,14 @@
  */
 import { app, BrowserWindow, ipcMain, protocol, net, shell } from 'electron';
 import { join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createRegistry } from '@bigbotart/providers';
 import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachmentsToProject } from './assets';
+import { AccelStore } from './lora';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
 import { extractFrame } from './frames';
@@ -87,6 +88,7 @@ const registry = createRegistry({
 });
 
 const settings = new SettingsStore();
+const accel = new AccelStore(settings);
 const store = new ProjectStore();
 const assets = new AssetStore();
 const skills = new SkillStore();
@@ -160,7 +162,7 @@ agent.onEvent = (ev: AgentEvent) => {
 queue.onJobFinish = (job) => {
   // Take 归档:有 takeId 就 patch(渲染层创建),否则补一条
   if (job.takeId && job.projectId) {
-    takes.patch(job.projectId, job.takeId, {
+    void takes.patch(job.projectId, job.takeId, {
       status: job.status,
       resultPath: job.resultPath,
       error: job.error,
@@ -187,6 +189,11 @@ queue.onJobFinish = (job) => {
       result: res.result,
     } satisfies AgentEvent);
   });
+};
+
+/** 队列变更 → 渲染层实时推送(精简视图,已剔除 req 大对象;窗口未建/已销毁时跳过) */
+queue.onChange = (jobs) => {
+  if (win && !win.isDestroyed()) win.webContents.send('render-queue-changed', jobs);
 };
 
 /** 当前活跃 chat 的工具上下文(按 chatKey 隔离,避免并发串写) */
@@ -300,14 +307,27 @@ ipcMain.handle('install-runtime', async (_e, id: string) => {
 // ---------- IPC:渲染任务(经队列,槽位互斥) ----------
 ipcMain.handle('check-providers', () => registry.checkAll());
 ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
-  logger.log('info', `submit-render node=${req.nodeId} slot=${req.slot} provider=${req.provider} takeId=${req.takeId ?? '—'} mode=${String((req.params as Record<string, unknown>).mode ?? '?')} tier=${String((req.params as Record<string, unknown>).tier ?? '?')} w=${String((req.params as Record<string, unknown>).width ?? '?')} h=${String((req.params as Record<string, unknown>).height ?? '?')}`);
+  const params = req.params as Record<string, unknown>;
+  logger.log('info', `submit-render node=${req.nodeId} slot=${req.slot} provider=${req.provider} takeId=${req.takeId ?? '—'} mode=${String(params.mode ?? '?')} tier=${String(params.tier ?? '?')} w=${String(params.width ?? '?')} h=${String(params.height ?? '?')}`);
+  // 🚀 加速 LoRA:开启且 real 模式时把蒸馏模型包解析成实际 modelDir(-d)+ steps(h3.c 不接受 --lora,见手册 §8)
+  // demo 模式走 mock 占位,不解析(避免包缺失在演示路径误报)
+  const accelReq = (params.accel ?? undefined) as { enabled?: boolean; packId?: string; steps?: number } | undefined;
+  if (accelReq?.enabled && req.slot === 'video' && settings.get().renderMode === 'real') {
+    const resolved = accel.resolveAccel(accelReq);
+    if (!resolved) {
+      throw new Error('加速 LoRA 开启但模型包不可用(未安装或目录缺失) · 请到设置页「加速 LoRA」检查');
+    }
+    params.modelDir = resolved.modelDir;
+    params.steps = resolved.steps;
+    logger.log('info', `submit-render accel: -d ${resolved.modelDir} --steps ${resolved.steps}`);
+  }
   return queue.submit(req);
 });
 
 // ---------- IPC:调试日志 ----------
 ipcMain.handle('debug-logs', () => logger.list());
 ipcMain.handle('debug-clear', () => logger.clear());
-ipcMain.handle('queue-status', () => queue.list());
+ipcMain.handle('queue-status', () => queue.slimList());
 ipcMain.handle('render-status', async (_e, provider: string, handle: { providerTaskId: string }): Promise<RenderStatus> => {
   // 优先查队列任务(demo/real 统一由队列驱动)
   const job = queue.getJob(handle.providerTaskId);
@@ -324,8 +344,9 @@ ipcMain.handle('render-status', async (_e, provider: string, handle: { providerT
   if (!p) throw new Error(`未知 provider: ${provider}`);
   return p.status(handle);
 });
-ipcMain.handle('cancel-render', (_e, provider: string, handle: { providerTaskId: string }) => {
-  queue.cancel(handle);
+ipcMain.handle('cancel-render', async (_e, provider: string, handle: { providerTaskId: string }) => {
+  // 队列侧负责杀真实子进程并归档(等其完成,避免下一个任务与残留进程重叠)
+  await queue.cancel(handle).catch(() => undefined);
   const p = registry.get(provider as never);
   return p?.cancel(handle).catch(() => undefined) ?? undefined;
 });
@@ -382,14 +403,33 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
   });
 });
 
-  // ---------- IPC:资产中心 ----------
-  ipcMain.handle('import-assets', (_e, opts?: { paths?: string[] }) => {
+  // ---------- IPC:资产中心(v2:项目视图/分类/标签/产物归档/回收站) ----------
+  ipcMain.handle('import-assets', (_e, opts?: { paths?: string[]; projectId?: string }) => {
     // paths 给定时走 headless(白名单目录);否则弹系统对话框(用户显式选择,不受限)
-    if (opts?.paths?.length) return assets.importFromPaths(opts.paths);
-    return assets.importFromDialog();
+    // projectId 给定时成功资产直接归属该项目(原子完成,避免渲染层导入后再逐条 update)
+    if (opts?.paths?.length) return assets.importFromPaths(opts.paths, { projectId: opts.projectId });
+    return assets.importFromDialog(opts?.projectId);
   });
-ipcMain.handle('list-assets', () => assets.list());
-ipcMain.handle('delete-asset', (_e, id: string) => assets.delete(id));
+  ipcMain.handle('list-assets', (_e, projectId?: string) => assets.list(projectId));
+  ipcMain.handle('delete-asset', (_e, id: string) => {
+    const refs = collectAssetRefs(store, id);
+    return { ...assets.delete(id), refs };
+  });
+  ipcMain.handle('update-asset', (_e, id: string, patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) =>
+    assets.update(id, patch),
+  );
+  ipcMain.handle('list-asset-categories', () => assets.listCategories());
+  ipcMain.handle('create-asset-category', (_e, name: string, projectId?: string) => assets.createCategory(name, projectId));
+  ipcMain.handle('rename-asset-category', (_e, id: string, name: string) => assets.renameCategory(id, name));
+  ipcMain.handle('delete-asset-category', (_e, id: string) => assets.deleteCategory(id));
+  ipcMain.handle('asset-refs', (_e, assetId: string) => collectAssetRefs(store, assetId));
+  ipcMain.handle('list-trash', () => assets.listTrash());
+  ipcMain.handle('restore-asset', (_e, id: string) => assets.restore(id));
+  ipcMain.handle('empty-trash', () => assets.emptyTrash());
+  ipcMain.handle('archive-products', (_e, input: { projectId: string; items: Array<{ nodeId: string; path: string }>; categoryId?: string }) =>
+    assets.archiveProducts(input.projectId, input.items, input.categoryId),
+  );
+  ipcMain.handle('list-archivable-products', (_e, projectId: string) => listArchivableProducts(store, projectId));
 
 // ---------- IPC:Skills ----------
 ipcMain.handle('list-skills', () => skills.list());
@@ -420,6 +460,47 @@ ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId)
 // ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑) ----------
 ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last') => extractFrame(videoPath, mode));
 
+// ---------- IPC:在系统文件管理器中显示(Finder) ----------
+// 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;
+// 文件缺失时逐级向上回退到最近存在的目录打开,保证点击必有真实跳转
+ipcMain.handle(
+  'reveal-in-finder',
+  async (_e, target: { path?: unknown }): Promise<{ ok: boolean; revealed: string; error?: string }> => {
+    const raw = typeof target?.path === 'string' ? target.path : '';
+    const p = resolve(raw || DATA_DIR);
+    const roots = [DATA_DIR, OUTPUTS_DIR, join(DATA_DIR, 'exports'), ...importAllowRoots()];
+    if (!raw || !roots.some((r) => isUnderRoot(p, r))) {
+      return { ok: false, revealed: p, error: '路径不在允许目录' };
+    }
+    try {
+      // 目标存在:文件 → Finder 选中该文件;目录 → 直接打开
+      if (existsSync(p)) {
+        const st = statSync(p);
+        if (st.isFile()) shell.showItemInFolder(p);
+        else shell.openPath(p);
+        return { ok: true, revealed: p };
+      }
+      // 目标缺失:向上找最近存在的目录打开(Finder 至少能落在产物附近)
+      let d = resolve(p, '..');
+      let hit: string | null = null;
+      while (true) {
+        if (existsSync(d) && statSync(d).isDirectory()) {
+          hit = d;
+          break;
+        }
+        const parent = resolve(d, '..');
+        if (parent === d) break;
+        d = parent;
+      }
+      if (!hit) return { ok: false, revealed: p, error: '路径不存在' };
+      shell.openPath(hit);
+      return { ok: true, revealed: hit };
+    } catch (e) {
+      return { ok: false, revealed: p, error: (e as Error).message };
+    }
+  },
+);
+
 // ---------- IPC:设置 ----------
 ipcMain.handle('get-settings', async () => {
   const s = settings.get();
@@ -432,6 +513,12 @@ ipcMain.handle('get-settings', async () => {
   return s;
 });
 ipcMain.handle('set-settings', (_e, patch) => settings.patch(patch));
+
+// ---------- IPC:加速 LoRA(蒸馏模型包)管理 ----------
+ipcMain.handle('accel-list', () => accel.list());
+ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number }) => accel.install(input));
+ipcMain.handle('accel-remove', (_e, id: string) => accel.remove(id));
+ipcMain.handle('accel-set-default', (_e, id: string | null) => accel.setDefault(id));
 
 // ---------- IPC:LLM 来源(五档) ----------
 ipcMain.handle('llm-local-models', (_e, kind: 'lmstudio' | 'ollama' | 'pimlx') => {
@@ -552,6 +639,10 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
       };
     }),
   );
+  // 附件自动登记为项目资源(source='attachment'):项目资源页可见;按 localPath 幂等,重复对话不重复登记
+  for (const pa of projAtts) {
+    if (pa.copied && pa.projectPath) await assets.registerAttachment(req.projectId, { id: pa.id, path: pa.projectPath });
+  }
   // 附件注入:项目内路径 + 尺寸元数据直接给 LLM(免去 assets.get 往返,也避免"信息太简略看不出内容")
   const attNote = projAtts.length
     ? `\n\n[用户附件 · 已拷入项目文件夹,可直接作为参考图/素材使用(也可用 canvas.create_node(kind=asset) 引用到画布):\n${projAtts

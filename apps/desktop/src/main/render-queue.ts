@@ -40,6 +40,10 @@ export class RenderQueue {
   /** 任务完成回调(连续性校验等) */
   onJobFinish: ((job: RenderJob) => void) | null = null;
 
+  /** 队列变更回调(当前 tick 内合并去抖;推送 slimList 精简视图,渲染层订阅用) */
+  onChange: ((jobs: RenderJob[]) => void) | null = null;
+  private notifyScheduled = false;
+
   /** 提交任务入队;返回队列任务 id(兼容 RenderJobHandle.providerTaskId 语义) */
   submit(req: RenderRequest & { takeId?: string }): RenderJobHandle {
     const provider = req.provider ?? (req.slot === 'video' ? 'h3c' : 'mlxgen');
@@ -59,22 +63,29 @@ export class RenderQueue {
     };
     this.jobs.push(job);
     this.pump();
+    this.notify();
     return { providerTaskId: job.id };
   }
 
-  cancel(handle: RenderJobHandle): void {
+  async cancel(handle: RenderJobHandle): Promise<void> {
     const job = this.jobs.find((j) => j.id === handle.providerTaskId);
     if (!job) return;
     if (job.status === 'queued') {
       job.status = 'cancelled';
       job.updatedAt = new Date().toISOString();
+      this.notify();
       return;
     }
     if (job.status === 'running' && this.running?.id === job.id) {
+      // 先等 provider 把真实子进程杀干净,再归档 + 放行下一个任务(避免新旧 h3 重叠)
       const real = this.handles.get(job.id);
       if (real) {
         const p = this.registry.get(this.effectiveProvider(job));
-        void p?.cancel(real).catch(() => undefined);
+        try {
+          await p?.cancel(real);
+        } catch {
+          /* provider.cancel 失败不阻断归档 */
+        }
       }
       this.finishJob(job, { status: 'cancelled', stage: '已取消' });
     }
@@ -82,6 +93,38 @@ export class RenderQueue {
 
   list(): RenderJob[] {
     return [...this.jobs].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  }
+
+  /** 对外精简视图:剔除内部 req(含参数/提示词/引用大对象),仅暴露渲染层所需字段 */
+  slimList(): RenderJob[] {
+    return this.jobs
+      .map((j) => ({
+        id: j.id,
+        nodeId: j.nodeId,
+        provider: j.provider,
+        status: j.status,
+        slot: j.slot,
+        projectId: j.projectId,
+        canvasId: j.canvasId,
+        progress: j.progress,
+        stage: j.stage,
+        error: j.error,
+        takeId: j.takeId,
+        resultPath: j.resultPath,
+        createdAt: j.createdAt,
+        updatedAt: j.updatedAt,
+      }))
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  }
+
+  /** 变更通知:合并到同一事件循环 tick 内只推一次(避免 submit+状态轮询连发多条 IPC) */
+  private notify(): void {
+    if (this.notifyScheduled) return;
+    this.notifyScheduled = true;
+    setImmediate(() => {
+      this.notifyScheduled = false;
+      this.onChange?.(this.slimList());
+    });
   }
 
   getJob(id: string): RenderJob | undefined {
@@ -136,9 +179,20 @@ export class RenderQueue {
       this.logger?.log("info", `[queue] ${providerId} 未就绪 → 兜底 mock`);
       p = this.registry.get('mock')!;
     }
+    // ⚠️ 引擎探测(可能耗时数秒~20s)期间用户可能已取消:取消后不再启动引擎/不再 submit
+    if (job.status !== 'running') {
+      this.logger?.log("info", `[queue] job=${job.id} 探测期间已取消,不再启动引擎`);
+      return;
+    }
 
-    const req: RenderRequest = job.req
+    const req0: RenderRequest = job.req
       ?? { provider: providerId, nodeId: job.nodeId, slot: job.slot === 'video' ? 'video' : 'image', params: {} };
+    // 全局「SSD 流式读权重」开关(设置页通用,默认关):视频任务在提交前注入 params.ssdStreaming,
+    // h3c provider 据此追加 --ssd-streaming(覆盖画布/Agent 两条提交路径;不改动已存 job.req)
+    const req: RenderRequest =
+      job.slot === 'video' && this.settings.get().ssdStreaming === true
+        ? { ...req0, params: { ...(req0.params ?? {}), ssdStreaming: true } }
+        : req0;
 
     let handle: RenderJobHandle;
     try {
@@ -147,6 +201,16 @@ export class RenderQueue {
     } catch (e) {
       this.logger?.log("info", `[queue] submit 失败: ${(e as Error).message} ${(e as Error).stack ?? ''}`);
       this.finishJob(job, { status: 'failed', stage: '提交失败', error: (e as Error).message });
+      return;
+    }
+    // 提交刚完成、handle 尚未登记的最小窗口内被取消 → 立即回收刚 spawn 的引擎进程
+    if (job.status !== 'running') {
+      this.logger?.log("info", `[queue] job=${job.id} 提交后已被取消,立即回收引擎进程`);
+      try {
+        await p?.cancel(handle);
+      } catch {
+        /* 忽略 */
+      }
       return;
     }
     this.handles.set(job.id, handle);
@@ -170,6 +234,7 @@ export class RenderQueue {
       if (st.progress !== undefined) job.progress = st.progress;
       if (st.stage) job.stage = st.stage;
       job.updatedAt = new Date().toISOString();
+      this.notify();
       if (st.status === 'SUCCEEDED' || st.status === 'FAILED' || st.status === 'EXPIRED') {
         this.finishJob(job, {
           status: st.status === 'SUCCEEDED' ? 'succeeded' : 'failed',
@@ -200,6 +265,7 @@ export class RenderQueue {
     // 完成回调(连续性校验等)
     this.onJobFinish?.(job);
     this.pump();
+    this.notify();
   }
 }
 

@@ -335,7 +335,7 @@ export class ToolHandlers {
       try {
         res = openDialog
           ? await this.assets.importFromDialog()
-          : this.assets.importFromPaths(paths);
+          : await this.assets.importFromPaths(paths);
       } catch (e) {
         return { ok: false, result: `导入失败: ${(e as Error).message}` };
       }
