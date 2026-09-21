@@ -33,6 +33,7 @@ import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
 import { AddNodePopover } from './canvas/AddNodePopover';
+import { usePrompt } from '../components/usePrompt';
 import { PortPickPop } from './canvas/PortPickPop';
 import { AgentPane } from './canvas/AgentPane';
 import { InspectorPane } from './canvas/InspectorPane';
@@ -109,6 +110,8 @@ export default function CanvasPage({
   const [tab, setTab] = useState<'chat' | 'insp'>('chat');
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
+  /** 正在重命名的节点 id(null = 无;节点头部显示内联输入框,Electron 不支持 window.prompt) */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; n: number } | null>(null);
   const [inspectTitle, setInspectTitle] = useState('镜头 02 · 男主踱步');
 
@@ -1100,6 +1103,28 @@ export default function CanvasPage({
     [selectNode, toastMsg],
   );
 
+  const { ask: askPrompt, dialog: promptDialog } = usePrompt();
+
+  /** 右键「重命名…」:改节点标题(唯一的持久化字段 label;不动 kind/data,不触发下游 stale) */
+  const renameNode = useCallback(
+    async (id: string) => {
+      const n = nodesRef.current.find((x) => x.id === id);
+      if (!n) return;
+      const next = await askPrompt({ title: '重命名节点', initial: n.title });
+      if (!next || next === n.title) return;
+      setNodes((ns) => ns.map((x) => (x.id === id ? { ...x, title: next } : x)));
+      // 同步检查器条目与当前检查器标题(若正显示该节点)
+      setInfoMap((m) => {
+        const cur = m[id];
+        if (!cur) return m;
+        return { ...m, [id]: { ...cur, t: next } };
+      });
+      setInspectTitle((cur) => (cur === n.title ? next : cur));
+      toastMsg(`已重命名为「${next}」`);
+    },
+    [toastMsg, askPrompt],
+  );
+
   /** 右键「在 Finder 中显示」:解析节点真实产物路径 → 主进程 shell 定位(文件缺失回退最近目录) */
   const revealNodeInFinder = useCallback(
     async (nodeId: string) => {
@@ -1193,6 +1218,61 @@ export default function CanvasPage({
       }
       if (n.kind === 'document') {
         toastMsg('文档节点无生成任务 · 可编辑后重新规划');
+        return;
+      }
+      // 图片裁切节点(image-crop):不推理,ffmpeg 按目标画幅裁剪 → 直接出产物 + 记 Take
+      if (n.kind === 'image-crop') {
+        let srcPath: string | undefined;
+        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        const cropFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+        if (!srcPath && cropFrom?.nodeId) {
+          const up = nodesRef.current.find((x) => x.id === cropFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          srcPath = up?.kind === 'asset'
+            ? assetCache.current[String(upData.assetId ?? '')]
+            : String(upData.resultPath ?? '') || undefined;
+        }
+        if (!srcPath) {
+          toastMsg('图片裁切需要输入图:连一个 图片生成/编辑/增强 节点或 asset,或在检查器填 Asset ID');
+          return;
+        }
+        const aspect = String(d.aspect ?? '9:16');
+        const focus = (String(d.focus ?? 'center') as 'center' | 'top' | 'bottom' | 'left' | 'right');
+        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '裁切中…', ghost: false } : x)));
+        const res = await window.bigbotart.cropImage({ path: srcPath, aspect, focus });
+        if (!res.ok || !res.path) {
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `裁切失败 · ${res.error ?? '未知错误'}` } : x)));
+          toastMsg(`裁切失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        // Take 归档(succeeded 一次写入):产物路径 + 源图 + 参数
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: res.path,
+            params: { kind: 'crop', aspect, focus, inputPath: srcPath },
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  extra: `✓ ${basenameOf(res.path as string)}`,
+                  data: { ...(x.data ?? {}), resultPath: res.path, currentTakeId: takeId },
+                }
+              : x,
+          ),
+        );
+        // 下游 ghost 边转正(裁切绕过渲染队列,补一次与队列完成相同的边状态刷新)
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(`已裁切至 ${aspect} · ${n.title}`);
         return;
       }
       const isImage = n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale';
@@ -1340,10 +1420,14 @@ export default function CanvasPage({
             width: d.width,
             height: d.height,
             steps: d.steps,
+            guidance: d.guidance,
+            negativePrompt: d.negativePrompt,
             seeds: d.seeds,
             inputPath,
             maskPath,
             scale: d.scale,
+            imageStrength: d.imageStrength,
+            outpaintSides: d.outpaintSides,
           }
         : {
             kind: 'video',
@@ -1364,9 +1448,9 @@ export default function CanvasPage({
 
       setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', ghost: false } : x)));
       try {
-        // 先建 Take(queued),再提交任务带 takeId(主进程完成时自动写终态)
+        // 先建 Take(queued),再提交任务带 takeId(主进程完成时自动写终态)· shot 与图片类节点(image-gen/edit/upscale)统一记录历史
         let takeId: string | undefined;
-        if (projectId && !isImage) {
+        if (projectId) {
           const t = await window.bigbotart.takesCreate(projectId, {
             shotNodeId: nodeId,
             status: 'queued',
@@ -1409,7 +1493,7 @@ export default function CanvasPage({
 
   const [agentRunText, setAgentRunText] = useState('Agent 已规划参数 · 等视频槽位 · 可提前改参');
   const runAll = () => {
-    const ids = nodesRef.current.filter((n) => n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale').map((n) => n.id);
+    const ids = nodesRef.current.filter((n) => n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop').map((n) => n.id);
     if (ids.length === 0) {
       toastMsg('画布上没有可运行的生成节点');
       return;
@@ -1888,6 +1972,7 @@ export default function CanvasPage({
         ctx={ctx}
         nodes={nodes}
         toastMsg={toastMsg}
+        onRename={renameNode}
         onDuplicate={duplicateNode}
         onDelete={deleteNode}
         onClose={() => setCtx(null)}
@@ -1933,6 +2018,7 @@ export default function CanvasPage({
         onClear={() => void window.bigbotart.debugClear().catch(() => undefined)}
         onClose={() => setDbgOpen(false)}
       />
+      {promptDialog}
     </div>
   );
 }
