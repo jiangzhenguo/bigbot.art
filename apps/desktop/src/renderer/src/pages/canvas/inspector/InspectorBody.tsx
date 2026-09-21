@@ -5,7 +5,13 @@ import { ShotInspector } from './ShotInspector';
 import { TimelineInspector } from './TimelineInspector';
 import DocumentInspector from './DocumentInspector';
 import StoryboardInspector from './StoryboardInspector';
+import { ImageTakeSection } from './ImageTakeSection';
 import { KVSection, Lbl, TextAreaField } from './fields';
+import { ImagePreview } from './ImagePreview';
+import { CropTakePreview } from './CropTakePreview';
+import { previewUrlOf } from '../media';
+import { ImageGenInspector } from './ImageGenInspector';
+import { ImageEditInspector } from './ImageEditInspector';
 
 export interface InspectorBodyProps {
   node: CanvasNode | undefined;
@@ -33,6 +39,8 @@ export interface InspectorBodyProps {
   onResyncStoryboard?: (sbNode: CanvasNode) => void;
   /** 文档节点:「生成分镜表」→ Agent plan-storyboard */
   onPlanStoryboard?: (docNode: CanvasNode) => void;
+  /** asset 节点:「从资源库选择…」→ 打开资产选择弹层 */
+  onOpenAssetPicker?: (nodeId: string) => void;
 }
 
 export function InspectorBody({
@@ -54,6 +62,7 @@ export function InspectorBody({
   onUndoStoryboard,
   onResyncStoryboard,
   onPlanStoryboard,
+  onOpenAssetPicker,
 }: InspectorBodyProps) {
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
@@ -63,6 +72,27 @@ export function InspectorBody({
   const info = infoMap[node.id];
   const setInfo = (patch: Partial<{ t: string; img: string | null; meta: Array<[string, string]> }>) => {
     setInfoMap((m) => ({ ...m, [node.id]: { ...(m[node.id] ?? { t: node.title, img: null, meta: [] }), ...patch } }));
+  };
+  /** 图片节点切换 Take → 回写画布节点(产物预览 + 绑定标记;与 shot 检查器 onSelectTake 同语义) */
+  const selectImageTake = (t: { id: string; attempt: number; status: string; resultPath?: string }) => {
+    setNodes((ns) =>
+      ns.map((n) => {
+        if (n.id !== node.id) return n;
+        const name = t.resultPath?.replace(/\\/g, '/').split('/').pop();
+        return {
+          ...n,
+          ghost: t.status === 'succeeded' ? !t.resultPath : n.ghost,
+          stale: false,
+          badge: undefined,
+          extra: t.resultPath ? `✓ ${name}` : t.status === 'succeeded' ? '✓·无产物' : t.status === 'failed' ? '失败' : n.extra,
+          data: {
+            ...(n.data ?? {}),
+            currentTakeId: t.id,
+            resultPath: t.resultPath ?? undefined,
+          },
+        };
+      }),
+    );
   };
 
   switch (node.kind) {
@@ -92,16 +122,24 @@ export function InspectorBody({
     case 'asset': {
       const mediaType = String(d.mediaType ?? 'image');
       const assetId = String(d.assetId ?? '');
+      // 已绑定资产 = 媒体类型锁定(资源节点「不可自变」);未绑定时才允许选类型
+      const locked = !!assetId;
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
-            <Lbl>媒体类型</Lbl>
+            <Lbl>媒体类型{locked ? ' · 已绑定锁定' : ''}</Lbl>
             <div className="row g6">
               {(['image', 'video', 'audio', 'document'] as const).map((t) => (
                 <span
                   key={t}
-                  className={`chip${mediaType === t ? ' on' : ''}`}
-                  onClick={() => setData({ mediaType: t })}
+                  className={`chip${mediaType === t ? ' on' : ''}${locked ? ' dis' : ''}`}
+                  onClick={() => {
+                    if (locked) {
+                      toastMsg('已绑定资产,媒体类型锁定 · 右键「更换资产…」换绑');
+                      return;
+                    }
+                    setData({ mediaType: t });
+                  }}
                 >
                   {t === 'image' ? '图片' : t === 'video' ? '视频' : t === 'audio' ? '音频' : '文档'}
                 </span>
@@ -115,146 +153,68 @@ export function InspectorBody({
             placeholder="asset-xxxxxxxxxxxx-xxxx"
             onChange={(v) => setData({ assetId: v })}
           />
-          <button
-            className="btn btn-s btn-sm"
-            onClick={() => {
-              void window.bigbotart.listAssets().then((all) => {
-                const opts = all.filter((a) => a.kind === mediaType);
-                if (!opts.length) {
-                  toastMsg(`资产库里没有 ${mediaType} 类资产`);
-                  return;
-                }
-                const first = opts[0]!;
-                setData({ assetId: first.id });
-                toastMsg(`已绑定最新 ${mediaType} 资产:${first.name}`);
-              });
-            }}
-          >
-            绑定最新 {mediaType} 资产
-          </button>
+          <div className="row g6">
+            <button
+              className="btn btn-s btn-sm"
+              onClick={() => node && onOpenAssetPicker && onOpenAssetPicker(node.id)}
+            >
+              从资源库选择…
+            </button>
+            <button
+              className="btn btn-s btn-sm"
+              onClick={() => {
+                void window.bigbotart.listAssets().then((all) => {
+                  const opts = all.filter((a) => a.kind === mediaType);
+                  if (!opts.length) {
+                    toastMsg(`资产库里没有 ${mediaType} 类资产`);
+                    return;
+                  }
+                  const first = opts[0]!;
+                  setData({ assetId: first.id });
+                  toastMsg(`已绑定最新 ${mediaType} 资产:${first.name}`);
+                });
+              }}
+            >
+              绑定最新 {mediaType} 资产
+            </button>
+          </div>
+          {mediaType === 'image' ? (
+            assetId && assetCache[assetId] ? (
+              <ImagePreview src={previewUrlOf(assetCache[assetId])} label="素材预览" />
+            ) : (
+              <ImagePreview src={null} label="素材预览" emptyHint="未绑定资产 · 绑定后显示完整图片" />
+            )
+          ) : null}
           {info?.meta ? <KVSection rows={info.meta} /> : null}
         </div>
       );
     }
     case 'image-gen': {
-      const model = String(d.model ?? 'AbstractFramework/z-image-turbo-8bit');
-      const prompt = String(d.prompt ?? '');
-      const w = Number(d.width ?? 1024);
-      const h = Number(d.height ?? 1024);
-      const seeds = (d.seeds as number[]) ?? [42];
-      const steps = Number(d.steps ?? 24);
-      const guidance = Number(d.guidance ?? 1.0);
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <TextAreaField label="提示词" value={prompt} rows={4} placeholder="晨雾弥漫的针叶林,远处湖面反射柔光,电影感广角" onChange={(v) => setData({ prompt: v })} />
-          <div>
-            <Lbl>模型</Lbl>
-            <input
-              className="input-w mono"
-              value={model}
-              onChange={(e) => setData({ model: e.target.value })}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div>
-            <Lbl>宽 × 高</Lbl>
-            <div className="row g6">
-              <input className="input-w mono" type="number" value={w} style={{ width: 90 }} onChange={(e) => setData({ width: Number(e.target.value) })} />
-              <span className="mut">×</span>
-              <input className="input-w mono" type="number" value={h} style={{ width: 90 }} onChange={(e) => setData({ height: Number(e.target.value) })} />
-            </div>
-          </div>
-          <div>
-            <Lbl>步数 / 引导</Lbl>
-            <div className="row g6">
-              <input className="input-w mono" type="number" value={steps} style={{ width: 70 }} onChange={(e) => setData({ steps: Number(e.target.value) })} />
-              <span className="mut">/</span>
-              <input className="input-w mono" type="number" step="0.1" value={guidance} style={{ width: 70 }} onChange={(e) => setData({ guidance: Number(e.target.value) })} />
-            </div>
-          </div>
-          <div>
-            <Lbl>Seeds(逗号分隔)</Lbl>
-            <input
-              className="input-w mono"
-              value={seeds.join(', ')}
-              onChange={(e) =>
-                setData({ seeds: e.target.value.split(/[,\\s]+/).filter(Boolean).map(Number).filter((x) => Number.isFinite(x)) })
-              }
-            />
-          </div>
-          <KVSection rows={[['引擎', 'mlxgen'], ['产物', `${seeds.length} 张 PNG`]]} />
-        </div>
+        <ImageGenInspector
+          node={node}
+          setData={setData}
+          jobs={jobs}
+          projectId={projectId}
+          runNode={runNode}
+          toastMsg={toastMsg}
+          onSelectTake={selectImageTake}
+        />
       );
     }
     case 'image-edit': {
-      const mode = String(d.mode ?? 'instruction');
-      const model = String(d.model ?? 'qwen-image-edit');
-      const prompt = String(d.prompt ?? '');
-      const inputAssetId = String(d.inputAssetId ?? '');
-      const maskAssetId = String(d.maskAssetId ?? '');
-      const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
-      const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
-      const promptFrom = d.promptFrom as PromptSource | undefined;
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>编辑模式</Lbl>
-            <div className="row g6" style={{ flexWrap: 'wrap' }}>
-              {(['instruction', 'img2img', 'inpaint', 'outpaint'] as const).map((m) => (
-                <span
-                  key={m}
-                  className={`chip${mode === m ? ' on' : ''}`}
-                  onClick={() => setData({ mode: m })}
-                >
-                  {m === 'instruction' ? '指令编辑' : m === 'img2img' ? 'I2I' : m === 'inpaint' ? 'Inpaint' : 'Outpaint'}
-                </span>
-              ))}
-            </div>
-          </div>
-          <TextAreaField label="指令 / Prompt" value={prompt} rows={3} placeholder="把背景换成日落,保留主体" onChange={(v) => setData({ prompt: v })} />
-          <TextAreaField label="输入图 Asset ID" value={inputAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ inputAssetId: v })} />
-          {frameSrc ? (
-            <div>
-              <Lbl>输入帧源(由 shot 连线自动取帧)</Lbl>
-              <div className="row g6" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-                <span className="mono mut" style={{ fontSize: 11 }}>节点 {(frameSrc.videoNodeId ?? '').slice(0, 10) || '?'}</span>
-                {(['first', 'last'] as const).map((at) => (
-                  <span
-                    key={at}
-                    className={`chip${(frameSrc.at ?? 'first') === at ? ' on' : ''}`}
-                    style={{ fontSize: 10, padding: '2px 8px' }}
-                    onClick={() => setData({ inputFrameSource: { videoNodeId: frameSrc.videoNodeId ?? '', at } })}
-                  >
-                    {at === 'first' ? '首帧' : '尾帧'}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : imgFrom?.nodeId ? (
-            <div>
-              <Lbl>输入图源(由连线直通)</Lbl>
-              <div className="mono mut" style={{ fontSize: 11 }}>
-                节点 {imgFrom.nodeId.slice(0, 10)} · 上游产物/素材直接作为输入图
-              </div>
-            </div>
-          ) : (
-            <div className="mut" style={{ fontSize: 11 }}>连一个 shot / 图片节点 / asset 可自动作为输入图</div>
-          )}
-          {promptFrom?.nodeId ? (
-            <div className="mut" style={{ fontSize: 11 }}>
-              提示词由文档节点 {promptFrom.nodeId.slice(0, 10)} 注入
-              {(promptFrom.mode ?? 'full') !== 'full' ? ` · ${promptFrom.mode === 'block' ? `选段 ${promptFrom.blockId ?? ''}` : `表格行 ${promptFrom.row ?? ''}`}` : ' · 全文'}
-              (自身 prompt 为空时生效)
-            </div>
-          ) : null}
-          {mode === 'inpaint' ? (
-            <TextAreaField label="遮罩图 Asset ID(inpaint 必填)" value={maskAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ maskAssetId: v })} />
-          ) : null}
-          <div>
-            <Lbl>模型</Lbl>
-            <input className="input-w mono" value={model} onChange={(e) => setData({ model: e.target.value })} style={{ width: '100%' }} />
-          </div>
-        </div>
+        <ImageEditInspector
+          node={node}
+          setData={setData}
+          jobs={jobs}
+          projectId={projectId}
+          nodes={nodes ?? []}
+          assetCache={assetCache}
+          runNode={runNode}
+          toastMsg={toastMsg}
+          onSelectTake={selectImageTake}
+        />
       );
     }
     case 'image-upscale': {
@@ -277,6 +237,70 @@ export function InspectorBody({
             <input className="input-w mono" value={model} onChange={(e) => setData({ model: e.target.value })} style={{ width: '100%' }} />
           </div>
           <KVSection rows={[['引擎', 'mlxgen · SeedVR2'], ['输入', '来自上游节点产物或 asset']]} />
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
+        </div>
+      );
+    }
+    case 'image-crop': {
+      const aspect = String(d.aspect ?? '9:16');
+      const focus = String(d.focus ?? 'center');
+      const inputAssetId = String(d.inputAssetId ?? '');
+      const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+      // 源图路径:Asset ID 直绑 → 连线上游(asset 节点取资产,其余取产物)
+      const cropSrc = (() => {
+        if (inputAssetId && assetCache[inputAssetId]) return assetCache[inputAssetId];
+        if (imgFrom?.nodeId) {
+          const up = (nodes ?? []).find((x) => x.id === imgFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          if (up?.kind === 'asset') {
+            const aid = String(upData.assetId ?? '');
+            if (aid && assetCache[aid]) return assetCache[aid];
+          }
+          return String(upData.resultPath ?? '') || null;
+        }
+        return null;
+      })();
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <Lbl>目标画幅</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {(['16:9', '9:16', '1:1', '4:3', '3:4', '2:3'] as const).map((a) => (
+                <span key={a} className={`chip${aspect === a ? ' on' : ''}`} onClick={() => setData({ aspect: a })}>
+                  {a}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div>
+            <Lbl>裁切锚点</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['center', '居中'],
+                ['left', '靠左'],
+                ['right', '靠右'],
+                ['top', '靠上'],
+                ['bottom', '靠下'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${focus === v ? ' on' : ''}`} onClick={() => setData({ focus: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+            <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>1:1 → 9:16 时横向裁切,left/right 决定保留左半/右半;其余锚点同理</div>
+          </div>
+          <TextAreaField label="输入图 Asset ID(与连线二选一)" value={inputAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ inputAssetId: v })} />
+          {imgFrom?.nodeId ? (
+            <div>
+              <Lbl>输入图源(由连线直通)</Lbl>
+              <div className="mono mut" style={{ fontSize: 11 }}>节点 {imgFrom.nodeId.slice(0, 10)} · 上游产物/素材直接作为裁剪源</div>
+            </div>
+          ) : (
+            <div className="mut" style={{ fontSize: 11 }}>连一个 图片生成/编辑/增强 节点或 asset 可自动作为裁剪源</div>
+          )}
+          <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['输出', `裁剪至 ${aspect} · 保持原分辨率`]]} />
+          <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} />
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
     }

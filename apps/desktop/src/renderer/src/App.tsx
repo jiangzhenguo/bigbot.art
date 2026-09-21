@@ -265,7 +265,11 @@ export default function App() {
       )}
       {currentPage === 'assets' && (
         <ErrorBoundary name="资产">
-          <AssetsPage onNavigate={handleNavigate} />
+          <AssetsPage
+            onNavigate={handleNavigate}
+            projectId={projectId}
+            projectName={projects.find((p) => p.id === projectId)?.name ?? '未命名项目'}
+          />
         </ErrorBoundary>
       )}
       {currentPage === 'skills' && (

@@ -25,6 +25,12 @@ export function thumbSrc(assetPath: string | undefined): string | null {
   return `bba-asset://${assetPath.split('/').pop()}`;
 }
 
+/** 统一本地路径 → 可显示 URL:产物(outputs/)走 bba-output,资产库走 bba-asset */
+export function previewUrlOf(p: string | null | undefined): string | null {
+  if (!p) return null;
+  return p.includes('/outputs/') ? outputUrlOf(p) : thumbSrc(p);
+}
+
 /** 宽/高 → 合法 32 倍数(小于 32 取 32;h3 硬性要求) */
 export function clamp32(v: number, fallback = 544): number {
   const n = Number.isFinite(v) && v > 0 ? v : fallback;

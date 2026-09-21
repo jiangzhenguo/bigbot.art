@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import type { RenderJob, Asset, ShotTakeHistory } from '@bigbotart/shared';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { RenderJob, Asset, ShotTakeHistory, AccelPack } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import {
   SHOT_ASPECTS,
@@ -8,6 +8,8 @@ import {
   SHOT_TIER_PRESETS,
   SHOT_MODE_LABEL,
   SHOT_REF_ROLES,
+  h3AlignFrames,
+  h3FramesForSeconds,
 } from '../constants';
 import { clamp32, thumbSrc, outputUrlOf } from '../media';
 
@@ -52,6 +54,8 @@ export function ShotInspector({
   const customHeight = Number(d.customHeight ?? 544);
   const seed = Number(d.seed ?? 42);
   const refs = (d.refs ?? []) as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }>;
+  /** 🚀 加速 LoRA(蒸馏模型包):enabled + 包 id + 步数档(提交时由主进程解析 -d/--steps) */
+  const accel = (d.accel ?? {}) as { enabled?: boolean; packId?: string; steps?: 4 | 8 };
 
   /* 接续链画面规格继承:由连线派发写入 specFrom / specOverride(见 CanvasPage 统一边分派) */
   const specFromId = (d.specFrom as { nodeId?: string } | undefined)?.nodeId;
@@ -88,7 +92,31 @@ export function ShotInspector({
   useEffect(() => {
     refreshHist();
   }, [refreshHist]);
+  // 任务提交/完成时自动刷新 Take 历史:按本节点 job 签名(含状态)变化才重拉,
+  // 长跑轮询期间签名不变不会重复请求 —— 同一节点连续生成,新版本立即可见
+  const jobSigRef = useRef('');
+  useEffect(() => {
+    const mine = jobs.filter((j) => j.nodeId === node.id);
+    const sig = `${node.id}|${mine.map((j) => `${j.id}:${j.status}`).join(',')}`;
+    if (sig === jobSigRef.current) return;
+    jobSigRef.current = sig;
+    refreshHist();
+  }, [jobs, node.id, refreshHist]);
   const takes = hist?.takes ?? [];
+  // 🚀 加速 LoRA:设置页登记的蒸馏模型包清单(主进程回填 exists)
+  const [packs, setPacks] = useState<AccelPack[]>([]);
+  useEffect(() => {
+    // 防御:主进程/preload 未重建时通道可能不存在(HMR 先于 main 热更的场景),缺失则降级空列表,不白屏
+    const api = window.bigbotart;
+    if (typeof api.accelList !== 'function') {
+      console.warn('[accel] accelList 通道不可用(主进程/preload 未重载?)· 加速 LoRA 降级为空列表');
+      setPacks([]);
+      return;
+    }
+    void api.accelList().then(setPacks).catch(() => setPacks([]));
+  }, []);
+  const defaultPackId = packs.find((p) => p.default)?.id ?? packs[0]?.id;
+  const selPack = packs.find((p) => p.id === (accel.packId ?? defaultPackId));
   /** 最近一次生成实际用过的提示词(存档在 Take.params 里)——节点 prompt 为空时可用于找回 */
   const takePrompt = (() => {
     for (const t of takes) {
@@ -120,6 +148,13 @@ export function ShotInspector({
       resultPath: t.resultPath,
     });
   };
+
+  // 🚀 加速 LoRA 生效后的预计时间与执行步数(按实际步数相对档位预设步数缩放)
+  const tierSteps = preset.steps;
+  const effSteps = accel.enabled ? (accel.steps ?? 8) : tierSteps;
+  const etaText = accel.enabled
+    ? `≈${Math.max(1, Math.round(preset.etaMin * (effSteps / tierSteps)))} 分钟`
+    : preset.eta;
 
   // 参考角色(按 mode)
   const roleDefs = SHOT_REF_ROLES[mode] ?? SHOT_REF_ROLES['text2video'] ?? [];
@@ -220,7 +255,7 @@ export function ShotInspector({
               <path d="M12 7v5l3.5 2" />
             </svg>
             <b>待生成</b>
-            <span className="right">{SHOT_TIER_PRESETS[tier].eta}</span>
+            <span className="right">{etaText}</span>
           </div>
           <div className="gs-sub">h3.c · {SHOT_MODE_LABEL[mode]} · {resText} · 显存 ≈25GB</div>
           <button className="btn btn-p btn-sm" style={{ width: '100%' }} onClick={submit}>立即生成</button>
@@ -228,7 +263,11 @@ export function ShotInspector({
       ) : (
         <div className="gok">
           <span className="dot ok" />生成完成 · Take {curTake.attempt} ✓
-          {curTake.durationSec !== undefined ? ` · 耗时 ${Math.round(curTake.durationSec / 60)}分${Math.round(curTake.durationSec % 60)}秒` : ''}
+          {/* 生成耗时(墙钟)用 elapsedSec;历史数据缺该字段时回退 durationSec */}
+          {(() => {
+            const sec = curTake.elapsedSec ?? curTake.durationSec;
+            return sec !== undefined ? ` · 耗时 ${Math.round(sec / 60)}分${Math.round(sec % 60)}秒` : '';
+          })()}
           <span className="mono">{curTake.resultPath ? curTake.resultPath.split('/').pop() : ''}</span>
         </div>
       )}
@@ -360,8 +399,78 @@ export function ShotInspector({
           </div>
         ) : null}
         <div className="f-hint">
-          输出 {resText} · 预计 ≈{SHOT_TIER_PRESETS[tier].eta.replace('≈', '')} · {SHOT_TIER_PRESETS[tier].note}
+          输出 {resText} · 预计 {etaText} · {SHOT_TIER_PRESETS[tier].note}
         </div>
+      </div>
+
+      {/* ── 🚀 加速 LoRA(蒸馏模型包):h3.c 不接受 --lora,加速 = 换蒸馏目录 + 4/8 步 ── */}
+      <div className="f-sec" data-od-id="shot-accel-lora">
+        <div className="lbl">🚀 加速 LoRA</div>
+        <div className="f-row">
+          <span className="f-lbl">开关</span>
+          <div className="f-chips">
+            <span
+              className={`chip${!accel.enabled ? ' on' : ''}`}
+              onClick={() => setData({ accel: { ...accel, enabled: false } })}
+            >
+              关闭
+            </span>
+            <span
+              className={`chip${accel.enabled ? ' on' : ''}`}
+              onClick={() =>
+                setData({
+                  accel: { enabled: true, packId: accel.packId ?? defaultPackId, steps: accel.steps ?? 8 },
+                })
+              }
+            >
+              ⚡ 开启
+            </span>
+          </div>
+        </div>
+        {accel.enabled ? (
+          <>
+            <div className="f-row">
+              <span className="f-lbl">步数</span>
+              <div className="f-chips">
+                {([4, 8] as const).map((s) => (
+                  <span
+                    key={s}
+                    className={`chip${(accel.steps ?? 8) === s ? ' on' : ''}`}
+                    onClick={() => setData({ accel: { ...accel, steps: s } })}
+                  >
+                    {s} 步{s === 8 ? ' · 推荐' : ''}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="f-row">
+              <span className="f-lbl">模型包</span>
+              {packs.length === 0 ? (
+                <span className="f-hint">暂无蒸馏模型包 · 去「设置 → 加速 LoRA」安装</span>
+              ) : (
+                <div className="f-chips">
+                  {packs.map((p) => (
+                    <span
+                      key={p.id}
+                      className={`chip${(accel.packId ?? defaultPackId) === p.id ? ' on' : ''}`}
+                      onClick={() => setData({ accel: { ...accel, packId: p.id } })}
+                    >
+                      {p.name}
+                      {p.default ? ' · 默认' : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="f-hint">
+              开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '默认蒸馏模型包'} · --steps {accel.steps ?? 8} · 省 60-80% 时间
+              {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
+              · 加速不随接续链规格继承
+            </div>
+          </>
+        ) : (
+          <div className="f-hint">蒸馏模型包 + 4/8 步出片(省 60-80% 时间)· 需设置页装有 turbo 模型包</div>
+        )}
       </div>
 
       {/* ── 生成参数 F/S/L/R + seed ── */}
@@ -376,15 +485,27 @@ export function ShotInspector({
               value={Number(d.frames ?? 124)}
               onChange={(e) => {
                 const f = Number(e.target.value);
-                if (Number.isFinite(f) && f > 240) toastMsg('帧数超过 10 秒上限(240) · 建议用时长设置或拆多镜头段落');
-                // 直接改帧数 → 清空时长(避免 seconds 优先覆盖),帧数显式生效
+                if (Number.isFinite(f) && f > h3FramesForSeconds(10)) {
+                  toastMsg(`帧数超过 10 秒上限(≈${h3FramesForSeconds(10)} 帧) · 建议用时长设置或拆多镜头段落`);
+                }
+                // 直接改帧数 → 清空时长(避免 seconds 优先覆盖),帧数显式生效(h3 运行时会再对齐 5+17n)
                 setData({ frames: Number.isFinite(f) ? f : 0, seconds: 0 });
               }}
             />
           </div>
           <div className="fg">
             <span>步数 S</span>
-            <input className="f-in" type="number" value={Number(d.steps ?? 20)} onChange={(e) => setData({ steps: Number(e.target.value) })} />
+            {accel.enabled ? (
+              <input
+                className="f-in"
+                type="number"
+                value={effSteps}
+                disabled
+                title="加速 LoRA 已接管步数(真实推理时以 --steps 覆盖)"
+              />
+            ) : (
+              <input className="f-in" type="number" value={Number(d.steps ?? 20)} onChange={(e) => setData({ steps: Number(e.target.value) })} />
+            )}
           </div>
           <div className="fg">
             <span>层数 L</span>
@@ -395,6 +516,11 @@ export function ShotInspector({
             <input className="f-in" type="number" value={Number(d.reuse ?? 1)} onChange={(e) => setData({ reuse: Number(e.target.value) })} />
           </div>
         </div>
+        {accel.enabled ? (
+          <div className="f-hint" style={{ marginTop: 6 }}>
+            加速 LoRA 已接管步数(--steps {effSteps})· 此处 S 显示为实际执行值,不可改;可在上方「加速 LoRA → 步数」切 4/8
+          </div>
+        ) : null}
         <div className="f-row" style={{ marginTop: 6 }}>
           <span className="f-lbl">seed</span>
           <input className="f-in" type="number" value={seed} style={{ width: 76 }} onChange={(e) => setData({ seed: Number(e.target.value) })} />
@@ -405,7 +531,7 @@ export function ShotInspector({
             min={1}
             max={10}
             value={seconds > 0 ? seconds : ''}
-            placeholder={`${Math.round(Number(d.frames ?? 124) / 24)}s`}
+            placeholder={`${Math.round(h3AlignFrames(Number(d.frames ?? 124)) / 24)}s`}
             style={{ width: 52 }}
             onChange={(e) => {
               let s = Number(e.target.value);
@@ -417,11 +543,11 @@ export function ShotInspector({
                 toastMsg('h3.c 单段时长最多 10 秒 · 更长请拆多镜头段落');
                 s = 10;
               }
-              // 选时长 → 帧数自动填上(24fps)
-              setData({ seconds: s, frames: Math.round(s * 24) });
+              // 选时长 → 帧数按 h3.c 规则自动填上(24fps 后对齐 5+17n;h3 --seconds 内部同此换算)
+              setData({ seconds: s, frames: h3FramesForSeconds(s) });
             }}
           />
-          <span className="f-hint">最多 10s(24fps · 10s=240 帧)· 选时长自动填帧数</span>
+          <span className="f-hint">最多 10s(24fps · 10s≈{h3FramesForSeconds(10)} 帧)· 选时长自动填对齐帧数(5+17n)</span>
         </div>
       </div>
 

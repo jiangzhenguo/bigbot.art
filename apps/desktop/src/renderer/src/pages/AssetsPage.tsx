@@ -1,5 +1,18 @@
+/**
+ * AssetsPage — 资源管理(对齐设计稿 assets.html / project-assets.html)
+ *
+ * 双视图:
+ * - 项目视图(projectId 给定,默认):项目头(返回画布/统计/打开总资源库)+ 项目分类/标签筛选 + 从画布产物导入
+ * - 总资源库(viewPid=null):跨项目聚合头 + 项目过滤 + 全局分类
+ *
+ * 数据:一次拉总库 listAssets() + 分类 + 项目列表;视图内过滤。删除 = 软删(回收站,7 天后清理);
+ * 详情面板由 pages/assets/AssetDetail 承担,卡片由 pages/assets/AssetCard 承担。
+ */
 import React, { useEffect, useMemo, useState } from 'react';
-import type { Asset } from '@bigbotart/shared';
+import type { Asset, AssetCategory, AssetRef, Project } from '@bigbotart/shared';
+import { AssetCard } from './assets/AssetCard';
+import { AssetDetail } from './assets/AssetDetail';
+import { usePrompt } from '../components/usePrompt';
 
 export type AssetsPageTarget =
   | 'home'
@@ -13,810 +26,636 @@ export type AssetsPageTarget =
 
 interface AssetsPageProps {
   onNavigate: (page: AssetsPageTarget) => void;
+  /** 进入时的项目上下文(画布入口);null = 直接打开总资源库 */
+  projectId: string | null;
+  projectName: string;
 }
 
-/* ------------------------------------------------------------------ *
- * 设计稿 assets.js 中的演示数据（ASSETS 表）
- * 图片按渲染进程约定使用相对 ./assets/ 路径
- * ------------------------------------------------------------------ */
+const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', audio: '音频', document: '文档' };
 
-interface AssetDef {
-  name: string;
-  img: string | null;
-  play?: boolean;
-  gray?: boolean;
-  wave?: boolean;
-  doc?: boolean;
-  meta: Array<[string, string]>;
-  refs: Array<[string, string]>;
-  params: string;
-}
-
-const ASSETS: Record<string, AssetDef> = {
-  'char-f': {
-    name: '角色 · 女主 v3',
-    img: './assets/char-female.jpg',
-    meta: [
-      ['类型', '角色设定 · 参考图'],
-      ['尺寸', '1023×665 · JPEG'],
-      ['注入', 'Ref2VA 提示词 · 身份锁定'],
-      ['来源', '导入 · 3 天前'],
-    ],
-    refs: [
-      ['镜头 01 · 首帧参考', '画布'],
-      ['镜头 02 · Ref2VA 锁定', '画布'],
-      ['镜头 03 · Ref2VA 锁定', '画布'],
-    ],
-    params:
-      'ref2va_weight: 0.82\nprompt_anchor: "女主, rust jacket, short hair"\nnegative: "extra fingers, deformed hands"',
-  },
-  'char-m': {
-    name: '角色 · 男主 v1',
-    img: './assets/char-male.jpg',
-    meta: [
-      ['类型', '角色设定 · 参考图'],
-      ['尺寸', '1023×681 · JPEG'],
-      ['注入', 'Ref2VA 提示词 · 身份锁定'],
-      ['来源', '导入 · 3 天前'],
-    ],
-    refs: [
-      ['镜头 02 · Ref2VA 锁定', '画布'],
-      ['镜头 04 · Ref2VA 锁定', '画布'],
-    ],
-    params: 'ref2va_weight: 0.78\nprompt_anchor: "男主, teal coat"\nnegative: "extra fingers"',
-  },
-  'env-v': {
-    name: '环境 · 河谷日景 v1',
-    img: './assets/env-valley.jpg',
-    meta: [
-      ['类型', '环境 · 场景/风格参考'],
-      ['尺寸', '1024×733 · JPEG'],
-      ['用法', '提示词「风格统一」注入'],
-    ],
-    refs: [
-      ['镜头 01 · 风格参考', '画布'],
-      ['镜头 03 · 风格参考', '画布'],
-    ],
-    params: 'style_phrase: "wide river valley, midday, paper-collage palette"',
-  },
-  'env-d': {
-    name: '环境 · 黄昏空镜 v2',
-    img: './assets/env-dusk.jpg',
-    meta: [
-      ['类型', '环境 · 场景参考'],
-      ['尺寸', '1024×683 · JPEG'],
-      ['用法', '首帧候选 · 空镜'],
-    ],
-    refs: [['镜头 05 · 首帧候选', '画布']],
-    params: 'style_phrase: "grassland dusk, amber sky, empty shot"',
-  },
-  'prop-b': {
-    name: '物品 · 保温杯 v1',
-    img: './assets/prop-bottle.jpg',
-    meta: [
-      ['类型', '物品 · 产品参考'],
-      ['尺寸', '1023×682 · JPEG'],
-      ['用法', '首帧 / 图片编辑参考'],
-    ],
-    refs: [['电商项目 · 镜头 02', '画布']],
-    params: 'product_anchor: "matte insulated bottle, side view"\nmaterial: stainless steel, sage',
-  },
-  'prop-logo': {
-    name: '物品 · 品牌 Logo',
-    img: null,
-    meta: [
-      ['类型', '品牌资产 · SVG'],
-      ['尺寸', '矢量 · 52×52 显示'],
-      ['用法', '片头复用 · 可存为 Skill'],
-    ],
-    refs: [['电商项目 · 片头', '时间线']],
-    params: 'brand_mark: droplet\nusage: intro sting, watermark corner',
-  },
-  take3: {
-    name: '镜1_Take3.mp4',
-    img: './assets/shot-01.jpg',
-    play: true,
-    meta: [
-      ['规格', '1920×1080 · 10.0s · MP4'],
-      ['编码', 'H.264 + AAC · 音轨内嵌'],
-      ['引擎', 'h3.c 0.4.2 · seed 88213 · 默认档'],
-      ['大小', '86 MB'],
-    ],
-    refs: [
-      ['镜头 01 · Selected Take', '画布'],
-      ['时间线 · 片段 1', '时间线'],
-      ['尾帧 → 镜2 参考候选', '连续性'],
-    ],
-    params: 'steps: 30 · layers: 28 · tier: default\nmode: FL2VA · ref: sb-river 首帧\nprompt: 五段式 · 纸拼贴 · 跃河',
-  },
-  take2: {
-    name: '镜1_Take2.mp4',
-    img: './assets/shot-01.jpg',
-    gray: true,
-    meta: [
-      ['状态', '失败 · OOM（显存峰值）'],
-      ['引擎', 'h3.c 0.4.2 · seed 88190'],
-      ['诊断', '已存 · 建议降档或减 layers'],
-    ],
-    refs: [['—', '未被引用']],
-    params: 'steps: 30 · layers: 32 · tier: default\nerror: metal_oom at layer 29',
-  },
-  s2t1: {
-    name: '镜2_Take1.mp4',
-    img: './assets/shot-02.jpg',
-    play: true,
-    meta: [
-      ['规格', '1280×720 · 8.0s · MP4'],
-      ['引擎', 'h3.c 0.4.2 · 草稿档'],
-      ['状态', '校验 Agent 复核中'],
-    ],
-    refs: [['镜头 02 · 候选 Take', '画布']],
-    params: 'steps: 20 · layers: 24 · tier: draft\nmode: FL2VA · ref: 镜1 尾帧',
-  },
-  sb1: {
-    name: '分镜静帧_v2_s88213',
-    img: './assets/sb-river.jpg',
-    meta: [
-      ['类型', '图片 · 分镜静帧'],
-      ['尺寸', '832×480 · 16:9'],
-      ['引擎', 'mlxgen · Z-Image-Turbo'],
-      ['seed', '88213'],
-    ],
-    refs: [['镜头 01 · 首帧', '画布']],
-    params: 'model: z-image-turbo\nsize: 832x480 · steps: 8\nprompt: 纸拼贴 · 女主跃河',
-  },
-  sb2: {
-    name: '分镜静帧_v2_s88214',
-    img: './assets/env-valley.jpg',
-    meta: [
-      ['类型', '图片 · 分镜静帧'],
-      ['尺寸', '832×480 · 16:9'],
-      ['引擎', 'mlxgen · Z-Image-Turbo'],
-      ['seed', '88214'],
-    ],
-    refs: [['镜头 03 · 首帧候选', '画布']],
-    params: 'model: z-image-turbo\nsize: 832x480 · steps: 8\nprompt: 纸拼贴 · 河谷空镜',
-  },
-  audio1: {
-    name: '草原环境声.mp3',
-    img: null,
-    wave: true,
-    meta: [
-      ['类型', '音频 · 导入'],
-      ['时长', '02:41 · 44.1kHz'],
-      ['用法', '--ref-audio · 带声直出'],
-    ],
-    refs: [['镜头 02 · 音轨参考', '画布']],
-    params: 'loudness: -23 LUFS → 统一至 -14\nchannels: stereo',
-  },
-  briefdoc: {
-    name: '草原之河_Brief.md',
-    img: null,
-    doc: true,
-    meta: [
-      ['类型', '文档 · Markdown'],
-      ['同步', '画布镜像 · 实时'],
-      ['结构', '场景 / 角色 / 风格'],
-    ],
-    refs: [['Brief 文档节点', '画布']],
-    params: '# 草原之河\n场景: 草原 / 宽河\n角色: 女主, 男主\n风格: 纸拼贴',
-  },
-  dircam: {
-    name: '运镜小样_低机位.mp4',
-    img: './assets/env-dusk.jpg',
-    play: true,
-    meta: [
-      ['类型', '视频 · 运镜参考'],
-      ['规格', '1280×720 · 8.0s'],
-      ['引擎', 'h3.c · 预览档'],
-    ],
-    refs: [['导演台节点 · 运镜参考', '画布']],
-    params: 'camera: low angle dolly\ntier: preview',
-  },
-};
-
-/** 资产卡的搜索词：等价于设计稿里的 card.textContent */
-interface AssetCardDef {
-  assetId: string;
-  /** 卡片标题（<b>） */
-  title: string;
-  /** 卡片副标题（.mono） */
-  sub: string;
-  cat: 'role' | 'env' | 'prop' | 'media';
-  mtype?: 'image' | 'video' | 'audio' | 'doc';
-  badge?: { text: string; cls: string };
-  img?: string;
-  imgStyle?: React.CSSProperties;
-  /** 非图片缩略图（品牌 Logo / 文档图标 / 音频波形 / 视频占位） */
-  thumbKind?: 'brand' | 'doc' | 'wave' | 'play';
-  newCard?: { label: string };
-}
-
-const ROLE_CARDS: AssetCardDef[] = [
-  {
-    assetId: 'char-f',
-    title: '角色 · 女主 v3',
-    sub: '身份锁定 · 3 镜头引用',
-    cat: 'role',
-    badge: { text: 'Ref2VA', cls: 'tag' },
-    img: './assets/char-female.jpg',
-  },
-  {
-    assetId: 'char-m',
-    title: '角色 · 男主 v1',
-    sub: '身份锁定 · 2 镜头引用',
-    cat: 'role',
-    badge: { text: 'Ref2VA', cls: 'tag' },
-    img: './assets/char-male.jpg',
-  },
-  { assetId: '', title: '', sub: '', cat: 'role', newCard: { label: '新建角色 · 参考图 + 提示词注入' } },
-];
-
-const ENV_CARDS: AssetCardDef[] = [
-  {
-    assetId: 'env-v',
-    title: '环境 · 河谷日景 v1',
-    sub: '风格参考注入 · 2 镜头引用',
-    cat: 'env',
-    img: './assets/env-valley.jpg',
-  },
-  {
-    assetId: 'env-d',
-    title: '环境 · 黄昏空镜 v2',
-    sub: '首帧候选 · 1 镜头引用',
-    cat: 'env',
-    img: './assets/env-dusk.jpg',
-  },
-  { assetId: '', title: '', sub: '', cat: 'env', newCard: { label: '新建环境 · 场景参考 + 风格措辞' } },
-];
-
-const PROP_CARDS: AssetCardDef[] = [
-  {
-    assetId: 'prop-b',
-    title: '物品 · 保温杯 v1',
-    sub: '首帧 / 编辑参考 · 1 镜头引用',
-    cat: 'prop',
-    img: './assets/prop-bottle.jpg',
-  },
-  {
-    assetId: 'prop-logo',
-    title: '物品 · 品牌 Logo',
-    sub: '品牌资产 · 片头复用',
-    cat: 'prop',
-    thumbKind: 'brand',
-  },
-  { assetId: '', title: '', sub: '', cat: 'prop', newCard: { label: '新建物品 · 产品图 + 材质 / 角度' } },
-];
-
-const MEDIA_CARDS: AssetCardDef[] = [
-  {
-    assetId: 'take3',
-    title: '镜1_Take3.mp4',
-    sub: 'h3.c · 默认档 · 带声 ✓',
-    cat: 'media',
-    mtype: 'video',
-    badge: { text: '视频 · 10s', cls: 'tag' },
-    img: './assets/shot-01.jpg',
-  },
-  {
-    assetId: 'take2',
-    title: '镜1_Take2.mp4',
-    sub: '诊断已存 · 可重试',
-    cat: 'media',
-    mtype: 'video',
-    badge: { text: '失败 · OOM', cls: 'err tag' },
-    img: './assets/shot-01.jpg',
-    imgStyle: { filter: 'grayscale(1)', opacity: 0.6 },
-  },
-  {
-    assetId: 's2t1',
-    title: '镜2_Take1.mp4',
-    sub: 'h3.c · 草稿档 · 8s',
-    cat: 'media',
-    mtype: 'video',
-    badge: { text: '校验中', cls: 'warn tag' },
-    img: './assets/shot-02.jpg',
-  },
-  {
-    assetId: 'sb1',
-    title: '分镜静帧_v2_s88213',
-    sub: 'Z-Image-Turbo · 832×480',
-    cat: 'media',
-    mtype: 'image',
-    img: './assets/sb-river.jpg',
-  },
-  {
-    assetId: 'sb2',
-    title: '分镜静帧_v2_s88214',
-    sub: 'Z-Image-Turbo · 832×480',
-    cat: 'media',
-    mtype: 'image',
-    img: './assets/env-valley.jpg',
-  },
-  {
-    assetId: 'audio1',
-    title: '草原环境声.mp3',
-    sub: '导入 · 02:41 · 作 --ref-audio',
-    cat: 'media',
-    mtype: 'audio',
-    thumbKind: 'wave',
-  },
-  {
-    assetId: 'briefdoc',
-    title: '草原之河_Brief.md',
-    sub: '画布镜像 · 同步中',
-    cat: 'media',
-    mtype: 'doc',
-    thumbKind: 'doc',
-  },
-  {
-    assetId: 'dircam',
-    title: '运镜小样_低机位.mp4',
-    sub: '导演台 · h3 预览档',
-    cat: 'media',
-    mtype: 'video',
-    badge: { text: '视频 · 8s', cls: 'tag' },
-    img: './assets/env-dusk.jpg',
-  },
-];
-
-const SECTIONS: Array<{
-  id: 'role' | 'env' | 'prop' | 'media';
-  title: string;
-  mut: string;
-  cards: AssetCardDef[];
-}> = [
-  { id: 'role', title: '角色', mut: '身份锁定 · Ref2VA 提示词注入', cards: ROLE_CARDS },
-  { id: 'env', title: '环境', mut: '场景 / 风格参考 · 首帧候选', cards: ENV_CARDS },
-  { id: 'prop', title: '物品', mut: '道具 / 产品参考 · 品牌资产', cards: PROP_CARDS },
-  { id: 'media', title: '最近生成与导入', mut: 'Take 自动归档 · 命名带 seed', cards: MEDIA_CARDS },
-];
-
-const CATEGORY_CHIPS: Array<{ cat: string; label: string }> = [
-  { cat: 'all', label: '全部 128' },
-  { cat: 'role', label: '角色 4' },
-  { cat: 'env', label: '环境 6' },
-  { cat: 'prop', label: '物品 11' },
-];
-
-const MTYPE_CHIPS: Array<{ mtype: 'image' | 'video' | 'audio' | 'doc'; label: string }> = [
-  { mtype: 'image', label: '图片 64' },
-  { mtype: 'video', label: '视频 41' },
-  { mtype: 'audio', label: '音频 9' },
-  { mtype: 'doc', label: '文档 14' },
-];
-
-const WAVE_BARS = [14, 26, 36, 20, 30, 16, 34, 22, 12, 28, 18, 32, 14, 24];
-
-/** 卡片全文，用于搜索命中（对齐设计稿的 card.textContent 匹配） */
-function cardText(c: AssetCardDef): string {
-  if (c.newCard) return c.newCard.label;
-  return `${c.title} ${c.sub} ${c.badge?.text ?? ''}`;
-}
-
-/** 真实资产 → 「最近生成与导入」分区的卡片（替代 MEDIA_CARDS 演示数据） */
-function assetToCard(a: Asset): AssetCardDef {
-  const mtype: NonNullable<AssetCardDef['mtype']> = a.kind === 'document' ? 'doc' : a.kind;
-  const dims: string[] = [];
-  if (a.width && a.height) dims.push(`${a.width}×${a.height}`);
-  if (a.durationSec != null) dims.push(`${a.durationSec}s`);
-  const dimsText = dims.join(' · ');
-  const ext = (a.mime ?? '').split('/')[1]?.toUpperCase() ?? '';
-  const sub = [dimsText, ext].filter(Boolean).join(' · ') || mtype;
-  const base: AssetCardDef = {
-    assetId: a.id,
-    title: a.name,
-    sub,
-    cat: 'media',
-    mtype,
-  };
-  switch (a.kind) {
-    case 'image':
-      return {
-        ...base,
-        img: `bba-asset://${a.localPath.split('/').pop()}`,
-        badge: dimsText ? { text: `图片 · ${dimsText}`, cls: 'tag' } : undefined,
-      };
-    case 'video':
-      return {
-        ...base,
-        thumbKind: 'play',
-        badge: a.durationSec != null ? { text: `视频 · ${a.durationSec}s`, cls: 'tag' } : undefined,
-      };
-    case 'audio':
-      return {
-        ...base,
-        thumbKind: 'wave',
-        badge: a.durationSec != null ? { text: `音频 · ${a.durationSec}s`, cls: 'tag' } : undefined,
-      };
-    default:
-      return { ...base, thumbKind: 'doc' };
-  }
-}
-
-export default function AssetsPage({ onNavigate }: AssetsPageProps) {
-  /* 选中资产 + 删除联动状态（对应 assets.js 的 sel / delNote） */
-  const [selectedAsset, setSelectedAsset] = useState<string>('char-f');
-  const [deletedAsset, setDeletedAsset] = useState<string | null>(null);
-  const [delNoteOpen, setDelNoteOpen] = useState<boolean>(false);
-
-  /* 真实资产库（listAssets 载入,导入后刷新） */
-  const [assets, setAssets] = useState<Asset[]>([]);
-  /* 导入/删除失败的提示文案（null = 不显示） */
-  const [importNote, setImportNote] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    window.bigbotart
-      .listAssets()
-      .then((list) => {
-        if (live) setAssets(list);
-      })
-      .catch((e) => {
-        if (live) setImportNote(`资产列表加载失败:${(e as Error).message}`);
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  /* 筛选状态：分类 + 媒体类型 + 搜索（对应 assets.js 的 cat / mtype / q） */
+export default function AssetsPage({ onNavigate, projectId, projectName }: AssetsPageProps) {
+  /* ── 数据 ── */
+  const [allAssets, setAllAssets] = useState<Asset[]>([]);
+  const [categories, setCategories] = useState<AssetCategory[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  /* ── 视图与筛选 ── */
+  const [viewPid, setViewPid] = useState<string | null>(projectId); // null = 总资源库
   const [cat, setCat] = useState<string>('all');
   const [mtype, setMtype] = useState<string | null>(null);
-  const [q, setQ] = useState<string>('');
+  const [selTags, setSelTags] = useState<string[]>([]);
+  const [q, setQ] = useState('');
+  /* ── 选中与引用 ── */
+  const [sel, setSel] = useState<string | null>(null);
+  const [refs, setRefs] = useState<AssetRef[]>([]);
+  /* ── 弹层 / 提示 ── */
+  const [catInput, setCatInput] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [archOpen, setArchOpen] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
 
-  const detail: AssetDef = ASSETS[selectedAsset] ?? ASSETS['char-f']!;
+  const toast = (m: string) => setNote(m);
 
-  const visibleSections = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return SECTIONS.map((s) => {
-      const showSect = (cat === 'all' || cat === s.id) && (s.id === 'media' || !mtype);
-      /* 「最近生成与导入」分区由真实资产驱动（替代 MEDIA_CARDS 演示数据） */
-      const src = s.id === 'media' ? assets.map(assetToCard) : s.cards;
-      const cards = showSect
-        ? src.filter((c) => {
-            if (mtype && c.mtype !== mtype) return false;
-            if (needle && !cardText(c).toLowerCase().includes(needle)) return false;
-            return true;
-          })
-        : [];
-      return { ...s, showSect, cards };
-    });
-  }, [cat, mtype, q, assets]);
-
-  const selectCategory = (next: string) => {
-    setCat(next);
-    setMtype(null);
-  };
-
-  const toggleMtype = (next: 'image' | 'video' | 'audio' | 'doc') => {
-    setMtype((prev) => (prev !== next ? next : null));
-  };
-
-  const handleImport = async () => {
+  /* ---- 加载:总库 + 分类 + 项目 ---- */
+  const load = async () => {
     try {
-      const res = await window.bigbotart.importAssets();
-      /* 用户取消（assets 与 failed 均为空）:静默返回 */
-      if (res.assets.length === 0 && res.failed.length === 0) return;
-      /* 导入成功后刷新列表,新导入的资产卡随之显示 */
-      if (res.assets.length > 0) {
-        const list = await window.bigbotart.listAssets();
-        setAssets(list);
-      }
-      if (res.failed.length > 0) {
-        const bad = res.failed.map((f) => `${f.name}:${f.error}`).join('、');
-        setImportNote(`导入完成:成功 ${res.assets.length} 项,失败 ${res.failed.length} 项 — ${bad}`);
-      } else {
-        setImportNote(null);
-      }
+      const [list, cats, ps] = await Promise.all([
+        window.bigbotart.listAssets(),
+        window.bigbotart.listAssetCategories(),
+        window.bigbotart.listProjects(),
+      ]);
+      setAllAssets(list);
+      setCategories(cats);
+      setProjects(ps);
     } catch (e) {
-      setImportNote(`导入失败:${(e as Error).message}`);
+      setNote(`资源加载失败:${(e as Error).message}`);
     }
   };
+  useEffect(() => {
+    void load();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleDeleteConfirm = async () => {
-    const id = selectedAsset;
-    setDelNoteOpen(false);
-    /* 演示资产（角色/环境/物品）不调 IPC,保留原有置灰联动 */
-    if (!assets.some((a) => a.id === id)) {
-      setDeletedAsset(id);
+  /* ---- 切换视图时刷新选中信息 ---- */
+  useEffect(() => {
+    setSel(null);
+    setRefs([]);
+    setCat('all');
+    setMtype(null);
+    setSelTags([]);
+    setQ('');
+  }, [viewPid]);
+
+  /* ---- 选中资产 → 拉引用 ---- */
+  useEffect(() => {
+    if (!sel) {
+      setRefs([]);
       return;
     }
+    let alive = true;
+    window.bigbotart
+      .assetRefs(sel)
+      .then((r) => {
+        if (alive) setRefs(r);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [sel]);
+
+  const selAsset = allAssets.find((a) => a.id === sel) ?? null;
+  const viewName = projects.find((p) => p.id === viewPid)?.name || projectName;
+
+  /* ---- 视图内资源 + 过滤 ---- */
+  const baseList = useMemo(
+    () => allAssets.filter((a) => !a.deletedAt && (viewPid ? a.projectId === viewPid : true)),
+    [allAssets, viewPid],
+  );
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return baseList.filter((a) => {
+      if (cat !== 'all' && a.categoryId !== (cat === '_none' ? undefined : cat)) return false;
+      if (mtype && a.kind !== mtype) return false;
+      if (selTags.length && !selTags.every((t) => (a.tags ?? []).includes(t))) return false;
+      if (needle) {
+        const hay = `${a.name} ${a.id} ${(a.tags ?? []).join(' ')}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+  }, [baseList, cat, mtype, selTags, q]);
+
+  /* 按分类分组(展示顺序:有分类的按 categories 顺序,最后未分类) */
+  const groups = useMemo(() => {
+    const g = new Map<string, Asset[]>();
+    for (const a of filtered) {
+      const key = a.categoryId ?? '_none';
+      if (!g.has(key)) g.set(key, []);
+      g.get(key)!.push(a);
+    }
+    const order = categories
+      .filter((c) => !c.projectId || c.projectId === viewPid)
+      .map((c) => c.id)
+      .filter((id) => g.has(id));
+    const rest = [...g.keys()].filter((k) => !order.includes(k)).sort((x, y) => (x === '_none' ? 1 : -1) - (y === '_none' ? 1 : -1));
+    return [...order, ...rest].map((k) => ({ key: k, items: g.get(k)! }));
+  }, [filtered, categories, viewPid]);
+
+  const catName = (id: string) => (id === '_none' ? '未分类' : categories.find((c) => c.id === id)?.name ?? '未知');
+
+  /* 全库标签频次(联想候选) */
+  const tagStats = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of allAssets) for (const t of a.tags ?? []) m.set(t, (m.get(t) ?? 0) + 1);
+    return [...m.entries()].map(([t, n]) => ({ t, n })).sort((x, y) => y.n - x.n || x.t.localeCompare(y.t));
+  }, [allAssets]);
+
+  const activeTags = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of baseList) for (const t of a.tags ?? []) m.set(t, (m.get(t) ?? 0) + 1);
+    return [...m.entries()].map(([t, n]) => ({ t, n })).sort((x, y) => y.n - x.n);
+  }, [baseList]);
+
+  /* ---- 动作:导入 / 分类 / 更新 / 删除 / 归档 ---- */
+  const handleImport = async () => {
     try {
-      const res = await window.bigbotart.deleteAsset(id);
-      if (res.ok) {
-        setAssets((prev) => prev.filter((a) => a.id !== id));
-        setDeletedAsset(id);
-        setImportNote(null);
+      // 项目视图下导入,归属直接由主进程原子写入(projectId),避免导入后逐条 update 的分裂链路
+      const res = await window.bigbotart.importAssets({ projectId: viewPid ?? undefined });
+      if (res.assets.length === 0 && res.failed.length === 0) return; // 用户取消:静默
+      await load();
+      if (res.failed.length) {
+        toast(`导入完成:成功 ${res.assets.length} 项,失败 ${res.failed.length} 项 — ${res.failed.map((f) => `${f.name}:${f.error}`).join('、')}`);
       } else {
-        setImportNote(`删除失败:${res.error ?? '未知错误'}`);
+        toast(`已导入 ${res.assets.length} 项资源${viewPid ? ' · 归入本项目' : ''}`);
       }
     } catch (e) {
-      setImportNote(`删除失败:${(e as Error).message}`);
+      toast(`导入失败:${(e as Error).message}`);
     }
   };
+
+  const createCategory = async () => {
+    const input = document.getElementById('catAddInput') as HTMLInputElement | null;
+    const name = input?.value.trim();
+    if (!name) return;
+    await window.bigbotart.createAssetCategory(name, viewPid ?? undefined).catch((e) => toast(`创建分类失败:${(e as Error).message}`));
+    setCatInput(false);
+    await load();
+  };
+
+  const { ask: askPrompt, dialog: promptDialog } = usePrompt();
+
+  const renameCategory = async (id: string) => {
+    const c = categories.find((x) => x.id === id);
+    if (!c) return;
+    const next = await askPrompt({ title: '重命名分类', initial: c.name });
+    if (!next || next === c.name) return;
+    const res = await window.bigbotart.renameAssetCategory(id, next).catch((e) => ({ ok: false as const, error: (e as Error).message }));
+    if (!res.ok) toast(res.error ?? '重命名失败');
+    await load();
+  };
+
+  const deleteCategory = async (id: string) => {
+    const n = baseList.filter((a) => a.categoryId === id).length;
+    if (n > 0 && !window.confirm(`分类「${catName(id)}」下有 ${n} 个资源。\n删除后这些资源将转「未分类」,原资源文件保留。\n继续?`)) return;
+    const res = await window.bigbotart.deleteAssetCategory(id).catch((e) => ({ ok: false as const, error: (e as Error).message }));
+    if (!res.ok) toast(res.error ?? '删除分类失败');
+    await load();
+  };
+
+  const updateSel = async (patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }): Promise<boolean> => {
+    if (!sel) return false;
+    const res = await window.bigbotart.updateAsset(sel, patch).catch(() => ({ ok: false as const, error: '更新失败' }));
+    if (!res.ok) toast(res.error ?? '更新失败');
+    await load();
+    return res.ok;
+  };
+
+  const handleDelete = async () => {
+    if (!sel || !selAsset) return;
+    const msg = refs.length
+      ? `「${selAsset.name}」被 ${refs.length} 处画布节点引用。\n删除后文件进入回收站(7 天后清理),引用节点标记为「资产已移除」。\n继续?`
+      : `将「${selAsset.name}」移到回收站?(7 天后清理,期间可恢复)`;
+    if (!window.confirm(msg)) return;
+    const res = await window.bigbotart.deleteAsset(sel).catch((e) => ({ ok: false as const, error: (e as Error).message, refs: undefined }));
+    if (!res.ok) {
+      toast(res.error ?? '删除失败');
+      return;
+    }
+    toast(`已移到回收站 ·「${selAsset.name}」`);
+    setSel(null);
+    await load();
+  };
+
+  /* 从画布产物导入 */
+  const [archItems, setArchItems] = useState<Array<{ nodeId: string; name: string; path: string; meta: string }>>([]);
+  const [archSel, setArchSel] = useState<Set<string>>(new Set());
+  const [archCat, setArchCat] = useState('');
+  const openArchive = async () => {
+    if (!viewPid) return;
+    try {
+      const list = await window.bigbotart.listArchivableProducts(viewPid);
+      setArchItems(list);
+      setArchSel(new Set(list.map((i) => i.nodeId)));
+      setArchCat('');
+      setArchOpen(true);
+    } catch (e) {
+      toast(`读取画布产物失败:${(e as Error).message}`);
+    }
+  };
+  const confirmArchive = async () => {
+    if (!viewPid) return;
+    const items = archItems.filter((i) => archSel.has(i.nodeId)).map((i) => ({ nodeId: i.nodeId, path: i.path }));
+    if (!items.length) return;
+    const res = await window.bigbotart
+      .archiveProducts({ projectId: viewPid, items, categoryId: archCat || undefined })
+      .catch((e) => ({ ok: false as const, assets: [] as Asset[], error: (e as Error).message }));
+    if (!res.ok) toast(res.error ?? '归档失败');
+    else toast(`已归档 ${res.assets.length} 个产物为项目资源`);
+    setArchOpen(false);
+    setSel(res.assets[0]?.id ?? null);
+    await load();
+  };
+
+  /* 回收站 */
+  const [trash, setTrash] = useState<Asset[]>([]);
+  const openTrash = async () => {
+    const t = await window.bigbotart.listTrash().catch(() => []);
+    setTrash(t);
+    setTrashOpen(true);
+  };
+  const restoreSel = async (id: string) => {
+    const res = await window.bigbotart.restoreAsset(id).catch((e) => ({ ok: false as const, error: (e as Error).message }));
+    if (!res.ok) toast(res.error ?? '恢复失败');
+    setTrash(await window.bigbotart.listTrash().catch(() => []));
+    await load();
+  };
+  const emptyTrash = async () => {
+    if (!window.confirm('永久清空回收站?文件将被物理删除,不可恢复。')) return;
+    await window.bigbotart.emptyTrash();
+    setTrash(await window.bigbotart.listTrash().catch(() => []));
+    await load();
+  };
+
+  const projectCats = categories.filter((c) => !c.projectId || c.projectId === (viewPid ?? undefined));
 
   return (
     <div className="pg-assets">
+      {promptDialog}
       <div className="app" data-od-id="assets-app">
-        {/* 工具条 */}
-        <header className="topbar" data-od-id="assets-toolbar">
-          <button className="btn btn-g btn-sm" onClick={() => onNavigate('home')}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-              <path d="m14 6-6 6 6 6" />
-            </svg>
-            资产中心
-          </button>
+        {/* ── 头部:项目头(项目视图)/ 总库头 ── */}
+        {viewPid ? (
+          <section className="projhero" data-od-id="project-hero" style={{ padding: '18px 22px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button className="btn btn-g btn-sm" data-od-id="project-back" title="返回画布" onClick={() => onNavigate('canvas')}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path d="m14 6-6 6 6 6" />
+                </svg>
+                画布
+              </button>
+              <b style={{ fontSize: 14 }}>{viewName}</b>
+              <span className="mut" style={{ fontSize: 11 }}>项目资源 · 仅本项目</span>
+              <span className="spacer" />
+              <a
+                className="btn btn-s btn-sm"
+                data-od-id="open-total-library"
+                style={{ cursor: 'pointer' }}
+                onClick={() => setViewPid(null)}
+              >
+                打开总资源库 →
+              </a>
+            </div>
+            <div style={{ display: 'flex', gap: 26, marginTop: 10, flexWrap: 'wrap' }}>
+              <span className="mono">{baseList.length} 资源总数</span>
+              <span className="mono">{projectCats.length} 分类</span>
+              <span className="mono ok">{baseList.filter((a) => a.source === 'product').length} 产物归档</span>
+              <span className="mono">{baseList.filter((a) => !a.categoryId).length} 未分类</span>
+            </div>
+          </section>
+        ) : (
+          <section className="libhero" data-od-id="library-hero" style={{ padding: '18px 22px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                className="btn btn-g btn-sm"
+                data-od-id="assets-back"
+                onClick={() => (projects.length || projectId ? onNavigate('canvas') : onNavigate('home'))}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path d="m14 6-6 6 6 6" />
+                </svg>
+                {projectId ? '画布' : '首页'}
+              </button>
+              <b style={{ fontSize: 14 }}>总资源库</b>
+              <span className="mut" style={{ fontSize: 11 }}>跨项目聚合 · 全局资源</span>
+              <span className="spacer" />
+              {projects.map((p) => {
+                const n = allAssets.filter((a) => a.projectId === p.id && !a.deletedAt).length;
+                return (
+                  <button
+                    key={p.id}
+                    className={`chip${viewPid === p.id ? '' : ''}`}
+                    style={{ fontSize: 11 }}
+                    data-od-id={`proj-pill-${p.id}`}
+                    onClick={() => setViewPid(p.id)}
+                  >
+                    {p.name} <span className="n">{n}</span>
+                  </button>
+                );
+              })}
+              {projects.length ? <span className="mut" style={{ fontSize: 11 }}>点项目名进入该项目资源页</span> : null}
+            </div>
+            <div style={{ display: 'flex', gap: 26, marginTop: 10, flexWrap: 'wrap' }}>
+              <span className="mono">{allAssets.filter((a) => !a.deletedAt).length} 资源总数</span>
+              <span className="mono">{projects.filter((p) => allAssets.some((a) => a.projectId === p.id)).length} 涉及项目</span>
+              <span className="mono">{categories.filter((c) => !c.projectId).length} 全局分类</span>
+              <span className="mono ok">{allAssets.filter((a) => a.source === 'product' && !a.deletedAt).length} 产物归档</span>
+            </div>
+          </section>
+        )}
+
+        {/* ── 工具条 ── */}
+        <header className="topbar" data-od-id="assets-toolbar" style={{ marginTop: 2 }}>
+          <span className="crumb" data-od-id="assets-crumb">
+            <b>资源管理</b>
+            <span className="chev">›</span>
+            <span>{viewPid ? projectName : '总资源库'}</span>
+          </span>
           <span className="sep" />
+          {viewPid ? (
+            <button className="btn btn-s btn-sm" id="archiveBtn" data-od-id="assets-archive-from-canvas" title="把画布里有产物的节点归档为项目资源" onClick={() => void openArchive()}>
+              从画布产物导入
+            </button>
+          ) : null}
           <button className="btn btn-p btn-sm" id="importBtn" data-od-id="assets-import" onClick={handleImport}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
               <path d="M12 5v14M5 12h14" />
             </svg>
-            导入资产
+            导入
           </button>
           <span className="sep" />
-          {CATEGORY_CHIPS.map((c) => (
-            <button
-              key={c.cat}
-              className={`chip${cat === c.cat ? ' on' : ''}`}
-              data-cat={c.cat}
-              onClick={() => selectCategory(c.cat)}
-            >
-              {c.label}
-            </button>
-          ))}
-          <span className="sep" />
-          {MTYPE_CHIPS.map((c) => (
-            <button
-              key={c.mtype}
-              className={`chip${mtype === c.mtype ? ' on' : ''}`}
-              data-mtype={c.mtype}
-              onClick={() => toggleMtype(c.mtype)}
-            >
-              {c.label}
-            </button>
-          ))}
+          <button className="btn btn-s btn-sm" data-od-id="trash-view" onClick={() => void openTrash()}>
+            回收站
+          </button>
           <span className="spacer" />
           <div className="search">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 13, height: 13 }}>
               <circle cx="11" cy="11" r="7" />
               <path d="m20 20-3.5-3.5" />
             </svg>
-            <input
-              id="searchInput"
-              placeholder="搜索资产 / seed / 提示词…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
+            <input placeholder="搜索资源名 / id / 标签…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
         </header>
 
-        <div className="work">
-          {/* 资产网格 */}
-          <main className="grid-area" data-od-id="assets-grid">
-            {importNote && (
-              <div className="del-note" id="importNote" role="status" style={{ marginBottom: 12 }}>
-                {importNote}
-              </div>
-            )}
-            {visibleSections.map((s) => (
-              <React.Fragment key={s.id}>
-                {s.showSect && (
-                  <>
-                    <div className="sect-h" data-cat-sect={s.id}>
-                      <b>{s.title}</b>
-                      <span className="mut">{s.mut}</span>
-                    </div>
-                    <div className="agrid" data-cat-grid={s.id}>
-                      {s.cards.map((c, i) => {
-                        if (c.newCard) {
-                          return (
-                            <div className="acard new" data-cat={c.cat} key={`${s.id}-new-${i}`}>
-                              <svg
-                                width="18"
-                                height="18"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="1.8"
-                              >
-                                <path d="M12 5v14M5 12h14" />
-                              </svg>
-                              <span style={{ fontSize: 'var(--text-xs)' }}>{c.newCard.label}</span>
-                            </div>
-                          );
-                        }
-                        const sel = selectedAsset === c.assetId;
-                        const gone = deletedAsset === c.assetId;
-                        return (
-                          <div
-                            className={`acard${sel ? ' sel' : ''}`}
-                            data-asset={c.assetId}
-                            data-cat={c.cat}
-                            data-type={c.mtype}
-                            key={c.assetId}
-                            style={gone ? { opacity: 0.35, pointerEvents: 'none' } : undefined}
-                            onClick={() => {
-                              if (gone) return;
-                              setSelectedAsset(c.assetId);
-                              setDelNoteOpen(false);
-                            }}
-                          >
-                            {c.thumbKind === 'brand' ? (
-                              <div
-                                className="athumb"
-                                style={{ display: 'grid', placeItems: 'center', background: 'var(--surface)' }}
-                              >
-                                <svg width="52" height="52" viewBox="0 0 52 52">
-                                  <rect width="52" height="52" rx="12" style={{ fill: 'var(--fg)' }} />
-                                  <path
-                                    d="M26 12c5 6 9 9.6 9 14a9 9 0 1 1-18 0c0-4.4 4-8 9-14Z"
-                                    style={{ fill: 'var(--bg)' }}
-                                  />
-                                </svg>
-                              </div>
-                            ) : c.thumbKind === 'doc' ? (
-                              <div
-                                className="athumb"
-                                style={{ display: 'grid', placeItems: 'center', background: 'var(--surface)' }}
-                              >
-                                <svg
-                                  width="34"
-                                  height="34"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  style={{ stroke: 'var(--muted)' }}
-                                  strokeWidth="1.5"
-                                >
-                                  <path d="M6 2h9l5 5v15H6Z" />
-                                  <path d="M14 2v6h6M9 13h8M9 17h5" />
-                                </svg>
-                              </div>
-                            ) : c.thumbKind === 'wave' ? (
-                              <div className="athumb wavebox">
-                                {WAVE_BARS.map((h, wi) => (
-                                  <i key={wi} style={{ height: `${h}px` }} />
-                                ))}
-                              </div>
-                            ) : c.thumbKind === 'play' ? (
-                              <div
-                                className="athumb"
-                                style={{ display: 'grid', placeItems: 'center', background: 'var(--surface)' }}
-                              >
-                                <svg
-                                  width="34"
-                                  height="34"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  style={{ stroke: 'var(--muted)' }}
-                                  strokeWidth="1.5"
-                                >
-                                  <circle cx="12" cy="12" r="9" />
-                                  <path d="M10 8.6v6.8l5.6-3.4Z" style={{ fill: 'var(--muted)' }} stroke="none" />
-                                </svg>
-                                {c.badge && <span className={`badge ${c.badge.cls}`}>{c.badge.text}</span>}
-                              </div>
-                            ) : (
-                              <div className="athumb">
-                                <img src={c.img} alt="" style={c.imgStyle} />
-                                {c.badge && <span className={`badge ${c.badge.cls}`}>{c.badge.text}</span>}
-                              </div>
-                            )}
-                            <div className="ai">
-                              <b>{c.title}</b>
-                              <div className="mono">{c.sub}</div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </React.Fragment>
-            ))}
-          </main>
-
-          {/* 右:详情面板 */}
-          <aside className="detail" data-od-id="assets-detail">
-            <div className="detail-in">
-              <div>
-                <div className="lbl" style={{ marginBottom: 8 }}>
-                  资产详情
-                </div>
-                <b id="dName" style={{ fontSize: 'var(--text-base)' }}>
-                  {detail.name}
-                </b>
-              </div>
-
-              {detail.img ? (
-                <div className="dpreview" id="dPreview">
-                  <img
-                    src={detail.img}
-                    alt="资产预览"
-                    id="dImg"
-                    style={{
-                      filter: detail.gray ? 'grayscale(1)' : undefined,
-                      opacity: detail.gray ? 0.6 : 1,
-                    }}
-                  />
-                  {detail.play && (
-                    <span className="play">
-                      <span>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M8 5.5v13l11-6.5Z" />
-                        </svg>
-                      </span>
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <div className="dpreview" id="dPreview" style={{ display: 'none' }} />
-              )}
-
-              <div>
-                <div className="lbl" style={{ marginBottom: 8 }}>
-                  自动元数据
-                </div>
-                <div className="kv" id="dMeta">
-                  {detail.meta.map((m, i) => (
-                    <div className="kr" key={i}>
-                      <span>{m[0]}</span>
-                      <span className="mono">{m[1]}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="lbl" style={{ marginBottom: 8 }}>
-                  绑定与引用
-                </div>
-                <div className="kv" id="dRefs">
-                  {detail.refs.map((m, i) => (
-                    <div className="kr" key={i}>
-                      <span>{m[0]}</span>
-                      <span className="mut">{m[1]}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="lbl" style={{ marginBottom: 8 }}>
-                  完整生成参数（可复现）
-                </div>
-                <div className="parambox mono" id="dParams">
-                  {detail.params}
-                </div>
-              </div>
-
-              <div className="row g6" style={{ flexWrap: 'wrap' }}>
-                <button className="btn btn-s btn-sm">拖到画布</button>
-                <button className="btn btn-s btn-sm">设为首帧</button>
-                <button className="btn btn-s btn-sm">归档</button>
-                <span className="spacer" />
-                <button className="btn btn-g btn-sm btn-danger" id="delBtn" onClick={() => setDelNoteOpen(true)}>
-                  删除
+        {/* ── 筛选条:分类 + 媒体 + 标签 ── */}
+        <div className="filters" data-od-id="assets-filters" style={{ padding: '10px 22px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div className="filter-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="lbl-mini" style={{ fontSize: 11, color: 'var(--meta)', flex: 'none' }}>分类</span>
+            <div className="chips-scroller" style={{ display: 'flex', gap: 6, overflowX: 'auto', flex: 1 }} data-od-id="assets-cat-chips">
+              <button className={`chip${cat === 'all' ? ' on' : ''}`} onClick={() => setCat('all')}>
+                全部 <span className="n">{baseList.length}</span>
+              </button>
+              {projectCats.map((c) => (
+                <button
+                  key={c.id}
+                  className={`chip${cat === c.id ? ' on' : ''}`}
+                  data-od-id={`cat-chip-${c.id}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    renameCategory(c.id);
+                  }}
+                  title="右键重命名"
+                  onClick={() => setCat(cat === c.id ? 'all' : c.id)}
+                >
+                  {c.name} <span className="n">{baseList.filter((a) => a.categoryId === c.id).length}</span>
                 </button>
-              </div>
-
-              {delNoteOpen && (
-                <div className="del-note" id="delNote">
-                  删除将提示联动：画布节点与时间线片段同步移除。
-                  <div className="row g6" style={{ marginTop: 8 }}>
-                    <button className="btn btn-d btn-sm" id="delConfirm" onClick={handleDeleteConfirm}>
-                      确认删除
-                    </button>
-                    <button className="btn btn-g btn-sm" id="delCancel" onClick={() => setDelNoteOpen(false)}>
-                      取消
-                    </button>
-                  </div>
-                </div>
+              ))}
+              <button className={`chip${cat === '_none' ? ' on' : ''}`} onClick={() => setCat(cat === '_none' ? 'all' : '_none')}>
+                未分类 <span className="n">{baseList.filter((a) => !a.categoryId).length}</span>
+              </button>
+              {catInput ? (
+                <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                  <input
+                    id="catAddInput"
+                    placeholder={viewPid ? '分类名' : '全局分类名'}
+                    maxLength={14}
+                    autoFocus
+                    data-od-id="cat-add-input"
+                    style={{ width: 90, fontSize: 11, padding: '3px 6px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void createCategory();
+                      if (e.key === 'Escape') setCatInput(false);
+                    }}
+                    onBlur={() => void createCategory()}
+                  />
+                </span>
+              ) : (
+                <button className="chip add" data-od-id="cat-add" onClick={() => setCatInput(true)}>
+                  ＋ 新建分类
+                </button>
               )}
             </div>
+            <span className="mut" style={{ fontSize: 11, flex: 'none' }}>
+              {viewPid ? '项目分类 · 仅本项目可见' : `${categories.filter((c) => !c.projectId).length} 个全局分类`}
+            </span>
+          </div>
+          <div className="filter-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="lbl-mini" style={{ fontSize: 11, color: 'var(--meta)', flex: 'none' }}>媒体</span>
+            <div className="chips-scroller" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
+              <button className={`chip${mtype === null ? ' on' : ''}`} onClick={() => setMtype(null)}>
+                全部 <span className="n">{baseList.length}</span>
+              </button>
+              {(['image', 'video', 'audio', 'document'] as const).map((k) => (
+                <button
+                  key={k}
+                  className={`chip${mtype === k ? ' on' : ''}`}
+                  data-od-id={`mtype-${k}`}
+                  onClick={() => setMtype(mtype === k ? null : k)}
+                >
+                  {KIND_LABEL[k]} <span className="n">{baseList.filter((a) => a.kind === k).length}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {activeTags.length ? (
+            <div className="filter-row" data-od-id="assets-tag-chips" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="lbl-mini" style={{ fontSize: 11, color: 'var(--meta)', flex: 'none' }}>标签</span>
+              {selTags.map((t) => (
+                <button key={t} className="chip on" data-od-id={`tag-sel-${t}`} onClick={() => setSelTags((s) => s.filter((x) => x !== t))}>
+                  {t} <span className="xbtn">×</span>
+                </button>
+              ))}
+              {activeTags
+                .filter((s) => !selTags.includes(s.t))
+                .slice(0, 8)
+                .map((s) => (
+                  <button key={s.t} className="chip" data-od-id={`tag-add-${s.t}`} onClick={() => setSelTags((v) => [...v, s.t])}>
+                    + {s.t} <span className="n">{s.n}</span>
+                  </button>
+                ))}
+              {selTags.length ? (
+                <button className="chip add" onClick={() => setSelTags([])}>清除筛选</button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {/* ── 网格 + 详情 ── */}
+        <div className="work">
+          <main className="grid-area" data-od-id="assets-grid">
+            {note ? (
+              <div role="status" style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'var(--surface-warm)', color: 'var(--fg)', fontSize: 12 }}>
+                {note}
+              </div>
+            ) : null}
+            {filtered.length === 0 ? (
+              <div className="empty" style={{ padding: '50px 20px', textAlign: 'center' }}>
+                <b>{baseList.length === 0 ? '还没有资源' : '当前筛选条件下没有结果'}</b>
+                <div className="mut" style={{ fontSize: 11, marginTop: 6 }}>
+                  {baseList.length === 0 ? '点击「导入」添加图片 / 视频 / 音频 / 文档' : '试着清空标签或换个分类'}
+                </div>
+                {baseList.length === 0 ? (
+                  <button className="btn btn-p btn-sm" style={{ marginTop: 12 }} data-od-id="empty-import" onClick={handleImport}>
+                    导入资产
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-s btn-sm"
+                    style={{ marginTop: 12 }}
+                    onClick={() => {
+                      setCat('all');
+                      setMtype(null);
+                      setSelTags([]);
+                      setQ('');
+                    }}
+                  >
+                    清除全部筛选
+                  </button>
+                )}
+              </div>
+            ) : (
+              groups.map((g) => (
+                <React.Fragment key={g.key}>
+                  <div className="sect-h" data-cat-sect={g.key}>
+                    <b>{catName(g.key)}</b>
+                    <span className="mut">
+                      {g.key === '_none' ? '没有归入任何分类的资源' : viewPid ? '项目分类' : '分类'}
+                    </span>
+                    <span className="pill">{g.items.length}</span>
+                  </div>
+                  <div className="agrid" data-cat-grid={g.key}>
+                    {g.items.map((a) => (
+                      <AssetCard
+                        key={a.id}
+                        asset={a}
+                        categoryName={g.key === '_none' ? undefined : catName(g.key)}
+                        refCount={refs.length && sel === a.id ? refs.length : undefined}
+                        selected={sel === a.id}
+                        onSelect={(id) => setSel(id)}
+                      />
+                    ))}
+                  </div>
+                </React.Fragment>
+              ))
+            )}
+          </main>
+          <aside className="detail" data-od-id="assets-detail">
+            <AssetDetail
+              asset={selAsset}
+              categories={categories}
+              projectId={viewPid}
+              projectName={viewName}
+              refs={refs}
+              tagStats={tagStats}
+              toastMsg={toast}
+              onUpdate={updateSel}
+              onDelete={() => void handleDelete()}
+              onUseInCanvas={() => {
+                toast('已打开画布 · 可在资产节点「更换资产…」中选择该资源');
+                onNavigate('canvas');
+              }}
+            />
           </aside>
         </div>
       </div>
+
+      {/* ── 从画布产物导入弹层(仅项目视图) ── */}
+      {archOpen && (
+        <div
+          className="archive-pop"
+          data-od-id="archive-from-canvas-pop"
+          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.35)' }}
+          onClick={() => setArchOpen(false)}
+        >
+          <div className="pop open" style={{ width: 420, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>
+            <div className="ap-h" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center' }}>
+              <div style={{ flex: 1 }}>
+                <b>从画布产物导入</b>
+                <div className="mut" style={{ fontSize: 11, marginTop: 3 }}>勾选画布中有产物的节点 · 归档为本项目资源</div>
+              </div>
+              <button className="ibtn" aria-label="关闭" onClick={() => setArchOpen(false)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 6l12 12M6 18 18 6" /></svg>
+              </button>
+            </div>
+            <div className="ap-list" style={{ padding: '4px 16px', overflowY: 'auto', maxHeight: 300 }}>
+              {archItems.length === 0 ? (
+                <div className="mut" style={{ padding: '16px 0' }}>本项目画布暂无已生成产物</div>
+              ) : (
+                archItems.map((it) => (
+                  <label key={it.nodeId} className="row" style={{ gap: 8, padding: '8px 2px', alignItems: 'center', display: 'flex' }}>
+                    <input
+                      type="checkbox"
+                      checked={archSel.has(it.nodeId)}
+                      onChange={(e) => {
+                        const next = new Set(archSel);
+                        if (e.target.checked) next.add(it.nodeId);
+                        else next.delete(it.nodeId);
+                        setArchSel(next);
+                      }}
+                    />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <b style={{ fontSize: 12, fontWeight: 600 }}>{it.name}</b>
+                      <div className="mut" style={{ fontSize: 10.5 }}>{it.meta}</div>
+                    </span>
+                    <span className="badge ok" style={{ fontSize: 10 }}>可归档</span>
+                  </label>
+                ))
+              )}
+            </div>
+            <div className="ap-foot" style={{ padding: '10px 16px', borderTop: '1px solid var(--border-soft)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="mut" style={{ fontSize: 11 }}>归档到分类</span>
+              <select
+                style={{ flex: 1, padding: '5px 8px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', fontSize: 12 }}
+                value={archCat}
+                onChange={(e) => setArchCat(e.target.value)}
+              >
+                <option value="">未分类</option>
+                {projectCats.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              <button className="btn btn-g btn-sm" onClick={() => setArchOpen(false)}>取消</button>
+              <button className="btn btn-p btn-sm" data-od-id="archive-confirm" disabled={archSel.size === 0} onClick={() => void confirmArchive()}>
+                归档 {archSel.size} 个产物
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 回收站弹层 ── */}
+      {trashOpen && (
+        <div
+          className="trash-pop"
+          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.35)' }}
+          onClick={() => setTrashOpen(false)}
+        >
+          <div className="pop open" style={{ width: 460, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>
+            <div className="ap-h" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center' }}>
+              <b>回收站</b>
+              <span className="mut" style={{ fontSize: 11, marginLeft: 8 }}>7 天后自动清理 · 期间可恢复</span>
+              <span className="spacer" />
+              <button className="btn btn-g btn-sm btn-danger" disabled={trash.length === 0} onClick={() => void emptyTrash()}>
+                清空回收站
+              </button>
+            </div>
+            <div style={{ padding: '4px 16px', overflowY: 'auto', maxHeight: 320 }}>
+              {trash.length === 0 ? (
+                <div className="mut" style={{ padding: '20px 0', textAlign: 'center' }}>回收站是空的</div>
+              ) : (
+                trash.map((a) => (
+                  <div key={a.id} className="row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-soft)' }}>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <b style={{ fontSize: 12 }}>{a.name}</b>
+                      <div className="mut" style={{ fontSize: 10.5 }}>{a.kind} · {new Date(a.deletedAt ?? '').toLocaleString('zh-CN', { hour12: false })}</div>
+                    </span>
+                    <button className="btn btn-s btn-sm" data-od-id={`trash-restore-${a.id}`} onClick={() => void restoreSel(a.id)}>
+                      恢复
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
