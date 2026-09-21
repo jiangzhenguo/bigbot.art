@@ -6,7 +6,7 @@
  *   全程离线,不触网
  */
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -16,6 +16,15 @@ import { gitBlobOid, fetchMsFiles, runMsDownload, type MsJob } from '../ms-downl
 const tmpRoot = mkdtempSync(join(tmpdir(), 'bbart-msdl-test-'));
 
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+/** 目录不存在时返回空数组(取消场景 blobs 可能未创建) */
+const readDirSafe = (dir: string): string[] => {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+};
 
 const jsonRes = (obj: unknown) =>
   ({ ok: true, status: 200, json: async () => obj }) as unknown as Response;
@@ -160,5 +169,56 @@ describe('runMsDownload 全流程(mock fetch,离线)', () => {
       .mock.calls.filter(([u]) => String(u).includes('weights/model.safetensors'));
     expect(lfsCalls.length).toBe(0);
     expect(job.status).toBe('done');
+  });
+
+  it('外部取消信号:中止本轮 fetch,保持调用方设置的 cancelled 终态,保留 .part', async () => {
+    const ctrl = new AbortController();
+    vi.mocked(fetch).mockImplementation(async (url: unknown) => {
+      const u = String(url);
+      if (u.startsWith('https://modelscope.cn/api/')) return jsonRes(msFiles);
+      if (u.startsWith('https://huggingface.co/api/')) return jsonRes({ sha: COMMIT });
+      if (u.includes('/resolve/master/weights/model.safetensors')) {
+        ctrl.abort(); // 用户点「取消」→ 外部信号中止
+        throw new Error('aborted'); // fetch 在中止后抛错,worker 识别 ctrl.signal.aborted 静默退出
+      }
+      if (u.includes('/resolve/master/tokenizer/vocab.json')) return bufRes(smallContent);
+      throw new Error(`unexpected url ${u}`);
+    });
+    const cacheDir = join(tmpRoot, 'cancel1');
+    const job = newJob();
+    job.status = 'cancelled'; // 调用方(mlxgenDownloadCancel)已置终态
+    await runMsDownload({ msRepoId: 'Test/Repo', hfRepoId: 'Test/Repo', hfCacheDir: cacheDir, job, signal: ctrl.signal });
+
+    expect(ctrl.signal.aborted).toBe(true);
+    // 取消不覆盖终态、不抛错、不进入下一轮续传
+    expect(job.status).toBe('cancelled');
+    expect(job.pct).not.toBe(100);
+  });
+
+  it('已取消后再无新文件落盘(worker 循环对 abort 立即让位)', async () => {
+    const ctrl = new AbortController();
+    let lfsHits = 0;
+    vi.mocked(fetch).mockImplementation(async (url: unknown) => {
+      const u = String(url);
+      if (u.startsWith('https://modelscope.cn/api/')) return jsonRes(msFiles);
+      if (u.startsWith('https://huggingface.co/api/')) return jsonRes({ sha: COMMIT });
+      if (u.includes('/resolve/master/weights/model.safetensors')) {
+        lfsHits++;
+        ctrl.abort();
+        throw new Error('aborted');
+      }
+      if (u.includes('/resolve/master/tokenizer/vocab.json')) return bufRes(smallContent);
+      throw new Error(`unexpected url ${u}`);
+    });
+    const cacheDir = join(tmpRoot, 'cancel2');
+    const job = newJob();
+    job.status = 'cancelled';
+    await runMsDownload({ msRepoId: 'Test/Repo', hfRepoId: 'Test/Repo', hfCacheDir: cacheDir, job, signal: ctrl.signal });
+
+    // 取消后没有任何文件完整落盘(不产生「半完整」误就绪)
+    const blobsDir = join(cacheDir, 'blobs');
+    const names = readDirSafe(blobsDir);
+    expect(names.every((n) => n.endsWith('.part') || n.endsWith('.incomplete')) || names.length === 0).toBe(true);
+    expect(lfsHits).toBeLessThanOrEqual(4); // 并发 4 路内,不再多轮重试
   });
 });

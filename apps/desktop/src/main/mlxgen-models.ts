@@ -46,9 +46,13 @@ function cacheDirFor(repoId: string): string {
 
 /**
  * HF 缓存完整性校验(替代骨架期「目录存在即就绪」近似,离线纯结构检查):
- *  1. blobs/ 下无「无主」`*.incomplete`(huggingface_hub 下载中断的临时分块);
- *     若同名前缀的完整 blob 已存在,则是 Xet→经典重试留下的残渣,忽略(实测:重试成功后
- *     旧分块不清理,一刀切判负会把已就绪模型误标为未下载)
+ *  1. blobs/ 下无「无主」未完成分块:
+ *     - `*.incomplete`(huggingface_hub 中断):若同名前缀的完整 blob 已存在,
+ *       则是 Xet→经典重试留下的残渣,忽略(实测:重试成功后旧分块不清理,一刀切判负
+ *       会把已就绪模型误标为未下载)
+ *     - `*.part`(ModelScope 直连 ms-download):**存在即未完成**——下载完成时
+ *       必然会 rename 成无后缀 blob,残留 .part = 中断/进行中(实测:App 退出时
+ *       只要有一个权重完整落盘、其余 .part 残留,旧规则会误判「已下载」)
  *  2. snapshots/ 下至少一个提交目录:有可解析到真实 blob 的非空文件、无悬空链接
  *     (snapshot 条目是指向 blobs 的符号链接;悬空链接 = blob 未完成/被清 → 判不完整)
  *  3. 至少一个权重文件(*.safetensors/*.gguf/*.bin)——只有配置/分词器不算模型
@@ -63,10 +67,11 @@ function isCacheComplete(cacheDir: string): boolean {
   const snapsDir = join(cacheDir, 'snapshots');
   if (!existsSync(blobsDir) || !existsSync(snapsDir)) return false;
   const blobs = readdirSync(blobsDir);
-  const completeBlobs = blobs.filter((f) => !f.endsWith('.incomplete'));
-  const interrupted = blobs
-    .filter((f) => f.endsWith('.incomplete'))
-    .some((f) => !completeBlobs.some((b) => f.startsWith(b)));
+  const completed = blobs.filter((f) => !f.endsWith('.incomplete') && !f.endsWith('.part'));
+  // hf_hub 中断:无主 .incomplete;ms-download 中断:存在 .part 即未完成(完成必已 rename)
+  const interrupted =
+    blobs.filter((f) => f.endsWith('.incomplete')).some((f) => !completed.some((b) => f.startsWith(b))) ||
+    blobs.some((f) => f.endsWith('.part'));
   if (interrupted) return false;
   for (const commit of readdirSync(snapsDir)) {
     const snap = join(snapsDir, commit);
@@ -153,19 +158,57 @@ export function mlxgenModelInfo(logger?: DebugLogger): MlxModelInfo[] {
 }
 
 export interface MlxDownloadStatus {
-  status: 'running' | 'done' | 'failed';
+  status: 'running' | 'done' | 'failed' | 'cancelled';
   pct: number | null;
   error?: string;
 }
 
+/** 进行中的下载任务(设置页进入时恢复进度轮询用) */
+export interface MlxActiveDownload {
+  id: string;
+  jobId: string;
+  pct: number | null;
+}
+
 interface DownloadJob extends MlxDownloadStatus {
   lastLine: string;
+  /** 用户取消时的中止回调(spawn kill / ModelScope AbortSignal),由通道各自注册 */
+  cancel?: () => void;
 }
 
 const jobs = new Map<string, DownloadJob>();
 
 /** repoId → 进行中的 jobId(同模型同时只允许一个下载进程,防连点互等 hf_hub 锁) */
 const activeByRepo = new Map<string, string>();
+
+/** 当前进行中的下载任务清单(设置页进入时恢复轮询;按 KNOWN_MODELS id 回填) */
+export function mlxgenDownloadActive(): MlxActiveDownload[] {
+  const out: MlxActiveDownload[] = [];
+  for (const [repoId, jobId] of activeByRepo) {
+    const job = jobs.get(jobId);
+    if (!job || job.status !== 'running') continue;
+    out.push({ id: KNOWN_MODELS.find((m) => m.repoId === repoId)?.id ?? repoId, jobId, pct: job.pct });
+  }
+  return out;
+}
+
+/** 取消进行中的下载:置 cancelled 终态 + 触发通道中止(kill spawn / abort fetch)
+ *  保留 .part/.incomplete 支持断点续传;任务释放后同一模型可重新下载 */
+export function mlxgenDownloadCancel(jobId: string, logger?: DebugLogger): { ok: boolean; error?: string } {
+  const job = jobs.get(jobId);
+  if (!job) return { ok: false, error: '下载任务不存在(可能已完成或已清理)' };
+  if (job.status === 'cancelled') return { ok: true }; // 幂等
+  if (job.status !== 'running') return { ok: false, error: `任务已结束(${job.status}),无需取消` };
+  job.status = 'cancelled';
+  job.error = '已取消 · 保留断点续传';
+  logger?.log('info', `mlxgen download ${jobId} → 用户取消`);
+  try {
+    job.cancel?.();
+  } catch (e) {
+    logger?.log('warn', `mlxgen download ${jobId} 取消回调异常:${(e as Error).message}`);
+  }
+  return { ok: true };
+}
 
 /** 启动真实下载;repoId 必须在已知清单内(防任意 repo 注入)
  *  去重:同一模型同时只允许一个下载进程(连点会互等 hf_hub 文件锁、全部卡死,实测事故)
@@ -188,14 +231,19 @@ export function mlxgenDownload(
   jobs.set(jobId, job);
   activeByRepo.set(repoId, jobId);
   if (known.msRepoId && process.env.BIGBOTART_MS_DOWNLOAD !== '0') {
-    // ModelScope 直连通道(国内 CDN;不依赖 HF 可达性)
+    // ModelScope 直连通道(国内 CDN;不依赖 HF 可达性);取消 = 外部 AbortSignal 中止 fetch
+    const cancelCtrl = new AbortController();
+    job.cancel = () => cancelCtrl.abort();
     runMsDownload({
       msRepoId: known.msRepoId,
       hfRepoId: repoId,
       hfCacheDir: cacheDirFor(repoId),
       job,
       logger,
+      signal: cancelCtrl.signal,
     }).catch((e) => {
+      // 用户取消不是失败:保持 cancelled 终态,不覆盖错误信息
+      if (job.status === 'cancelled') return;
       job.status = 'failed';
       job.error = (e as Error).message;
       logger?.log('error', `ms download ${known.msRepoId} 失败: ${job.error}`);
@@ -243,6 +291,21 @@ function runDownload(
     stdio: ['ignore', 'pipe', 'pipe'],
     env: disableXet ? { ...process.env, HF_HUB_DISABLE_XET: '1' } : process.env,
   });
+  // 取消:先 SIGTERM 优雅退出,5s 未退出再 SIGKILL 兜底(hf_hub 网络层可能不响应 TERM)
+  job.cancel = () => {
+    try {
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        } catch {
+          /* 已退出则忽略 */
+        }
+      }, 5000).unref?.();
+    } catch {
+      /* 已退出则忽略 */
+    }
+  };
   let buf = '';
   const eat = (d: Buffer): void => {
     buf = (buf + d.toString()).slice(-8000);
@@ -275,6 +338,10 @@ function runDownload(
 
   child.on('error', (e) => {
     clearInterval(watchdog);
+    if (job.status === 'cancelled') {
+      releaseRepo(repoId, jobId);
+      return;
+    }
     job.status = 'failed';
     job.error = `无法执行 mlxgen:${e.message} · 请先安装(设置页/引导向导「安装 mlxgen」)`;
     logger?.log('error', `mlxgen download ${repoId} spawn 失败: ${e.message}`);
@@ -282,7 +349,11 @@ function runDownload(
   });
   child.on('close', (code) => {
     clearInterval(watchdog);
-    if (job.status === 'failed') return;
+    // 用户取消/失败 = 终态:不再走停滞重试或 Xet 切换,直接释放 repo 占用
+    if (job.status === 'cancelled' || job.status === 'failed') {
+      releaseRepo(repoId, jobId);
+      return;
+    }
     // 看门狗杀掉的挂起进程:优先切经典通道重试;已是经典通道仍停滞 → 终态失败
     if (stalled) {
       if (!disableXet) {

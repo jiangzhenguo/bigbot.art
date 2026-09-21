@@ -38,7 +38,7 @@ export interface MsFileEntry {
 
 /** 与 mlxgen-models.ts 的 DownloadJob 结构对齐(进度/状态由本下载器直接写) */
 export interface MsJob {
-  status: 'running' | 'done' | 'failed';
+  status: 'running' | 'done' | 'failed' | 'cancelled';
   pct: number | null;
   error?: string;
   lastLine: string;
@@ -53,6 +53,8 @@ export interface MsDownloadOpts {
   hfCacheDir: string;
   job: MsJob;
   logger?: DebugLogger;
+  /** 外部取消信号(用户点「取消」):中止本轮全部 fetch,保持 job.status='cancelled' 由调用方设置 */
+  signal?: AbortSignal;
 }
 
 /** git blob oid = sha1("blob <len>\0" + content)(HF 缓存里普通文件的 blob 名) */
@@ -200,7 +202,11 @@ export async function runMsDownload(opts: MsDownloadOpts): Promise<void> {
   };
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
+    if (opts.signal?.aborted) return; // 外部取消:保持调用方设置的 cancelled 终态
     const ctrl = new AbortController();
+    // 外部取消联动:用户点「取消」→ 中止本轮全部 fetch
+    const onOuterAbort = (): void => ctrl.abort();
+    opts.signal?.addEventListener('abort', onOuterAbort, { once: true });
     let lastSize = currentBytes();
     let lastGrowthAt = Date.now();
     let stalled = false;
@@ -232,6 +238,8 @@ export async function runMsDownload(opts: MsDownloadOpts): Promise<void> {
     };
     await Promise.allSettled(Array.from({ length: CONCURRENCY }, () => worker()));
     clearInterval(ticker);
+    opts.signal?.removeEventListener('abort', onOuterAbort);
+    if (opts.signal?.aborted) return; // 外部取消:保留已落盘的 .part,断点续传
 
     const missing: string[] = [];
     for (const f of files) if (!(await isComplete(f))) missing.push(f.path);

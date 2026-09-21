@@ -20,7 +20,7 @@ import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory
 import { ToolHandlers } from './tool-handlers';
 import { TakeStore } from './takes';
 import { DebugLogger } from './logger';
-import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus } from './mlxgen-models';
+import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus, mlxgenDownloadActive, mlxgenDownloadCancel } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
 import {
   credentialDelete,
@@ -300,10 +300,12 @@ ipcMain.handle('probe-runtimes', async (): Promise<RuntimeProbe[]> => {
 
 ipcMain.handle('install-runtime', (_e, id: string) => installRuntime(id, logger));
 
-// ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询) ----------
+// ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询 / 取消) ----------
 ipcMain.handle('mlxgen-models', () => mlxgenModelInfo(logger));
 ipcMain.handle('mlxgen-download', (_e, repoId: string) => mlxgenDownload(repoId, logger));
 ipcMain.handle('mlxgen-download-status', (_e, jobId: string) => mlxgenDownloadStatus(jobId));
+ipcMain.handle('mlxgen-download-active', () => mlxgenDownloadActive());
+ipcMain.handle('mlxgen-download-cancel', (_e, jobId: string) => mlxgenDownloadCancel(jobId, logger));
 // base64 PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用)
 ipcMain.handle('save-png-asset', (_e, input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }) => {
   const r = assets.importFromDataUrl(input);

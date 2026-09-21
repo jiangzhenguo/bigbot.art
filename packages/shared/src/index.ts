@@ -31,7 +31,11 @@ export interface BigBotArtApi {
   // 图片引擎模型管理(mlxgen:已下载探测 / 真实下载 / 下载进度轮询)
   mlxgenModels(): Promise<Array<{ id: string; name: string; repoId: string; downloaded: boolean }>>;
   mlxgenDownload(repoId: string): Promise<{ ok: boolean; jobId?: string; error?: string }>;
-  mlxgenDownloadStatus(jobId: string): Promise<{ status: 'running' | 'done' | 'failed'; pct?: number | null; error?: string }>;
+  mlxgenDownloadStatus(jobId: string): Promise<{ status: 'running' | 'done' | 'failed' | 'cancelled'; pct?: number | null; error?: string }>;
+  /** 进行中的下载任务清单(设置页进入时恢复进度轮询;id 为主进程已知模型 id) */
+  mlxgenDownloadActive(): Promise<Array<{ id: string; jobId: string; pct: number | null }>>;
+  /** 取消进行中的下载;保留 .part/.incomplete 支持断点续传,取消后任务释放、可重新下载 */
+  mlxgenDownloadCancel(jobId: string): Promise<{ ok: boolean; error?: string }>;
   /** base64 dataURL PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用);返回新资产 id */
   savePngAsset(input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }): Promise<{ ok: boolean; assetId?: string; error?: string }>;
   // Provider / 渲染任务

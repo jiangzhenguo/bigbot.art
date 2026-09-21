@@ -67,6 +67,15 @@ describe('mlxgenModelInfo 已下载判定(HF 缓存完整性校验)', () => {
     expect(model().downloaded).toBe(true);
   });
 
+  it('.part 残留(ModelScope 直连中断/进行中)→ 未下载', () => {
+    resetRepo();
+    makeComplete();
+    // 真实事故形态:App 退出时权重已部分落盘(vae/0.safetensors 完整 + 其余 .part 残留),
+    // 旧规则只认 .incomplete 会把这种半成品误判「已下载」
+    writeFileSync(join(repoCache(), 'blobs', 'cafebabe.part'), 'partial');
+    expect(model().downloaded).toBe(false);
+  });
+
   it('snapshot 符号链接悬空(blob 缺失)→ 未下载', () => {
     resetRepo();
     const dir = repoCache();
