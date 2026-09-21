@@ -53,11 +53,13 @@ mlxgen --help          # 应打印帮助与版本号
 
 | 节点用途 | 模型 id(capabilities 声明) | 体积* | 说明 |
 |---|---|---|---|
-| 文生图(默认) | `AbstractFramework/z-image-turbo-8bit` | ~3GB | Z-Image Turbo,image-gen 默认 |
+| 文生图(默认) | `AbstractFramework/z-image-turbo-8bit` | ~11GB | Z-Image Turbo,image-gen 默认 |
 | 文生图(备选) | `qwen-image` | 中等 | Qwen Image |
 | 指令编辑 / mask | `mlx-community/Qwen-Image-Edit-8bit` | ~37.5GB | image-edit `instruction` / `inpaint`;8bit 量化版(官方原版 57.7GB,64GB 内存跑不动)。生成时 Provider 自动追加 `--base-model Qwen/Qwen-Image-Edit`(不给会被误路由成文生图 handler) |
-| 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~9GB | image-edit 多参考 / 扩图 |
-| 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~3GB | image-upscale |
+| 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | image-edit 多参考 / 扩图 |
+| 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~4.7GB | image-upscale |
+
+*体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)
 
 ```bash
 # 全部装齐(建议先只装 Z-Image-Turbo 跑通闭环;Qwen 系建议用设置页下载,走 ModelScope 直连)
