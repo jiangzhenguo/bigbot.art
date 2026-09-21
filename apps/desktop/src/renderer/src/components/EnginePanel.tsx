@@ -13,9 +13,18 @@ export default function EnginePanel({
 
   const install = async (id: string) => {
     setBusy(id);
-    const r = await window.bigbotart.installRuntime(id);
+    try {
+      const r = await window.bigbotart.installRuntime(id);
+      if (r.ok) {
+        await onProbe();
+        alert(`${r.message} · 已重新探测`);
+      } else {
+        alert(r.message);
+      }
+    } catch (e) {
+      alert(`安装调用失败:${e instanceof Error ? e.message : String(e)}`);
+    }
     setBusy(null);
-    alert(r.message);
   };
 
   if (!open) {

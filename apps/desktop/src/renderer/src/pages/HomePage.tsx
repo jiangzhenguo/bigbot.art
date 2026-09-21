@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { usePrompt } from '../components/usePrompt';
 
 export type HomePageTarget =
   | 'home'
@@ -169,8 +170,10 @@ export default function HomePage({
     setAttachments(attachments.filter((_, i) => i !== index));
   };
 
-  const handleRename = (id: string, currentName: string) => {
-    const next = prompt('重命名项目', currentName);
+  const { ask: askPrompt, dialog: promptDialog } = usePrompt();
+
+  const handleRename = async (id: string, currentName: string) => {
+    const next = await askPrompt({ title: '重命名项目', initial: currentName });
     if (next && next.trim() && next !== currentName) {
       onRenameProject(id, next.trim());
     }
@@ -198,6 +201,7 @@ export default function HomePage({
 
   return (
     <div className="pg-home">
+      {promptDialog}
       <div className="app" data-od-id="home-app">
         {/* 左导航 */}
         <aside className="side" data-od-id="home-nav">

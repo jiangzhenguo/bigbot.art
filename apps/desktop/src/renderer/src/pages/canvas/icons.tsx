@@ -26,6 +26,13 @@ export const ICON_EDIT = (
   </>
 );
 export const ICON_UPSCALE = <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />;
+export const ICON_CROP = (
+  <>
+    <path d="M6 2v16h16" />
+    <path d="M18 22V6H2" />
+    <path d="m15 9-6 6M15 15H9V9" />
+  </>
+);
 export const ICON_SHOT = (
   <>
     <rect x="2.5" y="5" width="19" height="14" rx="2" />
@@ -80,6 +87,7 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   image: ICON_IMAGE,
   edit: ICON_EDIT,
   upscale: ICON_UPSCALE,
+  crop: ICON_CROP,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   audio: ICON_AUDIO,
@@ -95,6 +103,7 @@ export const TYPE_ICON: Record<string, React.ReactNode> = {
   'image-gen': ICON_IMAGE,
   'image-edit': ICON_EDIT,
   'image-upscale': ICON_UPSCALE,
+  'image-crop': ICON_CROP,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   'audio-ref': ICON_AUDIO,

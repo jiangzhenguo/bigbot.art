@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { baseStyles, btnStyles, cardStyles, colors, spacing, textSizes } from '../styles/design';
+import { usePrompt } from '../components/usePrompt';
 
 interface Project {
   id: string;
@@ -20,6 +21,7 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewModal, setShowNewModal] = useState(false);
   const [newName, setNewName] = useState('');
+  const { ask: askPrompt, dialog: promptDialog } = usePrompt();
 
   const filteredProjects = projects.filter((p) =>
     p.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -32,8 +34,8 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
     setShowNewModal(false);
   };
 
-  const handleRename = (id: string, currentName: string) => {
-    const newName = prompt('重命名项目', currentName);
+  const handleRename = async (id: string, currentName: string) => {
+    const newName = await askPrompt({ title: '重命名项目', initial: currentName });
     if (newName && newName !== currentName) {
       onRenameProject(id, newName);
     }
@@ -52,6 +54,7 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
 
   return (
     <div style={{ ...baseStyles.app, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {promptDialog}
       {/* 顶栏 */}
       <div style={{ height: '52px', flexShrink: 0, borderBottom: `1px solid ${colors.borderSoft}`, display: 'flex', alignItems: 'center', gap: spacing[3], padding: `0 ${spacing[5]}`, background: colors.surfaceWarm }}>
         <button onClick={() => onNavigate('home')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: textSizes.sm, color: colors.fg2, display: 'flex', alignItems: 'center', gap: spacing[1] }}>

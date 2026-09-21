@@ -23,6 +23,8 @@ interface ToolbarProps {
   rerunDone: boolean;
   /** 当前受影响的节点数(stale / agentOn) */
   staleCount: number;
+  /** 本项目资源计数(顶栏「资源」入口角标) */
+  assetCount: number;
   onRerunAffected: () => void;
   onRunAll: () => void;
   dbgOpen: boolean;
@@ -41,6 +43,7 @@ export function Toolbar({
   setOpenPop,
   rerunDone,
   staleCount,
+  assetCount,
   onRerunAffected,
   onRunAll,
   dbgOpen,
@@ -116,6 +119,26 @@ export function Toolbar({
         onClick={onRerunAffected}
       >
         {rerunDone ? '重跑已排队 ✓' : `仅重跑受影响（${staleCount}）`}
+      </button>
+      <button
+        className="btn btn-s btn-sm"
+        data-od-id="toolbar-assets"
+        title="打开资源管理 · 项目资源视图"
+        onClick={() => onNavigate('assets')}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.8}
+          style={{ width: 12, height: 12, marginRight: 5, verticalAlign: -1 }}
+        >
+          <path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z" />
+        </svg>
+        资源
+        {assetCount > 0 ? (
+          <span className="n" style={{ color: 'var(--meta)', fontSize: 11, marginLeft: 4 }}>{assetCount}</span>
+        ) : null}
       </button>
       <button className="btn btn-s btn-sm" data-od-id="run-all" onClick={onRunAll}>
         运行全部

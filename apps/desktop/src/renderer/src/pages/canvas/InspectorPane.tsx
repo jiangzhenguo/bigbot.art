@@ -36,6 +36,8 @@ interface InspectorPaneProps {
   onRemoveEdge: (srcId: string, dstId: string) => void;
   /** 「仅重跑该节点」 */
   onRerunSelected: () => void;
+  /** asset 节点:「从资源库选择…」→ 打开资产选择弹层 */
+  onOpenAssetPicker?: (nodeId: string) => void;
 }
 
 export function InspectorPane({
@@ -62,6 +64,7 @@ export function InspectorPane({
   onOpenTimelinePage,
   onRemoveEdge,
   onRerunSelected,
+  onOpenAssetPicker,
 }: InspectorPaneProps) {
   return (
     <div className={`insp${tab === 'insp' ? ' on' : ''}`} data-od-id="inspector">
@@ -97,6 +100,7 @@ export function InspectorPane({
           onPlanStoryboard={onPlanStoryboard}
           onOpenTimelinePage={onOpenTimelinePage}
           onRemoveEdge={onRemoveEdge}
+          onOpenAssetPicker={onOpenAssetPicker}
         />
       ) : null}
       {selected && (

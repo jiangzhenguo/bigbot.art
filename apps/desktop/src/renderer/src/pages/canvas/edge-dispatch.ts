@@ -79,7 +79,12 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           SINGLE_ROLES.includes(role) &&
           (suppressedRoles.includes(role) || curRefs.some((r) => !r.auto && r.role === role));
         if (src.kind === 'asset') {
-          const role = e.label === 'ref-audio' ? 'ref-audio' : e.label === 'ref-image' ? 'ref-image' : undefined;
+          // 资产引用注入:按边 label 决定角色 —— 图片资源可作「首帧参考(first-frame)」或「参考图(ref-image)」
+          const role =
+            e.label === 'first-frame' ? 'first-frame'
+            : e.label === 'ref-image' ? 'ref-image'
+            : e.label === 'ref-audio' ? 'ref-audio'
+            : undefined;
           const assetId = String(s.assetId ?? '');
           if (role && assetId && !autoBlocked(role)) arr.push({ assetId, role, auto: true });
         } else if (fromShot) {
@@ -130,6 +135,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           'image-gen': 'image',
           'image-edit': 'image',
           'image-upscale': 'image',
+          'image-crop': 'image',
           'audio-ref': 'audio',
           asset: String(s.mediaType ?? ''),
         };
@@ -183,9 +189,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           const next = { videoNodeId: e.from, at: 'first' as const };
           if (!cur || cur.videoNodeId !== next.videoNodeId || cur.at !== next.at) framePatch.set(e.to, next);
         } else if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
-          // 输入图端口 input:静帧产物直通 / 素材引用;运行期解析(不覆盖手填 inputAssetId)
-          const cur = d.inputImageFrom as { nodeId?: string } | undefined;
-          if (!cur || cur.nodeId !== e.from) imageFromPatch.set(e.to, { nodeId: e.from });
+          // 输入图端口 input:静帧产物直通 / 素材引用;无条件登记(内容比对由 JSON 兜底,保证幂等)
+          imageFromPatch.set(e.to, { nodeId: e.from });
         }
         if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
           const cur = d.promptFrom as PromptSource | undefined;
@@ -209,10 +214,16 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         break;
       }
       case 'image-upscale': {
-        // 输入图端口 input(超分源):静帧产物直通 / 素材引用
+        // 输入图端口 input(超分源):静帧产物直通 / 素材引用;无条件登记(幂等)
         if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
-          const cur = d.inputImageFrom as { nodeId?: string } | undefined;
-          if (!cur || cur.nodeId !== e.from) imageFromPatch.set(e.to, { nodeId: e.from });
+          imageFromPatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
+      case 'image-crop': {
+        // 输入图端口 input(裁切源):静帧产物直通 / 素材引用;无条件登记(幂等)
+        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+          imageFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
@@ -289,7 +300,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       else delete data.inputFrameSource;
     }
     // 输入图端口 input(静帧直通 / 素材):与边同步,删除边即撤销
-    if (n.kind === 'image-edit' || n.kind === 'image-upscale') {
+    if (n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop') {
       const target = imageFromPatch.get(n.id) ?? null;
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;

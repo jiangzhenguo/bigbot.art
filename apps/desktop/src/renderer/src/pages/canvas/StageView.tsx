@@ -24,6 +24,8 @@ interface StageViewProps {
   flashId: string | null;
   connectDrag: ConnectDrag | null;
   takeResults: Record<string, string>;
+  /** assetId → 资产展示元信息(asset 节点渲染用) */
+  assetMeta: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }>;
   /** 临时连线路径(「+」拖拽跟手的虚线;由 CanvasPage 的 computeConnectPath 提供) */
   connectPath: (srcId: string, cx: number, cy: number) => string | null;
   zoomPct: string;
@@ -60,6 +62,7 @@ export function StageView({
   flashId,
   connectDrag,
   takeResults,
+  assetMeta,
   connectPath,
   zoomPct,
   onZoomBy,
@@ -136,6 +139,7 @@ export function StageView({
             isConnectTarget={connectDrag?.hitId === n.id}
             connectHitOk={connectDrag?.hitOk === true}
             takeResults={takeResults}
+            assetMeta={assetMeta}
             onSelect={onNodeSelect}
             onContextMenu={onNodeContextMenu}
             onHeaderPointerDown={onNodeHeaderPointerDown}

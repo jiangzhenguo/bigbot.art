@@ -1,15 +1,5 @@
 import type { NodeTag, CanvasNode, Edge, NodeInfo } from './types';
 
-/** 可导出的产物文件路径(右键「另存为」/「在 Finder 中显示」) */
-export const FINDER_PATH: Record<string, string> = {
-  brief: 'briefs/草原之河.md',
-  storyboard: 'takes/storyboard_seed88213.png',
-  audio: 'refs/草原环境声.mp3',
-  shot1: 'takes/shot_01_take3.mp4',
-  shot2: 'takes/shot_02_take2.mp4',
-  timeline: 'exports/草原之河_v2.mp4',
-};
-
 export const NODE_TYPES: NodeTag[] = [
   { id: 'doc', kind: 'document', name: '提示词 / 文档', sub: 'Markdown · 五段式/六段式' },
   { id: 'storyboard', kind: 'storyboard', name: '分镜表', sub: '脚本 · 一行 = 一个分镜' },
@@ -17,6 +7,7 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
   { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分', p1: true },
+  { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
   { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/Ref2VA' },
   { id: 'director', kind: 'director', name: '导演台', sub: '运镜参考小样', p1: true },
   { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
@@ -92,13 +83,25 @@ export const SHOT_SIZES: Record<'16:9' | '9:16' | '1:1', Record<(typeof SHOT_TIE
     reference: { width: 1024, height: 1024 },
   },
 };
-/** 档位预设(F/S/L/R + ETA)— H3_USAGE.md §4.3 四组 preset */
-export const SHOT_TIER_PRESETS: Record<(typeof SHOT_TIERS)[number], { label: string; steps: number; layers: number; reuse: number; frames: number; eta: string; note: string }> = {
-  preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', note: '极速草稿(reuse2 防呆安全)' },
-  draft: { label: '草稿', steps: 12, layers: 50, reuse: 2, frames: 56, eta: '≈9 分钟', note: '快速出片' },
-  default: { label: '默认', steps: 20, layers: 50, reuse: 1, frames: 124, eta: '≈15 分钟', note: '5s 段甜点' },
-  reference: { label: '参考', steps: 30, layers: 50, reuse: 1, frames: 124, eta: '≈30 分钟', note: 'high quality · gold 档' },
+/** 档位预设(F/S/L/R + ETA)— H3_USAGE.md §4.3 四组 preset;etaMin 供加速后按步数比例重算预计时间 */
+export const SHOT_TIER_PRESETS: Record<(typeof SHOT_TIERS)[number], { label: string; steps: number; layers: number; reuse: number; frames: number; eta: string; etaMin: number; note: string }> = {
+  preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', etaMin: 4, note: '极速草稿(reuse2 防呆安全)' },
+  draft: { label: '草稿', steps: 12, layers: 50, reuse: 2, frames: 56, eta: '≈9 分钟', etaMin: 9, note: '快速出片' },
+  default: { label: '默认', steps: 20, layers: 50, reuse: 1, frames: 124, eta: '≈15 分钟', etaMin: 15, note: '5s 段甜点' },
+  reference: { label: '参考', steps: 30, layers: 50, reuse: 1, frames: 124, eta: '≈30 分钟', etaMin: 30, note: 'high quality · gold 档' },
 };
+
+/** h3.c 帧数对齐:向上进位到 5+17n(与 h3_align_frame_count 一致,H3_USAGE.md §6) */
+export function h3AlignFrames(frames: number): number {
+  const v = Math.max(5, Math.round(frames));
+  const rem = ((v - 5) % 17 + 17) % 17;
+  return rem === 0 ? v : v + 17 - rem;
+}
+
+/** h3.c 秒数(24fps)→ 应该写的帧数:按 h3 CLI --seconds 的换算(seconds×24 后对齐 5+17n) */
+export function h3FramesForSeconds(seconds: number): number {
+  return h3AlignFrames(seconds * 24);
+}
 export const SHOT_MODE_LABEL: Record<string, string> = {
   text2video: '文生',
   'first-frame': '首帧',
@@ -144,7 +147,7 @@ export const NODE_INFO_BASE: Record<string, NodeInfo> = {
     img: './assets/sb-river.jpg',
     meta: [
       ['引擎', 'mlxgen · Z-Image-Turbo'],
-      ['尺寸', '832×480 · 16:9'],
+      ['尺寸', '1024×576 · 16:9'],
       ['seed', '批量 ×4 · 88213–88216'],
     ],
   },

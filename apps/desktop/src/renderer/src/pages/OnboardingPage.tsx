@@ -20,6 +20,10 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     state: 'idle' | 'busy' | 'done';
     message: string;
   }>({ state: 'idle', message: '未安装 · 用于本地 LLM(Agent 内核)' });
+  const [mgen, setMgen] = useState<{
+    state: 'idle' | 'busy' | 'done';
+    message: string;
+  }>({ state: 'idle', message: '未安装 · pip 包(uv tool install)' });
   const [consent, setConsent] = useState(true);
   const [owns, setOwns] = useState<Record<string, number>>({});
   const [checkHint, setCheckHint] = useState('点击「开始自检」');
@@ -45,6 +49,22 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     },
     [],
   );
+
+  /* 挂载时确认图片模型下载状态(Z-Image-Turbo 已缓存则显示已就绪) */
+  useEffect(() => {
+    let cancelled = false;
+    void window.bigbotart
+      .mlxgenModels()
+      .then((list) => {
+        if (cancelled) return;
+        const z = list.find((m) => m.id === 'z-image-turbo');
+        if (z?.downloaded) setOwns((o) => ({ ...o, img: 100 }));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const go = useCallback((i: number) => {
     clearTimers();
@@ -180,22 +200,62 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     );
   };
 
-  /* ── 步骤 3:模型下载(进度条)── */
+  /* ── 步骤 2:mlxgen 安装(install-runtime 真实执行 uv tool install)── */
+  const handleMgenInstall = async () => {
+    if (mgen.state === 'busy') return;
+    setMgen({ state: 'busy', message: '安装中…(uv tool install mlx-gen,可能数分钟)' });
+    let res: { ok: boolean; message: string } | null = null;
+    try {
+      res = await window.bigbotart.installRuntime('mlxgen');
+    } catch {
+      res = null;
+    }
+    if (res?.ok) {
+      setMgen({ state: 'done', message: '已安装 · pip 包' });
+      try {
+        setProbes(await window.bigbotart.probeRuntimes());
+      } catch {
+        /* 忽略探测失败 */
+      }
+    } else {
+      setMgen({ state: 'idle', message: res?.message ?? '安装失败 · 请手动执行 uv tool install --upgrade mlx-gen' });
+    }
+  };
+
+  /* ── 步骤 3:模型下载(真实执行 mlxgen download,进度轮询;llm/vid 为手动项)── */
   const handleDownload = (key: string) => {
-    if (owns[key] != null) return;
+    if (owns[key] != null || key !== 'img') return;
     setOwns((o) => ({ ...o, [key]: 0 }));
-    const t = setInterval(() => {
-      setOwns((o) => {
-        const curP = o[key] ?? 0;
-        const next = Math.min(100, curP + Math.random() * 5 + 1.5);
-        if (next >= 100) {
-          clearInterval(t);
-          delete dlTimersRef.current[key];
+    void window.bigbotart
+      .mlxgenDownload('AbstractFramework/z-image-turbo-8bit')
+      .then((res) => {
+        const jobId = res.jobId;
+        if (!res.ok || !jobId) {
+          setOwns((o) => ({ ...o, [key]: -1 }));
+          return;
         }
-        return { ...o, [key]: next };
-      });
-    }, 260);
-    dlTimersRef.current[key] = t;
+        const t = setInterval(() => {
+          void window.bigbotart
+            .mlxgenDownloadStatus(jobId)
+            .then((st) => {
+              if (st.status === 'running') {
+                setOwns((o) => ({ ...o, [key]: Math.round(st.pct ?? 0) }));
+                return;
+              }
+              clearInterval(t);
+              delete dlTimersRef.current[key];
+              if (st.status === 'done') {
+                setOwns((o) => ({ ...o, [key]: 100 }));
+                void window.bigbotart.probeRuntimes().then(setProbes).catch(() => {});
+              } else {
+                setOwns((o) => ({ ...o, [key]: -1 }));
+              }
+            })
+            .catch(() => {});
+        }, 700);
+        dlTimersRef.current[key] = t;
+      })
+      .catch(() => setOwns((o) => ({ ...o, [key]: -1 })));
   };
 
   /* ── 步骤 4:自检 ── */
@@ -340,12 +400,27 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
               <div className="grow">
                 <b>mlxgen</b>
                 <div className="mut mono" style={{ fontSize: 11 }}>
-                  {runtimeReady('mlxgen') ? '已就绪 · pip 包' : '未安装 · pip 包(uv tool install)'}
+                  {runtimeReady('mlxgen')
+                    ? '已就绪 · pip 包'
+                    : mgen.state === 'busy'
+                      ? mgen.message
+                      : mgen.message}
                 </div>
               </div>
-              <span className={runtimeReady('mlxgen') ? 'badge ok' : 'badge'}>
-                {runtimeReady('mlxgen') ? '已就绪' : '可安装'}
-              </span>
+              {runtimeReady('mlxgen') || mgen.state === 'done' ? (
+                <span className="badge ok">已就绪</span>
+              ) : mgen.state === 'busy' ? (
+                <span className="badge">安装中…</span>
+              ) : (
+                <button
+                  className="btn btn-s"
+                  id="mgenInstall"
+                  style={{ padding: '7px 14px', fontSize: 'var(--text-xs)' }}
+                  onClick={handleMgenInstall}
+                >
+                  安装
+                </button>
+              )}
             </div>
             <div className="d-row" id="lmsRow">
               <span className={lms.state === 'done' ? 'dot ok' : lms.state === 'busy' ? 'spin' : 'dot'} />
@@ -402,9 +477,19 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
             <h1>下载模型</h1>
             <p className="sub">按需下载,支持断点续传;可以先跳过,之后在「设置 · 模型下载」中安装。</p>
             {[
-              { key: 'llm', name: 'Ornith-1.5-35B-A3B · MLX 4bit', d: 'LLM · Agent 内核 · 推荐 · 19.4GB' },
-              { key: 'img', name: 'Z-Image-Turbo', d: '文生图 · 默认图片引擎 · 推荐 · 11.8GB' },
-              { key: 'vid', name: 'h3 视频模型组', d: '文生视频 + 带声直出 · 144GB · 磁盘充足' },
+              {
+                key: 'llm',
+                name: 'Ornith-1.5-35B-A3B · MLX 4bit',
+                d: 'LLM · Agent 内核 · 推荐 · 19.4GB',
+                auto: false,
+              },
+              {
+                key: 'img',
+                name: 'Z-Image-Turbo',
+                d: '文生图 · 默认图片引擎 · 推荐 · 11.8GB',
+                auto: true,
+              },
+              { key: 'vid', name: 'h3 视频模型组', d: '文生视频 + 带声直出 · 144GB · 磁盘充足', auto: false },
             ].map((m) => {
               const p = owns[m.key];
               return (
@@ -416,14 +501,20 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                     </div>
                   </div>
                   {p == null ? (
-                    <button
-                      className="btn btn-s"
-                      data-dl
-                      style={{ padding: '7px 14px', fontSize: 'var(--text-xs)' }}
-                      onClick={() => handleDownload(m.key)}
-                    >
-                      下载
-                    </button>
+                    m.auto ? (
+                      <button
+                        className="btn btn-s"
+                        data-dl
+                        style={{ padding: '7px 14px', fontSize: 'var(--text-xs)' }}
+                        onClick={() => handleDownload(m.key)}
+                      >
+                        下载
+                      </button>
+                    ) : (
+                      <span className="badge">手动 · 稍后在设置中处理</span>
+                    )
+                  ) : p < 0 ? (
+                    <span className="badge err">下载失败 · 见主进程日志</span>
                   ) : p < 100 ? (
                     <div style={{ minWidth: 140 }}>
                       <div

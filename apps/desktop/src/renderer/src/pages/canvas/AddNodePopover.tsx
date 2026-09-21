@@ -9,7 +9,7 @@
 import React, { useEffect, useState } from 'react';
 import type { Edge, CanvasNode } from './types';
 import { NODE_TYPES, RES, resLine } from './constants';
-import { resolvePort, hasConnector } from './connectors';
+import { resolvePortOptions, hasConnector, PORT_LABEL } from './connectors';
 
 interface AddNodePopoverProps {
   open: boolean;
@@ -25,8 +25,8 @@ interface AddNodePopoverProps {
   onLocate: (nodeId: string) => void;
   onSelectNode: (nodeId: string) => void;
   onClose: () => void;
-  /** 创建并连线(选中类型 + 画幅 + 档位由本组件回传) */
-  onCreate: (typeId: string, aspect: string, tier: string) => void;
+  /** 创建并连线(选中类型 + 画幅 + 档位 + 端口角色由本组件回传;port 仅多端口组合时给出) */
+  onCreate: (typeId: string, aspect: string, tier: string, port?: string) => void;
   /** 每次打开自增;变化时重置搜索/选中(画幅/档位跨打开保留) */
   openCount: number;
 }
@@ -43,9 +43,10 @@ export function AddNodePopover({
   onCreate,
   openCount,
 }: AddNodePopoverProps) {
-  /* 弹层本地 UI 状态:搜索 / 选中类型 / 画幅 × 档位 */
+  /* 弹层本地 UI 状态:搜索 / 选中类型 / 端口角色(多端口组合时) / 画幅 × 档位 */
   const [search, setSearch] = useState('');
   const [sel, setSel] = useState<string | null>(null);
+  const [portIdx, setPortIdx] = useState(0);
   const [aspect, setAspect] = useState('16:9');
   const [tier, setTier] = useState('默认');
 
@@ -53,6 +54,7 @@ export function AddNodePopover({
   useEffect(() => {
     setSearch('');
     setSel(null);
+    setPortIdx(0);
   }, [openCount]);
 
   const q = search.trim().toLowerCase();
@@ -60,9 +62,11 @@ export function AddNodePopover({
   const visibleTypes = src
     ? NODE_TYPES.filter((t) => hasConnector(src, t.id)).filter((t) => !q || t.name.toLowerCase().includes(q))
     : [];
-  const selPort = src && sel ? resolvePort(src, sel) : null;
+  /* 当前选中类型的全部端口选项 + 当前选择(多端口时 UI 可选) */
+  const portOpts = src && sel ? resolvePortOptions(src, sel) : [];
+  const chosenPort = portOpts[Math.min(portIdx, portOpts.length - 1)] ?? null;
   const tip = sel
-    ? `自动连线：${srcLabel} → ${NODE_TYPES.find((t) => t.id === sel)?.name ?? ''}${selPort ? ` · 落 ${selPort.port} 端口` : ''}`
+    ? `自动连线：${srcLabel} → ${NODE_TYPES.find((t) => t.id === sel)?.name ?? ''}${chosenPort ? ` · 落 ${chosenPort.port} 端口` : ''}`
     : '选中后自动连线并继承绑定';
   const resHint = resLine(aspect, tier);
 
@@ -126,7 +130,11 @@ export function AddNodePopover({
       </div>
       <div className="ap-list">
         {visibleTypes.map((t) => {
-          const rp = src ? resolvePort(src, t.id) : null;
+          const rpOpts = src ? resolvePortOptions(src, t.id) : [];
+          const rp = rpOpts[0] ?? null;
+          const multi = rpOpts.length > 1;
+          /* 预览端口:选中行显示当前选择,未选中行显示默认(首个) */
+          const rowPort = sel === t.id && multi ? (rpOpts[portIdx] ?? rp) : rp;
           return (
             <div
               key={t.id}
@@ -134,15 +142,33 @@ export function AddNodePopover({
               onClick={(e) => {
                 e.stopPropagation();
                 setSel(t.id);
+                setPortIdx(0); // 换类型重置端口选择
               }}
             >
               <div className="grow">
                 <b>{t.name}</b>
                 <div className="sub">{t.sub}</div>
-                {rp ? (
+                {rowPort ? (
                   <div className="conn">
-                    <span className="lk">{rp.port}</span>
-                    {rp.desc}
+                    <span className="lk">{PORT_LABEL[rowPort.port] ?? rowPort.port}</span>
+                    {rowPort.desc}
+                  </div>
+                ) : null}
+                {multi && sel === t.id ? (
+                  <div className="ap-port">
+                    <span className="lbl" style={{ marginRight: 6 }}>角色</span>
+                    {rpOpts.map((o, i) => (
+                      <span
+                        key={o.port}
+                        className={`chip${i === portIdx ? ' on' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPortIdx(i);
+                        }}
+                      >
+                        {PORT_LABEL[o.port] ?? o.port}
+                      </span>
+                    ))}
                   </div>
                 ) : null}
               </div>
@@ -216,7 +242,7 @@ export function AddNodePopover({
           onClick={(e) => {
             e.stopPropagation();
             if (!sel) return;
-            onCreate(sel, aspect, tier);
+            onCreate(sel, aspect, tier, chosenPort?.port);
           }}
         >
           创建并连线

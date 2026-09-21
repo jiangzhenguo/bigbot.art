@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Skill } from '@bigbotart/shared';
+import { usePrompt } from '../components/usePrompt';
 
 interface SkillsPageProps {
   onNavigate: (
@@ -264,10 +265,12 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
     setParamValues((prev) => ({ ...prev, [key]: value }));
   };
 
+  const { ask: askPrompt, dialog: promptDialog } = usePrompt();
+
   /** 保存当前画布为 Skill:取名字 → 取首个项目 id → 调 IPC → 刷新并选中新 Skill */
   const handleSaveSkill = async () => {
     try {
-      const name = (prompt('Skill 名称', '我的 Skill') ?? '').trim();
+      const name = await askPrompt({ title: 'Skill 名称', initial: '我的 Skill' });
       if (!name) return; // 取消或空名则返回
       const projects = await window.bigbotart.listProjects();
       const project = projects[0];
@@ -296,7 +299,7 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
       showError('请先选择一个「我的 Skill」再应用');
       return;
     }
-    const projectName = (prompt('新项目名称', skill.name) ?? '').trim();
+    const projectName = await askPrompt({ title: '新项目名称', initial: skill.name });
     if (!projectName) return; // 取消或空名
     try {
       await window.bigbotart.applySkill(skill.id, projectName);
@@ -393,6 +396,7 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
 
   return (
     <div className="pg-skills">
+      {promptDialog}
       <div className="app" data-od-id="skills-app">
         <header className="topbar" data-od-id="skills-toolbar">
           <button className="btn btn-g btn-sm" onClick={() => onNavigate('home')}>

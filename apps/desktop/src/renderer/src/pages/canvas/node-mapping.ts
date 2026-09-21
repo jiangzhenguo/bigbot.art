@@ -1,18 +1,20 @@
 import type { NodeKind } from '@bigbotart/shared';
 import { defaultStoryboardMarkdown } from '@bigbotart/shared';
 import type { CanvasNode, NodeTag, Edge } from './types';
-import { resolvePort } from './connectors';
+import { resolvePortOptions } from './connectors';
 
 /** 推导边 label = **目标端口锚定**(连接器设计 §5.5):由连接器端口表解析
- *  - 例:shot→shot = `first-frame`(上游尾帧)、asset→shot = `ref-image`/`ref-audio`、
+ *  - 例:shot→shot = `first-frame`(上游尾帧)、asset→shot = `first-frame`/`ref-image`/`ref-audio`、
  *        document→下游 = `prompt`、shot→timeline = `clip`、*→wf-output = `output`
  *  - 返回 undefined = 无可用连接器(该目标类型在「+」弹窗里不会列出)
+ *  - `portOverride` 给定时在多端口组合(asset 图 → shot)里显式选角色;缺省用默认(首个)端口
  *  - 特例:`workflow-input` 作为源时,端口锚定的是**源槽位名**(`slot-<名称>`),
  *    这里能解析出具体槽位;而 asset/document → wf-input 时目标节点尚未创建,
  *    只能给占位 `slot-<名称>`,由 dispatch 按来源媒体类型匹配槽位 */
-export function deriveEdgeLabel(src: CanvasNode, dstTag: NodeTag): string | undefined {
-  const r = resolvePort(src, dstTag.id);
-  if (!r) return undefined;
+export function deriveEdgeLabel(src: CanvasNode, dstTag: NodeTag, portOverride?: string): string | undefined {
+  const opts = resolvePortOptions(src, dstTag.id);
+  if (opts.length === 0) return undefined;
+  const r = (portOverride !== undefined ? opts.find((o) => o.port === portOverride) : undefined) ?? opts[0]!;
   if (r.port === 'slot-<名称>' && src.kind === 'workflow-input') {
     const slots = (src.data as { slots?: Array<{ name: string; accept: string[] }> })?.slots ?? [];
     const slot = slots.find((s) => {
@@ -56,6 +58,8 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
       return { engine: 'mlxgen', model: 'qwen-image-edit', prompt: '', mode: 'instruction' };
     case 'image-upscale':
       return { model: 'AbstractFramework/seedvr2-3b-8bit', scale: 2 };
+    case 'image-crop':
+      return { aspect: '9:16', focus: 'center' };
     case 'shot':
       return {
         engine: 'h3c',

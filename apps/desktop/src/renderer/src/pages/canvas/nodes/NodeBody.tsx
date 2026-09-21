@@ -22,7 +22,7 @@ import {
   WAVE_BARS,
 } from '../constants';
 import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
-import { basenameOf, outputUrlOf, clamp32, VideoThumb } from '../media';
+import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
 
 interface NodeBodyProps {
@@ -31,9 +31,11 @@ interface NodeBodyProps {
   nodes: CanvasNode[];
   /** nodeId → 最新成功 Take 产物路径(产物回填);渲染时 data.resultPath 优先 */
   takeResults: Record<string, string>;
+  /** assetId → 资产展示元信息(asset 节点渲染用;缺省 = 空表) */
+  assetMeta?: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }>;
 }
 
-export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
+export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBodyProps) {
   const d = (n.data ?? {}) as Record<string, unknown>;
   /** 产物路径:节点 data 优先,回退 Take 回填 */
   const productOf = (node: CanvasNode) =>
@@ -147,6 +149,45 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
     case 'asset': {
       const mediaType = String(d.mediaType ?? 'image');
       const assetId = String(d.assetId ?? '');
+      const am = assetMeta[assetId];
+      // 已绑定资产:按媒体类型渲染真实内容(缩略图 contain / 视频封面 / 波形 / 文档图标)
+      if (am) {
+        return (
+          <div className="nb">
+            {am.kind === 'image' && am.src ? (
+              <div className="nthumb fit">
+                <img src={am.src} alt={am.name} loading="lazy" />
+              </div>
+            ) : am.kind === 'video' ? (
+              <VideoThumb src={am.src ?? ''} badge={am.name} />
+            ) : am.kind === 'audio' ? (
+              <div className="wave">
+                {WAVE_BARS.map((h, i) => (
+                  <i key={i} style={{ height: h }} />
+                ))}
+              </div>
+            ) : (
+              <div
+                className="nthumb"
+                style={{
+                  aspectRatio: '16/9',
+                  display: 'grid',
+                  placeItems: 'center',
+                  background: 'var(--surface-warm)',
+                  border: '1.5px dashed var(--border)',
+                  fontSize: 22,
+                }}
+              >
+                📄
+              </div>
+            )}
+            <div className="nmeta mono">
+              {am.name} · {am.kind}
+              {am.categoryName ? ` · ${am.categoryName}` : ''}
+            </div>
+          </div>
+        );
+      }
       const emoji = mediaType === 'image' ? '🖼' : mediaType === 'video' ? '🎬' : mediaType === 'audio' ? '🎵' : '📄';
       return (
         <div className="nb">
@@ -167,7 +208,7 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
               <span style={{ opacity: 0.5 }}>{emoji}</span>
             )}
           </div>
-          <div className="nmeta mono">{assetId ? `资产 ${assetId.slice(0, 14)}… · ${mediaType}` : '未绑定资产 · 检查器里选择'}</div>
+          <div className="nmeta mono">{assetId ? `资产未加载 ${assetId.slice(0, 14)}… · ${mediaType}` : '未绑定资产 · 检查器里选择'}</div>
         </div>
       );
     }
@@ -181,7 +222,7 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb"><img src={outputUrlOf(outImg)} alt="图片产物" /></div>
+            <div className="nthumb fit"><img src={outputUrlOf(outImg)} alt="图片产物" /></div>
           ) : (
           <div className="nthumb" style={{ aspectRatio: '1/1', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
             待生成 · {w}×{h}
@@ -210,7 +251,7 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb"><img src={outputUrlOf(outImg)} alt="编辑产物" /></div>
+            <div className="nthumb fit"><img src={outputUrlOf(outImg)} alt="编辑产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               {modeLabel} · {inputState}
@@ -231,7 +272,7 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb"><img src={outputUrlOf(outImg)} alt="超分产物" /></div>
+            <div className="nthumb fit"><img src={outputUrlOf(outImg)} alt="超分产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               ×{scale} 超分 · {inputState}
@@ -241,10 +282,45 @@ export function NodeBody({ node: n, nodes, takeResults }: NodeBodyProps) {
         </div>
       );
     }
+    case 'image-crop': {
+      const aspect = String(d.aspect ?? '9:16');
+      const focus = String(d.focus ?? 'center');
+      const outImg = productOf(n);
+      const inputState = String(d.inputAssetId ?? '')
+        ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+        : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
+          ? `输入 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
+          : '输入待绑定';
+      // 缩略图比例 = 目标画幅(9:16 → 9/16),不固定在 16:9 框里裁切;
+      // 产物 contain 完整可见,占位框同比例(裁剪节点的样子就是图片的样子)
+      const ratio = aspect.replace(':', '/');
+      return (
+        <div className="nb">
+          {outImg ? (
+            <div className="nthumb">
+              <img
+                src={outputUrlOf(outImg)}
+                alt="裁切产物"
+                style={{ aspectRatio: ratio, objectFit: 'contain', background: 'var(--surface-warm)' }}
+              />
+            </div>
+          ) : (
+            <div className="nthumb" style={{ aspectRatio: ratio, display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+              裁剪至 {aspect} · {inputState}
+            </div>
+          )}
+          <div className="nmeta mono">{aspect} · {focus} · 保持原分辨率</div>
+        </div>
+      );
+    }
     case 'shot': {
       const mode = String(d.mode ?? 'text2video');
-      const tier = (String(d.tier ?? 'default')) as (typeof SHOT_TIERS)[number];
-      const aspect = (String(d.aspect ?? '16:9')) as (typeof SHOT_ASPECTS)[number];
+      // 白名单归一(与 ShotInspector 同规则):老数据/自定义画幅(如 '5:3')不在表内 → 回退 16:9,
+      // 否则 SHOT_SIZES[aspect] 为 undefined,点卡片会 "Cannot read properties of undefined (reading 'default')"
+      const tierRaw = String(d.tier ?? 'default');
+      const tier = (tierRaw in SHOT_TIER_PRESETS ? tierRaw : 'default') as (typeof SHOT_TIERS)[number];
+      const aspectRaw = String(d.aspect ?? '16:9');
+      const aspect = (aspectRaw === 'custom' || aspectRaw in SHOT_SIZES ? aspectRaw : '16:9') as (typeof SHOT_ASPECTS)[number];
       const prompt = String(d.prompt ?? '');
       const modeLabel = SHOT_MODE_LABEL[mode] ?? mode;
       // 尺寸以**节点 data 为权威**(与检查器同一规则);缺失时才按 aspect × tier 推导

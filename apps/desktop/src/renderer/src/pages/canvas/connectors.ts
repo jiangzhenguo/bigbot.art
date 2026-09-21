@@ -47,6 +47,7 @@ const BY_KIND: Record<string, Record<string, PortRow>> = {
     shot: ['first-frame', '首帧 · 直通'],
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
+    crop: ['input', '输入图 · 原图裁切'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
@@ -54,11 +55,20 @@ const BY_KIND: Record<string, Record<string, PortRow>> = {
     shot: ['first-frame', '首帧 · 直通'],
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
+    crop: ['input', '输入图 · 原图裁切'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-upscale': {
     shot: ['first-frame', '首帧 · 直通'],
     edit: ['input', '输入图 · 直通'],
+    crop: ['input', '输入图 · 原图裁切'],
+    image: ['ref-image', '参考图'],
+    timeline: ['clip', '静帧片段 · 入轨'],
+  },
+  'image-crop': {
+    shot: ['first-frame', '首帧 · 裁切直通'],
+    edit: ['input', '输入图 · 裁切结果'],
+    upscale: ['input', '输入图 · 超分源'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
@@ -99,7 +109,7 @@ const BY_TARGET: Record<string, PortRow> = {
 };
 
 /** 图片产物类节点(静帧直通) */
-export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale'];
+export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop'];
 
 /** 能收口到 workflow-output 的源(必须与 dispatch 的收集逻辑一致,否则弹窗会承诺不存在的边) */
 const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS];
@@ -134,49 +144,94 @@ function mediaTypeOf(n: CanvasNode): string {
   return String((n.data as { mediaType?: string } | undefined)?.mediaType ?? 'image');
 }
 
-/** 解析:该源 → 该目标类型是否有可用连接器;有则返回端口锚定 */
-export function resolvePort(src: CanvasNode, dstTypeId: string): PortResolution | null {
-  const byId = BY_ID[src.id]?.[dstTypeId];
-  if (byId) return { port: byId[0], desc: byId[1] };
+/** 端口 → 简短标签(连接时的角色选择 chips / 拖拽选择弹层用) */
+export const PORT_LABEL: Record<string, string> = {
+  'first-frame': '首帧参考',
+  'last-frame': '尾帧参考',
+  'ref-image': '参考图',
+  'ref-audio': '音频参考',
+  'ref-video': '参考视频',
+  prompt: '提示词',
+  input: '输入图',
+  clip: '入轨',
+};
 
-  // asset 按媒体类型细分(图片 / 音视频)
+/**
+ * 解析:该源 → 该目标类型的所有可用端口选项(首个为默认)。
+ * 多数组合只有一个端口;asset(图) → shot 支持「首帧参考 / 参考图参考」两种,由连接时 UI 选择。
+ */
+export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortResolution[] {
+  const byId = BY_ID[src.id]?.[dstTypeId];
+  if (byId) return [{ port: byId[0], desc: byId[1] }];
+
+  // asset 按媒体类型细分(图片 / 视频 / 音频 / 文档)——资源节点只作输入源,端口语义随媒体类型变化
   if (src.kind === 'asset') {
     const mt = mediaTypeOf(src);
-    const table: Record<string, PortRow> =
-      mt === 'audio' || mt === 'video'
-        ? {
-            shot: ['ref-audio', '音轨参考 · 带声直出'],
-            timeline: ['audio-track', '音轨 · 随片导出'],
-          }
-        : {
-            shot: ['ref-image', '参考图 · Ref2VA'],
-            image: ['ref-image', '参考图'],
-            edit: ['input', '输入图 · 原图编辑'],
-          };
+    // 图片资源 → 镜头:可当「首帧参考」或「参考图参考」(节点手册 §3.2:ref-image/first-frame 并存)
+    if (mt === 'image' && dstTypeId === 'shot') {
+      return [
+        { port: 'first-frame', desc: '首帧参考 · 此图作为镜头第一帧(FL2VA)' },
+        { port: 'ref-image', desc: '参考图 · Ref2VA 身份/场景锁定' },
+      ];
+    }
+    const TABLES: Record<string, Record<string, PortRow>> = {
+      image: {
+        shot: ['ref-image', '参考图 · Ref2VA'],
+        image: ['ref-image', '参考图'],
+        edit: ['input', '输入图 · 原图编辑'],
+        upscale: ['input', '输入图 · 超分源'],
+        crop: ['input', '输入图 · 原图裁切'],
+        timeline: ['clip', '静帧片段 · 入轨'],
+      },
+      video: {
+        shot: ['ref-video', '参考视频 · 风格/动作参考'],
+        edit: ['input', '取帧源 · 首/尾帧'],
+        timeline: ['clip', '视频素材 · 入轨'],
+      },
+      audio: {
+        shot: ['ref-audio', '音轨参考 · 带声直出'],
+        timeline: ['audio-track', '音轨 · 随片导出'],
+      },
+      document: {
+        shot: ['prompt', '提示词 · 全文注入'],
+        image: ['prompt', '提示词 · 全文注入'],
+        edit: ['prompt', '提示词 · 全文注入'],
+        doc: ['prompt', '文档引用'],
+        director: ['prompt', '编排依据 · 全文注入'],
+        storyboard: ['prompt', '分镜依据 · 全文注入'],
+      },
+    };
+    // noUncheckedIndexedAccess 下索引访问均可能 undefined,空表兜底(查不到 → [])
+    const table = TABLES[mt] ?? TABLES.image ?? {};
     const hit = table[dstTypeId];
-    if (hit) return { port: hit[0], desc: hit[1] };
+    if (hit) return [{ port: hit[0], desc: hit[1] }];
     // 素材/文档 → 工作流入口槽位(设计稿表缺此项,按 §11 迁移映射表 7/9 号补齐)
-    if (dstTypeId === 'wf-input') return { port: 'slot-<名称>', desc: '按槽位类型匹配槽位' };
-    return null;
+    if (dstTypeId === 'wf-input') return [{ port: 'slot-<名称>', desc: '按槽位类型匹配槽位' }];
+    return [];
   }
 
   if (src.kind === 'document' && dstTypeId === 'wf-input') {
-    return { port: 'slot-<名称>', desc: '文本槽位 · 全文注入' };
+    return [{ port: 'slot-<名称>', desc: '文本槽位 · 全文注入' }];
   }
 
   const byKind = BY_KIND[src.kind ?? '']?.[dstTypeId];
-  if (byKind) return { port: byKind[0], desc: byKind[1] };
+  if (byKind) return [{ port: byKind[0], desc: byKind[1] }];
 
   // 收口到 workflow-output:仅限真正产出产物的节点(与 dispatch 的 kind 匹配一致)
   const byTarget = BY_TARGET[dstTypeId];
   if (byTarget && COLLECTABLE_KINDS.includes(src.kind ?? '')) {
-    return { port: byTarget[0], desc: byTarget[1] };
+    return [{ port: byTarget[0], desc: byTarget[1] }];
   }
 
-  return null;
+  return [];
+}
+
+/** 解析:该源 → 该目标类型是否有可用连接器;有则返回默认(首个)端口锚定 */
+export function resolvePort(src: CanvasNode, dstTypeId: string): PortResolution | null {
+  return resolvePortOptions(src, dstTypeId)[0] ?? null;
 }
 
 /** 「+」弹窗:该类型是否该列出(只列出有可用连接器的类型) */
 export function hasConnector(src: CanvasNode, dstTypeId: string): boolean {
-  return resolvePort(src, dstTypeId) !== null;
+  return resolvePortOptions(src, dstTypeId).length > 0;
 }

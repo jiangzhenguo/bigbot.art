@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 import type {
+  AccelPack,
   AppSettings,
   CloudProviderEntry,
   LlmSource,
@@ -16,7 +17,7 @@ interface SettingsPageProps {
   ) => void;
 }
 
-type GroupKey = 'general' | 'llm' | 'engines' | 'queue' | 'storage' | 'models';
+type GroupKey = 'general' | 'llm' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
 
 /** LLM 来源单选(设计稿 data-llm 的五档) */
 type LlmKey = 'lmstudio' | 'ollama' | 'pimlx' | 'openai-compat' | 'cloud';
@@ -189,12 +190,21 @@ function LmPopover(props: {
 }
 
 interface DownloadState {
-  status: 'idle' | 'downloading' | 'done';
-  pct: number;
+  status: 'idle' | 'downloading' | 'done' | 'failed';
+  pct?: number;
+  error?: string;
 }
 
 /** 模型下载列表里可下载的条目(按 .mdl-row 顺序) */
 const MODEL_IDS = ['qwen-image-edit', 'seedvr2-3b', 'qwen2.5-vl'] as const;
+
+/** 模型 id → huggingface repo(mlxgen download 参数,与主进程白名单同口径) */
+const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> = {
+  'z-image-turbo': 'AbstractFramework/z-image-turbo-8bit',
+  'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
+  'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
+  'qwen2.5-vl': 'Qwen/Qwen2.5-VL-7B-Instruct',
+};
 
 export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   /* ---- 分组切换 ---- */
@@ -274,6 +284,8 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
 
   /* ---- 渲染模式:真实推理(仅由 getSettings 回填,点击经 setSettings 持久化) ---- */
   const [renderReal, setRenderReal] = useState(false);
+  /** h3 视频生成:SSD 流式读权重(--ssd-streaming),全局开关,默认关 */
+  const [ssdStreaming, setSsdStreaming] = useState(false);
 
   /* ---- 开关 ---- */
   const [sw, setSw] = useState<Record<string, boolean>>({
@@ -747,6 +759,7 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
       .then((s: AppSettings) => {
         if (!alive) return;
         setRenderReal(s.renderMode === 'real');
+        setSsdStreaming(s.ssdStreaming === true);
         setLlmSource(s.llm ?? null);
         if (s.llm?.kind) setLlm(KIND_TO_KEY[s.llm.kind] ?? 'lmstudio');
         if (s.llm?.kind === 'openai-compatible') {
@@ -819,6 +832,17 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
       .catch(() => setRenderReal(!next));
   };
 
+  /* ---- SSD 流式读权重开关(h3 视频生成 --ssd-streaming,全局默认关) ---- */
+  const toggleSsdStreaming = async (): Promise<void> => {
+    const next = !ssdStreaming;
+    setSsdStreaming(next);
+    try {
+      await window.bigbotart.setSettings({ ssdStreaming: next });
+    } catch {
+      setSsdStreaming(!next);
+    }
+  };
+
   /* ---- 引擎探测(真实接线 window.bigbotart.probeRuntimes) ---- */
   const [probes, setProbes] = useState<RuntimeProbe[]>([]);
   const [detecting, setDetecting] = useState(false);
@@ -855,25 +879,99 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   /* ---- Wan2.2 / Bernini-R 启用 ---- */
   const [wanEnabled, setWanEnabled] = useState(false);
 
-  /* ---- 模型下载 ---- */
+  /* ---- 模型下载(mlxgen 真实下载:spawn mlxgen download + 进度轮询) ---- */
   const [downloads, setDownloads] = useState<Record<string, DownloadState>>({});
+  /** 已下载状态:id → 已就绪(主进程按 HF 缓存目录探测) */
+  const [mlxReady, setMlxReady] = useState<Record<string, boolean>>({});
+  const refreshMlxModels = (): void => {
+    void window.bigbotart
+      .mlxgenModels()
+      .then((list) => setMlxReady(Object.fromEntries(list.map((m) => [m.id, m.downloaded]))))
+      .catch(() => {});
+  };
+  useEffect(() => {
+    refreshMlxModels();
+  }, []);
+
   const startDownload = (id: string): void => {
-    setDownloads((d) => ({ ...d, [id]: { status: 'downloading', pct: 0 } }));
-    const timer = window.setInterval(() => {
-      setDownloads((d) => {
-        const cur = d[id];
-        if (!cur || cur.status !== 'downloading') {
-          window.clearInterval(timer);
-          return d;
+    const repoId = MODEL_REPO[id as keyof typeof MODEL_REPO] ?? '';
+    if (!repoId) return;
+    void window.bigbotart
+      .mlxgenDownload(repoId)
+      .then((res) => {
+        const jobId = res.jobId;
+        if (!res.ok || !jobId) {
+          setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: res.error ?? '启动下载失败' } }));
+          return;
         }
-        const next = Math.min(100, cur.pct + Math.random() * 7 + 2);
-        if (next >= 100) {
-          window.clearInterval(timer);
-          return { ...d, [id]: { status: 'done', pct: 100 } };
-        }
-        return { ...d, [id]: { status: 'downloading', pct: next } };
+        const timer = window.setInterval(() => {
+          void window.bigbotart
+            .mlxgenDownloadStatus(jobId)
+            .then((st) => {
+              setDownloads((d) => ({
+                ...d,
+                [id]: { status: st.status === 'running' ? 'downloading' : st.status, pct: st.pct ?? 0, error: st.error },
+              }));
+              if (st.status !== 'running') {
+                window.clearInterval(timer);
+                refreshMlxModels();
+              }
+            })
+            .catch(() => {});
+        }, 700);
+      })
+      .catch(() => {
+        setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: '下载启动失败' } }));
       });
-    }, 300);
+  };
+
+  /* ---- 🚀 加速 LoRA(蒸馏模型包)---- */
+  const [accelPacks, setAccelPacks] = useState<AccelPack[]>([]);
+  const [accelMsg, setAccelMsg] = useState<string | null>(null);
+  const [accelForm, setAccelForm] = useState({ name: '', path: '', steps: 8 as 4 | 8 });
+  const refreshAccel = (): void => {
+    // 防御:主进程/preload 未重建时通道可能不存在(HMR 先于 main 热更),缺失则降级空列表,不白屏
+    const api = window.bigbotart;
+    if (typeof api.accelList !== 'function') {
+      console.warn('[accel] accelList 通道不可用(主进程/preload 未重载?)· 加速 LoRA 列表为空');
+      setAccelPacks([]);
+      return;
+    }
+    void api.accelList().then(setAccelPacks).catch(() => setAccelPacks([]));
+  };
+  useEffect(() => {
+    refreshAccel();
+  }, []);
+  const installAccel = (): void => {
+    if (!accelForm.name.trim() || !accelForm.path.trim()) {
+      setAccelMsg('请填名称与目录路径');
+      return;
+    }
+    void window.bigbotart.accelInstall(accelForm).then((r) => {
+      if (r.ok) {
+        setAccelPacks(r.packs ?? []);
+        setAccelForm({ name: '', path: '', steps: 8 });
+        setAccelMsg(`已安装「${accelForm.name.trim()}」· 登记完成(文件未拷贝)`);
+      } else {
+        setAccelMsg(r.error ?? '安装失败');
+      }
+    });
+  };
+  const removeAccel = (id: string): void => {
+    void window.bigbotart.accelRemove(id).then((r) => {
+      if (r.ok) {
+        setAccelPacks(r.packs ?? []);
+        setAccelMsg('已删除登记(磁盘文件保留)');
+      } else {
+        setAccelMsg(r.error ?? '删除失败');
+      }
+    });
+  };
+  const setDefaultAccel = (id: string): void => {
+    void window.bigbotart.accelSetDefault(id).then((r) => {
+      if (r.ok) setAccelPacks(r.packs ?? []);
+      else setAccelMsg(r.error ?? '操作失败');
+    });
   };
 
   /* ---- 引擎状态渲染:探测结果优先,否则回退设计稿默认文案 ---- */
@@ -960,6 +1058,13 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
               onClick={() => setGroup('models')}
             >
               模型下载
+            </a>
+            <a
+              className={`side-link${group === 'lora' ? ' on' : ''}`}
+              data-panel="lora"
+              onClick={() => setGroup('lora')}
+            >
+              🚀 加速 LoRA
             </a>
             <a
               className="side-link"
@@ -1061,6 +1166,17 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                   className={`sw${sw['general.restore'] ? ' on' : ''}`}
                   data-sw=""
                   onClick={() => toggleSw('general.restore')}
+                />
+              </div>
+              <div className="srow" data-od-id="settings-ssd-streaming">
+                <div className="grow">
+                  <b>SSD 流式读权重（--ssd-streaming）</b>
+                  <div className="sub">h3 视频生成专用 · 省 RAM（峰值≈6GB）但慢约 30%；64GB+ 默认关更快，内存紧张（OOM/被系统杀进程）时再开</div>
+                </div>
+                <span
+                  className={`sw${ssdStreaming ? ' on' : ''}`}
+                  data-sw=""
+                  onClick={() => void toggleSsdStreaming()}
                 />
               </div>
             </div>
@@ -1749,26 +1865,16 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                 </div>
                 <span className="badge ok">已就绪</span>
               </div>
-              <div className="mdl-row">
-                <div className="grow">
-                  <b>Z-Image-Turbo</b>
-                  <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                    文生图 · 推荐
-                  </div>
-                </div>
-                <span className="badge ok">已就绪</span>
-              </div>
-              {MODEL_IDS.map((id) => {
-                const meta: Record<
-                  (typeof MODEL_IDS)[number],
-                  { name: string; desc: string }
-                > = {
+              {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
+                const meta: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], { name: string; desc: string }> = {
+                  'z-image-turbo': { name: 'Z-Image-Turbo', desc: '文生图 · 推荐 · ~3GB' },
                   'qwen-image-edit': { name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 推荐 · 8.2GB' },
                   'seedvr2-3b': { name: 'SeedVR2 3B', desc: '超分修复 · 可选 · 6.1GB' },
                   'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · 可选' },
                 };
                 const m = meta[id];
                 const dl = downloads[id] ?? { status: 'idle' as const, pct: 0 };
+                const ready = mlxReady[id] === true;
                 return (
                   <div className="mdl-row" key={id}>
                     <div className="grow">
@@ -1776,29 +1882,133 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                       <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
                         {m.desc}
                       </div>
+                      {dl.status === 'failed' && (
+                        <div className="mut" style={{ fontSize: 11, color: 'var(--danger)' }}>
+                          {dl.error ?? '下载失败'}
+                        </div>
+                      )}
                     </div>
-                    {dl.status === 'idle' && (
+                    {ready ? (
+                      <span className="badge ok">已就绪</span>
+                    ) : dl.status === 'idle' ? (
                       <button className="btn btn-s btn-sm" data-dl="" onClick={() => startDownload(id)}>
                         下载
                       </button>
-                    )}
-                    {dl.status === 'downloading' && (
+                    ) : dl.status === 'downloading' ? (
                       <div style={{ minWidth: 130 }}>
                         <div className="row" style={{ justifyContent: 'space-between', fontSize: 10.5 }}>
                           <span className="mut">下载中</span>
-                          <span className="mono mut pct">{Math.round(dl.pct)}%</span>
+                          <span className="mono mut pct">{Math.round(dl.pct ?? 0)}%</span>
                         </div>
                         <div className="pbar" style={{ marginTop: 4 }}>
-                          <i style={{ width: `${dl.pct}%` }} />
+                          <i style={{ width: `${dl.pct ?? 0}%` }} />
                         </div>
                       </div>
+                    ) : (
+                      <span className="badge">{dl.error ? '下载出错' : '未下载'}</span>
                     )}
-                    {dl.status === 'done' && <span className="badge ok">已就绪</span>}
                   </div>
                 );
               })}
               <div className="mdl-row">
                 <div className="grow mut">更多：GLM-4 / DeepSeek / Llama 3.x / Mistral / Phi / Gemma 3 / MiniCPM…（§5.2.4 清单）</div>
+              </div>
+            </div>
+
+            {/* 🚀 加速 LoRA(蒸馏模型包):h3.c 不接受 --lora,加速 = 蒸馏目录(-d)+ 4/8 步 */}
+            <div className="group" data-group="lora" data-od-id="settings-lora" hidden={group !== 'lora'}>
+              <div className="gh">
+                <b>🚀 加速 LoRA</b>
+                <span className="spacer" />
+                <span className="mono mut" style={{ fontSize: 11 }}>
+                  蒸馏模型包 · h3.c -d 加速目录(非 .safetensors)
+                </span>
+              </div>
+              <div className="srow">
+                <div className="grow">
+                  <b>蒸馏模型包管理</b>
+                  <div className="sub">
+                    镜头开启「加速 LoRA」时 -d 换用所选包目录 + 4/8 步 · 默认包在镜头未选包时兜底(手册 §8)
+                  </div>
+                </div>
+                <span className="badge ok">
+                  {accelPacks.filter((p) => p.exists).length}/{accelPacks.length} 就绪
+                </span>
+              </div>
+              {accelPacks.length === 0 ? (
+                <div className="srow">
+                  <div className="grow mut">还没有模型包 · 在下方安装(如手册 §1.2 的 MiniMax-H3-turbo-T8test 目录)</div>
+                </div>
+              ) : (
+                accelPacks.map((p) => (
+                  <div className="mdl-row" key={p.id}>
+                    <div className="grow">
+                      <b>
+                        {p.name}
+                        {p.default ? ' · 默认' : ''}
+                      </b>
+                      <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                        {p.path} · 推荐 {p.steps ?? 8} 步
+                      </div>
+                    </div>
+                    {p.exists ? (
+                      <span className="badge ok">就绪</span>
+                    ) : (
+                      <span className="badge err">目录缺失</span>
+                    )}
+                    {!p.default && (
+                      <button className="btn btn-s btn-sm" onClick={() => setDefaultAccel(p.id)}>
+                        设默认
+                      </button>
+                    )}
+                    <button className="btn btn-s btn-sm" onClick={() => removeAccel(p.id)}>
+                      删除
+                    </button>
+                  </div>
+                ))
+              )}
+              <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+                <b>安装模型包</b>
+                <div className="row g8" style={{ flexWrap: 'wrap' }}>
+                  <span className="input-w">
+                    <input
+                      placeholder="名称,如 MiniMax-H3-turbo-T8test"
+                      value={accelForm.name}
+                      onChange={(e) => setAccelForm((f) => ({ ...f, name: e.target.value }))}
+                    />
+                  </span>
+                  <span className="input-w">
+                    <input
+                      className="mono"
+                      placeholder="/path/to/turbo-model-dir"
+                      value={accelForm.path}
+                      onChange={(e) => setAccelForm((f) => ({ ...f, path: e.target.value }))}
+                    />
+                  </span>
+                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>推荐步数</span>
+                  {([4, 8] as const).map((s) => (
+                    <span
+                      key={s}
+                      className={`chip${accelForm.steps === s ? ' on' : ''}`}
+                      onClick={() => setAccelForm((f) => ({ ...f, steps: s }))}
+                    >
+                      {s} 步
+                    </span>
+                  ))}
+                  <button className="btn btn-p btn-sm" onClick={installAccel}>
+                    安装
+                  </button>
+                </div>
+                {accelMsg ? (
+                  <div className="mut" style={{ fontSize: 11 }}>
+                    {accelMsg}
+                  </div>
+                ) : (
+                  <div className="mut" style={{ fontSize: 11 }}>
+                    目录须存在且含 FL2VA/(turbo 目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora,
+                    此为蒸馏模型包加速(手册 §8)
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -2,21 +2,27 @@
  * ContextMenu — 节点右键菜单(纯展示 + 轻量本地动作)
  *
  * 拆分自 CanvasPage 的 <div class="pop ctx"> 区块(原 2946–3031 行)。
- * 「另存为 / 在 Finder 中显示」是纯演示动作(读写 NODE_INFO_BASE / FINDER_PATH),
- * 与 toast 一起收敛在本组件;复制/删除走 CanvasPage 提供的回调。
+ * 「另存为」是纯演示动作(读写 NODE_INFO_BASE),与 toast 一起收敛在本组件;
+ * 「在 Finder 中显示」走 onReveal 回调(CanvasPage 解析节点真实产物路径 → 主进程 shell 定位);
+ * 复制/删除/重命名走 CanvasPage 提供的回调。
  */
 import React from 'react';
 import type { CanvasNode } from './types';
-import { NODE_INFO_BASE, FINDER_PATH } from './constants';
+import { NODE_INFO_BASE } from './constants';
 
 interface ContextMenuProps {
   ctx: { x: number; y: number; id: string } | null;
   nodes: CanvasNode[];
   toastMsg: (msg: string) => void;
+  onRename: (id: string) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
   /** 关闭菜单(CanvasPage 持有 ctx state) */
   onClose: () => void;
+  /** asset 节点「更换资产…」(打开资产选择弹层) */
+  onCtxChangeAsset?: (id: string) => void;
+  /** 在 Finder 中显示节点产物(CanvasPage 解析真实路径 → IPC,toast 反馈) */
+  onReveal: (id: string) => void;
 }
 
 /** 幽灵节点(尚无产物)在菜单里禁用导出类动作 */
@@ -29,7 +35,9 @@ function isCtxGhost(
   return !!n?.ghost;
 }
 
-export function ContextMenu({ ctx, nodes, toastMsg, onDuplicate, onDelete, onClose }: ContextMenuProps) {
+export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDelete, onClose, onCtxChangeAsset, onReveal }: ContextMenuProps) {
+  const ctxNode = ctx ? nodes.find((x) => x.id === ctx.id) : undefined;
+  const isAssetNode = ctxNode?.kind === 'asset';
   return (
     <div
       className={`pop ctx${ctx ? ' open' : ''}`}
@@ -39,7 +47,7 @@ export function ContextMenu({ ctx, nodes, toastMsg, onDuplicate, onDelete, onClo
         ctx
           ? {
               left: Math.max(8, Math.min(ctx.x, window.innerWidth - 212 - 8)),
-              top: Math.max(8, Math.min(ctx.y, window.innerHeight - 210 - 8)),
+              top: Math.max(8, Math.min(ctx.y, window.innerHeight - 260 - 8)),
             }
           : undefined
       }
@@ -63,6 +71,22 @@ export function ContextMenu({ ctx, nodes, toastMsg, onDuplicate, onDelete, onClo
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
         复制<span className="sc">⌘D</span>
+      </button>
+      <button
+        className="pop-it"
+        data-od-id="ctx-rename"
+        onClick={() => {
+          if (!ctx) return;
+          const id = ctx.id;
+          onClose();
+          onRename(id);
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+        重命名…
       </button>
       <button
         className={`pop-it${isCtxGhost(ctx, nodes) ? ' dim' : ''}`}
@@ -98,9 +122,7 @@ export function ContextMenu({ ctx, nodes, toastMsg, onDuplicate, onDelete, onClo
           if (!ctx || isCtxGhost(ctx, nodes)) return;
           const id = ctx.id;
           onClose();
-          toastMsg(
-            `已在 Finder 中显示 · ~/BigBotArt/草原之河/${FINDER_PATH[id] ?? 'takes/'}（演示）`,
-          );
+          onReveal(id);
         }}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
@@ -109,6 +131,26 @@ export function ContextMenu({ ctx, nodes, toastMsg, onDuplicate, onDelete, onClo
         在 Finder 中显示
       </button>
       <div className="ctx-sep"></div>
+      {isAssetNode && onCtxChangeAsset ? (
+        <button
+          className="pop-it"
+          data-od-id="ctx-change-asset"
+          onClick={() => {
+            if (!ctx) return;
+            const id = ctx.id;
+            onClose();
+            onCtxChangeAsset(id);
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+            <path d="M17 2l4 4-4 4" />
+            <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+            <path d="M7 22l-4-4 4-4" />
+            <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+          </svg>
+          更换资产…
+        </button>
+      ) : null}
       <button
         className="pop-it danger"
         data-od-id="ctx-delete"

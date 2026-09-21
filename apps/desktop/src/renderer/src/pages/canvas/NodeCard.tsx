@@ -21,6 +21,8 @@ interface NodeCardProps {
   nodes: CanvasNode[];
   /** nodeId → 最新成功 Take 产物路径(状态点 + 卡片内容回填) */
   takeResults: Record<string, string>;
+  /** assetId → 资产展示元信息(分类/缩略图;asset 节点渲染用) */
+  assetMeta: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }>;
   onSelect: (node: CanvasNode) => void;
   onContextMenu: (e: React.MouseEvent, node: CanvasNode) => void;
   onHeaderPointerDown: (e: React.PointerEvent, node: CanvasNode) => void;
@@ -38,6 +40,7 @@ export function NodeCard({
   connectHitOk,
   nodes,
   takeResults,
+  assetMeta,
   onSelect,
   onContextMenu,
   onHeaderPointerDown,
@@ -45,6 +48,9 @@ export function NodeCard({
   onAddClick,
   registerRef,
 }: NodeCardProps) {
+  const ameta = n.kind === 'asset'
+    ? assetMeta[String((n.data as { assetId?: unknown } | undefined)?.assetId ?? '')]
+    : undefined;
   const cls = [
     'node',
     n.ghost ? 'ghost' : '',
@@ -91,6 +97,10 @@ export function NodeCard({
           {TYPE_ICON[n.kind ?? 'plain']}
         </svg>
         {n.title}
+        {/* asset 节点:节点头部显示资产分类 badge(设计稿 st badge) */}
+        {ameta?.categoryName ? (
+          <span className="st badge" data-od-id="node-asset-cat">{ameta.categoryName}</span>
+        ) : null}
         {/* 状态点从**真实产物**派生(不再用节点上存的 st —— 它在加载时被写死为 ok):
            排队/生成中/失效 = 黄;有产物 = 绿;未生成 = 不显示 */}
         {(() => {
@@ -106,7 +116,7 @@ export function NodeCard({
           );
         })()}
       </div>
-      <NodeBody node={n} nodes={nodes} takeResults={takeResults} />
+      <NodeBody node={n} nodes={nodes} takeResults={takeResults} assetMeta={assetMeta} />
       <span className="port"></span>
       <button
         className="node-add"
