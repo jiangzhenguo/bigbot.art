@@ -14,6 +14,7 @@ const SETTINGS_FILE = join(DATA_DIR, 'settings.json');
 const DEFAULTS: AppSettings = {
   llm: { kind: 'lmstudio', model: 'ornith-1.5-35b-a3b-abliterated-mlx' },
   renderMode: 'demo',
+  ssdStreaming: false,
   lmStudioModel: 'ornith-1.5-35b-a3b-abliterated-mlx',
   defaultTier: 'default',
 };

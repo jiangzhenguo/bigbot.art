@@ -22,6 +22,8 @@ export interface H3CliOptions {
   seed: number;
   /** 秒数(24fps);给定时替代 frames 用 --seconds */
   seconds?: number;
+  /** SSD 流式读权重:内存紧张时开启,省 RAM 但更慢(默认关;64GB+ 实测关更快 ~30%) */
+  ssdStreaming?: boolean;
   /** 条件控制文件 */
   firstFrame?: string;
   lastFrame?: string;
@@ -123,6 +125,7 @@ export function buildH3Args(opts: H3CliOptions): string[] {
   for (const img of opts.refImages ?? []) args.push('--ref-image', img);
   if (opts.refVideo) args.push('--ref-video', opts.refVideo);
   if (opts.refAudio) args.push('--ref-audio', opts.refAudio);
+  if (opts.ssdStreaming === true) args.push('--ssd-streaming');
   for (const e of opts.extra ?? []) args.push(e);
   args.push('-p', opts.prompt);
   args.push('-o', opts.outputPath);

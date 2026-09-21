@@ -14,12 +14,14 @@ import { AccelStore } from './lora';
 import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
-import { extractFrame } from './frames';
+import { extractFrame, cropImage } from './frames';
 import { RenderQueue } from './render-queue';
-import { MemoryStore } from './memory';
+import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
 import { TakeStore } from './takes';
 import { DebugLogger } from './logger';
+import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus } from './mlxgen-models';
+import { installRuntime } from './runtime-install';
 import {
   credentialDelete,
   credentialGet,
@@ -34,7 +36,8 @@ import {
   resolveLlmEndpoint,
   testConnection,
 } from './llm';
-import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent } from '@bigbotart/shared';
+import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage } from '@bigbotart/shared';
+import { referenceMediaIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
 
@@ -97,6 +100,7 @@ const exportSvc = new ExportService(takes);
 const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
+  accel,
   // 分镜表规划:工具调用(对话里让 Agent 出分镜表)→ agent.planStoryboard(真 LLM,失败回退确定性模板)
   // LLM 来源与 agent-plan 同口径:项目级覆盖 → 全局设置 → worker 默认
   planStoryboard: async (brief, opts) => {
@@ -294,14 +298,16 @@ ipcMain.handle('probe-runtimes', async (): Promise<RuntimeProbe[]> => {
   return probes;
 });
 
-ipcMain.handle('install-runtime', async (_e, id: string) => {
-  const cmds: Record<string, string> = {
-    lmstudio: 'open -a "LM Studio" 或官网 https://lmstudio.ai 下载',
-    ollama: 'brew install ollama',
-    mlxgen: 'uv tool install --upgrade mlx-gen',
-    comfyui: '请从 https://github.com/comfyanonymous/ComfyUI 安装',
-  };
-  return { ok: false, message: cmds[id] ?? `未知运行时 ${id}`, manual: true };
+ipcMain.handle('install-runtime', (_e, id: string) => installRuntime(id, logger));
+
+// ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询) ----------
+ipcMain.handle('mlxgen-models', () => mlxgenModelInfo(logger));
+ipcMain.handle('mlxgen-download', (_e, repoId: string) => mlxgenDownload(repoId, logger));
+ipcMain.handle('mlxgen-download-status', (_e, jobId: string) => mlxgenDownloadStatus(jobId));
+// base64 PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用)
+ipcMain.handle('save-png-asset', (_e, input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }) => {
+  const r = assets.importFromDataUrl(input);
+  return { ok: r.ok, assetId: r.asset?.id, error: r.error };
 });
 
 // ---------- IPC:渲染任务(经队列,槽位互斥) ----------
@@ -309,6 +315,26 @@ ipcMain.handle('check-providers', () => registry.checkAll());
 ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
   const params = req.params as Record<string, unknown>;
   logger.log('info', `submit-render node=${req.nodeId} slot=${req.slot} provider=${req.provider} takeId=${req.takeId ?? '—'} mode=${String(params.mode ?? '?')} tier=${String(params.tier ?? '?')} w=${String(params.width ?? '?')} h=${String(params.height ?? '?')}`);
+  // 方案 D:提交前防呆 —— 单值参考端口(first-frame/last-frame/ref-audio/ref-video)多源 + 媒体匹配。
+  // 之前 h3c 对 refs 静默 `find(role)` 取第一个,多源时首帧来源不确定;这里入队前显式拒绝。
+  const refs = (req.references ?? []) as Array<{ role?: string; kind?: string; localPath?: string }>;
+  const byRole = new Map<string, number>();
+  for (const r of refs) {
+    if (!r.role) continue;
+    byRole.set(r.role, (byRole.get(r.role) ?? 0) + 1);
+  }
+  for (const role of ['first-frame', 'last-frame', 'ref-audio', 'ref-video']) {
+    const cnt = byRole.get(role);
+    if (cnt && cnt > 1) {
+      throw new Error(
+        `提交被拒绝:${req.nodeId} 的 ${role} 端口有 ${cnt} 个来源(单值端口,只能一个)。请移除多余连线后重试`,
+      );
+    }
+  }
+  const mediaIssues = referenceMediaIssues(refs as Array<{ role: string; kind?: string; path?: string }>);
+  if (mediaIssues.length > 0) {
+    throw new Error(`提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}`);
+  }
   // 🚀 加速 LoRA:开启且 real 模式时把蒸馏模型包解析成实际 modelDir(-d)+ steps(h3.c 不接受 --lora,见手册 §8)
   // demo 模式走 mock 占位,不解析(避免包缺失在演示路径误报)
   const accelReq = (params.accel ?? undefined) as { enabled?: boolean; packId?: string; steps?: number } | undefined;
@@ -459,6 +485,9 @@ ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId)
 
 // ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑) ----------
 ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last') => extractFrame(videoPath, mode));
+// 图片裁切(image-crop 节点):按目标画幅裁剪原图
+ipcMain.handle('crop-image', (_e, input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
+  cropImage(input.path, input.aspect, input.focus));
 
 // ---------- IPC:在系统文件管理器中显示(Finder) ----------
 // 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;
@@ -707,6 +736,77 @@ ipcMain.handle('agent-cancel', async (_e, projectId: string) => {
 });
 
 ipcMain.handle('memory-get', (_e, projectId: string) => memory.get(projectId));
+
+/* ---------- IPC:对话命令(/clear 清空 · /compact 压缩) ---------- */
+ipcMain.handle('memory-clear', (_e, projectId: string, canvasId: string) => {
+  const res = memory.clearConversation(projectId, canvasId);
+  logger.log('info', `memory.clear ${projectId}:${canvasId} · 清除 ${res.cleared} 条对话记录`);
+  return { ok: true, ...res };
+});
+
+/** 把 recall 消息组装成压缩用的 LLM 上下文(tool 记录转成带标记的 user 文本,便于模型理解"发生了什么") */
+function compactContext(msgs: RecallMessage[]): { systemPrompt: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> } {
+  return {
+    systemPrompt: '你是 BigBotArt 的对话压缩助手。用户会给你一段创作对话,你的任务是把它们压缩成简洁的中文摘要。只输出摘要正文。',
+    messages: msgs.map((r) => {
+      if (r.role === 'assistant') return { role: 'assistant', content: r.content };
+      if (r.role === 'tool') {
+        return {
+          role: 'user',
+          content: `[工具调用] ${r.toolName ?? '?'}(${JSON.stringify(r.toolArgs ?? {}).slice(0, 100)}) → ${(r.toolResult ?? '').slice(0, 200)}`,
+        };
+      }
+      return { role: 'user', content: r.content };
+    }),
+  };
+}
+
+/* /compact:把当前画布旧对话交给 LLM 压成摘要,裁剪 recall(保留最近 COMPACT_KEEP_LAST 条);
+   LLM 不可达/失败时用确定性兜底摘要,压缩流程照常完成(不阻塞用户) */
+ipcMain.handle('memory-compact', async (_e, projectId: string, canvasId: string) => {
+  const msgs = memory.get(projectId).recall.filter((r) => r.canvasId === canvasId);
+  const target = msgs.slice(0, Math.max(0, msgs.length - COMPACT_KEEP_LAST));
+  if (target.length === 0) return { ok: true, skipped: true, replaced: 0 };
+  logger.log('info', `memory.compact 开始 ${projectId}:${canvasId} · 压缩 ${target.length} 条(保留最近 ${COMPACT_KEEP_LAST} 条)`);
+
+  // LLM 来源优先级与 agent-chat 同口径:项目级覆盖 → 全局设置
+  let llm: LlmSource | undefined;
+  const project = store.getProject(projectId);
+  if (project?.llmOverride) llm = project.llmOverride;
+  else if (settings.get().llm) llm = settings.get().llm;
+  try {
+    const ep = await resolveLlmEndpoint(settings.get(), llm);
+    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+  } catch {
+    llm = undefined;
+  }
+
+  if (llm) {
+    try {
+      const result = await agent.chat({
+        projectId,
+        canvasId,
+        text: '请把以上对话压缩为简洁的中文摘要。保留:项目目标、已确定的风格与约束、画布节点的创建/修改/删除情况、待办事项、关键决定与产物内容。直接输出摘要正文,不要寒暄,不要输出其他内容。',
+        context: compactContext(target),
+        llm,
+      });
+      if (result.aborted) return { ok: false, error: '已打断' };
+      const summary = result.reply.trim();
+      if (summary) {
+        const res = memory.compactConversation(projectId, canvasId, summary);
+        logger.log('info', `memory.compact 完成 · 摘要 ${summary.length} 字 · 裁剪 ${res.replaced} 条`);
+        return { ok: true, summary, replaced: res.replaced };
+      }
+    } catch (e) {
+      logger.log('warn', `memory.compact LLM 失败,使用兜底摘要: ${(e as Error).message}`);
+    }
+  } else {
+    logger.log('warn', 'memory.compact LLM 不可达,使用兜底摘要');
+  }
+  const fallback = compactFallbackSummary(target);
+  const res = memory.compactConversation(projectId, canvasId, fallback);
+  return { ok: true, summary: fallback, replaced: res.replaced, fallback: true };
+});
 
 async function probeSimple(
   id: RuntimeProbe['id'],

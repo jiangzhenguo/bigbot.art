@@ -12,6 +12,11 @@ import type {
 const api: BigBotArtApi = {
   probeRuntimes: () => ipcRenderer.invoke('probe-runtimes'),
   installRuntime: (id) => ipcRenderer.invoke('install-runtime', id),
+  mlxgenModels: () => ipcRenderer.invoke('mlxgen-models'),
+  mlxgenDownload: (repoId: string) => ipcRenderer.invoke('mlxgen-download', repoId),
+  mlxgenDownloadStatus: (jobId: string) => ipcRenderer.invoke('mlxgen-download-status', jobId),
+  savePngAsset: (input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }) =>
+    ipcRenderer.invoke('save-png-asset', input),
   checkProviders: () => ipcRenderer.invoke('check-providers'),
   submitRender: (req: RenderRequest) => ipcRenderer.invoke('submit-render', req),
   renderStatus: (provider, handle) => ipcRenderer.invoke('render-status', provider, handle),
@@ -58,6 +63,8 @@ const api: BigBotArtApi = {
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),
   exportStatus: (taskId: string) => ipcRenderer.invoke('export-status', taskId),
   extractFrame: (videoPath, mode) => ipcRenderer.invoke('extract-frame', videoPath, mode),
+  cropImage: (input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
+    ipcRenderer.invoke('crop-image', input),
   revealInFinder: (target: { path: string }) => ipcRenderer.invoke('reveal-in-finder', target),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('set-settings', patch),
@@ -88,6 +95,8 @@ const api: BigBotArtApi = {
     return () => ipcRenderer.removeListener('agent-event', listener);
   },
   memoryGet: (projectId: string) => ipcRenderer.invoke('memory-get', projectId),
+  memoryClear: (projectId: string, canvasId: string) => ipcRenderer.invoke('memory-clear', projectId, canvasId),
+  memoryCompact: (projectId: string, canvasId: string) => ipcRenderer.invoke('memory-compact', projectId, canvasId),
   takesList: (projectId: string) => ipcRenderer.invoke('takes-list', projectId),
   takesHistory: (projectId: string, shotNodeId: string, currentTakeId?: string) =>
     ipcRenderer.invoke('takes-history', projectId, shotNodeId, currentTakeId),

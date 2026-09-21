@@ -16,6 +16,13 @@ import {
   rowNeedsImage,
   rowSeconds,
   SB_SIZE,
+  chunkText,
+  chunkNav,
+  validateEdge,
+  deriveShotRefsFromEdges,
+  validateRefsForSubmit,
+  referenceMediaIssues,
+  type DerivedRef,
   type PromptSource,
 } from '@bigbotart/shared';
 import type { ProjectStore } from './store';
@@ -23,6 +30,7 @@ import type { AssetStore } from './assets';
 import type { SkillStore } from './skills';
 import type { ExportService } from './export';
 import type { RenderQueue } from './render-queue';
+import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 export { toolDefinitions } from '@bigbotart/shared';
 
@@ -41,6 +49,15 @@ type Handler = (args: Record<string, unknown>, ctx: ToolContext) => Promise<Tool
 
 const nid = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
+/** 从路径后缀推断媒体 kind(提交引用映射用;与 shared referenceMediaIssues 同口径) */
+const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
+  /\.(png|jpe?g|webp|gif|bmp)$/i.test(p) ? 'image'
+  : /\.(mp4|mov|mkv)$/i.test(p) ? 'video'
+  : /\.(mp3|wav|m4a|aac)$/i.test(p) ? 'audio'
+  : undefined;
+
+const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
+
 /** 分镜表规划服务(由主进程注入,内部走 agent.planStoryboard → LLM / 确定性兜底) */
 export interface StoryboardPlanFn {
   (
@@ -57,6 +74,7 @@ export interface StoryboardPlanFn {
 
 export class ToolHandlers {
   private planStoryboard?: StoryboardPlanFn;
+  private accel?: AccelStore;
 
   constructor(
     private store: ProjectStore,
@@ -65,9 +83,10 @@ export class ToolHandlers {
     private exportSvc: ExportService,
     private queue: RenderQueue,
     private memory: MemoryStore,
-    opts: { planStoryboard?: StoryboardPlanFn } = {},
+    opts: { planStoryboard?: StoryboardPlanFn; accel?: AccelStore } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
+    this.accel = opts.accel;
   }
 
   /** 工具路由表 */
@@ -77,7 +96,26 @@ export class ToolHandlers {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
-      const lines = cur.nodes.map((n) => `- ${n.id} [${n.kind}] ${n.label}`).join('\n');
+      // 节点行附尺寸:asset 取资产库元数据宽高,图片/视频节点取 data.width/height ——
+      // 让 Agent 建下游节点(如 shot)时能读到上游图片/视频尺寸并沿用
+      const sizeOfNode = (n: CanvasNode): string => {
+        const d = (n.data ?? {}) as Record<string, unknown>;
+        if (n.kind === 'asset') {
+          const a = this.assets.get(String(d.assetId ?? ''));
+          if (a?.width && a?.height) return ` (${a.width}×${a.height})`;
+          return '';
+        }
+        const w = Number(d.width ?? 0);
+        const h = Number(d.height ?? 0);
+        return w > 0 && h > 0 ? ` (${w}×${h})` : '';
+      };
+      // ⚡ 标记:已开启加速 LoRA 的 shot
+      const accelMark = (n: CanvasNode): string => {
+        const d = (n.data ?? {}) as Record<string, unknown>;
+        const acc = (d.accel ?? {}) as { enabled?: boolean };
+        return acc.enabled ? ' ⚡' : '';
+      };
+      const lines = cur.nodes.map((n) => `- ${n.id} [${n.kind}] ${n.label}${sizeOfNode(n)}${accelMark(n)}`).join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
     'canvas.get_node': async (a, ctx) => {
@@ -108,6 +146,43 @@ export class ToolHandlers {
       ok: true,
       result: `节点类型:\n${nodeKindGuide()}\n\n可连线关系与端口语义:\n${connectorSummary()}`,
     }),
+    // 分段读取文档节点全文:先看 chunk=0 结构,再按需逐段读(长文档不一次性全量返回)
+    'document.read': async (a, ctx) => {
+      const nodeId = String(a.nodeId ?? '');
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      const node = cur?.nodes.find((n) => n.id === nodeId);
+      if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      if (node.kind !== 'document' && node.kind !== 'storyboard') {
+        return { ok: false, result: `节点 ${nodeId} 不是文档节点(${node.kind})· document.read 只读 document/storyboard 的 markdown` };
+      }
+      const md = String((node.data as { markdown?: unknown } | undefined)?.markdown ?? '');
+      if (!md.trim()) return { ok: false, result: `文档节点「${node.label}」内容为空(markdown 未填写)` };
+      const size = Number(a.size ?? 0) > 0 ? Number(a.size) : 4000;
+      const { chunks, totalChars, totalLines } = chunkText(md, { maxChars: size });
+      if (chunks.length === 0) return { ok: false, result: `文档节点「${node.label}」无内容可读` };
+      let idx = Number.isInteger(a.chunk) ? Number(a.chunk) : 0;
+      if (idx < 0) idx = 0;
+      if (idx >= chunks.length) {
+        return {
+          ok: false,
+          result: `块序号越界:chunk=${idx},该文档共 ${chunks.length} 块(0–${chunks.length - 1})· 已读完全部;如需重新分析可从 chunk=0 再读`,
+        };
+      }
+      const c = chunks[idx]!;
+      const nav = chunkNav(chunks, c);
+      const tail =
+        idx < chunks.length - 1
+          ? `\n---\n[继续读下一段] document.read(nodeId=${nodeId}, chunk=${idx + 1})· 剩余 ${chunks.length - 1 - idx} 段`
+          : '\n---\n[本块是最后一段 · 全文已读完]';
+      return {
+        ok: true,
+        result:
+          `文档「${node.label}」(${node.kind})· ${totalLines} 行 / ${totalChars} 字符 · ${nav}\n` +
+          `===== 第 ${idx + 1} 段(行 ${c.startLine}–${c.endLine})=====\n${c.text}${tail}`,
+        nodeId,
+      };
+    },
     'storyboard.plan': async (a, ctx) => {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
@@ -134,13 +209,23 @@ export class ToolHandlers {
         cur.edges.push({ id: nid('edge'), source: nodeId, target: sb.id, label: 'prompt' });
       }
       for (const n of [...res.images, ...res.shots]) cur.nodes.push(n);
-      for (const e of res.edges) cur.edges.push(e);
+      // 方案 A:LLM/规划器产出的边同样强制过校验,非法边丢弃并注明(不给画布留脏)
+      let droppedEdges = 0;
+      const keptEdges: CanvasEdge[] = [];
+      for (const e of res.edges) {
+        const v = validateEdge(cur.nodes, cur.edges.concat(keptEdges), e, {
+          resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind,
+        });
+        if (v.ok) keptEdges.push(e);
+        else droppedEdges++;
+      }
+      for (const e of keptEdges) cur.edges.push(e);
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
       const extra =
         res.shots.length || res.images.length
-          ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen`
+          ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen${droppedEdges ? ` · 已丢弃 ${droppedEdges} 条非法连线(端口/媒体不匹配)` : ''}`
           : '';
       return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
     },
@@ -221,7 +306,15 @@ export class ToolHandlers {
     'canvas.create_node': async (a, ctx) => {
       const kind = String(a.kind ?? 'document');
       const label = String(a.label ?? '新节点');
-      const data = (a.data as Record<string, unknown>) ?? {};
+      const rawData = (a.data as Record<string, unknown>) ?? {};
+      // 方案 B:refs 由连线推导,创建时直写 refs 一律忽略
+      let refsNote = '';
+      let data = rawData;
+      if ('refs' in rawData) {
+        const { refs: _ignored, ...rest } = rawData;
+        data = rest;
+        refsNote = ` · refs 由连线推导已忽略(用 canvas.connect 管理参考)`;
+      }
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
@@ -237,7 +330,7 @@ export class ToolHandlers {
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已创建节点「${label}」(${kind})`, nodeId: node.id };
+      return { ok: true, result: `已创建节点「${label}」(${kind})${refsNote}`, nodeId: node.id };
     },
     'canvas.update_node': async (a, ctx) => {
       const nodeId = String(a.nodeId ?? '');
@@ -246,12 +339,20 @@ export class ToolHandlers {
       const node = cur?.nodes.find((n) => n.id === nodeId);
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
       if (a.label !== undefined) node.label = String(a.label);
+      let refsNote = '';
       if (a.data && typeof a.data === 'object') {
-        node.data = { ...(node.data as Record<string, unknown>), ...(a.data as Record<string, unknown>) } as CanvasNode['data'];
+        const patch = a.data as Record<string, unknown>;
+        const next = { ...(node.data as Record<string, unknown>), ...patch };
+        // 方案 B:refs 由连线推导,直写 refs 一律忽略(消除双写漂移)
+        if ('refs' in patch) {
+          delete next.refs;
+          refsNote = ' · refs 由连线推导已忽略(用 canvas.connect/disconnect 管理参考)';
+        }
+        node.data = next as CanvasNode['data'];
       }
       node.updatedAt = new Date().toISOString();
       if (cur) { cur.updatedAt = node.updatedAt; this.store.saveCanvasSnapshot(cur); }
-      return { ok: true, result: `已更新节点「${node.label}」`, nodeId };
+      return { ok: true, result: `已更新节点「${node.label}」${refsNote}`, nodeId };
     },
     'canvas.delete_node': async (a, ctx) => {
       const nodeId = String(a.nodeId ?? '');
@@ -270,17 +371,65 @@ export class ToolHandlers {
     'canvas.connect': async (a, ctx) => {
       const from = String(a.from ?? '');
       const to = String(a.to ?? '');
+      const label = String(a.label ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
       if (!cur.nodes.some((n) => n.id === from)) return { ok: false, result: `源节点 ${from} 不存在` };
       if (!cur.nodes.some((n) => n.id === to)) return { ok: false, result: `目标节点 ${to} 不存在` };
       if (cur.edges.some((e) => e.source === from && e.target === to)) return { ok: true, result: '连线已存在' };
-      cur.edges.push({ id: nid('edge'), source: from, target: to, label: String(a.label ?? '') });
+      // 方案 A:写入点强制校验(端口合法性 + 媒体匹配 + 单值端口基数)
+      const v = validateEdge(
+        cur.nodes,
+        cur.edges,
+        { source: from, target: to, label },
+        { resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind },
+      );
+      if (!v.ok) {
+        const replaced = v.errors.find((e) => e.replaceable)?.replacedEdge;
+        if (replaced) {
+          // 方案 B:单值端口冲突 ⇒ 替换语义(旧边让位,新边生效;下游失效标记由渲染层 stale 机制承担)
+          cur.edges = cur.edges.filter(
+            (e) => !(e.source === replaced.source && e.target === replaced.target && e.label === replaced.label),
+          );
+          cur.edges.push({ id: nid('edge'), source: from, target: to, label });
+          cur.updatedAt = new Date().toISOString();
+          cur.version += 1;
+          this.store.saveCanvasSnapshot(cur);
+          return {
+            ok: true,
+            result: `已连线 ${from} → ${to}[${label}] · ⚠️ 单值端口冲突,已自动替换旧边 ${replaced.source} → ${replaced.target}[${replaced.label ?? ''}](旧来源不再生效,下游受影响节点会标记 stale)`,
+          };
+        }
+        return { ok: false, result: `连线被拒绝:${v.errors[0]!.message}` };
+      }
+      cur.edges.push({ id: nid('edge'), source: from, target: to, label });
       cur.updatedAt = new Date().toISOString();
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已连线 ${from} → ${to}` };
+      return { ok: true, result: `已连线 ${from} → ${to}[${label}]` };
+    },
+    'canvas.disconnect': async (a, ctx) => {
+      const from = String(a.from ?? '');
+      const to = String(a.to ?? '');
+      const label = String(a.label ?? '');
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const removed = label
+        ? cur.edges.filter((e) => e.source === from && e.target === to && (e.label ?? '') === label)
+        : cur.edges.filter((e) => e.source === from && e.target === to);
+      if (removed.length === 0) {
+        return { ok: false, result: `连线不存在:${from} → ${to}${label ? ` [${label}]` : ''}` };
+      }
+      cur.edges = cur.edges.filter((e) => !removed.includes(e));
+      cur.updatedAt = new Date().toISOString();
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+      return {
+        ok: true,
+        result: `已移除 ${removed.length} 条连线:${from} → ${to}${label ? ` [${label}]` : ''}`,
+      };
     },
 
     /* ── engine 域 ── */
@@ -290,15 +439,65 @@ export class ToolHandlers {
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       const node = cur?.nodes.find((n) => n.id === nodeId);
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      if (!cur) return { ok: false, result: '画布不存在' };
+      if (node.kind === 'image-crop') {
+        // 裁切不走引擎队列(ffmpeg 本地裁剪,由画布运行);Agent 侧提示用户到画布执行
+        return { ok: false, result: '图片裁切节点不走引擎队列:请在画布上选中该节点并运行(本地 ffmpeg,秒级)' };
+      }
       const isImage = node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale' || node.kind === 'asset';
+      // 方案 B+D:shot 的参考引用由连线推导(不再信任 agent 直写的 data.refs),提交前防呆拦截
+      const d = (node.data ?? {}) as Record<string, unknown>;
+      let references: Array<{ asset: import('@bigbotart/shared').Asset; role: string; localPath: string }> = [];
+      let warnNote = '';
+      if (node.kind === 'shot') {
+        const refs = deriveShotRefsFromEdges(
+          cur.nodes,
+          cur.edges,
+          nodeId,
+          Array.isArray(d.refs) ? (d.refs as DerivedRef[]) : undefined,
+          Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : undefined,
+        );
+        const issues = validateRefsForSubmit(nodeId, 'shot', refs, d);
+        const errs = issues.filter((i) => i.severity === 'error');
+        if (errs.length > 0) return { ok: false, result: `提交被拒绝:${errs.map((i) => i.message).join('; ')}` };
+        const warns = issues.filter((i) => i.severity === 'warn');
+        if (warns.length > 0) warnNote = ` · 警告:${warns.map((i) => i.message).join('; ')}`;
+        const now = new Date().toISOString();
+        const resolved: Array<{ asset: import('@bigbotart/shared').Asset; role: string; localPath: string }> = [];
+        for (const r of refs) {
+          if (r.assetId) {
+            const as = this.assets.get(r.assetId);
+            if (!as) continue;
+            resolved.push({ asset: as, role: r.role, localPath: as.localPath });
+          } else if (r.path) {
+            resolved.push({
+              asset: {
+                id: `shot-frame:${nodeId}`,
+                kind: kindFromPath(r.path) ?? 'image',
+                name: basenameOf(r.path),
+                localPath: r.path,
+                tags: [],
+                createdAt: now,
+              },
+              role: r.role,
+              localPath: r.path,
+            });
+          }
+        }
+        references = resolved;
+        const mediaIssues = referenceMediaIssues(resolved.map((x) => ({ role: x.role, kind: x.asset.kind, path: x.localPath })));
+        if (mediaIssues.length > 0) {
+          return { ok: false, result: `提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}` };
+        }
+      }
       const handle = this.queue.submit({
         provider: (node.data as { engine?: string }).engine === 'mlxgen' ? 'mlxgen' : isImage ? 'mlxgen' : 'h3c',
         nodeId,
         slot: isImage ? 'image' : 'video',
         params: (node.data as Record<string, unknown>) ?? {},
-        references: [],
+        references,
       });
-      return { ok: true, result: `已提交生成任务(${handle.providerTaskId})`, nodeId };
+      return { ok: true, result: `已提交生成任务(${handle.providerTaskId})${warnNote}`, nodeId };
     },
     'engine.queue_status': async () => {
       const jobs = this.queue.list();
@@ -309,6 +508,21 @@ export class ToolHandlers {
       const jobId = String(a.jobId ?? '');
       this.queue.cancel({ providerTaskId: jobId });
       return { ok: true, result: `已取消任务 ${jobId}` };
+    },
+
+    /* ── 加速 LoRA 域 ── */
+    'accel.list': async () => {
+      const packs = this.accel?.list() ?? [];
+      if (packs.length === 0) {
+        return { ok: true, result: '未安装加速 LoRA 蒸馏模型包 · 请先到设置页「加速 LoRA」安装;未开启加速时用常规档位生成' };
+      }
+      const lines = packs.map((p) => {
+        const parts = [`- ${p.id} [${p.name}]`, p.steps ? `steps=${p.steps}` : 'steps=默认'];
+        if (p.default) parts.push('· 默认');
+        if (p.exists === false) parts.push('· ⚠️ 目录缺失,不可用');
+        return parts.join(' ');
+      });
+      return { ok: true, result: `已安装加速 LoRA 蒸馏模型包:\n${lines.join('\n')}\n(镜头 data.accel={enabled:true, packId, steps} 开启;packId 用上面 id)` };
     },
 
     /* ── assets 域 ── */

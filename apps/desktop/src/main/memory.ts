@@ -19,6 +19,17 @@ const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 const RECALL_INJECT_LIMIT = 12; // 当前画布最近 N 条消息注入
 const ARCHIVAL_INJECT_LIMIT = 3; // archival 检索 top N
 const SUMMARY_FALLBACK_LEN = 200; // summary 生成的保底截断
+/** /compact 保留的最近消息条数(压缩更早的 old 部分;尾部保留以承接上下文/待确认 ask 卡) */
+export const COMPACT_KEEP_LAST = 8;
+
+/** /compact 的确定性兜底摘要(LLM 不可达/失败时保证压缩流程照常完成,不阻塞用户) */
+export function compactFallbackSummary(msgs: RecallMessage[]): string {
+  const lines = msgs.map((r) => {
+    const who = r.role === 'user' ? '用户' : r.role === 'assistant' ? '助手' : `工具(${r.toolName ?? '?'})`;
+    return `${who} ${r.content}`.slice(0, 160);
+  });
+  return `【对话自动摘要 · LLM 不可用时兜底】\n${lines.join('\n')}`.slice(0, 1500);
+}
 
 function memFile(projectId: string): string {
   return join(DATA_DIR, `memory-${projectId}.json`);
@@ -113,6 +124,41 @@ export class MemoryStore {
     this.persist(projectId);
   }
 
+  /** /clear:清空当前画布对话——移除该画布全部 recall + 对话压缩摘要(节点总结 summary 保留) */
+  clearConversation(projectId: string, canvasId: string): { cleared: number } {
+    const m = this.get(projectId);
+    const before = m.recall.length;
+    m.recall = m.recall.filter((r) => r.canvasId !== canvasId);
+    let changed = m.recall.length !== before;
+    const cur = m.canvasMemory[canvasId];
+    if (cur?.conversationSummary) {
+      m.canvasMemory[canvasId] = { ...cur, conversationSummary: undefined };
+      changed = true;
+    }
+    if (changed) this.persist(projectId);
+    return { cleared: before - m.recall.length };
+  }
+
+  /** /compact:把画布旧对话压成摘要——合并写入 canvasMemory.conversationSummary,裁剪 recall 只留最近 keepLast 条 */
+  compactConversation(projectId: string, canvasId: string, summary: string, keepLast = COMPACT_KEEP_LAST): { replaced: number } {
+    const m = this.get(projectId);
+    const entries = m.recall.filter((r) => r.canvasId === canvasId);
+    const replaced = Math.max(0, entries.length - keepLast);
+    if (replaced === 0) return { replaced: 0 };
+    const cur = m.canvasMemory[canvasId];
+    const merged = cur?.conversationSummary ? `${cur.conversationSummary}\n\n${summary}` : summary;
+    m.canvasMemory[canvasId] = {
+      summary: cur?.summary ?? '',
+      nodeCount: cur?.nodeCount ?? 0,
+      lastActive: cur?.lastActive ?? new Date().toISOString(),
+      keyDecisions: cur?.keyDecisions ?? [],
+      conversationSummary: merged,
+    };
+    m.recall = m.recall.filter((r) => r.canvasId !== canvasId || entries.indexOf(r) >= entries.length - keepLast);
+    this.persist(projectId);
+    return { replaced };
+  }
+
   /** 检索 recall(当前画布最近 N 条) */
   recentRecall(projectId: string, canvasId: string, limit = RECALL_INJECT_LIMIT): RecallMessage[] {
     const m = this.get(projectId);
@@ -174,6 +220,12 @@ export class MemoryStore {
     if (core.styleGuide) parts.push(`【风格规则】${core.styleGuide}`);
     if (core.constraints) parts.push(`【硬性约束】${core.constraints}`);
     if (core.userPreferences) parts.push(`【用户偏好】${core.userPreferences}`);
+
+    // ② 当前画布的对话压缩摘要(/compact 生成)注入 —— 压缩后仍保留全局脉络
+    const curMem = m.canvasMemory[canvasId];
+    if (curMem?.conversationSummary) {
+      parts.push(`【本画布对话摘要(已压缩)】${curMem.conversationSummary}`);
+    }
 
     // ② 其他画布的 summary 注入(当前画布除外)
     const others = Object.entries(m.canvasMemory).filter(([cid]) => cid !== canvasId);

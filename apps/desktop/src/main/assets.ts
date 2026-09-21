@@ -101,6 +101,16 @@ export function importAllowRoots(): string[] {
   return [DATA_DIR, OUTPUTS_DIR, mockOut, imgOut];
 }
 
+/**
+ * ffmpeg 读源(取帧/裁切)允许的根:渲染产物/导出(outputSearchRoots)
+ * ∪ 数据目录/资产库/项目文件夹(importAllowRoots)∪ 资产库显式根。
+ * 素材与产物在资产库、各 outputs 下都可作为裁剪 / 取帧源(过去只认 outputs,
+ * 资产库素材会误报「不在允许目录」)。
+ */
+export function ffmpegReadRoots(): string[] {
+  return [...new Set([...outputSearchRoots(), ...importAllowRoots(), ASSETS_DIR])];
+}
+
 /** 项目资产目录(不存在则创建) */
 export function projectAssetsDir(projectId: string): string {
   // projectId 由应用生成(proj-<ts>-<rand>),仍过滤路径分隔符防注入
@@ -311,6 +321,34 @@ export class AssetStore {
 
   get(id: string): Asset | undefined {
     return this.assets.find((a) => a.id === id);
+  }
+
+  /** 从 base64 PNG dataURL 导入资产(检查器画遮罩生成 mask 用);写入资产库并登记,返回新资产 */
+  importFromDataUrl(input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }): { ok: boolean; asset?: Asset; error?: string } {
+    const m = /^data:image\/(png|jpeg|webp);base64,(.+)$/.exec(input.dataUrl ?? '');
+    if (!m) return { ok: false, error: '仅支持 PNG/JPEG/WebP base64 dataURL' };
+    const ext = m[1] === 'png' ? '.png' : m[1] === 'jpeg' ? '.jpg' : '.webp';
+    const id = `asset-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const dest = join(ASSETS_DIR, `${id}${ext}`);
+    try {
+      writeFileSync(dest, Buffer.from(m[2]!, 'base64'));
+      const asset: Asset = {
+        id,
+        kind: 'image',
+        name: input.name,
+        localPath: dest,
+        mime: `image/${m[1] === 'jpeg' ? 'jpeg' : m[1]}`,
+        projectId: input.projectId,
+        source: 'import',
+        tags: input.tags ?? ['遮罩'],
+        createdAt: new Date().toISOString(),
+      };
+      this.assets.push(asset);
+      this.save();
+      return { ok: true, asset };
+    } catch (e) {
+      return { ok: false, error: `写入失败:${(e as Error).message}` };
+    }
   }
 
   /* ── 更新:重命名 / 改分类 / 改归属 / 改标签 ── */
