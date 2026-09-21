@@ -16,7 +16,8 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     timeline: 'clip', // 整段入轨
   },
   'image-gen': {
-    shot: 'first-frame', // 静帧直通首帧
+    // 图生视频双端口:first-frame 静帧直通首帧(FL2VA)/ ref-image 参考图注入(Ref2VA 身份/场景锁定)
+    shot: 'first-frame/ref-image',
     edit: 'input',
     upscale: 'input',
     crop: 'input', // 原图裁切源
@@ -24,21 +25,21 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     timeline: 'clip',
   },
   'image-edit': {
-    shot: 'first-frame',
+    shot: 'first-frame/ref-image',
     edit: 'input',
     upscale: 'input',
     crop: 'input', // 原图裁切源
     timeline: 'clip',
   },
   'image-upscale': {
-    shot: 'first-frame',
+    shot: 'first-frame/ref-image',
     edit: 'input',
     crop: 'input', // 原图裁切源
     image: 'ref-image',
     timeline: 'clip',
   },
   'image-crop': {
-    shot: 'first-frame', // 裁切结果直通首帧
+    shot: 'first-frame/ref-image', // 裁切结果 → 首帧直通 / 参考图注入
     edit: 'input', // 裁切结果作输入图
     upscale: 'input',
     image: 'ref-image', // 裁切结果作参考图

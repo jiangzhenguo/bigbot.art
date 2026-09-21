@@ -158,6 +158,23 @@ describe('B · deriveShotRefsFromEdges(refs 由边推导)', () => {
     const refs = deriveShotRefsFromEdges(nodes, [edge('a', 's', 'first-frame')], 's', [], ['first-frame']);
     expect(refs).toEqual([]);
   });
+
+  it('图片产物 → shot ref-image 推导出 path 引用(auto,参考图端口)', () => {
+    const nodes = [imageNode('g'), shotNode('s', { mode: 'ref-image' })];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('g', 's', 'ref-image')], 's');
+    expect(refs).toEqual([{ path: '/out/g.png', role: 'ref-image', auto: true }]);
+  });
+
+  it('两个图片产物源分别连 first-frame 与 ref-image:refs 两个端口各自推导', () => {
+    const nodes = [imageNode('g'), { id: 'c', kind: 'image-crop', data: { resultPath: '/out/c.png' } }, shotNode('s')];
+    const refs = deriveShotRefsFromEdges(
+      nodes,
+      [edge('g', 's', 'first-frame'), edge('c', 's', 'ref-image')],
+      's',
+    );
+    expect(refs.find((r) => r.role === 'first-frame')).toEqual({ path: '/out/g.png', role: 'first-frame', auto: true });
+    expect(refs.find((r) => r.role === 'ref-image')).toEqual({ path: '/out/c.png', role: 'ref-image', auto: true });
+  });
 });
 
 describe('D · 提交前防呆', () => {
@@ -185,5 +202,17 @@ describe('D · 提交前防呆', () => {
 
   it('allowedPortLabels:image-crop → shot 得 first-frame', () => {
     expect(allowedPortLabels(cropNode('c'), 'shot')).toContain('first-frame');
+  });
+
+  it('allowedPortLabels:四类图片产物 → shot 双端口(first-frame + ref-image 图生视频)', () => {
+    for (const k of ['image-gen', 'image-edit', 'image-upscale', 'image-crop']) {
+      const labels = allowedPortLabels({ id: `n-${k}`, kind: k, data: { resultPath: `/out/${k}.png` } }, 'shot');
+      expect(labels, k).toEqual(expect.arrayContaining(['first-frame', 'ref-image']));
+    }
+  });
+
+  it('validateEdge:image-gen → shot ref-image 合法(参考图端口)', () => {
+    const nodes = [imageNode('g'), shotNode('s')];
+    expect(validateEdge(nodes, [], edge('g', 's', 'ref-image')).ok).toBe(true);
   });
 });

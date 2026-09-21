@@ -282,10 +282,13 @@ export function deriveShotRefsFromEdges(
         if (tail) derived.push({ path: tail, role: 'first-frame', auto: true });
       }
     } else if (IMAGE_KINDS.includes(src.kind)) {
-      // 图片产物静帧直通首帧
+      // 图片产物 → 镜头:first-frame 静帧直通首帧 / ref-image 参考图注入(图生视频双端口,与资产图行为一致)
       if (lbl === 'first-frame') {
         const img = String(sd.resultPath ?? '');
         if (img) derived.push({ path: img, role: 'first-frame', auto: true });
+      } else if (lbl === 'ref-image') {
+        const img = String(sd.resultPath ?? '');
+        if (img) derived.push({ path: img, role: 'ref-image', auto: true });
       }
     }
   }

@@ -20,6 +20,9 @@ export interface PortResolution {
 
 type PortRow = [port: string, desc: string];
 
+/** 端口条目:单条 tuple,或多条 tuple 数组(同目标的多个可选端口,如图片产物 → shot 的 first-frame/ref-image) */
+type PortEntry = PortRow | PortRow[];
+
 /** 源节点 id 特例(演示节点/固定语义) */
 const BY_ID: Record<string, Record<string, PortRow>> = {
   // 演示画布里的角色资产:身份注入优先于通用参考图
@@ -36,15 +39,18 @@ const BY_ID: Record<string, Record<string, PortRow>> = {
   },
 };
 
-/** 源节点 kind → 目标类型 → 端口 */
-const BY_KIND: Record<string, Record<string, PortRow>> = {
+/** 源节点 kind → 目标类型 → 端口(单条或多条;多条时 resolvePortOptions 返回全部,弹窗出「角色」chips) */
+const BY_KIND: Record<string, Record<string, PortEntry>> = {
   shot: {
     shot: ['first-frame', '首帧 · 上游尾帧自动取帧'],
     edit: ['input', '输入帧 · 首/尾帧可取'],
     timeline: ['clip', '视频片段 · 整段入轨'],
   },
   'image-gen': {
-    shot: ['first-frame', '首帧 · 直通'],
+    shot: [
+      ['first-frame', '首帧 · 直通'],
+      ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
+    ],
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
@@ -52,21 +58,30 @@ const BY_KIND: Record<string, Record<string, PortRow>> = {
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-edit': {
-    shot: ['first-frame', '首帧 · 直通'],
+    shot: [
+      ['first-frame', '首帧 · 直通'],
+      ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
+    ],
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-upscale': {
-    shot: ['first-frame', '首帧 · 直通'],
+    shot: [
+      ['first-frame', '首帧 · 直通'],
+      ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
+    ],
     edit: ['input', '输入图 · 直通'],
     crop: ['input', '输入图 · 原图裁切'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-crop': {
-    shot: ['first-frame', '首帧 · 裁切直通'],
+    shot: [
+      ['first-frame', '首帧 · 裁切直通'],
+      ['ref-image', '参考图 · 裁切结果作 Ref2VA'],
+    ],
     edit: ['input', '输入图 · 裁切结果'],
     upscale: ['input', '输入图 · 超分源'],
     image: ['ref-image', '参考图'],
@@ -215,7 +230,11 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
   }
 
   const byKind = BY_KIND[src.kind ?? '']?.[dstTypeId];
-  if (byKind) return [{ port: byKind[0], desc: byKind[1] }];
+  if (byKind) {
+    // 单条 tuple(如 ['first-frame', '首帧 · 直通'])/ 多条 tuple 数组(图片产物 → shot 双端口)统一展开
+    const rows: PortRow[] = Array.isArray(byKind[0]) ? (byKind as PortRow[]) : [byKind as PortRow];
+    return rows.map(([port, desc]) => ({ port, desc }));
+  }
 
   // 收口到 workflow-output:仅限真正产出产物的节点(与 dispatch 的 kind 匹配一致)
   const byTarget = BY_TARGET[dstTypeId];

@@ -60,6 +60,26 @@ describe('resolvePortOptions · image-crop 作为源', () => {
   });
 });
 
+describe('resolvePortOptions · 图片产物 → shot(图生视频双端口)', () => {
+  it('image-gen / image-edit / image-upscale / image-crop → shot 均提供 first-frame + ref-image 双端口', () => {
+    for (const k of ['image-gen', 'image-edit', 'image-upscale', 'image-crop']) {
+      const opts = resolvePortOptions(imageNode(k, true), 'shot');
+      expect(opts.map((o) => o.port), k).toEqual(['first-frame', 'ref-image']);
+    }
+  });
+
+  it('双端口默认锚定为首端口 first-frame,ref-image 可选(deriveEdgeLabel portOverride 场景)', () => {
+    expect(resolvePort(imageNode('image-gen', true), 'shot')?.port).toBe('first-frame');
+    const opts = resolvePortOptions(imageNode('image-gen', true), 'shot');
+    expect(opts.some((o) => o.port === 'ref-image')).toBe(true);
+  });
+
+  it('asset(图片素材) → shot 双端口保持不变(回归)', () => {
+    const opts = resolvePortOptions(assetImage(), 'shot');
+    expect(opts.map((o) => o.port)).toEqual(['first-frame', 'ref-image']);
+  });
+});
+
 describe('IMAGE_KINDS', () => {
   it('image-crop 属于图片产物类节点(静帧直通/收口集合)', () => {
     expect(IMAGE_KINDS).toContain('image-crop');

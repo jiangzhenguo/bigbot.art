@@ -60,7 +60,10 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         const modeOverridden = d.modeOverride === true;
         const fromShot = src.kind === 'shot';
         const fromImage = IMAGE_KINDS.includes(src.kind ?? '');
-        const hasFrameEdge = fromShot || fromImage || e.label === 'first-frame';
+        // 只有「首帧端口」入边才自动切 mode(默认文生 → 首帧);
+        // ref-image(参考图)边不误切首帧 —— h3 的 --ref-image 与 --first-frame 互斥(连接器设计 §10.4)
+        const isFirstFrameEdge = e.label === 'first-frame';
+        const hasFrameEdge = (fromShot || fromImage || src.kind === 'asset') && isFirstFrameEdge;
         // 只要存在「首帧端口」入边就登记(与是否需要切换 mode 无关),供删边后收回判断
         if (hasFrameEdge) {
           frameEdgeNodes.add(e.to);
@@ -100,10 +103,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           }
           specFromPatch.set(e.to, { nodeId: e.from });
         } else if (fromImage) {
-          // 静帧直通:图片产物直接当首帧(端口 first-frame)
-          if (frameOk && !autoBlocked('first-frame')) {
+          // 图片产物 → 镜头(图生视频双端口):
+          // - first-frame:静帧直通首帧(全链路自动切首帧模式)
+          // - ref-image:结果图作 Ref2VA 参考(多值端口,可多条,与资产图 ref-image 行为一致)
+          if (e.label === 'first-frame') {
+            if (frameOk && !autoBlocked('first-frame')) {
+              const img = String(s.resultPath ?? '');
+              if (img) arr.push({ path: img, role: 'first-frame', auto: true });
+            }
+          } else if (e.label === 'ref-image') {
             const img = String(s.resultPath ?? '');
-            if (img) arr.push({ path: img, role: 'first-frame', auto: true });
+            if (img) arr.push({ path: img, role: 'ref-image', auto: true });
           }
         }
         if (arr.length) refPatch.set(e.to, arr);

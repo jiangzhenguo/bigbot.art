@@ -76,6 +76,41 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect(refs).toContainEqual({ path: '/tmp/out/crop.png', role: 'first-frame', auto: true });
   });
 
+  it('图片产物 → shot(ref-image 端口):shot.refs 注入 { path, role:ref-image, auto } 参考图', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('s1', 'shot', { mode: 'ref-image', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'g1', to: 's1', cls: '', label: 'ref-image' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const shot = nextNodes.find((n) => n.id === 's1')!;
+    const refs = (shot.data as { refs: Array<{ path?: string; role: string }> }).refs;
+    expect(refs).toContainEqual({ path: '/tmp/out/g1.png', role: 'ref-image', auto: true });
+  });
+
+  it('ref-image 边不触发 mode 自动切换(保持 text2video;h3 --ref-image 与 --first-frame 互斥)', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('s1', 'shot', { mode: 'text2video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'g1', to: 's1', cls: '', label: 'ref-image' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const shot = nextNodes.find((n) => n.id === 's1')!;
+    expect((shot.data as { mode: string }).mode).toBe('text2video');
+  });
+
+  it('first-frame 边仍自动切 mode=first-frame(回归);删掉后收回 text2video', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('s1', 'shot', { mode: 'text2video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'g1', to: 's1', cls: '', label: 'first-frame' }];
+    const once = computeEdgeDerivations(nodes, edges);
+    expect((once.nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('first-frame');
+    const twice = computeEdgeDerivations(once.nextNodes, []);
+    expect((twice.nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('text2video');
+  });
+
   it('crop → timeline:入线(clip)', () => {
     const nodes = [node('c1', 'image-crop', { resultPath: '/tmp/out/crop.png' }), node('t1', 'timeline', { shotNodeIds: [] })];
     const edges: Edge[] = [{ from: 'c1', to: 't1', cls: '', label: 'clip' }];

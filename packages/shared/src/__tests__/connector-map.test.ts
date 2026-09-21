@@ -11,14 +11,21 @@ import {
 } from '../connector-map.js';
 
 describe('CONNECTOR_MAP · image-crop', () => {
-  it('image-crop 作为源:可连 shot(首帧)/edit/upscale(输入)/image(参考图)/timeline(clip)', () => {
+  it('image-crop 作为源:可连 shot(首帧/参考图图生视频双端口)/edit/upscale(输入)/image(参考图)/timeline(clip)', () => {
     const src = CONNECTOR_MAP['image-crop'];
     expect(src).toBeDefined();
-    expect(src?.['shot']).toBe('first-frame');
+    expect(src?.['shot']).toBe('first-frame/ref-image');
     expect(src?.['edit']).toBe('input');
     expect(src?.['upscale']).toBe('input');
     expect(src?.['image']).toBe('ref-image');
     expect(src?.['timeline']).toBe('clip');
+  });
+
+  it('四类图片产物 → shot 均声明图生视频双端口(first-frame/ref-image)', () => {
+    for (const k of ['image-gen', 'image-edit', 'image-upscale', 'image-crop']) {
+      const shotPorts = CONNECTOR_MAP[k]?.['shot'];
+      expect(shotPorts, k).toBe('first-frame/ref-image');
+    }
   });
 
   it('图片产物类节点可作为裁切源(crop → input)', () => {
