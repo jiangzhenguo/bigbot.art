@@ -46,8 +46,8 @@ export interface ChatMsg {
   toolCall?: { name: string; args: Record<string, unknown>; status: 'running' | 'success' | 'error'; result?: string; nodeId?: string };
   /** 本轮工具执行聚合(ToolRunCard;设计文档 §3.3) */
   toolRuns?: ToolRun[];
-  /** 确认卡片(Agent 调 ask.user 暂停,等待用户点选);options 已归一化为 AskOption */
-  ask?: { question: string; options: AskOption[] };
+  /** 确认卡片(Agent 调 ask.user 暂停,等待用户点选);options 已归一化为 AskOption;picked 记录用户点选(写回消息数据,重进页面/恢复历史后仍可回显) */
+  ask?: { question: string; options: AskOption[]; picked?: string };
   /** 错误卡(ErrorCard;retryText 存在时显示「重试本轮」) */
   error?: { title: string; detail: string; retryText?: string };
   /** loading 占位(发送后到回复前) */

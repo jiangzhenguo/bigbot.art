@@ -16,7 +16,14 @@ import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from '
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
 
-const MAX_TOOL_ROUNDS = 8;
+/**
+ * 最大工具调用轮数(LLM ↔ 工具往返)。
+ * 参考:原生 pi(CLI agent)用 maxTurns 做无限循环保护,生态常见默认 50
+ * (pi-subagents 可配置 default max turns;reactLoop maxTurns=50)。
+ * 本项目按上下文窗口等比例折算取保守值:32k 窗口原 8 轮 → 100k 窗口 ≈ 25 轮,
+ * 留余量取 20(每轮历史线性增长,超窗会让远端拒绝;若遇长任务可手动拆小)。
+ */
+const MAX_TOOL_ROUNDS = 20;
 
 /**
  * 敏感操作强制确认闸(结构兜底,与 memory.ts 的提问规则对应)。
@@ -44,6 +51,26 @@ function describeAction(name: string, args: Record<string, unknown>): string {
 }
 
 /** 从正文拆出思考内容(reasoning 模型经 OpenAI 兼容端点常把 <think> 漏进 text;兼容未闭合) */
+/**
+ * LLM 端点错误注解:识别本地模型(LM Studio)prompt template 渲染失败类错误并附中文修复指引。
+ * 这类错误不是应用 bug:Ornith/Qwen3.5 系 GGUF 内置 chat_template 有硬 raise_exception,
+ * agent 工具调用消息流(末尾是 tool 结果而非 user query)渲染即抛「No user query found in messages.」
+ * (LM Studio 0.4.6 已知问题,见 lmstudio-bug-tracker #1586 / Ornith 官方修复 commit)。
+ */
+const LLM_TEMPLATE_ERR_RE = /jinja|prompt\s*template|no user query|render(?:ing)?\s*prompt/i;
+const LLM_TEMPLATE_HINT =
+  '【修复指引】此错误来自本地模型(LM Studio)的 Prompt Template 损坏,不是 BigBotArt 的问题:' +
+  'Agent 的工具调用消息流渲染失败。请在 LM Studio 换用 lmstudio-community 的新版模型,' +
+  '或在 My Models → 模型设置 → Prompt Template 覆盖为修复版模板(Ornith/Qwen3.5 系已知问题)。';
+
+/** 给 LLM 返回错误追加可操作的修复指引(仅模板类错误;已注解的文本不重复追加) */
+function annotateLlmError(raw: string): string {
+  if (raw && LLM_TEMPLATE_ERR_RE.test(raw) && !raw.includes('【修复指引】')) {
+    return `${raw}\n\n${LLM_TEMPLATE_HINT}`;
+  }
+  return raw;
+}
+
 function splitThink(raw: string): { text: string; thinking?: string } {
   const thinks: string[] = [];
   const cleaned = raw.replace(/<think>([\s\S]*?)(?:<\/think>|$)/g, (_m, inner: string) => {
@@ -116,7 +143,7 @@ export class PiChatSession {
       provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 32000, maxTokens: 4000,
+      contextWindow: 100_000, maxTokens: 4000,
     };
     const provider = createProvider({
       id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,
@@ -174,7 +201,7 @@ export class PiChatSession {
       }
       if (assistant.stopReason === 'aborted') return { reply: '', toolCalls, aborted: true };
       if (assistant.stopReason === 'error' || assistant.errorMessage) {
-        throw new Error(`LLM 返回错误: ${assistant.errorMessage ?? assistant.stopReason}`);
+        throw new Error(`LLM 返回错误: ${annotateLlmError(assistant.errorMessage ?? assistant.stopReason)}`);
       }
 
       // 调试:记录本轮 LLM 返回结构

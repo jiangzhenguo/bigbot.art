@@ -20,6 +20,13 @@ import { planDeterministic, planStoryboardDeterministic, buildStoryboardMaterial
 let seq = 0;
 const nid = (p: string) => `${p}-${Date.now()}-${++seq}`;
 
+/** h3.c 帧数对齐(5+17n):与 h3 --seconds 的换算一致(seconds×24 后向上对齐) */
+function h3AlignFrames(f: number): number {
+  const v = Math.max(5, Math.round(f));
+  const r = (v - 5) % 17;
+  return r === 0 ? v : v + 17 - r;
+}
+
 /** LLM 结构化输出 schema(镜头规划) */
 export interface LlmPlanOutput {
   brief: string;
@@ -198,7 +205,7 @@ export class PiPlanner {
       reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 32000,
+      contextWindow: 100_000,
       maxTokens: 2400,
     };
     const provider = createProvider({
@@ -285,7 +292,7 @@ export class PiPlanner {
       reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 32000,
+      contextWindow: 100_000,
       maxTokens: 2000,
     };
     const provider = createProvider({
@@ -378,7 +385,7 @@ export class PiPlanner {
           prompt,
           width: s.width ?? 768,
           height: s.height ?? 768,
-          frames: Math.round((s.durationHintSec ?? 4) * 24),
+          frames: h3AlignFrames((s.durationHintSec ?? 4) * 24),
           steps: 30,
           layers: 50,
           reuse: 1,

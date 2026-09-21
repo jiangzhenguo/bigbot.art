@@ -14,6 +14,13 @@ import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
 import { llmDisplayName } from './llm-display';
 
+/** 错误卡标题:模板类错误(本地模型 Prompt Template 损坏,pi-chat 已附修复指引)/ 不可达 / 其他对话失败 */
+function errorCardTitle(detail: string): string {
+  if (/jinja|prompt\s*template|no user query|修复指引/i.test(detail)) return '本地模型提示词模板异常';
+  if (/不可达|不可用|超时|timeout|ECONNREFUSED|fetch failed|connect/i.test(detail)) return '对话服务不可达';
+  return '对话失败';
+}
+
 export interface UseAgentChatOptions {
   projectId: string | null;
   canvasId: string;
@@ -156,6 +163,58 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
     setMsgs((m) => [...m, { ...msg, id: ++msgId.current }]);
   }, []);
 
+  /** /clear 命令:清空当前画布对话(UI + 持久化 recall/压缩摘要;画布/产物不受影响) */
+  const clearChat = useCallback(() => {
+    if (!projectId || !canvasId) {
+      toastMsg('请先进入一个项目画布');
+      return;
+    }
+    setMsgs([]);
+    pinToBottom.current = true;
+    void window.bigbotart
+      .memoryClear(projectId, canvasId)
+      .then((res) => toastMsg(res.ok ? `已清空对话 · 移除 ${res.cleared} 条记录` : `清空失败:${res.error ?? '未知错误'}`))
+      .catch((e) => toastMsg(`清空失败:${e instanceof Error ? e.message : String(e)}`));
+  }, [projectId, canvasId, toastMsg]);
+
+  /** /compact 命令:把旧对话压成摘要(LLM 总结 + 裁剪 recall),保留最近若干条承接上下文 */
+  const compactChat = useCallback(() => {
+    if (!projectId || !canvasId) {
+      toastMsg('请先进入一个项目画布');
+      return;
+    }
+    const loadingId = ++msgId.current;
+    setSending(true);
+    setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '正在压缩对话…' }]);
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    window.bigbotart
+      .memoryCompact(projectId, canvasId)
+      .then((res) => {
+        // updater 外一次分配 id(StrictMode 下 updater 双跑,ref 改动必须在 updater 外)
+        const doneId = ++msgId.current;
+        setMsgs((m) => {
+          const rest = m.filter((x) => x.id !== loadingId);
+          if (res.ok && res.skipped) {
+            return [...rest, { id: doneId, kind: 'sys', text: '对话太短,无需压缩' }];
+          }
+          if (res.ok && res.summary) {
+            return [
+              ...rest,
+              { id: doneId, kind: 'sys', text: `已压缩 ${res.replaced ?? 0} 条旧消息${res.fallback ? ' · LLM 不可用,使用兜底摘要' : ''}:\n${res.summary}` },
+            ];
+          }
+          return [...rest, { id: doneId, kind: 'agent', error: { title: '压缩失败', detail: res.error ?? '未知错误' } }];
+        });
+        if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+      })
+      .catch((e) => {
+        const errId = ++msgId.current;
+        const detail = e instanceof Error ? e.message : String(e);
+        setMsgs((m) => [...m.filter((x) => x.id !== loadingId), { id: errId, kind: 'agent', error: { title: '压缩失败', detail } }]);
+      })
+      .finally(() => setSending(false));
+  }, [projectId, canvasId]);
+
   /* ══ 对话发送 / 打断 ══ */
   const send = useCallback(
     (overrideText?: string, attachments?: Asset[]) => {
@@ -168,6 +227,22 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
       if (!pid || !cid) {
         toastMsg('请先进入一个项目画布');
         return;
+      }
+      // ✂️ 斜杠命令(仅纯文本时识别;带附件视为普通消息):/clear 清空对话 · /compact 压缩上下文
+      if (atts.length === 0) {
+        const cmd = v.match(/^\/(clear|compact)(?:\s|$)/)?.[1];
+        if (cmd === 'clear') {
+          clearChat();
+          setChatInput('');
+          if (inputRef.current) inputRef.current.value = '';
+          return;
+        }
+        if (cmd === 'compact') {
+          compactChat();
+          setChatInput('');
+          if (inputRef.current) inputRef.current.value = '';
+          return;
+        }
       }
       setMsgs((m) => [
         ...m,
@@ -245,7 +320,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
                 id: ++msgId.current,
                 kind: 'agent',
                 error: {
-                  title: /不可达|不可用|超时|timeout|ECONNREFUSED|fetch failed|connect/i.test(detail) ? '对话服务不可达' : '对话失败',
+                  title: errorCardTitle(detail),
                   detail,
                   retryText: v,
                 },
@@ -259,7 +334,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
           const detail = e instanceof Error ? e.message : String(e);
           setMsgs((m) => [
             ...m.filter((x) => x.id !== loadingId),
-            { id: ++msgId.current, kind: 'agent', error: { title: '对话服务不可达', detail, retryText: v } },
+            { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail, retryText: v } },
           ]);
         })
         .finally(() => {
@@ -271,7 +346,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
           if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
         });
     },
-    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg],
+    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat],
   );
 
   /** 真实打断:中止 worker 内 LLM 请求 */
@@ -284,6 +359,21 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
     ]);
     setSending(false);
   }, [projectId]);
+
+  /** ask 确认卡点选:①把选择写回消息数据(ask.picked,记录——重进页面/恢复历史后仍回显);②以选项文案继续对话 */
+  const askPick = useCallback(
+    (msgId: number, label: string) => {
+      // updater 纯:只做数据映射;副作用 send 在 updater 外
+      setMsgs((m) => m.map((x) => (x.id === msgId && x.ask ? { ...x, ask: { ...x.ask, picked: label } } : x)));
+      send(label);
+    },
+    [send],
+  );
+
+  /** ask 确认卡「重新选择」:清除已记录的点选(ask.picked),回到可点选状态(之前已回传的答复不撤销) */
+  const askReset = useCallback((msgId: number) => {
+    setMsgs((m) => m.map((x) => (x.id === msgId && x.ask ? { ...x, ask: { ...x.ask, picked: undefined } } : x)));
+  }, []);
 
   /** 挂载时恢复当前画布的对话历史(recall;连续的 tool 记录聚合为一组 toolRuns) */
   useEffect(() => {
@@ -301,7 +391,9 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
         }
         toolGroup = null;
       };
-      for (const r of recent) {
+      for (let i = 0; i < recent.length; i++) {
+        const r = recent[i];
+        if (!r) continue; // noUncheckedIndexedAccess:recent[i] 可能为 undefined
         if (r.role === 'tool' && r.toolName === 'ask.user') {
           // ask.user 暂停卡(被 worker 拦截,不经工具桥):恢复成可点选的确认卡,而不是丢成纯文本
           flushTools();
@@ -321,7 +413,20 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
             // 注意 recall 顺序是 [assistant 文本, …工具记录, ask.user],要往前找最近一条同文本文本消息
             const dupIdx = restored.findLastIndex((x) => x.kind === 'agent' && x.text === args.question);
             if (dupIdx >= 0) restored.splice(dupIdx, 1);
-            restored.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: args.question, options: opts as import('@bigbotart/shared').AskOption[] } });
+            // 恢复「已点选」:ask.user 之后紧邻的用户消息恰为某个选项文案 → 视为用户当时的点选,
+            // 卡片直接回显「已选择 · X」,而不是退回等待确认(修复:点选未记录,重进页面状态丢失)
+            const askOpts = opts as Array<{ label: string }>;
+            const nxt = recent[i + 1];
+            const picked =
+              nxt?.role === 'user' && nxt.content && askOpts.some((o) => o.label.trim() === nxt.content.trim())
+                ? nxt.content.trim()
+                : undefined;
+            restored.push({
+              id: ++msgId.current,
+              kind: 'agent',
+              odId: 'agent-ask',
+              ask: { question: args.question, options: opts as import('@bigbotart/shared').AskOption[], picked },
+            });
           } else {
             restored.push({ id: ++msgId.current, kind: 'agent', text: r.content });
           }
@@ -408,7 +513,11 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
     msgs,
     sending,
     send,
+    askPick,
+    askReset,
     interrupt,
+    clearChat,
+    compactChat,
     pushMsg,
     chatInput,
     setChatInput,

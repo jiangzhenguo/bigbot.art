@@ -20,7 +20,7 @@ export function AgentChatView({
   onLocate: (nodeId: string) => void;
   onOpenSettings: () => void;
 }) {
-  const { msgs, send, chatRef, pinToBottom, model, modelOverridden } = chat;
+  const { msgs, send, askPick, askReset, chatRef, pinToBottom, model, modelOverridden } = chat;
 
   return (
     <>
@@ -39,7 +39,14 @@ export function AgentChatView({
           pinToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <ChatMessageList msgs={msgs} onSend={send} onLocate={onLocate} onOpenSettings={onOpenSettings} />
+        <ChatMessageList
+          msgs={msgs}
+          onSend={send}
+          onLocate={onLocate}
+          onOpenSettings={onOpenSettings}
+          onAskPick={askPick}
+          onAskReset={askReset}
+        />
       </div>
     </>
   );

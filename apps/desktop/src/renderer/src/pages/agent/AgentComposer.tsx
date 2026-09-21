@@ -23,6 +23,7 @@ export function AgentComposer({
 
   const {
     sending, send, interrupt,
+    clearChat, compactChat,
     setChatInput, inputRef, autoGrow,
     model, modelOptions, loadModelOptions, pickModel,
   } = chat;
@@ -84,7 +85,7 @@ export function AgentComposer({
         <textarea
           rows={2}
           ref={inputRef}
-          placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…"
+          placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…（/clear 清空对话 · /compact 压缩上下文）"
           onChange={(e) => {
             setChatInput(e.target.value);
             autoGrow(e.target);
@@ -98,6 +99,12 @@ export function AgentComposer({
         />
       </div>
       <div className="toolrow">
+        <button className="chip mono" onClick={clearChat} title="清空当前画布对话(移除全部对话记录,不可恢复;画布与产物不受影响)">
+          /clear
+        </button>
+        <button className="chip mono" onClick={compactChat} title="把旧对话压缩成摘要并裁剪上下文,保留最近几轮">
+          /compact
+        </button>
         <button
           className="chip"
           onClick={(e) => {

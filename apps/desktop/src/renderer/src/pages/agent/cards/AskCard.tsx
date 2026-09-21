@@ -5,8 +5,10 @@
  * - 问题支持 Markdown(含 GFM 表格,方案对比用)
  * - 选项:字母序号圆 A~F + 主文案 + 灰色副说明 + 中性「推荐」徽标
  * - 点选后:选项收起,回显「已选择 · X · 已作为回复回传」,可「重新选择」回退
+ * - 选中态是受控的:picked 来自消息数据(ask.picked),由父级记录,不做本地记忆——
+ *   点选即写回消息数据,重进页面/恢复历史后仍正确回显,不会丢回「等待确认」
  */
-import React, { useState } from 'react';
+import React from 'react';
 import type { AskOption } from '@bigbotart/shared';
 import MarkdownText from '../../../components/MarkdownText';
 
@@ -31,13 +33,19 @@ function normalize(o: AskOption | string): AskOption {
 export function AskCard({
   question,
   options,
+  picked = null,
   onPick,
+  onReset,
 }: {
   question: string;
   options: Array<AskOption | string>;
+  /** 已点选的选项文案(来自消息数据 ask.picked;null = 未点选) */
+  picked?: string | null;
+  /** 点选选项:父级负责记录到消息数据,并以该文案继续对话 */
   onPick: (label: string) => void;
+  /** 点「重新选择」:父级清除 ask.picked,回到可点选状态 */
+  onReset: () => void;
 }) {
-  const [picked, setPicked] = useState<string | null>(null);
   // 最后一道防线:任何来源(实时/恢复/异常协议)给到非数组 options 都不允许崩——空选项只显示问题
   const opts = (Array.isArray(options) ? options : []).map(normalize).slice(0, 6);
 
@@ -54,7 +62,7 @@ export function AskCard({
         </div>
         <div className="ask-opts">
           {opts.map((o, i) => (
-            <button key={`${o.label}-${i}`} className="ask-opt" type="button" onClick={() => { setPicked(o.label); onPick(o.label); }}>
+            <button key={`${o.label}-${i}`} className="ask-opt" type="button" onClick={() => onPick(o.label)}>
               <span className="ix">{LETTERS[i] ?? String(i + 1)}</span>
               <span className="tx">
                 {o.label}
@@ -69,7 +77,7 @@ export function AskCard({
           <span className="grow">
             已选择 · <b>{picked}</b> · 已作为回复回传
           </span>
-          <span className="rst" onClick={() => setPicked(null)}>
+          <span className="rst" onClick={onReset}>
             重新选择
           </span>
         </div>

@@ -19,12 +19,18 @@ export function ChatMessageList({
   onSend,
   onLocate,
   onOpenSettings,
+  onAskPick,
+  onAskReset,
 }: {
   msgs: ChatMsg[];
   /** 发送一条用户消息(ask 点选 / 错误卡重试) */
   onSend: (text: string) => void;
   onLocate: (nodeId: string) => void;
   onOpenSettings: () => void;
+  /** ask 确认卡点选:父级记录选择到消息数据(ask.picked),并以该文案继续对话 */
+  onAskPick: (msgId: number, label: string) => void;
+  /** ask 确认卡「重新选择」:父级清除 ask.picked,回到可点选 */
+  onAskReset: (msgId: number) => void;
 }) {
   return (
     <>
@@ -66,8 +72,18 @@ export function ChatMessageList({
           );
         }
         if (m.ask) {
-          // 确认卡片(Agent 调 ask.user):点选选项作为你的答复继续对话
-          return <AskCard key={m.id} question={m.ask.question} options={m.ask.options} onPick={onSend} />;
+          // 确认卡片(Agent 调 ask.user):点选选项作为你的答复继续对话;
+          // selected 来自消息数据(ask.picked),重进页面/恢复历史后仍正确回显
+          return (
+            <AskCard
+              key={m.id}
+              question={m.ask.question}
+              options={m.ask.options}
+              picked={m.ask.picked ?? null}
+              onPick={(label) => onAskPick(m.id, label)}
+              onReset={() => onAskReset(m.id)}
+            />
+          );
         }
         if (m.toolRuns) {
           // 工具聚合卡:一轮调用一张卡(设计文档 §3)
