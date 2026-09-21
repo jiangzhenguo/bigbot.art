@@ -93,6 +93,10 @@ export default function CanvasPage({
     [],
   );
   const [edges, setEdges] = useState<Edge[]>([]);
+  /** store 侧已知快照版本(挂载/刷新/推送时更新;保存用它,避免旧版本整体覆盖 Agent 的增量写盘) */
+  const [knownVersion, setKnownVersion] = useState(0);
+  const knownVersionRef = useRef(0);
+  knownVersionRef.current = knownVersion;
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const edgesRef = useRef(edges);
@@ -532,12 +536,39 @@ export default function CanvasPage({
         name: activeCanvas.name,
         nodes: toSharedNodes(ns ?? nodes) as never,
         edges: toSharedEdges(es ?? edges) as never,
-        version: activeCanvas.version,
+        // 用已知版本(随推送/刷新前进),保证不落后于 store —— 落后会导致 saveCanvasSnapshot 版本防护拒绝覆盖
+        version: knownVersion || activeCanvas.version,
         createdAt: activeCanvas.createdAt,
         updatedAt: new Date().toISOString(),
       };
     },
-    [activeCanvas, nodes, edges],
+    [activeCanvas, nodes, edges, knownVersion],
+  );
+
+  /** 最近一次确认与 store 一致的内容基线(JSON)—— 卸载/防抖保存前比对,无变化不写盘。
+   *  防止「version 对齐但内容为空/旧」的崩溃/重挂场景覆盖 store(与主进程版本防护双保险)。 */
+  const lastSavedRef = useRef('');
+  /** 标记内容基线为「与 store 一致」(加载/推送/保存成功后调用) */
+  const markBaseline = useCallback((ns: CanvasNode[], es: Edge[]) => {
+    lastSavedRef.current = JSON.stringify([ns, es]);
+  }, []);
+  /** 保存当前快照:内容相对基线有真实变化才写盘;写盘后把基线推进到已保存内容。
+   *  opts.allowEmpty = true 仅 auto-save 使用(用户清空画布是合法编辑);
+   *  卸载/切画布 flush 默认禁止空快照覆盖 —— 崩溃时内存 state 可能为空,不得覆盖 store 有内容的画布。 */
+  const maybePersist = useCallback(
+    (snap: CanvasSnapshot | null, opts?: { allowEmpty?: boolean }) => {
+      if (!snap) return;
+      const local = JSON.stringify([snap.nodes, snap.edges]);
+      if (local === lastSavedRef.current) return;
+      if (opts?.allowEmpty !== true) {
+        const hasContent = (snap.nodes?.length ?? 0) > 0 || (snap.edges?.length ?? 0) > 0;
+        const baselineHasContent = lastSavedRef.current !== '' && lastSavedRef.current !== '[[],[]]';
+        if (!hasContent && baselineHasContent) return;
+      }
+      lastSavedRef.current = local;
+      void onSaveCanvas(snap);
+    },
+    [onSaveCanvas],
   );
 
   /** 切换画布前先 flush 当前画布的未保存改动 */
@@ -546,9 +577,8 @@ export default function CanvasPage({
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    const snap = buildActiveSnapshot();
-    if (snap) void onSaveCanvas(snap);
-  }, [buildActiveSnapshot, onSaveCanvas]);
+    maybePersist(buildActiveSnapshot());
+  }, [buildActiveSnapshot, maybePersist]);
 
   /** 切画布包装:先 flush-save 再走 onSwitchCanvas */
   const switchCanvas = useCallback(
@@ -571,8 +601,7 @@ export default function CanvasPage({
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    const snap = buildActiveSnapshot();
-    if (snap) void onSaveCanvas(snap);
+    maybePersist(buildActiveSnapshot());
   };
   useEffect(() => () => saveFlushRef.current(), []);
 
@@ -582,12 +611,14 @@ export default function CanvasPage({
   useEffect(() => {
     if (!projectCanvases || !activeCanvas) return;
     bootRef.current = true;
+    setKnownVersion(activeCanvas.version ?? 0);
     // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
     // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
     const loaded = activeCanvas.nodes.map((n) => fromSharedNode(n as never));
     const selfHeal = dedupeNodeIds(loaded, toLocalEdges(activeCanvas.edges as never));
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
+    markBaseline(selfHeal.nodes, selfHeal.edges);
     if (selfHeal.changed) {
       const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
       if (repaired) void onSaveCanvas(repaired);
@@ -712,17 +743,19 @@ export default function CanvasPage({
     [setNodes, toastMsg],
   );
 
-  /** 工具改画布后:从 store 重新拉当前画布刷新节点 */
+  /** 工具改画布后:从 store 重新拉当前画布刷新节点(Agent 工具增量写盘后主进程会推送快照,这里兜底双保险) */
   const refreshCanvasFromStore = useCallback(async () => {
     if (!projectId || !activeCanvasId) return;
     try {
       const pc = await window.bigbotart.loadProjectCanvases(projectId);
       const cur = pc.canvases.find((c) => c.id === activeCanvasId);
       if (!cur) return;
+      setKnownVersion(cur.version ?? 0);
       const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
       const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
       setNodes(selfHeal.nodes);
       setEdges(selfHeal.edges);
+      markBaseline(selfHeal.nodes, selfHeal.edges);
       if (selfHeal.changed) {
         const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
         if (repaired) void onSaveCanvas(repaired);
@@ -732,6 +765,42 @@ export default function CanvasPage({
       console.error('刷新画布失败', e);
     }
   }, [projectId, activeCanvasId]);
+
+  /** 画布内容同步(推送的快照或 store 拉取结果)→ 本地 nodes/edges + knownVersion。
+   *  内容与版本都没变化时跳过 setState——推送可能来自渲染层自身的保存,重设会触发
+   *  auto-save 依赖的 effect 再保存,造成 version 无限增长的写盘循环。 */
+  const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'>) => {
+    const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
+    const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
+    const version = cur.version ?? 0;
+    const sameContent =
+      JSON.stringify(selfHeal.nodes) === JSON.stringify(nodesRef.current) &&
+      JSON.stringify(selfHeal.edges) === JSON.stringify(edgesRef.current);
+    if (sameContent) {
+      // 内容没变:只前进 knownVersion(不 setNodes → 不触发 auto-save 再保存 → 避免 version 循环写盘)
+      knownVersionRef.current = version;
+      setKnownVersion(version);
+      markBaseline(selfHeal.nodes, selfHeal.edges);
+      return selfHeal;
+    }
+    setKnownVersion(version);
+    setNodes(selfHeal.nodes);
+    setEdges(selfHeal.edges);
+    markBaseline(selfHeal.nodes, selfHeal.edges);
+    nextId.current = seedIdCounter(selfHeal.nodes);
+    return selfHeal;
+  }, []);
+
+  /* 主进程任何画布写盘(Agent 工具增量 / 自身保存)都会推送快照:
+     匹配当前画布则同步本地状态 —— Agent 操作实时可见,且后续保存不再用旧版本覆盖。 */
+  useEffect(() => {
+    const off = window.bigbotart.onCanvasSnapshotUpdated((snap) => {
+      if (!projectId || snap.projectId !== projectId) return;
+      if (activeCanvasId && snap.id !== activeCanvasId) return;
+      applyCanvasSnapshot(snap);
+    });
+    return off;
+  }, [projectId, activeCanvasId, applyCanvasSnapshot]);
 
   /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
   const chat = useAgentChat({
@@ -746,8 +815,7 @@ export default function CanvasPage({
     if (bootRef.current || !projectId || !activeCanvas) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      const snap = buildActiveSnapshot();
-      if (snap) void onSaveCanvas(snap);
+      maybePersist(buildActiveSnapshot(), { allowEmpty: true });
     }, 800);
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);

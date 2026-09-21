@@ -53,13 +53,17 @@ export interface BigBotArtApi {
   deleteProject(id: string): Promise<{ ok: boolean; error?: string }>;
   renameProject(id: string, name: string): Promise<{ ok: boolean; error?: string }>;
   loadCanvas(projectId: string): Promise<import('./domain').CanvasSnapshot>;
-  saveCanvas(snapshot: import('./domain').CanvasSnapshot): Promise<{ ok: boolean }>;
+  saveCanvas(snapshot: import('./domain').CanvasSnapshot): Promise<{ ok: boolean; stale?: boolean; current?: import('./domain').CanvasSnapshot }>;
   /** 项目级 LLM 覆盖(null 清除,回退全局) */
   setProjectLlm(projectId: string, llm: import('./domain').LlmSource | null): Promise<{ ok: boolean }>;
   /** 加载项目下所有画布 + 活动画布 id(一次拉完,前端切换无往返) */
   loadProjectCanvases(projectId: string): Promise<import('./domain').ProjectCanvases>;
-  /** 保存单画布快照(自动写回项目容器) */
-  saveCanvasSnapshot(snap: import('./domain').CanvasSnapshot): Promise<{ ok: boolean }>;
+  /** 保存单画布快照(自动写回项目容器)。
+   *  版本防护:当 snap.version 落后于 store 当前版本(如 Agent 工具已增量写盘、渲染层状态未同步)时
+   *  拒绝整体覆盖,返回 stale=true + 最新 current,由渲染层刷新后再保存,避免吞掉 Agent 的改动。 */
+  saveCanvasSnapshot(snap: import('./domain').CanvasSnapshot): Promise<{ ok: boolean; stale?: boolean; current?: import('./domain').CanvasSnapshot }>;
+  /** 画布快照更新推送(主进程任何写盘后广播,含 Agent 工具增量;渲染层据此刷新本地状态保持同步) */
+  onCanvasSnapshotUpdated(cb: (snap: import('./domain').CanvasSnapshot) => void): () => void;
   /** 创建一个新画布(空白),返回画布;持久化并设为主画布(若项目无画布) */
   createCanvas(projectId: string, name?: string): Promise<import('./domain').CanvasSnapshot>;
   /** 重命名画布 */

@@ -37,6 +37,11 @@ const api: BigBotArtApi = {
   saveCanvas: (snapshot: CanvasSnapshot) => ipcRenderer.invoke('save-canvas', snapshot),
   loadProjectCanvases: (projectId: string) => ipcRenderer.invoke('load-project-canvases', projectId),
   saveCanvasSnapshot: (snapshot: CanvasSnapshot) => ipcRenderer.invoke('save-canvas-snapshot', snapshot),
+  onCanvasSnapshotUpdated: (cb) => {
+    const listener = (_e: unknown, snap: unknown) => cb(snap as never);
+    ipcRenderer.on('canvas-snapshot-updated', listener);
+    return () => ipcRenderer.removeListener('canvas-snapshot-updated', listener);
+  },
   createCanvas: (projectId: string, name?: string) => ipcRenderer.invoke('create-canvas', projectId, name),
   renameCanvas: (projectId: string, canvasId: string, name: string) => ipcRenderer.invoke('rename-canvas', projectId, canvasId, name),
   deleteCanvas: (projectId: string, canvasId: string) => ipcRenderer.invoke('delete-canvas', projectId, canvasId),

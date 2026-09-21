@@ -93,6 +93,11 @@ const registry = createRegistry({
 const settings = new SettingsStore();
 const accel = new AccelStore(settings);
 const store = new ProjectStore();
+/** 任何画布快照写盘(Agent 工具增量 / 渲染层整体保存)都广播给渲染层,
+ *  画布页订阅后刷新本地状态 —— Agent 改的画布实时可见,并且渲染层保存不再带旧版本覆盖。 */
+store.onCanvasSaved = (snap) => {
+  if (win && !win.isDestroyed()) win.webContents.send('canvas-snapshot-updated', snap);
+};
 const assets = new AssetStore();
 const skills = new SkillStore();
 const takes = new TakeStore();
@@ -425,7 +430,8 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
     name: cur.name,
     nodes: (snap.nodes ?? []) as never,
     edges: (snap.edges ?? []) as never,
-    version: snap.version ?? cur.version,
+    // 用渲染层快照的 version(save-canvas-snapshot 同口径),落后于 store 时由 saveCanvasSnapshot 版本防护拒绝覆盖
+    version: snap.version ?? 0,
     createdAt: cur.createdAt,
     updatedAt: new Date().toISOString(),
   });

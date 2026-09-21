@@ -31,6 +31,9 @@ const MAIN_CANVAS_ID = 'main';
 export class ProjectStore {
   private docs: StoredDoc;
 
+  /** 画布快照写盘回调(主进程注册 → 广播给渲染层;Agent 工具增量写与渲染层整体保存都会触发) */
+  onCanvasSaved?: (snap: CanvasSnapshot) => void;
+
   constructor() {
     mkdirSync(DATA_DIR, { recursive: true });
     this.docs = this.read();
@@ -120,15 +123,25 @@ export class ProjectStore {
     }
   }
 
-  /** 单画布快照写回(自动定位到对应项目容器) */
-  saveCanvasSnapshot(snap: CanvasSnapshot): { ok: boolean } {
+  /** 单画布快照写回(自动定位到对应项目容器)。
+   *  版本防护:snap.version 落后于 store 当前版本(如 Agent 工具已增量写盘、渲染层还持旧状态)时
+   *  拒绝整体覆盖(stale=true + 最新 current),让渲染层刷新后再保存 —— 修复「Agent 操作的画布被
+   *  渲染层旧快照覆盖」(两个写入者无版本协调时,整体替换会把增量写入吞掉)。 */
+  saveCanvasSnapshot(snap: CanvasSnapshot): { ok: boolean; stale?: boolean; current?: CanvasSnapshot } {
     const pc = this.loadProjectCanvases(snap.projectId);
     const now = new Date().toISOString();
     const idx = pc.canvases.findIndex((c) => c.id === snap.id);
+    const cur = idx >= 0 ? pc.canvases[idx] : undefined;
+    // 防护:传入快照 version 落后于当前(说明 store 有更新的写入,渲染层未同步)→ 拒绝覆盖
+    if (cur && (snap.version ?? 0) < cur.version) {
+      // 广播最新快照:渲染层凭此同步 version/内容,下一次保存不再落后(避免反复被拒)
+      this.onCanvasSaved?.(cur);
+      return { ok: false, stale: true, current: cur };
+    }
     const next: CanvasSnapshot = {
       ...snap,
       version: (snap.version ?? 0) + 1,
-      createdAt: idx >= 0 ? (pc.canvases[idx]?.createdAt ?? now) : now,
+      createdAt: cur?.createdAt ?? now,
       updatedAt: now,
     };
     if (idx >= 0) pc.canvases[idx] = next;
@@ -138,6 +151,8 @@ export class ProjectStore {
       pc.activeCanvasId = pc.canvases[0]?.id ?? snap.id;
     }
     this.saveProjectCanvases(pc);
+    // 写盘后广播最新快照(渲染层同步本地状态;Agent 工具与渲染层保存都从这里驱动 UI)
+    this.onCanvasSaved?.(next);
     return { ok: true };
   }
 
