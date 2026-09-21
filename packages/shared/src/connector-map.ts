@@ -19,6 +19,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     shot: 'first-frame', // 静帧直通首帧
     edit: 'input',
     upscale: 'input',
+    crop: 'input', // 原图裁切源
     image: 'ref-image', // 参考图
     timeline: 'clip',
   },
@@ -26,12 +27,21 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     shot: 'first-frame',
     edit: 'input',
     upscale: 'input',
+    crop: 'input', // 原图裁切源
     timeline: 'clip',
   },
   'image-upscale': {
     shot: 'first-frame',
     edit: 'input',
+    crop: 'input', // 原图裁切源
     image: 'ref-image',
+    timeline: 'clip',
+  },
+  'image-crop': {
+    shot: 'first-frame', // 裁切结果直通首帧
+    edit: 'input', // 裁切结果作输入图
+    upscale: 'input',
+    image: 'ref-image', // 裁切结果作参考图
     timeline: 'clip',
   },
   'audio-ref': {
@@ -60,6 +70,16 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   timeline: {
     doc: 'prompt',
   },
+  // 资产引用:端口按媒体类型动态(渲染层 connectors.ts 四类矩阵为准,此处给 Agent 综合摘要)
+  asset: {
+    shot: 'first-frame/ref-image/ref-video/ref-audio/prompt', // 按媒体类型:图片=首帧参考(first-frame)/参考图(ref-image) · 视频 ref-video · 音频 ref-audio · 文档 prompt
+    image: 'ref-image', // 图片参考图(Ref2VA/风格)
+    edit: 'input', // 输入图/取帧源
+    upscale: 'input', // 超分源
+    crop: 'input', // 裁切源
+    timeline: 'clip', // 静帧/视频素材入轨;音频为 audio-track
+    doc: 'prompt', // 文档资产 → 文档引用
+  },
   'workflow-input': {
     '*': 'slot-<名称>', // 按槽位类型匹配目标端口
   },
@@ -84,6 +104,9 @@ export const PORT_SEMANTICS: Record<string, string> = {
   output: '产物汇聚收口(工作流出口)',
 };
 
+/** 单值端口:同一目标节点上该端口至多一条入边(多值端口:ref-image/prompt/clip/sequence/output/slot-*) */
+export const SINGLE_VALUE_PORTS = new Set(['first-frame', 'last-frame', 'input', 'ref-audio', 'ref-video']);
+
 /** 人读的连接器能力摘要(给 Agent system prompt / 工具返回) */
 export function connectorSummary(): string {
   const lines: string[] = [];
@@ -91,7 +114,14 @@ export function connectorSummary(): string {
   for (const [src, targets] of Object.entries(CONNECTOR_MAP)) {
     const per: string[] = [];
     for (const [dst, port] of Object.entries(targets)) {
-      per.push(dst === '*' ? '任意操作节点(slot-<名称>)' : `${dst} → ${port}(${PORT_SEMANTICS[port] ?? port})`);
+      if (dst === '*') {
+        per.push('任意操作节点(slot-<名称>)');
+        continue;
+      }
+      const single = port.split('/').some((p) => SINGLE_VALUE_PORTS.has(p.trim()))
+        ? '·单值端口(同一目标该端口只能一条入边,重复连自动替换旧边)'
+        : '';
+      per.push(`${dst} → ${port}(${PORT_SEMANTICS[port] ?? port})${single}`);
     }
     if (src !== 'workflow-input') {
       per.push(`${CONNECTOR_OUTPUT_TARGET} → output(${PORT_SEMANTICS.output})`);
@@ -99,6 +129,7 @@ export function connectorSummary(): string {
     lines.push(`- ${src}:可连 ${per.join(';')}`);
   }
   lines.push(`- 收口到 ${CONNECTOR_OUTPUT_TARGET}:${outRows.join('/')}`);
+  lines.push('⚠️ 端口基数:first-frame/last-frame/input/ref-audio/ref-video 是单值端口,同一目标节点只允许一条入边;ref-image/prompt/clip/sequence/output 可多条。写边前系统会强制校验,不合法会被拒绝,单值端口重复连会自动替换旧边。');
   return lines.join('\n');
 }
 
@@ -109,8 +140,9 @@ export const NODE_KIND_GUIDE = [
   ['asset', '资产引用(图片/视频/音频/文档)'],
   ['image-gen', '图片生成(mlxgen 文生图)'],
   ['image-edit', '图片编辑(指令/I2I/Inpaint/Outpaint)'],
+  ['image-crop', '图片裁切(按目标画幅裁剪,如 1:1 → 9:16,供下游作输入图)'],
   ['image-upscale', '图片增强(超分)'],
-  ['shot', '视频镜头(h3.c:文生/首帧/首尾帧/参考图)'],
+  ['shot', '视频镜头(h3.c:文生/首帧/首尾帧/参考图;支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
   ['director', '导演台(运镜参考小样)'],
   ['timeline', '时间线/剪辑(FFmpeg 导出)'],
   ['audio-ref', '音频参考(--ref-audio)'],

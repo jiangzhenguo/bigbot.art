@@ -11,6 +11,7 @@ export type NodeKind =
   | 'image-gen' // Text→Image
   | 'image-edit' // I2I / 指令编辑 / Inpaint / Outpaint
   | 'image-upscale' // 超分修复
+  | 'image-crop' // 图片裁切:按目标画幅裁剪原图,供下游节点使用(如 1:1 → 9:16)
   | 'shot' // 视频镜头(h3.c)
   | 'director' // 运镜调度小样(占位)
   | 'timeline' // 时间线/剪辑
@@ -126,6 +127,7 @@ export interface NodeDataMap {
   'image-gen': ImageGenParams;
   'image-edit': ImageEditParams;
   'image-upscale': { model: string; scale: number };
+  'image-crop': ImageCropParams;
   shot: ShotParams;
   director: { prompt: string };
   timeline: TimelineData;
@@ -248,6 +250,8 @@ export interface ImageGenParams {
   engine: 'mlxgen' | 'comfyui' | 'mock';
   model: string; // e.g. AbstractFramework/z-image-turbo-8bit
   prompt: string;
+  /** 🆕 负向提示词(mlxgen `--negative-prompt`,非空才传;蒸馏模型不支持时 CLI 会报错) */
+  negativePrompt?: string;
   width: number;
   height: number;
   steps?: number;
@@ -270,9 +274,59 @@ export interface ImageEditParams {
     | 'outpaint'; // 扩图
   inputAssetId?: string;
   maskAssetId?: string;
+  /** 🆕 图像强度(0-1,img2img latent 用;→ `--image-strength`,0 不传/忽略) */
+  imageStrength?: number;
   outpaintSides?: { top: number; bottom: number; left: number; right: number };
   /** 🆕 提示词来源追溯 */
   promptFrom?: PromptSource;
+  /** 输入帧源(由 shot 连线自动取帧,渲染层写入) */
+  inputFrameSource?: { videoNodeId: string; at: 'first' | 'last' };
+  /** 输入图来源(由图片产物/素材连线直通,渲染层写入;运行期与 inputAssetId 同优先级) */
+  inputImageFrom?: { nodeId: string };
+}
+
+/** 图片裁切参数(image-crop 节点:不推理,按目标画幅 ffmpeg 居中/锚点裁剪) */
+export interface ImageCropParams {
+  /** 目标画幅(A:B,如 1:1 → '9:16' 裁两边) */
+  aspect: string;
+  /** 裁切锚点:center=居中(默认)/ top / bottom / left / right(压缩轴按锚点取)
+   *  例 1:1 → 9:16 横向裁切时 left/right 决定保留左半还是右半 */
+  focus?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+  /** 输入图来源(素材连线直通,渲染层写入) */
+  inputImageFrom?: { nodeId: string };
+  /** 输入图 Asset id(手动绑定,与连线二选一) */
+  inputAssetId?: string;
+  /** 🆕 提示词来源追溯(占位,保持结构一致) */
+  promptFrom?: PromptSource;
+}
+
+/**
+ * 镜头加速档(🚀 加速 LoRA)。
+ * h3.c CLI 不接受 --lora;加速 = 换蒸馏模型包目录(-d)+ 少步数(4/8 步),
+ * 见 docs/MiniMax-H3-加速-LoRA-使用手册.md §8。提交时由主进程解析成实际 modelDir + steps。
+ */
+export interface ShotAccel {
+  /** 本镜头是否开启加速 */
+  enabled?: boolean;
+  /** 使用的蒸馏模型包 id(设置页 accelPacks);缺省 = 默认包 */
+  packId?: string;
+  /** 加速步数档:4(边缘略糊) / 8(质量甜点,推荐) */
+  steps?: 4 | 8;
+}
+
+/** 加速 LoRA 蒸馏模型包(设置页安装/管理;仅登记,不删磁盘) */
+export interface AccelPack {
+  id: string;
+  name: string;
+  /** 可传给 `h3 -d` 的模型目录(含 FL2VA/) */
+  path: string;
+  /** 推荐步数档 */
+  steps?: 4 | 8;
+  /** 是否默认包(镜头开启加速未选包时用) */
+  default?: boolean;
+  installedAt?: string;
+  /** 列表时主进程回填:目录当前是否存在(存在但缺 FL2VA/ 视为 invalid) */
+  exists?: boolean;
 }
 
 /** 视频镜头参数(h3.c) */
@@ -297,6 +351,8 @@ export interface ShotParams {
   reuse: number;
   tier: QualityTier;
   seed: number;
+  /** 🚀 加速 LoRA:开启则提交时用蒸馏模型包 + 4/8 步(见 ShotAccel) */
+  accel?: ShotAccel;
   /** 引用绑定:资产 id 或直连文件路径 → 角色(映射 --ref-image / --first-frame / --ref-video 等)
    *  - assetId:资产中心的引用(由连线自动注入或手动添加)
    *  - path:直连文件路径(如上游 shot 抽出的尾帧 PNG),优先于 assetId 解析 */
@@ -310,7 +366,7 @@ export interface ShotParams {
   promptFrom?: PromptSource;
 }
 
-/** 一次生成结果 = Take(保留历史,不覆盖) */
+/** 一次生成结果 = Take(保留历史,不覆盖;shotNodeId 字段语义为「节点 id」,shot/image-gen/image-edit/image-crop 通用) */
 export interface Take {
   id: string;
   shotNodeId: string;
@@ -319,8 +375,10 @@ export interface Take {
   providerTaskId?: string;
   params: Record<string, unknown>;
   resultPath?: string;
-  /** 耗时(秒,从提交到完成) */
+  /** 媒体时长(秒,成功产物的视频/音频长度;时间线与剪辑用) */
   durationSec?: number;
+  /** 生成耗时(秒,墙钟:从提交到完成;与媒体时长 durationSec 区分,检查器「耗时」用) */
+  elapsedSec?: number;
   /** h3.c 命令行(dry-run 调试 / 失败诊断用) */
   cmdline?: string;
   cost?: { credits?: number; unit?: string };
@@ -354,8 +412,40 @@ export interface Asset {
   width?: number;
   height?: number;
   durationSec?: number;
+  /** 归属项目;缺省 = 总资源库(全局共享) */
+  projectId?: string;
+  /** 分类 id(资产库分类字典);缺省 = 未分类 */
+  categoryId?: string;
+  /** 入库来源:手动导入 / 对话附件 / 画布产物归档 */
+  source?: 'import' | 'attachment' | 'product';
+  /** 来源节点 id(仅 source='product',用于反查画布引用与定位) */
+  originNodeId?: string;
   tags: string[];
+  /** 软删除标记(进回收站);list / list(projectId) 不再返回 */
+  deletedAt?: string;
   createdAt: string;
+}
+
+/** 资源分类(项目级或全局;删除时分类下资源转「未分类」,文件保留) */
+export interface AssetCategory {
+  id: string;
+  name: string;
+  /** 分类归属:项目分类带 projectId;全局分类缺省 */
+  projectId?: string;
+  createdAt: string;
+}
+
+/** 资源被画布引用的位置(删除安全警告 / 「定位画布」跳转) */
+export interface AssetRef {
+  assetId: string;
+  projectId: string;
+  canvasId: string;
+  canvasName: string;
+  nodeId: string;
+  /** 引用节点类型:asset / shot / image-edit / image-upscale / audio-ref / workflow-input */
+  kind: string;
+  /** 人读描述,如「主画布 · 镜头 01 · Ref2VA」 */
+  where: string;
 }
 
 /** 项目(SQLite 持久化) */
@@ -475,9 +565,13 @@ export interface AppSettings {
   llm?: LlmSource;
   /** 渲染模式:demo=始终 mock 占位;real=引擎就绪则真实推理 */
   renderMode: 'demo' | 'real';
+  /** h3 视频生成:SSD 流式读权重(--ssd-streaming)。省 RAM(峰值≈6GB)但慢约 30%;64GB+ 默认关更快 */
+  ssdStreaming?: boolean;
   lmStudioModel?: string;
   /** 默认档位:时间线/生成默认 tier */
   defaultTier?: QualityTier;
+  /** 🚀 加速 LoRA 蒸馏模型包库(设置页安装/管理;h3.c -d 用的 turbo 目录,非 .safetensors) */
+  accelPacks?: AccelPack[];
   /** 云端供应商目录(凭据存钥匙串,这里只有 hasKey 标记) */
   cloudProviders?: CloudProviderEntry[];
 }
@@ -492,6 +586,16 @@ export interface AssetImportResult {
 
 /* ═══ Agent 会话 / 记忆体系(画布页 Agent 对话) ═══ */
 
+/** 单画布记忆:节点总结(切换画布时写入)+ 对话压缩摘要(/compact 生成,注入当前会话上下文) */
+export interface CanvasMemory {
+  summary: string;
+  nodeCount: number;
+  lastActive: string;
+  keyDecisions: string[];
+  /** /compact 生成的对话压缩摘要(注入当前画布上下文,压缩后仍保留全局脉络) */
+  conversationSummary?: string;
+}
+
 /** 分层记忆(MemGPT 式):core 核心记忆 + 画布总结 + recall 对话流 + archival 归档 */
 export interface ProjectMemory {
   projectId: string;
@@ -503,12 +607,7 @@ export interface ProjectMemory {
     userPreferences: string;
   };
   /** 每个画布的总结记忆(切换画布时写入;其他画布以 summary 注入当前会话) */
-  canvasMemory: Record<string, {
-    summary: string;
-    nodeCount: number;
-    lastActive: string;
-    keyDecisions: string[];
-  }>;
+  canvasMemory: Record<string, CanvasMemory>;
   /** 全部对话消息(可检索) */
   recall: RecallMessage[];
   /** 归档记忆(长期事实:生成产物/关键决定/资产备注) */

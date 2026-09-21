@@ -215,9 +215,11 @@ export function storyboardMarkdown(title: string, intro: string, head: string[],
   return [`# ${title}`, '', intro, '', tableToGfm(head, rows)].join('\n');
 }
 
-/** 铺节点默认画幅 → 尺寸(32 倍数,含 h3.c 限制内;渲染层/agent/工具执行共用同一口径) */
+/** 铺节点默认画幅 → 尺寸(渲染层/agent/工具执行共用同一口径)
+ *  16:9 / 9:16 用精确比例 1024×576 / 576×1024(32 倍数,与 image-crop 口径一致;
+ *  旧值 832×480 / 480×832 实为 26:15 / 15:26,非真 16:9) */
 export const SB_SIZE: Record<string, { width: number; height: number }> = {
-  '16:9': { width: 832, height: 480 },
-  '9:16': { width: 480, height: 832 },
+  '16:9': { width: 1024, height: 576 },
+  '9:16': { width: 576, height: 1024 },
   '1:1': { width: 768, height: 768 },
 };

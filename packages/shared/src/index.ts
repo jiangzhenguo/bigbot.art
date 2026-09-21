@@ -28,6 +28,12 @@ export interface BigBotArtApi {
   // 引擎引导
   probeRuntimes(): Promise<RuntimeProbe[]>;
   installRuntime(id: string): Promise<{ ok: boolean; message: string }>;
+  // 图片引擎模型管理(mlxgen:已下载探测 / 真实下载 / 下载进度轮询)
+  mlxgenModels(): Promise<Array<{ id: string; name: string; repoId: string; downloaded: boolean }>>;
+  mlxgenDownload(repoId: string): Promise<{ ok: boolean; jobId?: string; error?: string }>;
+  mlxgenDownloadStatus(jobId: string): Promise<{ status: 'running' | 'done' | 'failed'; pct?: number | null; error?: string }>;
+  /** base64 dataURL PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用);返回新资产 id */
+  savePngAsset(input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }): Promise<{ ok: boolean; assetId?: string; error?: string }>;
   // Provider / 渲染任务
   checkProviders(): Promise<Record<string, import('./provider').ProviderStatus>>;
   submitRender(req: import('./provider').RenderRequest): Promise<import('./provider').RenderJobHandle>;
@@ -103,6 +109,14 @@ export interface BigBotArtApi {
     videoPath: string,
     mode: 'first' | 'last',
   ): Promise<{ ok: boolean; path?: string; error?: string }>;
+  /** 图片裁切:按目标画幅(A:B)ffmpeg 裁剪原图(image-crop 节点用;产物落 outputs/crops/) */
+  cropImage(input: {
+    path: string;
+    /** 目标画幅,如 '16:9' / '9:16' / '1:1';宽高比须 > 0 */
+    aspect: string;
+    /** 裁切锚点:center(默认)/ top / bottom / left / right */
+    focus?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+  }): Promise<{ ok: boolean; path?: string; error?: string }>;
   // 系统 / 文件
   /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
   revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;
@@ -164,6 +178,20 @@ export interface BigBotArtApi {
   onAgentEvent(cb: (ev: import('./domain').AgentEvent) => void): () => void;
   /** 读取项目记忆(调试/设置页展示) */
   memoryGet(projectId: string): Promise<import('./domain').ProjectMemory>;
+  /** /clear 命令:清空当前画布对话(移除该画布全部 recall + 对话压缩摘要;节点总结保留) */
+  memoryClear(projectId: string, canvasId: string): Promise<{ ok: boolean; cleared: number; error?: string }>;
+  /** /compact 命令:把当前画布旧对话压成摘要(LLM 总结,不可达时兜底),写入 canvasMemory.conversationSummary 并裁剪 recall(保留最近 N 条) */
+  memoryCompact(projectId: string, canvasId: string): Promise<{
+    ok: boolean;
+    summary?: string;
+    /** 被压缩裁掉的旧消息条数 */
+    replaced?: number;
+    /** 对话太短,无需压缩 */
+    skipped?: boolean;
+    /** LLM 不可达时使用确定性兜底摘要 */
+    fallback?: boolean;
+    error?: string;
+  }>;
   // Take 历史(shot 节点生成归档)
   /** 列出项目下全部 Take(最新在前) */
   takesList(projectId: string): Promise<import('./domain').Take[]>;
@@ -190,3 +218,5 @@ export * from './tool-defs.js';
 export * from './table.js';
 export * from './prompt.js';
 export * from './connector-map.js';
+export * from './edge-validate.js';
+export * from './document.js';
