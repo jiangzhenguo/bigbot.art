@@ -43,21 +43,26 @@
 [基础人格] 创作 Agent + 提问规范(ask.user 引导)
 [画布能力] 节点类型 12 种 + 连接器端口语义表 + 分镜表流程(storyboard.plan → materialize → 重同步)
 [项目目标/风格规则/硬性约束/用户偏好]  ← core,有值才注入
+[本画布对话摘要(已压缩)] ← /compact 生成(conversationSummary),压缩后仍注入全局脉络
 [本项目的其他画布] summary 注入
 [项目记忆(相关)] archival 关键字检索 top 3
-历史:当前画布 recall 最近 12 条 + 本轮输入
-参数:temperature 0.4 · contextWindow 32k · maxTokens 4000
+历史:当前画布 recall 最近 12 条 + 本轮输入(/compact 后更早消息折叠成摘要,尾部保留最近 8 条)
+参数:temperature 0.4 · contextWindow 100k · maxTokens 4000
 ```
 
 ### 1.5 提问与打断
 
 - **确认卡片**:Agent 调 `ask.user` → worker 拦截返回 `{ask}` → 渲染层卡片(问题 + 2~6 按钮),点选作为用户消息回传继续。v1.1 起 options 支持 `{label, sub?, recommended?}` 结构化选项(worker 归一化,字符串仍兼容),确认卡带字母序号/副说明/推荐徽标/已选择回显(`AskCard`)。
 - **打断**:`agentCancel` + AbortSignal(103ms 生效);对话中可随时「已打断 · 可直接在画布修改」。
+- **对话命令**(输入框斜杠命令,Composer 也有对应按钮):
+  - `/clear`:清空当前画布对话 —— UI 消息 + 持久化 recall + 压缩摘要一并移除(画布节点/产物/节点总结不受影响;其他画布不受影响;操作不可恢复)。
+  - `/compact`:把当前画布旧对话交给 LLM 压成中文摘要,写入 `canvasMemory.conversationSummary` 并裁剪 recall(保留最近 8 条,承接上下文与未确认的 ask 卡);摘要随每次对话注入(见 §1.4),多次 compact 自动合并追加。
 
 ### 1.6 容错
 
 - 规划器:LLM 不可达/失败 → **确定性模板兜底**(闭环不中断)。
 - 对话:LLM 不可达 → 明确报错(无兜底,依赖模型在线);工具执行异常 → 工具卡标「失败」。
+- `/compact`:LLM 不可达/失败 → **确定性兜底摘要**(`compactFallbackSummary`,按角色折叠旧消息,截断 1500 字),压缩流程照常完成,不阻塞用户。
 
 ---
 
@@ -202,6 +207,7 @@ components/ToolRunCard.tsx          ← 纯展示组件(本地状态:cExpanded/r
 1. **确认卡片**(已实现,微调):选项按钮在收起态可保留一列;question 支持 Markdown 表格(提案对比用)。
 2. **模型选择器**保持现状(顶栏/项目级)。
 3. P2:ToolRunCard 时间轴模式(每行左侧时间点 + 耗时)。
+4. **对话命令按钮**(已实现):Composer 工具行提供 `/clear`(清空对话)、`/compact`(压缩上下文)两个按钮,与斜杠命令等价,便于发现。
 
 ---
 
@@ -225,7 +231,7 @@ components/ToolRunCard.tsx          ← 纯展示组件(本地状态:cExpanded/r
 | `packages/agent/src/pi-chat.ts` | 对话工具循环 + ask.user 拦截(options 归一化为 AskOption) |
 | `packages/agent/src/pi-planner.ts` | 规划器 system prompt 与 JSON schema |
 | `packages/agent/src/plan.ts` | 确定性兜底(plan / plan-storyboard) |
-| `apps/desktop/src/main/memory.ts` | system prompt 组装(人格/画布能力/记忆注入) |
+| `apps/desktop/src/main/memory.ts` | system prompt 组装(人格/画布能力/记忆注入)+ clear/compact 对话管理(recall 裁剪、conversationSummary 注入) |
 | `apps/desktop/src/main/tool-handlers.ts` | 24 个工具的主进程执行 |
 | `CanvasPage.tsx` | 消息流渲染:toolRuns 聚合卡(send 对账 + SSE 实时更新 + 历史连续 tool 分组)、AskCard、错误卡 |
 | `components/ToolRunCard.tsx`(已实现) | 聚合折叠卡片(卡片级/行级展开,失败自动展开) |

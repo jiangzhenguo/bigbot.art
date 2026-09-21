@@ -14,6 +14,7 @@
     "build": "pnpm --filter @bigbotart/desktop build",
     "build:packages": "pnpm -r --filter './packages/*' build",
     "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
     "start": "BIGBOTART_DRYRUN=0 pnpm --filter @bigbotart/desktop start"
   },
   "engines": {
@@ -25,5 +26,9 @@
       "esbuild"
     ]
   },
-  "packageManager": "pnpm@11.0.8"
+  "packageManager": "pnpm@11.0.8",
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "vitest": "^3.2.7"
+  }
 }

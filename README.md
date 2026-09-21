@@ -11,12 +11,12 @@
 - ✅ **画布工作台**:9 类节点拖拽/连线/检查器/Agent 面板/队列条(原生 CSS transform 实现,非 React Flow)
 - ✅ **一句话起活**:首页输入需求 → Agent 规划(远端 DeepSeek / 本地 LM Studio)→ 生成 Brief + 镜头节点
 - ✅ **引擎引导向导雏形**:真实探测 LM Studio(1234)/ Ollama(11434)/ ComfyUI(8188)/ h3.c(--info 读 GPU/Metal/内存)/ mlxgen(command -v)
-- ✅ **h3c Provider**(`packages/providers/src/h3c.ts`):命令构造器(32 倍数宽高校验、档位防呆、五段式提示词)+ 后台子进程托管骨架(默认 dry-run,避免骨架期跑 10 分钟推理)
+- ✅ **h3c Provider**(`packages/providers/src/h3c.ts`):命令构造器(32 倍数宽高校验、档位防呆、五段式提示词)+ 后台子进程托管骨架(registry 默认 dry-run;真实跑见「M1 骨架的已知边界」)
 - ✅ **mlxgen Provider**(文生图/指令编辑/I2I/Inpaint/Outpaint/超分能力声明)
 - ✅ **Mock Provider**:离线演示,ffmpeg 生成带音轨测试视频(模拟带声直出)
 - ✅ **Agent 内核**(`packages/agent`):JSON-RPC over stdio 子进程协议 + pi-ai 真 LLM 规划(远端 DeepSeek / 本地 LM Studio)
 - ✅ **项目/画布持久化**(`apps/desktop/src/main/store.ts`):JSON 存储(接口可切换 SQLite)
-- ✅ **节点生成按钮**:每个镜头节点有"▶ 生成"按钮,点击调用真实 Provider(当前 mock 模式,`BIGBOTART_DRYRUN=0` 后真实推理)
+- ✅ **节点生成按钮**:每个镜头节点有"▶ 生成"按钮,按当前模式路由(真实跑 `pnpm dev` 时调 h3.c / mlxgen 真实推理;`pnpm dev:dry` 时只落占位结果)
 
 ## 目录结构
 
@@ -44,9 +44,10 @@ packages/agent/        # Agent 子进程管理 + 确定性规划(pi 插槽)
 
 ```bash
 pnpm install
-pnpm dev          # 开发模式(electron-vite dev)
+pnpm dev          # 真实跑(根脚本显式 BIGBOTART_DRYRUN=0,见 AGENTS.md §0.5)
+pnpm dev:dry      # 开发/排障 dry-run(安全默认,不碰真模型)
 pnpm build        # 构建产物
-pnpm start        # electron-vite preview
+pnpm start        # electron-vite preview(真实跑)
 ```
 
 首次启动会自动创建示例项目;引擎引导向导在画布右上角"🛠 引擎引导"。
@@ -56,7 +57,7 @@ pnpm start        # electron-vite preview
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BIGBOTART_HOME` | `~/.bigbotart` | 项目/画布数据目录 |
-| `BIGBOTART_DRYRUN=0` | `1` | 关闭 dry-run,真实调用 h3.c / mlxgen(慢,需模型就绪) |
+| `BIGBOTART_DRYRUN=0` | `1` | 关闭 dry-run,真实调用 h3.c / mlxgen(慢,需模型就绪;根脚本 `pnpm dev`/`pnpm start` 已显式设为 `0`) |
 | `BIGBOTART_H3_OUTPUTS` | `.bigbotart/outputs` | h3 输出目录 |
 
 ### 远端/本地 LLM(Agent 规划内核)
@@ -70,9 +71,16 @@ Agent 已集成 **pi-ai + 远端 OpenAI 兼容 LLM**(默认 DeepSeek,已实测�
 2. **本地 LM Studio**:未配置远端时自动回退 `http://127.0.0.1:1234/v1`(Ornith-1.5)
 3. **确定性规划兜底**:LLM 不可达时自动回退模板拆镜,闭环不断
 
+### Agent 对话(画布右侧面板)
+
+画布页右侧 Agent 面板即多轮创作对话(带工具调用 + 分层记忆)。输入框支持两个斜杠命令,Composer 工具行也有等价按钮:
+
+- **`/clear`** — 清空当前画布对话:UI 消息与持久化对话记录(recall + 压缩摘要)一并移除,不可恢复;画布节点、生成产物、节点总结不受影响,其他画布对话不受影响。
+- **`/compact`** — 压缩上下文:把旧对话交给 LLM 压成中文摘要并裁剪对话记录(保留最近 8 条承接上下文),摘要会作为「本画布对话摘要(已压缩)」随后续每次对话注入系统提示,多次压缩自动合并;LLM 不可达时自动降级为确定性兜底摘要,流程不中断。
+
 ## M1 骨架的已知边界
 
-- **h3.c / mlxgen 默认 dry-run**(只构造命令 + 占位结果);`BIGBOTART_DRYRUN=0` 后走真实推理。
+- **h3.c / mlxgen registry 代码默认 dry-run**(只构造命令 + 占位结果)。⚠️ 但根脚本 `pnpm dev` / `pnpm start` 已显式 `BIGBOTART_DRYRUN=0` = **真实跑**(144GB 模型、preview 档也要 1-2 分钟);`pnpm dev:dry` 才是 dry-run(开发/排障默认)。真实跑还需设置页「真实推理」开关 = real,两层开关、前置条件与常见坑见 AGENTS.md §0.5。
 - **Agent 为 pi-ai 真 LLM 规划**(远端/本地),失败回退确定性模板;接入点 `packages/agent/src/pi-planner.ts`。
 - **画布持久化为 JSON 文件**;SQLite 方案(接口已抽象)待 Electron 内置 Node 升级或引入 better-sqlite3。
 - **macOS Gatekeeper**:从非官方渠道下载的 Electron 二进制可能被系统清除;本仓库已用 `codesign --force --deep --sign -` 做 ad-hoc 签名规避,重装依赖后如遇清除需重新签名(见下)。

@@ -14,17 +14,44 @@ Electron 31 + React 18 + React Flow 12 的无限画布视频/图片生成 Agent,
 - `packages/agent` — Agent 内核(主进程 `manager.ts` ↔ worker 子进程,stdio JSON-RPC)
 
 ```bash
-pnpm install && pnpm dev:dry     # 开发(dry-run,安全默认)
+pnpm install && pnpm dev:dry     # 开发(dry-run,安全默认;AI 排障/开发默认用这个)
+pnpm dev                         # 真实跑(上线真跑,见 §0.5;仅用户明确要求时用)
 pnpm typecheck                   # 提交前必跑,全 workspace tsc --noEmit
 pnpm build                       # electron-vite build
 ```
+
+## 0.5 真实跑模式(上线真跑)
+
+> 与 dry-run 相对。红线 R2 不变:真实推理**只能由用户显式触发**,AI 代理不得默认进入真实跑。
+
+| 入口 | 模式 | 行为 |
+|---|---|---|
+| `pnpm dev:dry` | dry-run(测试) | 只构造命令 + 占位结果,不碰真模型;**开发/排障默认** |
+| `pnpm dev` / `pnpm start` | **真实跑** | 根脚本已显式 `BIGBOTART_DRYRUN=0`,真实 spawn h3.c / mlxgen |
+
+真实跑必须**两层开关同时满足**(缺一不可):
+
+1. 环境变量 `BIGBOTART_DRYRUN=0` —— 主进程**启动时只读一次**;改了 `.env` 或启动命令后必须**重启 App** 才生效
+2. 设置页「真实推理」开关 = real —— 持久化在 `~/.bigbotart/settings.json` 的 `renderMode:'real'`
+
+前置条件(不满足会白等或失败):
+
+- 引擎模型就绪:`h3 --info -d <modelDir>` 能列出 checkpoint(本机部署见 h3c-usage skill)
+- 接受成本:144GB 模型驻内存,preview 档也要 1-2 分钟、768² 档 8-10 分钟;首次 Metal shader 编译约 30 分钟
+- 不要同时开两个真实任务(App 内生成 + CLI 直跑会争抢内存)
+
+常见坑(均为本项目实测):
+
+- 启动报「does not provide an export named …」:`packages/*` 的 dist 过期,先 `pnpm build:packages` 再启动
+- 提交成功但 Take「无产物文件」:仍是 dry-run(回查上面两层开关)
+- 启动日志显示 `BIGBOTART_DRYRUN=1`:实例是用 `pnpm dev:dry` 起的,要重启切 `pnpm dev`
 
 ## 1. 红线(违反 = 直接打回)
 
 | # | 红线 | 原因 |
 |---|---|---|
 | R1 | **禁止把 `.env`、API Key、令牌写入任何会被 git 跟踪的文件**;新密钥配置只写 `.env.example` 的占位符 + 注释 | 仓库无密钥历史,保持如此 |
-| R2 | **禁止默认关闭 dry-run**。代码内 `BIGBOTART_DRYRUN !== '0'` 的判定逻辑不许反转;真实推理只能由用户显式触发 | h3.c 真实推理加载 144GB 模型,preview 也要数分钟 |
+| R2 | **禁止默认关闭 dry-run**。代码内 `BIGBOTART_DRYRUN !== '0'` 的判定逻辑不许反转;真实推理只能由用户显式触发(真实跑的操作细则见 §0.5) | h3.c 真实推理加载 144GB 模型,preview 也要数分钟 |
 | R3 | **禁止绕过 `packages/providers/src/registry.ts` 直接实例化 Provider**;新 Provider 实现 `Provider` 接口后注入 `createRegistry({ extra })` | registry 是唯一的后端选择点 |
 | R4 | **禁止 renderer 直接 `import` Node/Electron API**;一切能力经 `BigBotArtApi` IPC 契约 + preload `contextBridge` | 进程隔离是安全边界 |
 | R5 | **禁止删除/覆盖 `.bigbotart/`、`outputs/` 下的用户数据**;调试时用临时目录 | 本地优先,用户资产不可逆 |
@@ -55,7 +82,7 @@ pnpm build                       # electron-vite build
 ## 3. 验证纪律
 
 1. **改完必跑 `pnpm typecheck`**;涉及单个包可用 `pnpm --filter <pkg> typecheck`
-2. **功能验证默认 dry-run**:`pnpm dev:dry`。需要真实推理前必须先向用户确认(成本:分钟级 + 大内存)
+2. **功能验证默认 dry-run**:`pnpm dev:dry`。需要真实推理前必须先向用户确认(成本:分钟级 + 大内存;入口/前置条件/常见坑见 §0.5)
 3. Agent worker 改动后,验证子进程路径(`AgentManager.inline` 默认 false):worker 崩溃不应污染主进程
 4. mock Provider 永远真实(ffmpeg 占位 MP4),可用它做端到端冒烟而不碰真模型
 
@@ -63,7 +90,7 @@ pnpm build                       # electron-vite build
 
 - TypeScript ESM,`"type": "module"`;workspace 内部引用用 `@bigbotart/*` 包名,不跨包相对路径
 - 注释与文档用中文;标识符用英文;环境变量统一 `BIGBOTART_` 前缀
-- 主进程模块化:新能力优先加到 `src/main/` 下的独立模块(assets/export/frames/llm/memory/settings/skills/store/takes 已是先例),不要继续堆 `index.ts`(已 645 行)
+- 主进程模块化:新能力优先加到 `src/main/` 下的独立模块(assets/export/frames/llm/lora/memory/settings/skills/store/takes 已是先例),不要继续堆 `index.ts`(已 645 行)
 - renderer 的 React Flow 画布逻辑集中在 `src/renderer/src/pages/canvas/`;新节点类型要同步 `node-mapping.ts` / `connectors.ts` / `constants.ts`
 - renderer 的 Agent 对话面板在 `src/renderer/src/pages/agent/`:`useAgentChat.ts`(全部状态与副作用)+ `AgentChatView`/`AgentComposer`(展示)+ `cards/`(消息卡片,纯展示)
 
