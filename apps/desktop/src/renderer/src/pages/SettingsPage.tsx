@@ -190,7 +190,9 @@ function LmPopover(props: {
 }
 
 interface DownloadState {
-  status: 'idle' | 'downloading' | 'done' | 'failed';
+  status: 'idle' | 'downloading' | 'done' | 'failed' | 'cancelled';
+  /** 主进程下载任务 id(轮询/取消用) */
+  jobId?: string;
   pct?: number;
   error?: string;
 }
@@ -889,8 +891,54 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
       .then((list) => setMlxReady(Object.fromEntries(list.map((m) => [m.id, m.downloaded]))))
       .catch(() => {});
   };
+  /** 轮询定时器表(model id → interval;unmount 统一清理,防旧 timer 泄漏) */
+  const pollTimers = useRef<Record<string, number>>({});
+  const stopPolling = (id: string): void => {
+    const t = pollTimers.current[id];
+    if (t) {
+      window.clearInterval(t);
+      delete pollTimers.current[id];
+    }
+  };
+  /** 对指定下载任务轮询进度,终态(running 以外)停表 + 刷新就绪状态 */
+  const startPolling = (id: string, jobId: string): void => {
+    stopPolling(id);
+    pollTimers.current[id] = window.setInterval(() => {
+      void window.bigbotart
+        .mlxgenDownloadStatus(jobId)
+        .then((st) => {
+          setDownloads((d) => ({
+            ...d,
+            [id]: { status: st.status === 'running' ? 'downloading' : st.status, jobId, pct: st.pct ?? 0, error: st.error },
+          }));
+          if (st.status !== 'running') {
+            stopPolling(id);
+            refreshMlxModels();
+          }
+        })
+        .catch(() => {});
+    }, 700);
+  };
+  /** 进入设置页/页面刷新时,恢复主进程仍在进行的下载任务进度(此前 startDownload 的 jobId 只存在组件 state) */
+  const pollActiveDownloads = (): void => {
+    void window.bigbotart
+      .mlxgenDownloadActive()
+      .then((tasks) => {
+        for (const t of tasks) {
+          setDownloads((d) =>
+            d[t.id]?.status === 'downloading' ? d : { ...d, [t.id]: { status: 'downloading', jobId: t.jobId, pct: t.pct ?? 0 } },
+          );
+          startPolling(t.id, t.jobId);
+        }
+      })
+      .catch(() => {});
+  };
   useEffect(() => {
     refreshMlxModels();
+    pollActiveDownloads();
+    return () => {
+      for (const id of Object.keys(pollTimers.current)) stopPolling(id);
+    };
   }, []);
 
   const startDownload = (id: string): void => {
@@ -904,24 +952,31 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
           setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: res.error ?? '启动下载失败' } }));
           return;
         }
-        const timer = window.setInterval(() => {
-          void window.bigbotart
-            .mlxgenDownloadStatus(jobId)
-            .then((st) => {
-              setDownloads((d) => ({
-                ...d,
-                [id]: { status: st.status === 'running' ? 'downloading' : st.status, pct: st.pct ?? 0, error: st.error },
-              }));
-              if (st.status !== 'running') {
-                window.clearInterval(timer);
-                refreshMlxModels();
-              }
-            })
-            .catch(() => {});
-        }, 700);
+        setDownloads((d) => ({ ...d, [id]: { status: 'downloading', jobId, pct: 0 } }));
+        startPolling(id, jobId);
       })
       .catch(() => {
         setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: '下载启动失败' } }));
+      });
+  };
+
+  /** 取消进行中的下载(主进程终止子进程/中止 fetch,保留断点续传) */
+  const cancelDownload = (id: string, jobId?: string): void => {
+    if (!jobId) {
+      stopPolling(id);
+      setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', error: '已取消' } }));
+      return;
+    }
+    void window.bigbotart
+      .mlxgenDownloadCancel(jobId)
+      .then((r) => {
+        stopPolling(id);
+        setDownloads((d) => ({ ...d, [id]: { status: r.ok ? 'cancelled' : 'downloading', jobId, error: r.ok ? '已取消 · 保留断点续传' : r.error ?? '取消失败' } }));
+        if (r.ok) refreshMlxModels();
+      })
+      .catch(() => {
+        stopPolling(id);
+        setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', jobId, error: '已取消' } }));
       });
   };
 
@@ -1866,11 +1921,13 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                 <span className="badge ok">已就绪</span>
               </div>
               {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
+                // 模型大小按 HF 官方文件清单实测(2026-09,hf-mirror tree 汇总 / ModelScope 直连清单):
+                //   z-image-turbo-8bit 10.99GB · qwen-image-edit-8bit 37.5GB · seedvr2-3b-8bit 4.72GB · qwen2.5-vl-7b 16.6GB
                 const meta: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], { name: string; desc: string }> = {
-                  'z-image-turbo': { name: 'Z-Image-Turbo', desc: '文生图 · 推荐 · ~3GB' },
-                  'qwen-image-edit': { name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 推荐 · 8.2GB' },
-                  'seedvr2-3b': { name: 'SeedVR2 3B', desc: '超分修复 · 可选 · 6.1GB' },
-                  'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · 可选' },
+                  'z-image-turbo': { name: 'Z-Image-Turbo', desc: '文生图 · 推荐 · ~11GB' },
+                  'qwen-image-edit': { name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 推荐 · 37.5GB' },
+                  'seedvr2-3b': { name: 'SeedVR2 3B', desc: '超分修复 · 可选 · ~4.7GB' },
+                  'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · 可选 · ~16.6GB' },
                 };
                 const m = meta[id];
                 const dl = downloads[id] ?? { status: 'idle' as const, pct: 0 };
@@ -1903,6 +1960,22 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                         <div className="pbar" style={{ marginTop: 4 }}>
                           <i style={{ width: `${dl.pct ?? 0}%` }} />
                         </div>
+                        <button
+                          className="btn btn-s btn-sm"
+                          type="button"
+                          data-cancel-dl={id}
+                          style={{ marginTop: 6 }}
+                          onClick={() => cancelDownload(id, dl.jobId)}
+                        >
+                          取消下载
+                        </button>
+                      </div>
+                    ) : dl.status === 'cancelled' ? (
+                      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                        <span className="badge" title={dl.error}>已取消</span>
+                        <button className="btn btn-s btn-sm" data-dl="" onClick={() => startDownload(id)}>
+                          重新下载
+                        </button>
                       </div>
                     ) : (
                       <span className="badge">{dl.error ? '下载出错' : '未下载'}</span>

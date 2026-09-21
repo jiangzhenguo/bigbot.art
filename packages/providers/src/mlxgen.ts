@@ -86,11 +86,11 @@ export class MlXGenProvider implements Provider {
       editModes: ['instruction', 'img2img', 'inpaint', 'outpaint'],
       aspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3'],
       models: [
-        'AbstractFramework/z-image-turbo-8bit (Z-Image Turbo, 文生图, ~3GB)',
+        'AbstractFramework/z-image-turbo-8bit (Z-Image Turbo, 文生图, ~11GB)',
         'qwen-image (Qwen Image, 文生图)',
         'mlx-community/Qwen-Image-Edit-8bit (Qwen Image Edit 8bit, 指令编辑/mask, ~37.5GB)',
-        'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint)',
-        'AbstractFramework/seedvr2-3b-8bit (超分修复)',
+        'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint, ~18GB)',
+        'AbstractFramework/seedvr2-3b-8bit (超分修复, ~4.7GB)',
       ],
       notes: ['图片槽位与视频槽位互斥', '模型文件需 mlxgen download 预下载'],
     };
