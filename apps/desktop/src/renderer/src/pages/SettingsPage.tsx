@@ -260,6 +260,9 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   }>>({});
   const [cloudHint, setCloudHint] = useState<string | null>(null);
   const [addPvOpen, setAddPvOpen] = useState(false);
+  /* 删除供应商两步确认:第一次点击进入确认态(3.2s 未再点自动复位) */
+  const [pvDelConfirm, setPvDelConfirm] = useState<string | null>(null);
+  const pvDelTimer = useRef<number | null>(null);
 
   /* ---- 添加模型弹层(打开即 llmListRemoteModels 真拉取) ---- */
   const [mdlFor, setMdlFor] = useState<string | null>(null);
@@ -495,8 +498,19 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
         return;
       case 'cloud': {
         const cur = llmSource?.kind === 'cloud' ? llmSource : null;
-        if (cur?.model && cloudProviders.some((p) => p.id === cur.provider)) {
+        if (cur?.model && cloudProviders.some((p) => p.id === cur.provider && p.models.includes(cur.model!))) {
           persistKind({ kind: 'cloud', provider: cur.provider, model: cur.model });
+          return;
+        }
+        // radio 点击必须真正生效:自动挑一个可用的云端供应商(已启用+有模型,优先已配 key),
+        // 选中其首个模型并启用该供应商;一个都没有才提示先配置(此前只闪提示不选中,重启后看似"丢回本地")
+        const target =
+          cloudProviders.find((p) => p.enabled && p.models.length > 0 && p.hasKey) ??
+          cloudProviders.find((p) => p.enabled && p.models.length > 0) ??
+          cloudProviders.find((p) => p.models.length > 0);
+        if (target) {
+          if (!target.enabled) patchProvider(target.id, (p) => ({ ...p, enabled: true }));
+          persistKind({ kind: 'cloud', provider: target.id, model: target.models[0]! });
         } else {
           flashHint('cloud', '请先添加云端供应商并选择模型');
         }
@@ -680,7 +694,39 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   };
   const selectCloudModel = (id: string, model: string): void => {
     setLlm('cloud');
+    // 选中即启用:停用状态的供应商被选中后 chat 会报「云端供应商已停用」,选中语义应包含启用
+    const p = cloudProviders.find((x) => x.id === id);
+    if (p && !p.enabled) patchProvider(id, (x) => ({ ...x, enabled: true }));
     persistKind({ kind: 'cloud', provider: id, model });
+  };
+  /** 删除云端供应商:两步确认;连带删钥匙串凭据、当前 llm 回退本地默认、清理项目级覆盖 */
+  const removeProvider = async (id: string): Promise<void> => {
+    if (pvDelConfirm !== id) {
+      setPvDelConfirm(id);
+      window.clearTimeout(pvDelTimer.current ?? undefined);
+      pvDelTimer.current = window.setTimeout(() => setPvDelConfirm(null), 3200);
+      return;
+    }
+    window.clearTimeout(pvDelTimer.current ?? undefined);
+    setPvDelConfirm(null);
+    persistCloud(cloudProviders.filter((p) => p.id !== id));
+    void window.bigbotart.credentialDelete(id).catch(() => {});
+    if (llmSource?.kind === 'cloud' && llmSource.provider === id) {
+      // 当前来源被删 → 回退本地默认(与 DEFAULTS 同口径:model 缺省由主进程补 lmStudioModel)
+      setLlm('lmstudio');
+      persistKind({ kind: 'lmstudio' });
+    }
+    // 项目级覆盖引用该供应商的,清掉(否则下次对话报「云端供应商不存在」)
+    try {
+      const projects = await window.bigbotart.listProjects();
+      for (const pr of projects) {
+        if (pr.llmOverride?.kind === 'cloud' && pr.llmOverride.provider === id) {
+          void window.bigbotart.setProjectLlm(pr.id, null).catch(() => {});
+        }
+      }
+    } catch {
+      /* 项目列表读取失败不阻塞删除 */
+    }
   };
   const delPvModel = (e: React.MouseEvent<HTMLButtonElement>, id: string, model: string): void => {
     e.stopPropagation();
@@ -1521,6 +1567,21 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
                                 );
                               })
                             )}
+                            <div className="pv-frow" style={{ marginTop: 10 }}>
+                              <span className="spacer" />
+                              <button
+                                className="btn btn-s btn-sm"
+                                data-od-id={`provider-del-${p.id}`}
+                                style={{ color: 'var(--warn)' }}
+                                title="删除该供应商(连同本机钥匙串凭据;不影响已生成的画布内容)"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void removeProvider(p.id);
+                                }}
+                              >
+                                {pvDelConfirm === p.id ? '再点一次确认删除' : '删除供应商'}
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
