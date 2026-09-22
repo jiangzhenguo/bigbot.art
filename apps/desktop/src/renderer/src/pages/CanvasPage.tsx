@@ -26,6 +26,7 @@ import {
   seedIdCounter,
 } from './canvas/node-mapping';
 import { resolvePort, resolvePortOptions, type PortResolution } from './canvas/connectors';
+import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc } from './canvas/media';
 import { nodesReducer } from './canvas/edge-dispatch';
@@ -143,6 +144,10 @@ export default function CanvasPage({
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const bootRef = useRef(true); // 挂载期跳过首轮保存(等加载/规划落地)
   const prevJobState = useRef<Record<string, string>>({});
+  /** 接力轮次中已提交、仍存活的任务(去重防重复入队;终态后移除) */
+  const cascadePendingRef = useRef<Set<string>>(new Set());
+  /** 最新接力触发函数(渲染时重绑,引用最新 runNode,避免 effect 闭包拿到旧版本) */
+  const cascadeKickRef = useRef<(nodeId: string, jobs: RenderJob[], freshTail?: string) => void>(() => {});
   const assetCache = useRef<Record<string, string>>({}); // assetId → localPath
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [categories, setCategories] = useState<AssetCategory[]>([]);
@@ -861,6 +866,13 @@ export default function CanvasPage({
     );
     setTakeResults(out);
   }, [projectId]);
+
+  /** 重生成某节点 ⇒ 全部下游生成节点标 stale(依赖过期;接力跑完逐个刷新,成功即清) */
+  const markDownstreamStale = useCallback((nodeId: string) => {
+    const affected = allDownstreamGenIds([nodeId], nodesRef.current, edgesRef.current);
+    if (affected.length === 0) return;
+    setNodes((ns) => ns.map((x) => (affected.includes(x.id) ? { ...x, stale: true } : x)));
+  }, []);
   useEffect(() => {
     void refreshTakeResults();
   }, [refreshTakeResults]);
@@ -870,7 +882,7 @@ export default function CanvasPage({
   useEffect(() => {
     let alive = true;
     let lastSig = '';
-    const apply = (list: RenderJob[]) => {
+    const apply = async (list: RenderJob[]) => {
       const sig = list.map((j) => `${j.id}:${j.status}:${j.progress ?? ''}:${j.stage ?? ''}:${j.resultPath ?? ''}`).join('|');
       if (sig === lastSig) return;
       lastSig = sig;
@@ -880,6 +892,10 @@ export default function CanvasPage({
         const prev = prevJobState.current[j.id];
         if (prev === j.status) continue;
         prevJobState.current[j.id] = j.status;
+        // 接力任务终态:从「本接力轮存活集」移除,后续重跑不再被占位挡住
+        if (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled') {
+          cascadePendingRef.current.delete(j.nodeId);
+        }
         if (j.status === 'succeeded') {
           setNodes((ns) =>
             ns.map((n) =>
@@ -901,24 +917,26 @@ export default function CanvasPage({
             es.map((e) => (e.to === j.nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)),
           );
           // 连续性:上游 shot 跑完 → 自动抽尾帧归档(下游镜头 first-frame 的帧源)
-          // 注意:每次新产物都要重新抽(上游重跑后尾帧必须刷新),以 tailFrameFrom 记录来源产物
+          // 注意:每次新产物都要重新抽(上游重跑后尾帧必须刷新),以 tailFrameFrom 记录来源产物;
+          // 这里**等待**抽取完成并把最新尾帧显式传给接力下游(见下),避免读 ref 拿到旧尾帧
           const done = nodesRef.current.find((x) => x.id === j.nodeId);
           const doneData = (done?.data ?? {}) as Record<string, unknown>;
+          let freshTail: string | undefined;
           if (done?.kind === 'shot' && j.resultPath && String(doneData.tailFrameFrom ?? '') !== j.resultPath) {
-            void window.bigbotart
-              .extractFrame(j.resultPath, 'last')
-              .then((res) => {
-                if (!res.ok || !res.path) return;
-                setNodes((ns) =>
-                  ns.map((x) =>
-                    x.id === j.nodeId
-                      ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: j.resultPath } }
-                      : x,
-                  ),
-                );
-              })
-              .catch(() => undefined);
+            const res = await window.bigbotart.extractFrame(j.resultPath, 'last');
+            if (res.ok && res.path) {
+              freshTail = res.path;
+              setNodes((ns) =>
+                ns.map((x) =>
+                  x.id === j.nodeId
+                    ? { ...x, data: { ...(x.data ?? {}), tailFramePath: res.path, tailFrameFrom: j.resultPath } }
+                    : x,
+                ),
+              );
+            }
           }
+          // 接力:上游成功后,直接下游生成节点(无产物/已 stale)依次送入队列,整条链递归跑到尾
+          cascadeKickRef.current?.(j.nodeId, list, freshTail);
         } else if (j.status === 'failed') {
           setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}` } : n)));
         } else if (j.status === 'running') {
@@ -1309,13 +1327,15 @@ export default function CanvasPage({
 
   /* ══ 真实渲染:提交节点到主进程队列(槽位互斥) ══ */
   const runNode = useCallback(
-    async (nodeId: string) => {
+    async (nodeId: string, opts?: { freshTailFrame?: string; freshTailFrom?: string }) => {
       const n = nodesRef.current.find((x) => x.id === nodeId);
       if (!n) {
         toastMsg('请先在画布上选中一个节点');
         return;
       }
       const d = (n.data ?? {}) as Record<string, unknown>;
+      // 重生成(节点已有旧产物)⇒ 下游依赖过期:传递闭包标 stale(接力跑完逐个刷新,成功即清)
+      if (CASCADE_KINDS.has(n.kind ?? '') && Boolean(d.resultPath)) markDownstreamStale(nodeId);
       if (n.kind === 'timeline') {
         onNavigate('timeline');
         return;
@@ -1384,8 +1404,8 @@ export default function CanvasPage({
       const engine = String(d.engine ?? (isImage ? 'mlxgen' : 'h3c'));
 
       // 参考绑定 → Provider references(首/尾帧、参考图、参考音频;shot 接续走 path 直链)
-      const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string }> | undefined) ?? [];
-      const references = refs
+      const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }> | undefined) ?? [];
+      let references = refs
         .map((r) => {
           const localPath = r.path ?? assetCache.current[r.assetId ?? ''];
           if (!localPath) return null;
@@ -1409,13 +1429,34 @@ export default function CanvasPage({
          已显式绑定首帧(手动或连线派发)时不覆盖用户意图。 */
       let inheritedFrom: string | null = null;
       if (n.kind === 'shot') {
-        const hasFirst = refs.some((r) => r.role === 'first-frame');
         const shotMode = String(d.mode ?? 'text2video');
         const wantsFrameAnchor = shotMode === 'first-frame' || shotMode === 'first-last';
         const upShotId = edgesRef.current
           .filter((e) => e.to === nodeId)
           .map((e) => e.from)
           .find((id) => nodesRef.current.find((x) => x.id === id)?.kind === 'shot');
+        // 接力注入:上游刚跑完,把最新尾帧显式覆盖到自动首帧引用 —— nodesRef 在 setState 后
+        // 尚未刷新,直接读 data.refs 可能拿到旧尾帧;手动绑定的首帧(非 auto)保持优先,不覆盖
+        if (opts?.freshTailFrame && upShotId && opts.freshTailFrom === upShotId) {
+          const manualFirst = refs.some((r) => r.role === 'first-frame' && r.auto !== true);
+          if (!manualFirst) {
+            references = references.filter((r) => (r as { role?: string }).role !== 'first-frame');
+            references.push({
+              asset: {
+                id: `shot-tail:${nodeId}`,
+                kind: 'image',
+                name: `上游 ${opts.freshTailFrom} · 尾帧`,
+                localPath: opts.freshTailFrame,
+                tags: [],
+                createdAt: new Date().toISOString(),
+              },
+              role: 'first-frame',
+              localPath: opts.freshTailFrame,
+            } as never);
+            inheritedFrom = nodesRef.current.find((x) => x.id === upShotId)?.title ?? null;
+          }
+        }
+        const hasFirst = references.some((r) => (r as { role?: string }).role === 'first-frame');
         if (!hasFirst && (wantsFrameAnchor || !['ref-image', 'last-frame'].includes(shotMode))) {
           const upId = upShotId;
           const up = upId ? nodesRef.current.find((x) => x.id === upId) : undefined;
@@ -1579,8 +1620,24 @@ export default function CanvasPage({
         toastMsg(`提交失败:${msg}`);
       }
     },
-    [onNavigate, toastMsg, projectId, activeCanvasId],
+    [onNavigate, toastMsg, projectId, activeCanvasId, markDownstreamStale],
   );
+
+  /* 接力触发(渲染时重绑,引用最新 runNode):上游成功后,把直接下游中「该跑」的依次送入队列。
+     递归由「下游成功后再次走成功分支 → 再接力再下游」自然完成,整条链跑到尾。 */
+  cascadeKickRef.current = (nodeId, jobs, freshTail) => {
+    const runnable = pickCascadeTargets(nodeId, nodesRef.current, edgesRef.current, {
+      isBusy: (id) =>
+        cascadePendingRef.current.has(id) ||
+        jobs.some((j) => j.nodeId === id && (j.status === 'queued' || j.status === 'running')),
+    });
+    if (runnable.length === 0) return;
+    for (const id of runnable) {
+      cascadePendingRef.current.add(id);
+      void runNode(id, { freshTailFrame: freshTail, freshTailFrom: nodeId });
+    }
+    toastMsg(`已接力 ${runnable.length} 个下游节点 · 依次生成`);
+  };
 
   /* ══ 顶部动作 ══ */
   const [rerunDone, setRerunDone] = useState(false);
