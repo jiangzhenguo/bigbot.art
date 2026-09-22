@@ -112,6 +112,17 @@ function sourceMedia(node: EdgeNodeMin, opts?: ValidateEdgeOptions): string | un
 }
 
 /**
+ * 该源节点在指定端口上实际提供的「载荷媒体」(而非节点主输出媒体)。
+ * 特例:shot 的 first-frame 端口消费的是其「尾帧 PNG」(图片),不是视频本体 ——
+ * 镜头接续语义(deriveShotRefsFromEdges 以 tailFramePath 注入;尾帧未就绪也允许建边,
+ * 提交期 W004 兜底),与渲染层 connectors.ts(BY_KIND shot→shot 恒提供 first-frame)同口径。
+ */
+function portPayloadMedia(node: EdgeNodeMin, label: string, opts?: ValidateEdgeOptions): string | undefined {
+  if (node.kind === 'shot' && label === 'first-frame') return 'image';
+  return sourceMedia(node, opts);
+}
+
+/**
  * 该源 → 该目标上「当前媒体类型下可选」的端口 label 列表。
  * 纯规则函数:渲染层 / 工具层 / 物化层共用同一份能力表。
  */
@@ -127,10 +138,11 @@ export function allowedPortLabels(
   if (source.kind === 'workflow-input') return [];
   const raw = CONNECTOR_MAP[source.kind]?.[targetKind];
   if (!raw) return [];
-  const sm = sourceMedia(source, opts);
   return splitPorts(raw).filter((label) => {
     const need = PORT_REQUIRED_MEDIA[label];
-    return !need || sm === undefined || sm === need;
+    if (!need) return true;
+    const pm = portPayloadMedia(source, label, opts);
+    return pm === undefined || pm === need;
   });
 }
 

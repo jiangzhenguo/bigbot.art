@@ -72,6 +72,36 @@ describe('A · validateEdge 端口合法性', () => {
     expect(res.errors[0]!.message).toContain('ref-video');
   });
 
+  it('shot → shot first-frame 合法(镜头接续:上游尾帧 → 下游首帧,载荷是尾帧图片而非视频本体)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4', tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    const res = validateEdge(nodes, [], edge('up', 'down', 'first-frame'));
+    expect(res.ok).toBe(true);
+    expect(allowedPortLabels(shotNode('up'), 'shot')).toEqual(['first-frame']);
+  });
+
+  it('shot → shot 尾帧未就绪也允许建边(连线先立,提交期 W004 兜底)', () => {
+    const nodes = [shotNode('up'), shotNode('down')];
+    expect(validateEdge(nodes, [], edge('up', 'down', 'first-frame')).ok).toBe(true);
+  });
+
+  it('shot → shot 其他端口仍被拒(last-frame/ref-image 媒体不匹配,ref-video 不在镜头接续端口表)', () => {
+    const nodes = [shotNode('up', { tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    for (const label of ['last-frame', 'ref-image', 'ref-video']) {
+      const res = validateEdge(nodes, [], edge('up', 'down', label));
+      expect(res.ok, label).toBe(false);
+      expect(res.errors[0]!.code, label).toBe('port-not-allowed');
+    }
+  });
+
+  it('shot → shot first-frame 与已有 first-frame 入边冲突 ⇒ 可替换(单值端口)', () => {
+    const nodes = [assetNode('a'), shotNode('up', { tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    const edges = [edge('a', 'down', 'first-frame')];
+    const res = validateEdge(nodes, edges, edge('up', 'down', 'first-frame'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('single-port-conflict');
+    expect(res.errors[0]!.replaceable).toBe(true);
+  });
+
   it('asset(video) → shot ref-video 合法', () => {
     const nodes = [assetNode('v', 'video'), shotNode('s')];
     const res = validateEdge(nodes, [], edge('v', 's', 'ref-video'));
