@@ -803,7 +803,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings ::-webkit-scrollbar-track{background:transparent}
 @keyframes settings-spin{to{transform:rotate(360deg)}}
 .pg-settings .spin{width:12px;height:12px;border:1.5px solid color-mix(in oklab,var(--accent),transparent 65%);border-top-color:var(--accent);border-radius:50%;animation:settings-spin .9s linear infinite}
-.pg-settings .app{height:100vh;display:flex;overflow:hidden}
+.pg-settings .app{height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.pg-settings .topbar{height:52px;flex:none;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface-warm)}
+.pg-settings .topbar .sep{width:1px;height:20px;background:var(--border)}
+.pg-settings .crumb{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-sm)}
+.pg-settings .crumb .chev{color:var(--meta)}
+.pg-settings .sbody{flex:1;display:flex;min-height:0;overflow:hidden}
 .pg-settings .side{width:230px;flex:none;background:var(--surface);border-right:1px solid var(--border-soft);display:flex;flex-direction:column;min-height:0}
 .pg-settings .side-brand{display:flex;align-items:center;gap:9px;padding:16px 16px 12px;font-family:var(--font-display);font-size:var(--text-base);font-weight:600;letter-spacing:var(--tracking-display)}
 .pg-settings .side-brand .mk{width:26px;height:26px;border-radius:8px;background:var(--fg);color:var(--bg);display:grid;place-items:center;flex:none}
@@ -836,6 +841,7 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .pbar{height:5px;border-radius:3px;background:color-mix(in oklab,var(--fg) 10%,transparent);overflow:hidden}
 .pg-settings .pbar i{display:block;height:100%;border-radius:3px;background:var(--accent);transition:width .3s linear}
 .pg-settings{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var(--accent) 7%,transparent), transparent 62%),radial-gradient(900px 640px at -8% 108%, color-mix(in oklab,var(--fg) 7%,transparent), transparent 58%),var(--bg);background-attachment:fixed;min-height:100vh}
+.pg-settings .topbar{margin:10px 12px 0;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec)}
 .pg-settings .side{margin:12px 0 12px 12px;border:1px solid var(--border);border-radius:22px;background:var(--glass-bg);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec)}
 .pg-settings .side-link.on{background:color-mix(in oklab,var(--bg) 74%,transparent)}
 .pg-settings .local-card{background:var(--glass-well)}

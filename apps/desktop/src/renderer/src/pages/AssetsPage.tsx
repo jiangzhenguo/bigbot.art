@@ -2,8 +2,11 @@
  * AssetsPage — 资源管理(对齐设计稿 assets.html / project-assets.html)
  *
  * 双视图:
- * - 项目视图(projectId 给定,默认):项目头(返回画布/统计/打开总资源库)+ 项目分类/标签筛选 + 从画布产物导入
- * - 总资源库(viewPid=null):跨项目聚合头 + 项目过滤 + 全局分类
+ * - 项目视图(projectId 给定,默认):公共顶部栏(PageTopBar)+ 项目信息条(统计/打开总资源库)+ 项目分类/标签筛选 + 从画布产物导入
+ * - 总资源库(viewPid=null):公共顶部栏 + 跨项目聚合信息条 + 项目过滤 + 全局分类
+ *
+ * 返回逻辑:总库视图 → 先回项目视图(有项目上下文时);项目视图 → onBack 回来源页(App 导航栈,
+ * 从首页进回首頁、从画布进回画布)。
  *
  * 数据:一次拉总库 listAssets() + 分类 + 项目列表;视图内过滤。删除 = 软删(回收站,7 天后清理);
  * 详情面板由 pages/assets/AssetDetail 承担,卡片由 pages/assets/AssetCard 承担。
@@ -13,6 +16,7 @@ import type { Asset, AssetCategory, AssetRef, Project } from '@bigbotart/shared'
 import { AssetCard } from './assets/AssetCard';
 import { AssetDetail } from './assets/AssetDetail';
 import { usePrompt } from '../components/usePrompt';
+import PageTopBar from '../components/PageTopBar';
 
 export type AssetsPageTarget =
   | 'home'
@@ -26,6 +30,10 @@ export type AssetsPageTarget =
 
 interface AssetsPageProps {
   onNavigate: (page: AssetsPageTarget) => void;
+  /** 返回上一页(App 导航栈出栈,回到来源页) */
+  onBack: () => void;
+  /** 返回按钮文案(来源页名,如「画布」「首页」) */
+  backLabel: string;
   /** 进入时的项目上下文(画布入口);null = 直接打开总资源库 */
   projectId: string | null;
   projectName: string;
@@ -33,7 +41,7 @@ interface AssetsPageProps {
 
 const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', audio: '音频', document: '文档' };
 
-export default function AssetsPage({ onNavigate, projectId, projectName }: AssetsPageProps) {
+export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, projectName }: AssetsPageProps) {
   /* ── 数据 ── */
   const [allAssets, setAllAssets] = useState<Asset[]>([]);
   const [categories, setCategories] = useState<AssetCategory[]>([]);
@@ -104,6 +112,17 @@ export default function AssetsPage({ onNavigate, projectId, projectName }: Asset
 
   const selAsset = allAssets.find((a) => a.id === sel) ?? null;
   const viewName = projects.find((p) => p.id === viewPid)?.name || projectName;
+
+  /* 返回:总库视图先回项目视图(有项目上下文时);项目视图回来源页(App 导航栈,从哪来回哪去) */
+  const handleBack = () => {
+    if (!viewPid && projectId) {
+      setViewPid(projectId);
+      return;
+    }
+    onBack();
+  };
+  /* 总库视图且有项目上下文时,返回目标是项目视图(按钮文案 = 项目名) */
+  const backText = !viewPid && projectId ? viewName : backLabel;
 
   /* ---- 视图内资源 + 过滤 ---- */
   const baseList = useMemo(
@@ -281,83 +300,19 @@ export default function AssetsPage({ onNavigate, projectId, projectName }: Asset
     <div className="pg-assets">
       {promptDialog}
       <div className="app" data-od-id="assets-app">
-        {/* ── 头部:项目头(项目视图)/ 总库头 ── */}
-        {viewPid ? (
-          <section className="projhero" data-od-id="project-hero" style={{ padding: '18px 22px 10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button className="btn btn-g btn-sm" data-od-id="project-back" title="返回画布" onClick={() => onNavigate('canvas')}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                  <path d="m14 6-6 6 6 6" />
-                </svg>
-                画布
-              </button>
-              <b style={{ fontSize: 14 }}>{viewName}</b>
-              <span className="mut" style={{ fontSize: 11 }}>项目资源 · 仅本项目</span>
-              <span className="spacer" />
-              <a
-                className="btn btn-s btn-sm"
-                data-od-id="open-total-library"
-                style={{ cursor: 'pointer' }}
-                onClick={() => setViewPid(null)}
-              >
-                打开总资源库 →
-              </a>
-            </div>
-            <div style={{ display: 'flex', gap: 26, marginTop: 10, flexWrap: 'wrap' }}>
-              <span className="mono">{baseList.length} 资源总数</span>
-              <span className="mono">{projectCats.length} 分类</span>
-              <span className="mono ok">{baseList.filter((a) => a.source === 'product').length} 产物归档</span>
-              <span className="mono">{baseList.filter((a) => !a.categoryId).length} 未分类</span>
-            </div>
-          </section>
-        ) : (
-          <section className="libhero" data-od-id="library-hero" style={{ padding: '18px 22px 10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button
-                className="btn btn-g btn-sm"
-                data-od-id="assets-back"
-                onClick={() => (projects.length || projectId ? onNavigate('canvas') : onNavigate('home'))}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                  <path d="m14 6-6 6 6 6" />
-                </svg>
-                {projectId ? '画布' : '首页'}
-              </button>
-              <b style={{ fontSize: 14 }}>总资源库</b>
-              <span className="mut" style={{ fontSize: 11 }}>跨项目聚合 · 全局资源</span>
-              <span className="spacer" />
-              {projects.map((p) => {
-                const n = allAssets.filter((a) => a.projectId === p.id && !a.deletedAt).length;
-                return (
-                  <button
-                    key={p.id}
-                    className={`chip${viewPid === p.id ? '' : ''}`}
-                    style={{ fontSize: 11 }}
-                    data-od-id={`proj-pill-${p.id}`}
-                    onClick={() => setViewPid(p.id)}
-                  >
-                    {p.name} <span className="n">{n}</span>
-                  </button>
-                );
-              })}
-              {projects.length ? <span className="mut" style={{ fontSize: 11 }}>点项目名进入该项目资源页</span> : null}
-            </div>
-            <div style={{ display: 'flex', gap: 26, marginTop: 10, flexWrap: 'wrap' }}>
-              <span className="mono">{allAssets.filter((a) => !a.deletedAt).length} 资源总数</span>
-              <span className="mono">{projects.filter((p) => allAssets.some((a) => a.projectId === p.id)).length} 涉及项目</span>
-              <span className="mono">{categories.filter((c) => !c.projectId).length} 全局分类</span>
-              <span className="mono ok">{allAssets.filter((a) => a.source === 'product' && !a.deletedAt).length} 产物归档</span>
-            </div>
-          </section>
-        )}
-
-        {/* ── 工具条 ── */}
-        <header className="topbar" data-od-id="assets-toolbar" style={{ marginTop: 2 }}>
-          <span className="crumb" data-od-id="assets-crumb">
-            <b>资源管理</b>
-            <span className="chev">›</span>
-            <span>{viewPid ? projectName : '总资源库'}</span>
-          </span>
+        {/* ── 公共顶部栏:返回 + 面包屑 + 动作 + 搜索 ── */}
+        <PageTopBar
+          odId="assets"
+          backLabel={backText}
+          onBack={handleBack}
+          crumb={
+            <>
+              <b>资源管理</b>
+              <span className="chev">›</span>
+              <span>{viewPid ? viewName : '总资源库'}</span>
+            </>
+          }
+        >
           <span className="sep" />
           {viewPid ? (
             <button className="btn btn-s btn-sm" id="archiveBtn" data-od-id="assets-archive-from-canvas" title="把画布里有产物的节点归档为项目资源" onClick={() => void openArchive()}>
@@ -382,7 +337,49 @@ export default function AssetsPage({ onNavigate, projectId, projectName }: Asset
             </svg>
             <input placeholder="搜索资源名 / id / 标签…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
-        </header>
+        </PageTopBar>
+
+        {/* ── 视图信息条:上下文 + 统计(返回与动作已并入顶部栏) ── */}
+        {viewPid ? (
+          <section data-od-id="project-hero" style={{ padding: '14px 22px 6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <b style={{ fontSize: 14 }}>{viewName}</b>
+              <span className="mut" style={{ fontSize: 11 }}>项目资源 · 仅本项目</span>
+              <span className="spacer" />
+              <a
+                className="btn btn-s btn-sm"
+                data-od-id="open-total-library"
+                style={{ cursor: 'pointer' }}
+                onClick={() => setViewPid(null)}
+              >
+                打开总资源库 →
+              </a>
+            </div>
+          </section>
+        ) : (
+          <section data-od-id="library-hero" style={{ padding: '14px 22px 6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <b style={{ fontSize: 14 }}>总资源库</b>
+              <span className="mut" style={{ fontSize: 11 }}>跨项目聚合 · 全局资源</span>
+              <span className="spacer" />
+              {projects.map((p) => {
+                const n = allAssets.filter((a) => a.projectId === p.id && !a.deletedAt).length;
+                return (
+                  <button
+                    key={p.id}
+                    className={`chip${viewPid === p.id ? '' : ''}`}
+                    style={{ fontSize: 11 }}
+                    data-od-id={`proj-pill-${p.id}`}
+                    onClick={() => setViewPid(p.id)}
+                  >
+                    {p.name} <span className="n">{n}</span>
+                  </button>
+                );
+              })}
+              {projects.length ? <span className="mut" style={{ fontSize: 11 }}>点项目名进入该项目资源页</span> : null}
+            </div>
+          </section>
+        )}
 
         {/* ── 筛选条:分类 + 媒体 + 标签 ── */}
         <div className="filters" data-od-id="assets-filters" style={{ padding: '10px 22px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>

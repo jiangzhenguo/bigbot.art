@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import HomePage from './pages/HomePage';
 import CanvasPage from './pages/CanvasPage';
 import AssetsPage from './pages/AssetsPage';
@@ -11,6 +11,18 @@ import ErrorBoundary from './components/ErrorBoundary';
 import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
+
+/** 页面中文名(返回按钮文案用) */
+const PAGE_LABEL: Record<Page, string> = {
+  home: '首页',
+  canvas: '画布',
+  assets: '资源管理',
+  skills: 'Skills 库',
+  timeline: '时间线',
+  settings: '设置',
+  onboarding: '引导',
+  projects: '项目列表',
+};
 
 export interface ProjectItem {
   id: string;
@@ -26,6 +38,9 @@ export interface EngineStatus {
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('home');
+  /* 简易导航栈:handleNavigate 压栈,详情页「返回」经 handleBack 出栈回到来源页
+     (此前资源管理页写死回画布/凭 projects.length 猜来源,返回目标不对) */
+  const navStackRef = useRef<Page[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projectCanvases, setProjectCanvases] = useState<ProjectCanvases | null>(null);
@@ -86,10 +101,22 @@ export default function App() {
         setCurrentPage('projects');
         return;
       }
+      navStackRef.current.push(currentPage);
+      if (navStackRef.current.length > 20) navStackRef.current.shift();
       setCurrentPage(page);
     },
-    [projectId],
+    [projectId, currentPage],
   );
+
+  /** 返回上一页(资源管理等详情页用);栈空兜底回首页 */
+  const handleBack = useCallback(() => {
+    const prev = navStackRef.current.pop();
+    const target: Page = !prev ? 'home' : prev === 'canvas' && !projectId ? 'projects' : prev;
+    setCurrentPage(target);
+  }, [projectId]);
+
+  /** 来源页文案(返回按钮标签);导航栈只在事件里改,渲染期读取最新值即可 */
+  const backLabel = PAGE_LABEL[navStackRef.current[navStackRef.current.length - 1] ?? 'home'];
 
   const handleGenerate = async (brief: string) => {
     try {
@@ -267,6 +294,8 @@ export default function App() {
         <ErrorBoundary name="资产">
           <AssetsPage
             onNavigate={handleNavigate}
+            onBack={handleBack}
+            backLabel={backLabel}
             projectId={projectId}
             projectName={projects.find((p) => p.id === projectId)?.name ?? '未命名项目'}
           />
@@ -292,7 +321,7 @@ export default function App() {
       )}
       {currentPage === 'settings' && (
         <ErrorBoundary name="设置">
-          <SettingsPage onNavigate={handleNavigate} />
+          <SettingsPage onNavigate={handleNavigate} onBack={handleBack} backLabel={backLabel} />
         </ErrorBoundary>
       )}
       {currentPage === 'onboarding' && (

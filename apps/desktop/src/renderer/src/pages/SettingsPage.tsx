@@ -10,14 +10,30 @@ import type {
   LocalRuntimeModels,
   RuntimeProbe,
 } from '@bigbotart/shared';
+import PageTopBar from '../components/PageTopBar';
 
 interface SettingsPageProps {
   onNavigate: (
     page: 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects',
   ) => void;
+  /** 返回上一页(App 导航栈出栈,回到来源页) */
+  onBack: () => void;
+  /** 返回按钮文案(来源页名,如「画布」「首页」) */
+  backLabel: string;
 }
 
 type GroupKey = 'general' | 'llm' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
+
+/** 面包屑当前组名(与侧栏导航文案一致) */
+const GROUP_LABEL: Record<GroupKey, string> = {
+  general: '通用',
+  llm: 'LLM 来源',
+  engines: '引擎(Provider)',
+  queue: '队列与资源',
+  storage: '存储与项目',
+  models: '模型下载',
+  lora: '加速 LoRA',
+};
 
 /** LLM 来源单选(设计稿 data-llm 的五档) */
 type LlmKey = 'lmstudio' | 'ollama' | 'pimlx' | 'openai-compat' | 'cloud';
@@ -208,7 +224,7 @@ const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> =
   'qwen2.5-vl': 'Qwen/Qwen2.5-VL-7B-Instruct',
 };
 
-export default function SettingsPage({ onNavigate }: SettingsPageProps) {
+export default function SettingsPage({ onNavigate, onBack, backLabel }: SettingsPageProps) {
   /* ---- 分组切换 ---- */
   const [group, setGroup] = useState<GroupKey>('llm');
 
@@ -1091,33 +1107,23 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
   return (
     <div className="pg-settings">
       <div className="app" data-od-id="settings-app">
-        {/* 左:设置导航 */}
+        {/* ── 公共顶部栏:返回来源页 + 面包屑(与资源/技能页同款) ── */}
+        <PageTopBar
+          odId="settings"
+          backLabel={backLabel}
+          onBack={onBack}
+          crumb={
+            <>
+              <b>设置</b>
+              <span className="chev">›</span>
+              <span>{GROUP_LABEL[group]}</span>
+            </>
+          }
+        />
+        <div className="sbody">
+        {/* 左:设置导航(brand/「设置」标签已移除,页面标题在公共顶栏面包屑) */}
         <aside className="side" data-od-id="settings-nav">
-          <a
-            className="side-brand"
-            href="index.html"
-            title="返回原型总览"
-            onClick={(e) => {
-              e.preventDefault();
-              onNavigate('home');
-            }}
-          >
-            <span className="mk">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <rect x="3" y="3" width="8" height="8" rx="2" />
-                <rect x="13" y="13" width="8" height="8" rx="2" />
-                <path d="M11 8h6a4 4 0 0 1 4 4v1" opacity=".65" />
-              </svg>
-            </span>
-            BigBotArt
-          </a>
-          <div className="side-nav" style={{ marginTop: 4 }}>
-            <div className="lbl">设置</div>
+          <div className="side-nav" style={{ marginTop: 12 }}>
             <a
               className={`side-link${group === 'general' ? ' on' : ''}`}
               data-panel="general"
@@ -1176,27 +1182,6 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
               }}
             >
               引擎引导向导…
-            </a>
-            <div className="lbl">返回</div>
-            <a
-              className="side-link"
-              href="home.html"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate('home');
-              }}
-            >
-              首页
-            </a>
-            <a
-              className="side-link"
-              href="canvas.html"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate('canvas');
-              }}
-            >
-              画布工作台
             </a>
           </div>
           <div className="side-foot">
@@ -2147,6 +2132,7 @@ export default function SettingsPage({ onNavigate }: SettingsPageProps) {
             </div>
           </div>
         </main>
+        </div>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Skill } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
+import PageTopBar from '../components/PageTopBar';
 
 interface SkillsPageProps {
   onNavigate: (
@@ -535,20 +536,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
     <div className="pg-skills">
       {promptDialog}
       <div className="app" data-od-id="skills-app">
-        <header className="topbar" data-od-id="skills-toolbar">
-          <button className="btn btn-g btn-sm" onClick={() => onNavigate('home')}>
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-            >
-              <path d="m14 6-6 6 6 6" />
-            </svg>
-            Skills 库
-          </button>
+        <PageTopBar odId="skills" backLabel="首页" onBack={() => onNavigate('home')}>
           <span className="sep"></span>
           <button
             className="btn btn-s btn-sm"
@@ -610,7 +598,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
-        </header>
+        </PageTopBar>
 
         <div className="work">
           <main className="grid-area" data-od-id="skills-grid">
