@@ -20,6 +20,11 @@ interface ToolbarProps {
   /** 工具行弹层(分支等)当前打开的 id;由 CanvasPage 持有(全局点按/Escape 要关闭它) */
   openPop: string | null;
   setOpenPop: React.Dispatch<React.SetStateAction<string | null>>;
+  /* 撤销/重做(历史由 CanvasPage 的 HistoryStack 持有,这里只接线与置灰) */
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   rerunDone: boolean;
   /** 当前受影响的节点数(stale / agentOn) */
   staleCount: number;
@@ -41,6 +46,10 @@ export function Toolbar({
   onRenameCanvas,
   openPop,
   setOpenPop,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   rerunDone,
   staleCount,
   assetCount,
@@ -72,13 +81,27 @@ export function Toolbar({
         onRenameCanvas={onRenameCanvas}
       />
       <span className="sep"></span>
-      <button className="ibtn" title="撤销">
+      <button
+        className="ibtn"
+        data-od-id="canvas-undo"
+        title={canUndo ? '撤销(⌘Z)' : '没有可撤销的操作'}
+        disabled={!canUndo}
+        style={canUndo ? undefined : { opacity: 0.4 }}
+        onClick={onUndo}
+      >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
           <path d="M8 5 3 10l5 5" />
           <path d="M3 10h11a7 7 0 0 1 0 14h-3" />
         </svg>
       </button>
-      <button className="ibtn" title="重做">
+      <button
+        className="ibtn"
+        data-od-id="canvas-redo"
+        title={canRedo ? '重做(⌘⇧Z)' : '没有可重做的操作'}
+        disabled={!canRedo}
+        style={canRedo ? undefined : { opacity: 0.4 }}
+        onClick={onRedo}
+      >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
           <path d="m16 5 5 5-5 5" />
           <path d="M21 10H10a7 7 0 0 0 0 14h3" />

@@ -132,6 +132,15 @@ export class ProjectStore {
     const now = new Date().toISOString();
     const idx = pc.canvases.findIndex((c) => c.id === snap.id);
     const cur = idx >= 0 ? pc.canvases[idx] : undefined;
+    // 🛡️ 防护:空快照覆盖有内容的画布一律拒绝(最后防线)。
+    // 事故背景(2026-09-22):渲染层在「画布尚未装填」的瞬间 flush 了一次空快照,把 version 374 的
+    // 有内容画布写成了空画布;version 防护挡不住(渲染层版本并不落后),只能靠内容判空兜底。
+    // 用户真要清空画布时,渲染层会先删节点(每次删除都算内容变化)→ 那时传的是「非首次」的空快照,
+    // 这里按「当前 store 有、传入为空」拒绝;确需清空请走 delete-canvas 或先删到只剩一个节点再删。
+    if (cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0 && (snap.edges?.length ?? 0) === 0) {
+      this.onCanvasSaved?.(cur);
+      return { ok: false, stale: true, current: cur };
+    }
     // 防护:传入快照 version 落后于当前(说明 store 有更新的写入,渲染层未同步)→ 拒绝覆盖
     if (cur && (snap.version ?? 0) < cur.version) {
       // 广播最新快照:渲染层凭此同步 version/内容,下一次保存不再落后(避免反复被拒)

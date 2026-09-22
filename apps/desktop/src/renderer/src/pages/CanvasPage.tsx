@@ -30,6 +30,7 @@ import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc } from './canvas/media';
 import { nodesReducer } from './canvas/edge-dispatch';
+import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
 import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
@@ -46,6 +47,19 @@ import { useAgentChat } from './agent/useAgentChat';
 
 /** 节点尚未测得高度时的估算兜底(px):连线端点/预览线首帧用,实测后立即被替换 */
 const UNMEASURED_NODE_H = 72;
+
+/** 默认视图(无持久化 viewport 的画布:新画布 / 旧项目文件) */
+const DEFAULT_VIEW = { x: 20, y: 10, z: 0.86 };
+
+/** 画布视口合法化:非有限值 / 越界缩放一律回退默认视图(旧项目文件与手改 JSON 都走这里) */
+function normalizeView(raw?: { x?: unknown; y?: unknown; z?: unknown } | null): { x: number; y: number; z: number } {
+  const x = Number(raw?.x);
+  const y = Number(raw?.y);
+  const z = Number(raw?.z);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return { ...DEFAULT_VIEW };
+  if (z < 0.4 || z > 1.3) return { ...DEFAULT_VIEW };
+  return { x, y, z };
+}
 
 export default function CanvasPage({
   onNavigate,
@@ -71,9 +85,12 @@ export default function CanvasPage({
   const toastTimer = useRef<number | null>(null);
   const queueTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
+  /** 视口(平移/缩放)落盘防抖计时器 */
+  const viewTimer = useRef<number | null>(null);
 
-  /* ── 视图:平移 / 缩放(以指针为中心滚轮缩放) ── */
-  const [view, setView] = useState({ x: 20, y: 10, z: 0.86 });
+  /* ── 视图:平移 / 缩放(以指针为中心滚轮缩放) ──
+     初值 = 默认视图;挂载/切画布时由画布快照的 viewport 覆盖(见下方加载 effect) */
+  const [view, setView] = useState({ ...DEFAULT_VIEW });
   const viewRef = useRef(view);
   viewRef.current = view;
   const [panning, setPanning] = useState(false);
@@ -89,8 +106,16 @@ export default function CanvasPage({
    对外 setNodes 保持 React.Dispatch<SetStateAction> 签名,内部转 dispatch,
    所有既有调用点与 InspectorBody 等子组件 props 无需改动。 */
   const [nodes, dispatchNodes] = useReducer(nodesReducer, []);
+  const [edges, setEdgesState] = useState<Edge[]>([]);
+  /** 节点/边 ref:必须**同步**跟上每一次写入(不能只在渲染期赋值)。
+   *  原因:commitEdit 在 setNodes/setEdges 之后同一 tick 内读它来决定历史条目,若 ref 还是旧值,
+   *  历史会认为「结构没变」而不记录 —— 表现就是「新建的节点撤销不掉」(2026-09-22 实测事故)。 */
+  const nodesRef = useRef<CanvasNode[]>(nodes);
+  const edgesRef = useRef<Edge[]>(edges);
   const setNodes: React.Dispatch<React.SetStateAction<CanvasNode[]>> = useCallback(
     (arg: CanvasNode[] | ((prev: CanvasNode[]) => CanvasNode[])) => {
+      // 同步推进 ref(与 reducer 相同的纯 updater 语义;StrictMode 下 reducer 仍会双跑,但 ref 只推进一次)
+      nodesRef.current = typeof arg === 'function' ? arg(nodesRef.current) : arg;
       dispatchNodes({
         type: 'set',
         updater: typeof arg === 'function' ? arg : () => arg,
@@ -98,15 +123,18 @@ export default function CanvasPage({
     },
     [],
   );
-  const [edges, setEdges] = useState<Edge[]>([]);
+  /** setEdges 包装:同样写入即同步 ref */
+  const setEdges: React.Dispatch<React.SetStateAction<Edge[]>> = useCallback(
+    (arg: Edge[] | ((prev: Edge[]) => Edge[])) => {
+      edgesRef.current = typeof arg === 'function' ? arg(edgesRef.current) : arg;
+      setEdgesState(arg);
+    },
+    [],
+  );
   /** store 侧已知快照版本(挂载/刷新/推送时更新;保存用它,避免旧版本整体覆盖 Agent 的增量写盘) */
   const [knownVersion, setKnownVersion] = useState(0);
   const knownVersionRef = useRef(0);
   knownVersionRef.current = knownVersion;
-  const nodesRef = useRef(nodes);
-  nodesRef.current = nodes;
-  const edgesRef = useRef(edges);
-  edgesRef.current = edges;
   const [selected, setSelected] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<string | null>(null);
   const [infoMap, setInfoMap] = useState<Record<string, NodeInfo>>(() => ({
@@ -213,6 +241,95 @@ export default function CanvasPage({
     };
   }, [measure]);
 
+  /* ══ 撤销 / 重做(真正的实现:见 canvas/canvas-history.ts)══
+     提交时机 = 离散编辑动作完成时(不是 state 每次变化):
+     - 拖动节点结束 / 参数改写 / 建删节点与连线 / 分镜表铺节点 …
+     - view(平移缩放)不进历史;Agent 工具写盘不经这里(由推送 refresh 换基线)
+     历史里只存「节点 + 连线」的可序列化内容。 */
+  const historyRef = useRef(new HistoryStack());
+  const [histVer, setHistVer] = useState(0);
+  /** 取当前内容(节点 + 连线)的引用快照:数组本身不可变(每次写入都是新数组),故浅拷贝即快照 */
+  const contentSnapshot = useCallback(
+    (): HistoryContent => ({ nodes: nodesRef.current, edges: edgesRef.current }),
+    [],
+  );
+  /** 记录一次编辑:label 是动作名(撤销提示与按钮 tooltip 用)。
+   *  调用时机:在对应 setState/setEdges **之后**立即调用(此时 ref 已是编辑后内容)。
+   *  「编辑前」状态由 HistoryStack 自己在基线里保存,所以这里不需要传 prev,
+   *  也就不会踩「prev/next 必须同一渲染周期成对给出」的时序陷阱。 */
+  const commitEdit = useCallback((label: string) => {
+    historyRef.current.commit(contentSnapshot(), label);
+    setHistVer((v) => v + 1);
+  }, [contentSnapshot]);
+  /** 工具条的按钮态:必须**读** histVer,否则 setHistVer 不会触发重渲染 ——
+   *  历史栈在 ref 里,React 看不见它的变化,按钮会永远停在初始的置灰状态。 */
+  const canUndo = useMemo(() => historyRef.current.canUndo(), [histVer]);
+  const canRedo = useMemo(() => historyRef.current.canRedo(), [histVer]);
+
+  /** 应用历史内容到画布(节点 + 连线一次 setState,避免中间态触发连线派生)。
+   *  回放期间(下一帧之前)所有 commitEdit 被 HistoryStack 的闸门忽略,保证撤销本身不进历史。 */
+  const applyHistoryContent = useCallback(
+    (content: HistoryContent) => {
+      historyRef.current.beginReplay();
+      setNodes(content.nodes as CanvasNode[]);
+      setEdges(content.edges as Edge[]);
+      const settle = () => {
+        historyRef.current.endReplay({ nodes: nodesRef.current, edges: edgesRef.current });
+        setHistVer((v) => v + 1);
+      };
+      // 等两个渲染帧:连线派生 effect(derive-from-edges)可能再写一次 state,之后才建立基线
+      requestAnimationFrame(() => requestAnimationFrame(settle));
+    },
+    [setNodes],
+  );
+
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (!h.canUndo()) {
+      toastMsg('没有可撤销的操作');
+      return;
+    }
+    const entry = h.stepUndo(contentSnapshot());
+    if (!entry) return;
+    applyHistoryContent(entry.content);
+    toastMsg(`已撤销:${entry.label}${h.canRedo() ? ' · ⌘⇧Z 重做' : ''}`);
+  }, [applyHistoryContent, contentSnapshot, toastMsg]);
+
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (!h.canRedo()) {
+      toastMsg('没有可重做的操作');
+      return;
+    }
+    const entry = h.stepRedo(contentSnapshot());
+    if (!entry) return;
+    applyHistoryContent(entry.content);
+    toastMsg(`已重做:${entry.label}`);
+  }, [applyHistoryContent, contentSnapshot, toastMsg]);
+
+  /* ── 舞台可视区尺寸(小地图视口框/跳转中心需要;窗口变化与面板拖宽时实时更新) ── */
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const update = () => setStageSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /** 小地图跳转:把目标世界坐标对准舞台中心(保持当前缩放不变) */
+  const onMinimapNavigate = useCallback((world: { x: number; y: number }) => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    setView((v) => ({
+      ...v,
+      x: stage.clientWidth / 2 - world.x * v.z,
+      y: stage.clientHeight / 2 - world.y * v.z,
+    }));
+  }, []);
+
   /* ── 节点定位 + 拖拽(scale 校正,和 canvas.js 一致) ── */
   const dragRef = useRef<{
     id: string;
@@ -220,13 +337,17 @@ export default function CanvasPage({
     sy: number;
     ox: number;
     oy: number;
+    moved: boolean;
   } | null>(null);
+  /** 拖动开始时的内容(撤销要回到的位置):拖拽过程中每帧 setState 只写状态,不动历史 */
+  const dragPrevRef = useRef<HistoryContent | null>(null);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
       if (!d) return;
       const z = viewRef.current.z;
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
       setNodes((ns) =>
         ns.map((n) =>
           n.id === d.id
@@ -236,7 +357,16 @@ export default function CanvasPage({
       );
     };
     const onUp = () => {
+      const d = dragRef.current;
+      if (!d) return;
       dragRef.current = null;
+      // 拖动结束 = 一次离散编辑 ✓ 提交历史(未真正移动过则不记)
+      if (d.moved && dragPrevRef.current) {
+        // 拖动是唯一「跨越很长时间、起点状态必须显式记下」的编辑:直接把拖动前内容当撤销目标
+        historyRef.current.commitFrom(dragPrevRef.current, { nodes: nodesRef.current, edges: edgesRef.current }, '移动节点');
+        setHistVer((v) => v + 1);
+      }
+      dragPrevRef.current = null;
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -300,6 +430,7 @@ export default function CanvasPage({
     const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
     const edgeLabel = deriveEdgeLabel(src, tag, port);
     if (edgeLabel === undefined) return; // 无连接器(双重保险)
+    const before = { nodes: nodesRef.current, edges: edgesRef.current };
     setEdges((es) => {
       // 完全相同边不去重:允许同 src→dst 重复(shot→timeline 多条入线本就支持)
       // 但若「label 也一样」则跳过,避免无意义的 dup
@@ -544,7 +675,7 @@ export default function CanvasPage({
   const activeCanvasId = projectCanvases?.activeCanvasId ?? '';
   const activeCanvas = projectCanvases?.canvases.find((c) => c.id === activeCanvasId);
 
-  /** 构建当前画布快照(节点+边)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
+  /** 构建当前画布快照(节点+边+视口)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
   const buildActiveSnapshot = useCallback(
     (ns?: CanvasNode[], es?: Edge[]): CanvasSnapshot | null => {
       if (!activeCanvas) return null;
@@ -556,6 +687,8 @@ export default function CanvasPage({
         edges: toSharedEdges(es ?? edges) as never,
         // 用已知版本(随推送/刷新前进),保证不落后于 store —— 落后会导致 saveCanvasSnapshot 版本防护拒绝覆盖
         version: knownVersion || activeCanvas.version,
+        // 画布视口:退出/重进恢复上次看到的位置与缩放(取 ref,保证拖拽/滚轮进行中也写最新值)
+        viewport: { ...viewRef.current },
         createdAt: activeCanvas.createdAt,
         updatedAt: new Date().toISOString(),
       };
@@ -566,6 +699,8 @@ export default function CanvasPage({
   /** 最近一次确认与 store 一致的内容基线(JSON)—— 卸载/防抖保存前比对,无变化不写盘。
    *  防止「version 对齐但内容为空/旧」的崩溃/重挂场景覆盖 store(与主进程版本防护双保险)。 */
   const lastSavedRef = useRef('');
+  /** 最近一次落盘的视口(内容没变但视口变了也要写盘,见 maybePersist) */
+  const lastViewRef = useRef<{ x: number; y: number; z: number } | null>(null);
   /** 标记内容基线为「与 store 一致」(加载/推送/保存成功后调用) */
   const markBaseline = useCallback((ns: CanvasNode[], es: Edge[]) => {
     lastSavedRef.current = JSON.stringify([ns, es]);
@@ -577,25 +712,40 @@ export default function CanvasPage({
     (snap: CanvasSnapshot | null, opts?: { allowEmpty?: boolean }) => {
       if (!snap) return;
       const local = JSON.stringify([snap.nodes, snap.edges]);
-      if (local === lastSavedRef.current) return;
-      if (opts?.allowEmpty !== true) {
-        const hasContent = (snap.nodes?.length ?? 0) > 0 || (snap.edges?.length ?? 0) > 0;
-        const baselineHasContent = lastSavedRef.current !== '' && lastSavedRef.current !== '[[],[]]';
-        if (!hasContent && baselineHasContent) return;
+      // 🛡️ 防「空快照覆盖有内容画布」:本地内存为空,但 store 里这份画布有节点时一律不写盘。
+      // 事故背景(2026-09-22):启动瞬间/切画布时若 nodes 尚未装填,一次 flush 就会把有内容的画布写成空,
+      // 而基线比对只看「本地内容是否变过」,挡不住「本地是空、基线也是空」的首次写盘。
+      const localEmpty = (snap.nodes?.length ?? 0) === 0 && (snap.edges?.length ?? 0) === 0;
+      const storeHasNodes = (activeCanvas?.nodes?.length ?? 0) > 0;
+      if (localEmpty && storeHasNodes) return;
+      if (local === lastSavedRef.current) {
+        // 内容没变:视口(平移/缩放)变了也要落盘,否则重进画布会回到上次内容改动时的位置
+        const last = lastViewRef.current;
+        const vp = snap.viewport;
+        if (vp && last && last.x === vp.x && last.y === vp.y && last.z === vp.z) return;
+        lastViewRef.current = vp ? { ...vp } : last;
+        void onSaveCanvas(snap);
+        return;
       }
+
       lastSavedRef.current = local;
+      lastViewRef.current = snap.viewport ? { ...snap.viewport } : lastViewRef.current;
       void onSaveCanvas(snap);
     },
-    [onSaveCanvas],
+    [onSaveCanvas, activeCanvas],
   );
 
-  /** 切换画布前先 flush 当前画布的未保存改动 */
+  /** 切换画布前先 flush 当前画布的未保存改动(含视口) */
   const flushSaveNow = useCallback(() => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    maybePersist(buildActiveSnapshot());
+    if (viewTimer.current) {
+      window.clearTimeout(viewTimer.current);
+      viewTimer.current = null;
+    }
+    maybePersist(buildActiveSnapshot(), { allowEmpty: true });
   }, [buildActiveSnapshot, maybePersist]);
 
   /** 切画布包装:先 flush-save 再走 onSwitchCanvas */
@@ -619,7 +769,11 @@ export default function CanvasPage({
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    maybePersist(buildActiveSnapshot());
+    if (viewTimer.current) {
+      window.clearTimeout(viewTimer.current);
+      viewTimer.current = null;
+    }
+    maybePersist(buildActiveSnapshot(), { allowEmpty: true });
   };
   useEffect(() => () => saveFlushRef.current(), []);
 
@@ -637,6 +791,15 @@ export default function CanvasPage({
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
     markBaseline(selfHeal.nodes, selfHeal.edges);
+    // 画布视口:恢复上次退出时的平移/缩放(旧项目文件无 viewport → 默认视图)
+    const restored = normalizeView(activeCanvas.viewport);
+    viewRef.current = restored;
+    setView(restored);
+    lastViewRef.current = { ...restored };
+    // 换画布 = 换编辑对象:清空撤销/重做历史并重建基线
+    historyRef.current.clear();
+    historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+    setHistVer((v) => v + 1);
     if (selfHeal.changed) {
       const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
       if (repaired) void onSaveCanvas(repaired);
@@ -755,10 +918,11 @@ export default function CanvasPage({
             : n,
         ),
       );
+      commitEdit('更换绑定资产');
       toastMsg(`已更换为「${asset.name}」 · 下游绑定同步更新`);
       setAssetPickFor(null);
     },
-    [setNodes, toastMsg],
+    [setNodes, toastMsg, commitEdit],
   );
 
   /** 工具改画布后:从 store 重新拉当前画布刷新节点(Agent 工具增量写盘后主进程会推送快照,这里兜底双保险) */
@@ -774,6 +938,10 @@ export default function CanvasPage({
       setNodes(selfHeal.nodes);
       setEdges(selfHeal.edges);
       markBaseline(selfHeal.nodes, selfHeal.edges);
+      // Agent 工具改了画布:换基线并清空历史(历史坐标已不可用,撤销会与 Agent 改动打架)
+      historyRef.current.clear();
+      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+      setHistVer((v) => v + 1);
       if (selfHeal.changed) {
         const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
         if (repaired) void onSaveCanvas(repaired);
@@ -787,13 +955,21 @@ export default function CanvasPage({
   /** 画布内容同步(推送的快照或 store 拉取结果)→ 本地 nodes/edges + knownVersion。
    *  内容与版本都没变化时跳过 setState——推送可能来自渲染层自身的保存,重设会触发
    *  auto-save 依赖的 effect 再保存,造成 version 无限增长的写盘循环。 */
-  const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'>) => {
+  const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'> & { viewport?: CanvasSnapshot['viewport'] }) => {
     const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
     const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
     const version = cur.version ?? 0;
     const sameContent =
       JSON.stringify(selfHeal.nodes) === JSON.stringify(nodesRef.current) &&
       JSON.stringify(selfHeal.edges) === JSON.stringify(edgesRef.current);
+    // 内容确实变了(外部写入:Agent 工具 / 另一个窗口):连视口一起同步,
+    // 并换历史基线 —— 历史里的节点引用已失效,撤销会回到与 store 不一致的旧内容
+    if (!sameContent && cur.viewport) {
+      const v = normalizeView(cur.viewport);
+      viewRef.current = v;
+      setView(v);
+      lastViewRef.current = { ...v };
+    }
     if (sameContent) {
       // 内容没变:只前进 knownVersion(不 setNodes → 不触发 auto-save 再保存 → 避免 version 循环写盘)
       knownVersionRef.current = version;
@@ -804,6 +980,17 @@ export default function CanvasPage({
     setKnownVersion(version);
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
+    // 快照推送分两种:
+    // ① 我方 auto-save 的回推(内容 == 刚保存的 lastSavedRef)→ 不能清历史!
+    //    否则「新建节点 → 800ms 后自动保存 → 回推清空历史 → 撤销永远置灰」(2026-09-22 实测事故)
+    // ② 外部写入(Agent 工具 / 另一窗口)→ 历史里的节点引用已失效,换基线清历史,
+    //    避免撤销回到与 store 不一致的旧内容
+    const isOwnSave = JSON.stringify([toSharedNodes(selfHeal.nodes), toSharedEdges(selfHeal.edges)]) === lastSavedRef.current;
+    if (!isOwnSave) {
+      historyRef.current.clear();
+      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+      setHistVer((v) => v + 1);
+    }
     markBaseline(selfHeal.nodes, selfHeal.edges);
     nextId.current = seedIdCounter(selfHeal.nodes);
     return selfHeal;
@@ -832,7 +1019,22 @@ export default function CanvasPage({
     selectedNodeRef,
   });
 
-  /* 画布自动持久化(防抖 800ms;只在 active canvas 有内容时写) */
+  /* 视口自动持久化(防抖 400ms):平移/缩放停止后把 viewport 写回快照 ——
+     与内容保存同一个函数,内容没变时只在视口变化时写盘(见 maybePersist)。
+     切画布/离开页面由 flushSaveNow / 卸载 flush 兜底,所以这里不需要更短的延迟。 */
+  useEffect(() => {
+    if (bootRef.current || !projectId || !activeCanvas) return;
+    if (viewTimer.current) window.clearTimeout(viewTimer.current);
+    viewTimer.current = window.setTimeout(() => {
+      maybePersist(buildActiveSnapshot(), { allowEmpty: true });
+    }, 400);
+    return () => {
+      if (viewTimer.current) window.clearTimeout(viewTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.x, view.y, view.z, projectId, activeCanvasId]);
+
+  /* 画布内容自动持久化(防抖 800ms;只在 active canvas 有内容时写) */
   useEffect(() => {
     if (bootRef.current || !projectId || !activeCanvas) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
@@ -1049,10 +1251,11 @@ export default function CanvasPage({
       // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
       const edgeLabel = deriveEdgeLabel(src, t, port);
       setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
+      commitEdit(`新增「${t.name}」并连线`);
       setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
       closeAddPop();
     },
-    [apFrom, closeAddPop],
+    [apFrom, closeAddPop, commitEdit],
   );
 
   /* 左侧面板:双击添加 + 拖拽添加
@@ -1147,8 +1350,9 @@ export default function CanvasPage({
           data: makeInitialData(t),
         } as CanvasNode,
       ]);
+      commitEdit('从节点库添加节点');
     },
-    [findFreeSpot],
+    [findFreeSpot, commitEdit],
   );
 
   /** 拖拽添加(鼠标松开时落到世界坐标,不与现有节点重叠) */
@@ -1180,8 +1384,9 @@ export default function CanvasPage({
           data: makeInitialData(t),
         } as CanvasNode,
       ]);
+      commitEdit('从节点库拖入节点');
     },
-    [findFreeSpot, screenToWorld],
+    [findFreeSpot, screenToWorld, commitEdit],
   );
 
   /* ══ 右键菜单 ══ */
@@ -1205,6 +1410,7 @@ export default function CanvasPage({
           flash: false,
         } as CanvasNode,
       ]);
+      commitEdit('复制节点');
       const info = NODE_INFO_BASE[id];
       if (info) {
         setInfoMap((m) => {
@@ -1222,7 +1428,7 @@ export default function CanvasPage({
       selectNode(nid);
       toastMsg('已复制节点 · 副本不携带连线与运行状态');
     },
-    [selectNode, toastMsg],
+    [selectNode, toastMsg, commitEdit],
   );
 
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
@@ -1235,6 +1441,7 @@ export default function CanvasPage({
       const next = await askPrompt({ title: '重命名节点', initial: n.title });
       if (!next || next === n.title) return;
       setNodes((ns) => ns.map((x) => (x.id === id ? { ...x, title: next } : x)));
+      commitEdit('重命名节点');
       // 同步检查器条目与当前检查器标题(若正显示该节点)
       setInfoMap((m) => {
         const cur = m[id];
@@ -1244,7 +1451,7 @@ export default function CanvasPage({
       setInspectTitle((cur) => (cur === n.title ? next : cur));
       toastMsg(`已重命名为「${next}」`);
     },
-    [toastMsg, askPrompt],
+    [toastMsg, askPrompt, commitEdit],
   );
 
   /** 右键「在 Finder 中显示」:解析节点真实产物路径 → 主进程 shell 定位(文件缺失回退最近目录) */
@@ -1282,6 +1489,7 @@ export default function CanvasPage({
     (id: string) => {
       setNodes((ns) => ns.filter((n) => n.id !== id));
       setEdges((es) => es.filter((e) => e.from !== id && e.to !== id));
+      commitEdit('删除节点');
       setInfoMap((m) => {
         const next = { ...m };
         delete next[id];
@@ -1290,7 +1498,7 @@ export default function CanvasPage({
       setSelected((s) => (s === id ? null : s));
       toastMsg('已删除节点 · 相关连线已一并移除');
     },
-    [toastMsg],
+    [toastMsg, commitEdit],
   );
 
   /* ── 全局点按:关闭工具行弹层(模型/技能/分支) ── */
@@ -1316,6 +1524,21 @@ export default function CanvasPage({
         duplicateNode(selected);
         return;
       }
+      // ⌘Z 撤销 / ⌘⇧Z(或 ⌘Y)重做:输入框内保留系统文本撤销,不抢
+      if ((e.metaKey || e.ctrlKey) && !typing) {
+        const k = e.key.toLowerCase();
+        if (k === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) redo();
+          else undo();
+          return;
+        }
+        if (k === 'y') {
+          e.preventDefault();
+          redo();
+          return;
+        }
+      }
       if ((e.key === 'Backspace' || e.key === 'Delete') && selected && !typing) {
         e.preventDefault();
         deleteNode(selected);
@@ -1323,7 +1546,7 @@ export default function CanvasPage({
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [closeAddPop, deleteNode, duplicateNode, selected]);
+  }, [closeAddPop, deleteNode, duplicateNode, selected, undo, redo]);
 
   /* ══ 真实渲染:提交节点到主进程队列(槽位互斥) ══ */
   const runNode = useCallback(
@@ -1759,10 +1982,11 @@ export default function CanvasPage({
         ...created,
       ]);
       setEdges((es) => [...es, ...newEdges]);
+      commitEdit('分镜表铺节点');
       if (ids[0]) setSelected(ids[0]);
       toastMsg(`已铺 ${pending.length} shot${imgs ? ` + ${imgs} image-gen` : ''} · ${pending.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`);
     },
-    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelected, toastMsg],
+    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelected, toastMsg, commitEdit],
   );
 
   /** 整体撤销铺节点:移除该分镜表铺出的全部节点与对应边 */
@@ -1787,9 +2011,10 @@ export default function CanvasPage({
           .map((x) => (x.id === sbNode.id ? { ...x, data: { ...(x.data ?? {}), lastTable: '' } } : x)),
       );
       setEdges((es) => es.filter((e) => !ids.has(e.from) && !ids.has(e.to)));
+      commitEdit('整体撤销铺节点');
       toastMsg(`已整体撤销 ${n} 个铺出节点 · 分镜表回到待铺状态`);
     },
-    [setNodes, setEdges, toastMsg],
+    [setNodes, setEdges, toastMsg, commitEdit],
   );
 
   /** 重新同步:按当前表重组提示词写回已铺节点(不重建、不删除、不自动重跑) */
@@ -1854,6 +2079,7 @@ export default function CanvasPage({
         const sb = fromSharedNode(plan.storyboard as never);
         setNodes((ns) => [...ns, sb]);
         setEdges((es) => [...es, { from: docNode.id, to: sb.id, cls: '', label: 'prompt' }]);
+        commitEdit('生成分镜表节点');
         setSelected(sb.id);
         chat.pushMsg({ kind: 'sys', text: `Agent 已生成分镜表 · ${plan.report}` });
         toastMsg(`已生成分镜表 · ${plan.report}`);
@@ -1942,6 +2168,10 @@ export default function CanvasPage({
           onRenameCanvas={onRenameCanvas}
           openPop={openPop}
           setOpenPop={setOpenPop}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={undo}
+          onRedo={redo}
           rerunDone={rerunDone}
           staleCount={nodesRef.current.filter((n) => n.stale || n.agentOn).length}
           assetCount={assetCount}
@@ -1973,10 +2203,12 @@ export default function CanvasPage({
             assetMeta={assetMeta}
             connectPath={computeConnectPath}
             zoomPct={zoomPct}
+            stageSize={stageSize}
+            onMinimapNavigate={onMinimapNavigate}
             onZoomBy={(d) =>
               setView((v) => ({ ...v, z: Math.min(1.3, Math.max(0.4, v.z + d)) }))
             }
-            onZoomReset={() => setView((v) => ({ ...v, x: 20, y: 10, z: 0.86 }))}
+            onZoomReset={() => setView({ ...DEFAULT_VIEW })}
             stageRef={stageRef}
             edgesSvgRef={edgesSvgRef}
             minimapRef={minimapRef}
@@ -2015,7 +2247,8 @@ export default function CanvasPage({
             }}
             onNodeHeaderPointerDown={(e, n) => {
               if (e.button !== 0) return;
-              dragRef.current = { id: n.id, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y };
+              dragRef.current = { id: n.id, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y, moved: false };
+              dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
               e.stopPropagation();
             }}
             onNodeAddPointerDown={(e, n) => {
@@ -2103,6 +2336,7 @@ export default function CanvasPage({
                 infoMap={infoMap}
                 setInfoMap={setInfoMap}
                 setNodes={setNodes}
+                onCommitEdit={commitEdit}
                 toastMsg={toastMsg}
                 projectId={projectId}
                 activeCanvasId={activeCanvasId}
@@ -2116,9 +2350,10 @@ export default function CanvasPage({
                 onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
                 onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
                 onOpenTimelinePage={() => onNavigate('timeline')}
-                onRemoveEdge={(srcId, dstId) =>
-                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)))
-                }
+                onRemoveEdge={(srcId, dstId) => {
+                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
+                  commitEdit('移除连线');
+                }}
                 onRerunSelected={() => {
                   if (!selected) return;
                   void runNode(selected);

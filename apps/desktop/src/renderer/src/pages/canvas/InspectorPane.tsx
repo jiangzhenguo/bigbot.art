@@ -20,6 +20,8 @@ interface InspectorPaneProps {
   infoMap: Record<string, NodeInfo>;
   setInfoMap: React.Dispatch<React.SetStateAction<Record<string, NodeInfo>>>;
   setNodes: React.Dispatch<React.SetStateAction<CanvasNode[]>>;
+  /** 撤销提交:检查器改参数 = 一次离散编辑动作(记入历史;缺省时退化为主导航,不影响独立使用) */
+  onCommitEdit?: (label: string) => void;
   toastMsg: (msg: string) => void;
   projectId: string | null;
   activeCanvasId: string | null;
@@ -49,6 +51,7 @@ export function InspectorPane({
   infoMap,
   setInfoMap,
   setNodes,
+  onCommitEdit,
   toastMsg,
   projectId,
   activeCanvasId,
@@ -86,6 +89,7 @@ export function InspectorPane({
           infoMap={infoMap}
           setInfoMap={setInfoMap}
           setNodes={setNodes}
+          onCommitEdit={onCommitEdit}
           toastMsg={toastMsg}
           projectId={projectId}
           activeCanvasId={activeCanvasId}

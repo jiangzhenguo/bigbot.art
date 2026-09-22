@@ -72,6 +72,8 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
 - **IPC 契约**:`BigBotArtApi`(`packages/shared/src/index.ts`)是主进程与渲染进程的类型化合同,preload 通过 `contextBridge` 暴露到 `window.bigbotart`。
 - **加速 LoRA(h3.c 加速)**:h3.c CLI 不接受 `--lora`;「加速 LoRA」= 蒸馏模型包(设置页 `accelPacks`,`src/main/lora.ts` 管理)+ 4/8 步。镜头 `data.accel.enabled` 时,主进程 `submit-render` 把包 id 解析为 `params.modelDir`(-d)与 `params.steps`(包缺失 → 提交报错)。详见 `docs/MiniMax-H3-加速-LoRA-使用手册.md` §8。
 - **Take 历史覆盖图片节点**:`Take.shotNodeId` 字段语义 = **节点 id**,shot 与 image-gen / image-edit / image-upscale / image-crop 统一记录(提交前 `takesCreate(queued)`,队列完成或裁切快路径写终态;检查器可切换回看)。`image-crop` 是纯 ffmpeg 节点,不走渲染队列(`/crop-image` IPC,见 `apps/desktop/src/main/frames.ts`)。
+- **画布视口持久化**:`CanvasSnapshot.viewport?`(`{x,y,z}`,`packages/shared/src/domain.ts`)记录每张画布的平移/缩放,退出应用或切画布后重进恢复上次视角。渲染层 `buildActiveSnapshot` 把 `viewRef` 写进快照;`maybePersist` 在**内容没变但视口变了**时也写盘;视口改动 400ms 防抖落盘(与内容 800ms 防抖分开),切画布(`flushSaveNow`)/离开页面(卸载 flush)强制落盘。旧项目文件缺 `viewport` → `normalizeView` 回退默认视图(`{x:20,y:10,z:0.86}`,缩放钳制 0.4–1.3)。
+- **画布撤销/重做**:`apps/desktop/src/renderer/src/pages/canvas/canvas-history.ts` 的 `HistoryStack`(单测 `__tests__/canvas-history.test.ts`)。历史内容 = 节点 + 连线(**不含 viewport**);`commitEdit(label)` 必须在对应 `setNodes/setEdges` **之前**调用(此刻 ref 里还是编辑前内容 = 撤销目标),覆盖拖动结束、建删节点/连线、检查器改参、分镜表铺节点、换绑资产等离散动作;内部用 `structureSig`(忽略 w/h、badge/flash/stale/ghost,与数组顺序无关)去重 → 拖动过程与测量抖动不产生历史;上限 60 条。撤销/重做走 `beginReplay` → `setNodes/setEdges` → 两帧后 `endReplay` 建立新基线,回放期间提交被闸门忽略。画布加载与 Agent 工具写盘推送(`applyCanvasSnapshot` 内容变化)会清空历史换基线。工具栏按钮按 `canUndo/canRedo` 置灰,快捷键 ⌘Z / ⌘⇧Z(⌘Y),输入框内不抢系统文本撤销。
 
 ## 环境变量
 

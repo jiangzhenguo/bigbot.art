@@ -18,6 +18,8 @@ export interface InspectorBodyProps {
   infoMap: Record<string, { t: string; img: string | null; meta: Array<[string, string]> }>;
   setInfoMap: React.Dispatch<React.SetStateAction<Record<string, { t: string; img: string | null; meta: Array<[string, string]> }>>>;
   setNodes: React.Dispatch<React.SetStateAction<CanvasNode[]>>;
+  /** 撤销提交:参数编辑 = 一次离散编辑动作(记入历史,label 显示在撤销提示里) */
+  onCommitEdit?: (label: string) => void;
   toastMsg: (msg: string) => void;
   projectId: string | null;
   activeCanvasId: string | null;
@@ -48,6 +50,7 @@ export function InspectorBody({
   infoMap,
   setInfoMap,
   setNodes,
+  onCommitEdit,
   toastMsg,
   projectId,
   activeCanvasId,
@@ -67,6 +70,7 @@ export function InspectorBody({
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const setData = (patch: Record<string, unknown> | Partial<TimelineData>) => {
+    onCommitEdit?.(`修改「${node.title}」参数`);
     setNodes((ns) => ns.map((n) => (n.id === node.id ? { ...n, data: { ...(n.data ?? {}), ...patch } } : n)));
   };
   const info = infoMap[node.id];
@@ -75,6 +79,7 @@ export function InspectorBody({
   };
   /** 图片节点切换 Take → 回写画布节点(产物预览 + 绑定标记;与 shot 检查器 onSelectTake 同语义) */
   const selectImageTake = (t: { id: string; attempt: number; status: string; resultPath?: string }) => {
+    onCommitEdit?.(`切换「${node.title}」的 Take`);
     setNodes((ns) =>
       ns.map((n) => {
         if (n.id !== node.id) return n;
@@ -310,6 +315,7 @@ export function InspectorBody({
           node={node}
           setData={setData}
           onSelectTake={(take) => {
+            onCommitEdit?.(`切换「${node.title}」的 Take`);
             setNodes((ns) =>
               ns.map((n) => {
                 if (n.id !== node.id) return n;

@@ -464,6 +464,15 @@ export interface Project {
   activeCanvasId: string;
 }
 
+/** 画布视口(平移 + 缩放):随画布快照持久化,退出/重进恢复上次看到的位置 */
+export interface CanvasViewport {
+  /** 世界坐标原点在舞台内的屏幕偏移(px) */
+  x: number;
+  y: number;
+  /** 缩放比例(1 = 100%;UI 钳制在 0.4–1.3) */
+  z: number;
+}
+
 /** 单个画布的快照(节点 + 连线);持久化在 canvases-${projectId}.json 中 */
 export interface CanvasSnapshot {
   /** 画布 id,全局唯一;通过 projectId 字段归属项目 */
@@ -473,6 +482,8 @@ export interface CanvasSnapshot {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   version: number;
+  /** 画布视口(旧项目文件缺省;读入时做有限性 + 范围校验,非法值回退默认视图) */
+  viewport?: CanvasViewport;
   createdAt: string;
   updatedAt: string;
 }
