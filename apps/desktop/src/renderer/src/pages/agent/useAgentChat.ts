@@ -9,6 +9,7 @@
  *    (StrictMode 下 updater 双跑,updater 内改 ref 会导致重复建卡,本项目真实事故)。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import type { Asset, LlmSource } from '@bigbotart/shared';
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
@@ -27,9 +28,11 @@ export interface UseAgentChatOptions {
   /** 工具改动画布后回调(CanvasPage 重拉节点) */
   onCanvasMutated: () => void;
   toastMsg: (msg: string) => void;
+  /** 画布当前选中节点 id(ref 稳定引用,避免选中变化重建 send;随对话请求注入让 Agent 感知) */
+  selectedNodeRef?: RefObject<string | null>;
 }
 
-export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }: UseAgentChatOptions) {
+export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, selectedNodeRef }: UseAgentChatOptions) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -46,6 +49,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
   const [model, setModel] = useState('Ornith-1.5-35B · 本地');
   /** 当前显示的模型是否来自项目级覆盖(false = 全局默认) */
   const [modelOverridden, setModelOverridden] = useState(false);
+  /* 🆕 当前画布激活技能(触发技能注入卡/输入区 chip;进入页面经 skill-active 查询恢复) */
+  const [activeSkill, setActiveSkill] = useState<{ skillId: string; name: string; inject?: 'full' | 'summary' } | null>(null);
   /* 模型选择器:真实清单(已加载本地模型 + 已启用云端供应商模型),打开弹层时刷新 */
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(MODEL_OPTION_FALLBACK);
   const loadModelOptions = useCallback(async (): Promise<void> => {
@@ -273,6 +278,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
           canvasId: cid,
           text: v,
           attachments: atts.length ? atts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, localPath: a.localPath })) : undefined,
+          selectedNodeId: selectedNodeRef?.current ?? undefined,
         })
         .then((res) => {
           // StrictMode 下 setMsgs updater 会双跑:ref 的读与清必须在 updater 外完成,
@@ -346,7 +352,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
           if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
         });
     },
-    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat],
+    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, selectedNodeRef],
   );
 
   /** 真实打断:中止 worker 内 LLM 请求 */
@@ -472,6 +478,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
           return [...m, cardMsg];
         });
       } else if (ev.kind === 'tool-end' && ev.toolName) {
+        const tName = ev.toolName; // 闭包内窄化丢失防御(updater 里类型收窄不可靠)
         setMsgs((m) => {
           // 找本轮聚合卡中最后一条同名 running 行,更新为 success/error
           const liveId = liveToolCardId.current;
@@ -491,6 +498,35 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
         });
         // 工具改了画布:刷新节点
         if (ev.toolName.startsWith('canvas.')) onCanvasMutated();
+        // 🆕 技能工具联动:激活/停用/读取 → 独立「技能注入卡」(配置事件)+ 同步 activeSkill
+        if (tName.startsWith('skills.')) {
+          // 从本轮聚合卡取该工具行的 args(激活/读取需要 skillId;行数据在 toolRuns 里)
+          let args: Record<string, unknown> = {};
+          setMsgs((m) => {
+            const li = liveToolCardId.current != null ? m.findIndex((x) => x.id === liveToolCardId.current && x.toolRuns) : -1;
+            const runs = li >= 0 ? m[li]?.toolRuns ?? [] : [];
+            const row = [...runs].reverse().find((r) => r.name === tName);
+            if (row?.args) args = row.args;
+            if (!['skills.activate', 'skills.deactivate', 'skills.read'].includes(tName) || !ev.ok) return m;
+            const skillId = String(args.skillId ?? '');
+            const name = String(args.skillName ?? skillId);
+            const card: ChatMsg = {
+              id: ++msgId.current,
+              kind: 'agent',
+              odId: 'agent-skill',
+              skill: tName === 'skills.activate'
+                ? { action: 'activate', skillId, name, inject: args.inject === 'summary' ? 'summary' : 'full', preview: ev.result?.slice(0, 120) }
+                : tName === 'skills.deactivate'
+                  ? { action: 'deactivate', skillId, name }
+                  : { action: 'read', skillId, name, instructionsText: ev.result ?? undefined },
+            };
+            return [...m.filter((x) => !x.skill), card]; // 常驻一行:替换旧技能卡
+          });
+          if (ev.ok) {
+            if (ev.toolName === 'skills.activate') setActiveSkill({ skillId: String(args.skillId ?? ''), name: String(args.skillName ?? ''), inject: args.inject === 'summary' ? 'summary' : 'full' });
+            if (ev.toolName === 'skills.deactivate') setActiveSkill(null);
+          }
+        }
       } else if (ev.kind === 'continuity') {
         setMsgs((m) => [
           ...m,
@@ -508,6 +544,75 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
     });
     return off;
   }, [projectId, canvasId, onCanvasMutated]);
+
+  /** 🆕 手动激活技能(输入区快选 / 技能页共用):调 IPC + 落「技能注入卡」+ 同步 chip */
+  const activateSkill = useCallback(
+    (skill: { skillId: string; name: string; inject?: 'full' | 'summary' }) => {
+      if (!projectId) {
+        toastMsg('请先打开项目再激活技能');
+        return;
+      }
+      void window.bigbotart
+        .skillActivate(projectId, canvasId, skill.skillId)
+        .then((r) => {
+          if (!r.ok) {
+            toastMsg(r.error ?? '激活技能失败');
+            return;
+          }
+          setActiveSkill({ skillId: skill.skillId, name: skill.name, inject: r.hasInstructions ? skill.inject ?? 'full' : undefined });
+          setMsgs((m) => [
+            ...m.filter((x) => !x.skill),
+            {
+              id: ++msgId.current,
+              kind: 'agent',
+              odId: 'agent-skill',
+              skill: {
+                action: 'activate',
+                skillId: skill.skillId,
+                name: skill.name,
+                inject: r.hasInstructions ? skill.inject ?? 'full' : undefined,
+                preview: r.preview ?? undefined,
+              },
+            },
+          ]);
+          toastMsg(`已加载技能「${skill.name}」的操作指令${r.hasInstructions ? '' : '(该技能无指令段)'}`);
+        })
+        .catch(() => toastMsg('激活技能失败:主进程通道异常'));
+    },
+    [projectId, canvasId, toastMsg],
+  );
+
+  /** 🆕 手动停用技能(输入区 chip ✕) */
+  const deactivateSkill = useCallback(() => {
+    if (!projectId) return;
+    const prev = activeSkill;
+    void window.bigbotart
+      .skillDeactivate(projectId, canvasId)
+      .then(() => {
+        setActiveSkill(null);
+        setMsgs((m) => [
+          ...m.filter((x) => !x.skill),
+          { id: ++msgId.current, kind: 'agent', odId: 'agent-skill', skill: { action: 'deactivate', skillId: prev?.skillId ?? '', name: prev?.name ?? '当前技能' } },
+        ]);
+        toastMsg('已停用技能,后续对话不再注入指令');
+      })
+      .catch(() => toastMsg('停用技能失败'));
+  }, [projectId, canvasId, activeSkill, toastMsg]);
+
+  /* 🆕 挂载时恢复画布激活技能(进入页面 chip 与注入状态一致) */
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    void window.bigbotart
+      .skillActive(projectId, canvasId)
+      .then((s) => {
+        if (alive && s) setActiveSkill({ skillId: s.skillId, name: s.name, inject: s.inject });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [projectId, canvasId]);
 
   return {
     msgs,
@@ -530,6 +635,9 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg }:
     modelOptions,
     loadModelOptions,
     pickModel,
+    activeSkill,
+    activateSkill,
+    deactivateSkill,
   };
 }
 

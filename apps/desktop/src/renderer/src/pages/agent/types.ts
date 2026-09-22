@@ -46,6 +46,17 @@ export interface ChatMsg {
   toolCall?: { name: string; args: Record<string, unknown>; status: 'running' | 'success' | 'error'; result?: string; nodeId?: string };
   /** 本轮工具执行聚合(ToolRunCard;设计文档 §3.3) */
   toolRuns?: ToolRun[];
+  /** 🆕 技能注入卡(配置事件:激活/停用/读取;与工具执行卡并列但独立,见设计稿 trc-skill) */
+  skill?: {
+    action: 'activate' | 'deactivate' | 'read';
+    skillId: string;
+    name: string;
+    inject?: 'full' | 'summary';
+    /** 注入全文(激活 full 时展示,可展开) */
+    instructionsText?: string;
+    /** 激活预览(前 N 字符,工具返回) */
+    preview?: string;
+  };
   /** 确认卡片(Agent 调 ask.user 暂停,等待用户点选);options 已归一化为 AskOption;picked 记录用户点选(写回消息数据,重进页面/恢复历史后仍可回显) */
   ask?: { question: string; options: AskOption[]; picked?: string };
   /** 错误卡(ErrorCard;retryText 存在时显示「重试本轮」) */

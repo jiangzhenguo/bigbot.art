@@ -143,7 +143,7 @@ export class PiChatSession {
       provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 100_000, maxTokens: 4000,
+      contextWindow: 100_000, maxTokens: 12000,
     };
     const provider = createProvider({
       id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,
@@ -175,6 +175,15 @@ export class PiChatSession {
             timestamp: Date.now(),
           } as unknown as Message;
         }
+        // system 动作记录(工具成功后的划线):pi-ai 无原生 system 消息,转成 user 角色并加标记,
+        // 让模型明确这是"系统记录发生的事"而非用户新指令
+        if (m.role === 'system') {
+          return {
+            role: 'user',
+            content: `[系统记录] ${m.content}`,
+            timestamp: Date.now(),
+          } as unknown as Message;
+        }
         return { role: 'user', content: m.content, timestamp: Date.now() } as Message;
       }),
       { role: 'user', content: userText, timestamp: Date.now() } as Message,
@@ -188,7 +197,10 @@ export class PiChatSession {
       let assistant: AssistantMessage;
       try {
         assistant = await models.complete(models.getModel('bigbotart-llm', ep.modelId)!, context, {
-          maxTokens: 4000,
+          // 输出预算:12000(2026-09 从 4000 调大)——本地推理型(带 thinking)模型做多节点规划
+          // 时思维链会吃掉大量 output token,4000 常在发出工具调用前被 finish_reason=length 截断,
+          // 表现为「思考半天后空回复」;配合工具说明的「大任务分步」双管齐下
+          maxTokens: 12000,
           temperature: 0.4,
           apiKey: ep.apiKey ?? 'unused',
           signal,

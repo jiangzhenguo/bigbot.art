@@ -6,6 +6,9 @@ interface SkillsPageProps {
   onNavigate: (
     page: 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects',
   ) => void;
+  /** 🆕 当前打开的项目/画布(「注入指令到当前画布」与「已激活」徽章需要;无项目时相关入口置灰) */
+  projectId?: string | null;
+  canvasId?: string | null;
 }
 
 /* 与设计稿 skills.js 中的 SKILLS 表一致 */
@@ -79,6 +82,8 @@ interface SkillCardDef {
   img?: string;
   imgStyle?: React.CSSProperties;
   pchs?: string[];
+  /** 🆕 卡片徽章(如「指令」「已激活」) */
+  badges?: Array<{ label: string; kind: 'inst' | 'active' }>;
 }
 
 const BUILTIN_CARDS: SkillCardDef[] = [
@@ -179,10 +184,10 @@ function showError(msg: string, err?: unknown): void {
   console.error('[SkillsPage]', msg, err ?? '');
 }
 
-export default function SkillsPage({ onNavigate }: SkillsPageProps) {
+export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPageProps) {
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string | null>('paper');
+  const [selected, setSelected] = useState<string | null>('paper-collage');
   const [dur, setDur] = useState('45');
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -190,8 +195,15 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
     { name: '无字幕版', tag: '分支' },
     { name: '儿童版', tag: '分支' },
   ]);
+  /** 🆕 当前画布激活技能(进入查询恢复;详情/卡片徽章用) */
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
+  /** 🆕 指令编辑器草稿(id → { text, inject });保存按钮落 skillUpdate */
+  const [insDraft, setInsDraft] = useState<{ id: string; text: string; inject: 'full' | 'summary' } | null>(null);
+  /** 🆕 指令编辑器是否展开(选中技能时按需打开) */
+  const [insOpen, setInsOpen] = useState(false);
+  const [savingIns, setSavingIns] = useState(false);
 
-  /* ---- 挂载时读取真实 Skills ---- */
+  /* ---- 挂载时读取真实 Skills + 恢复画布激活技能 ---- */
   const refreshSkills = useCallback(async () => {
     try {
       setSkills(await window.bigbotart.listSkills());
@@ -202,19 +214,50 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
 
   useEffect(() => {
     void refreshSkills();
-  }, [refreshSkills]);
+    if (!projectId || !canvasId) return;
+    void window.bigbotart
+      .skillActive(projectId, canvasId)
+      .then((s) => setActiveSkillId(s?.skillId ?? null))
+      .catch(() => {});
+  }, [refreshSkills, projectId, canvasId]);
 
-  /** 真实 Skill → 设计稿「我的 Skill」卡片(副标题:节点数 · 参数 · 更新时间) */
+  /** 真实 Skill → 设计稿「我的 Skill」卡片(副标题:节点数 · 参数 · 更新时间;含指令/激活徽章) */
   const mineCards: SkillCardDef[] = useMemo(
     () =>
-      skills.map((s) => ({
-        skill: s.id,
-        kind: 'mine' as const,
-        title: s.name,
-        sub: `节点数 ${s.nodes.length} · 参数 ${s.params.length} · ${fmtUpdated(s.updatedAt)}`,
-        pchs: s.params,
-      })),
-    [skills],
+      skills
+        .filter((s) => !s.builtin)
+        .map((s) => ({
+          skill: s.id,
+          kind: 'mine' as const,
+          title: s.name,
+          sub: `节点数 ${s.nodes.length} · 参数 ${s.params.length} · ${fmtUpdated(s.updatedAt)}`,
+          pchs: s.params,
+          badges: [
+            ...(s.instructions ? [{ label: '指令', kind: 'inst' as const }] : []),
+            ...(activeSkillId === s.id ? [{ label: '已激活', kind: 'active' as const }] : []),
+          ],
+        })),
+    [skills, activeSkillId],
+  );
+
+  /** 官方精选(出厂内置,builtin):封面占位,指令徽章 + 激活徽章;渲染替换 BUILTIN_CARDS 演示数据 */
+  const builtinCards: SkillCardDef[] = useMemo(
+    () =>
+      skills
+        .filter((s) => s.builtin)
+        .map((s) => ({
+          skill: s.id,
+          kind: 'builtin' as const,
+          title: s.name,
+          sub: s.description ?? '双形态齐备 · 画布模板 + Agent 操作指令',
+          pchs: s.params,
+          img: '',
+          badges: [
+            ...(s.instructions ? [{ label: '指令', kind: 'inst' as const }] : []),
+            ...(activeSkillId === s.id ? [{ label: '已激活', kind: 'active' as const }] : []),
+          ],
+        })),
+    [skills, activeSkillId],
   );
 
   /** 详情面板选中项:内置模板走 SKILLS 表;真实 Skill 走列表映射 */
@@ -243,10 +286,20 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
 
   const q = query.trim().toLowerCase();
 
+  /** 技能 id → 真实技能(搜索指令内容 / 详情指令区用) */
+  const skillOf = (id: string | null): Skill | undefined => skills.find((s) => s.id === id);
+
+  /** 详情面板当前选中的真实技能(指令编辑器/注入按钮用;内置模板选中时为空) */
+  const real = skillOf(selected);
+
   const cardVisible = (c: SkillCardDef): boolean => {
     if (filter === 'fork' && c.kind !== 'fork') return false;
     if (q) {
-      const text = [c.title, c.sub ?? '', ...(c.pchs ?? [])].join(' ').toLowerCase();
+      // 搜索范围:标题 / 副标题 / 参数 / 指令内容(设计稿「搜索 Skill 名称、指令内容…」)
+      const real = c.skill ? skillOf(c.skill) : undefined;
+      const text = [c.title, c.sub ?? '', ...(c.pchs ?? []), real?.instructions ?? '', real?.description ?? '']
+        .join(' ')
+        .toLowerCase();
       if (text.indexOf(q) < 0) return false;
     }
     return true;
@@ -259,6 +312,9 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
     setSelected(id);
     setDur('45');
     setParamValues({});
+    setInsOpen(false);
+    const real = skills.find((s) => s.id === id);
+    setInsDraft(real ? { id: real.id, text: real.instructions ?? '', inject: real.inject ?? 'full' } : null);
   };
 
   const handleParamChange = (key: string, value: string) => {
@@ -267,20 +323,32 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
 
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
 
-  /** 保存当前画布为 Skill:取名字 → 取首个项目 id → 调 IPC → 刷新并选中新 Skill */
+  /** 保存当前画布为 Skill:取名 → 可选操作指令(设计稿「…操作指令整体入库」) → 调 IPC → 刷新并选中 */
   const handleSaveSkill = async () => {
     try {
       const name = await askPrompt({ title: 'Skill 名称', initial: '我的 Skill' });
       if (!name) return; // 取消或空名则返回
+      // 第二步:(可选)把 Agent 操作要求写成指令段——确定空/取消 = 仅画布模板
+      const instructions = await askPrompt({
+        title: '操作指令(可选,空则跳过)',
+        initial: '',
+        placeholder: '如「先 storyboard.plan 再 materialize,提交前 ask.user 确认档位;措辞段…」(支持 {占位})',
+      });
       const projects = await window.bigbotart.listProjects();
       const project = projects[0];
       if (!project) {
         showError('请先创建项目并搭建画布');
         return;
       }
-      const saved = await window.bigbotart.saveSkill({ name, projectId: project.id });
+      const saved = await window.bigbotart.saveSkill({
+        name,
+        projectId: project.id,
+        canvasId: project.activeCanvasId ?? undefined,
+        instructions: instructions ?? undefined,
+      });
       await refreshSkills();
       setSelected(saved.id);
+      setInsDraft(saved.instructions ? { id: saved.id, text: saved.instructions, inject: saved.inject ?? 'full' } : null);
       setDur('45');
       setParamValues({});
     } catch (err) {
@@ -290,6 +358,68 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
 
   const handleFork = () => {
     setDerivs((prev) => [...prev, { name: '新分支 · 未命名', tag: '刚刚' }]);
+  };
+
+  /** 🆕 打开指令编辑器:以真实技能指令为草稿(无则空) */
+  const openInsEditor = (skill: Skill) => {
+    setInsDraft({ id: skill.id, text: skill.instructions ?? '', inject: skill.inject ?? 'full' });
+    setInsOpen(true);
+  };
+
+  /** 🆕 保存指令段(skillUpdate;空文本 = 移除指令,退回「仅画布模板」) */
+  const saveInstructions = async () => {
+    if (!insDraft) return;
+    setSavingIns(true);
+    try {
+      const r = await window.bigbotart.skillUpdate(insDraft.id, {
+        instructions: insDraft.text,
+        inject: insDraft.inject,
+      });
+      if (!r.ok) {
+        showError(r.error ?? '保存指令失败');
+        return;
+      }
+      await refreshSkills();
+      setInsOpen(false);
+      setInsDraft(null);
+    } catch (err) {
+      showError('保存指令失败', err);
+    } finally {
+      setSavingIns(false);
+    }
+  };
+
+  /** 🆕 注入指令到当前画布(skillActivate;需已打开项目+画布) */
+  const handleActivate = async (skill: Skill) => {
+    if (!projectId || !canvasId) {
+      showError('请先打开一个项目与画布,再注入指令');
+      return;
+    }
+    if (!skill.instructions) {
+      showError(`「${skill.name}」只有画布模板,没有操作指令段 · 可在下方编辑器中添加`);
+      return;
+    }
+    try {
+      const r = await window.bigbotart.skillActivate(projectId, canvasId, skill.id);
+      if (!r.ok) {
+        showError(r.error ?? '注入指令失败');
+        return;
+      }
+      setActiveSkillId(skill.id);
+    } catch (err) {
+      showError('注入指令失败', err);
+    }
+  };
+
+  /** 🆕 取消当前画布的技能激活 */
+  const handleDeactivate = async () => {
+    if (!projectId || !canvasId) return;
+    try {
+      await window.bigbotart.skillDeactivate(projectId, canvasId);
+      setActiveSkillId(null);
+    } catch (err) {
+      showError('停用失败', err);
+    }
   };
 
   const handleApply = async () => {
@@ -382,6 +512,13 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
       </div>
       <div className="si">
         <b>{c.title}</b>
+        <div className="row g6" style={{ marginTop: -1 }}>
+          {(c.badges ?? []).map((b) => (
+            <span key={b.label} className={`badge ${b.kind === 'active' ? 'ok' : ''}`} style={{ fontSize: 10 }}>
+              {b.label}
+            </span>
+          ))}
+        </div>
         <div className="sub">{c.sub}</div>
         <div className="pchs">
           {(c.pchs ?? []).map((p) => (
@@ -468,7 +605,7 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
             </svg>
             <input
               id="searchInput"
-              placeholder="搜索 Skill…"
+              placeholder="搜索 Skill 名称、指令内容…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -478,20 +615,20 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
         <div className="work">
           <main className="grid-area" data-od-id="skills-grid">
             <div className="sect-h" data-sect="builtin" style={{ display: builtinShown ? '' : 'none' }}>
-              <b>内置模板</b>
-              <span className="mut">覆盖风格 / 镜头 / 节奏 / 提示词结构</span>
+              <b>官方精选</b>
+              <span className="mut">双形态齐备 · 画布模板 + Agent 操作指令</span>
             </div>
             <div
               className="sgrid"
               data-sect-grid="builtin"
               style={{ display: builtinShown ? '' : 'none' }}
             >
-              {BUILTIN_CARDS.map(renderCard)}
+              {builtinCards.map(renderCard)}
             </div>
 
             <div className="sect-h" data-sect="mine" style={{ display: mineShown ? '' : 'none' }}>
               <b>我的 Skill</b>
-              <span className="mut">保存自画布 · 双向可编辑</span>
+              <span className="mut">保存自画布 · 节点结构 + 参数 + 操作指令 · 可编辑</span>
             </div>
             <div className="sgrid" data-sect-grid="mine" style={{ display: mineShown ? '' : 'none' }}>
               {mineCards.map(renderCard)}
@@ -509,7 +646,7 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
                 <span style={{ fontSize: 'var(--text-xs)' }}>
                   从当前画布保存
                   <br />
-                  节点结构 + 参数 + 提示词模板
+                  节点结构 + 参数 + 操作指令整体入库
                 </span>
               </div>
             </div>
@@ -609,6 +746,77 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
                   {active?.keep ?? ''}
                 </div>
               </div>
+              {real && projectId ? (
+                /* 🆕 操作指令(Agent 指令段):编辑/保存/注入——画布级配置事件 */
+                <div>
+                  <div className="row" style={{ justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span className="lbl">操作指令(Agent)</span>
+                    {real.instructions ? (
+                      <span className="badge" title={`inject: ${real.inject ?? 'full'}`}>
+                        指令 · {real.inject ?? 'full'}
+                      </span>
+                    ) : null}
+                  </div>
+                  {insOpen ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <textarea
+                        className="f-ta mono"
+                        rows={7}
+                        data-od-id="skill-ins-editor"
+                        value={insDraft?.text ?? ''}
+                        placeholder={'# 任务流程\n1. canvas.list_nodes 读需求…(支持 {占位};撰写规范见 docs/Agent技能文档-撰写指南与模板.md)'}
+                        onChange={(e) => setInsDraft((d) => (d ? { ...d, text: e.target.value } : d))}
+                      />
+                      <div className="row g8">
+                        {(['full', 'summary'] as const).map((m) => (
+                          <span
+                            key={m}
+                            className={`chip${insDraft?.inject === m ? ' on' : ''}`}
+                            onClick={() => setInsDraft((d) => (d ? { ...d, inject: m } : d))}
+                          >
+                            {m === 'full' ? '全量注入' : '摘要模式'}
+                          </span>
+                        ))}
+                        <span className="mut" style={{ fontSize: 10.5, marginLeft: 'auto' }}>
+                          {(insDraft?.text?.length ?? 0) > 4000 ? '⚠ 超长建议摘要模式' : `${insDraft?.text?.length ?? 0} 字`}
+                        </span>
+                      </div>
+                      <div className="row g8">
+                        <button className="btn btn-p btn-sm" data-od-id="skill-ins-save" disabled={savingIns} onClick={saveInstructions}>
+                          保存指令
+                        </button>
+                        <button className="btn btn-s btn-sm" onClick={() => setInsOpen(false)}>
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {real.instructions ? (
+                        <pre className="keepbox mono" style={{ maxHeight: 96, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                          {real.instructions.length > 220 ? `${real.instructions.slice(0, 220)}…` : real.instructions}
+                        </pre>
+                      ) : (
+                        <div className="mut" style={{ fontSize: 11, border: '1px dashed var(--border)', borderRadius: 8, padding: '8px 10px' }}>
+                          该技能仅画布模板——添加操作指令后,对话可自动按此执行
+                        </div>
+                      )}
+                      <button className="btn btn-s btn-sm" data-od-id="skill-ins-edit" onClick={() => void openInsEditor(real)}>
+                        {real.instructions ? '编辑指令' : '添加操作指令'}
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    className="btn btn-s btn-sm"
+                    style={{ width: '100%', marginTop: 8 }}
+                    data-od-id="skill-activate"
+                    disabled={!projectId || !canvasId}
+                    onClick={() => (activeSkillId === real.id ? void handleDeactivate() : void handleActivate(real))}
+                  >
+                    {activeSkillId === real.id ? '已注入当前画布 · 点击停用' : '注入指令到当前画布'}
+                  </button>
+                </div>
+              ) : null}
               <button
                 className="btn btn-p"
                 style={{ width: '100%' }}
@@ -616,7 +824,7 @@ export default function SkillsPage({ onNavigate }: SkillsPageProps) {
                 data-od-id="skill-apply"
                 onClick={handleApply}
               >
-                应用到新项目
+                铺节点到新项目
               </button>
               <div className="row g8">
                 <button

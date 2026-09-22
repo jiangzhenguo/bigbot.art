@@ -11,7 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { ProjectMemory, RecallMessage, ArchivalEntry } from '@bigbotart/shared';
+import type { ProjectMemory, RecallMessage, ArchivalEntry, CanvasNode, CanvasEdge } from '@bigbotart/shared';
 import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
@@ -25,7 +25,8 @@ export const COMPACT_KEEP_LAST = 8;
 /** /compact 的确定性兜底摘要(LLM 不可达/失败时保证压缩流程照常完成,不阻塞用户) */
 export function compactFallbackSummary(msgs: RecallMessage[]): string {
   const lines = msgs.map((r) => {
-    const who = r.role === 'user' ? '用户' : r.role === 'assistant' ? '助手' : `工具(${r.toolName ?? '?'})`;
+    const who =
+      r.role === 'user' ? '用户' : r.role === 'assistant' ? '助手' : r.role === 'system' ? '系统' : `工具(${r.toolName ?? '?'})`;
     return `${who} ${r.content}`.slice(0, 160);
   });
   return `【对话自动摘要 · LLM 不可用时兜底】\n${lines.join('\n')}`.slice(0, 1500);
@@ -153,10 +154,32 @@ export class MemoryStore {
       lastActive: cur?.lastActive ?? new Date().toISOString(),
       keyDecisions: cur?.keyDecisions ?? [],
       conversationSummary: merged,
+      activeSkillId: cur?.activeSkillId, // 压缩不改变画布激活技能
     };
     m.recall = m.recall.filter((r) => r.canvasId !== canvasId || entries.indexOf(r) >= entries.length - keepLast);
     this.persist(projectId);
     return { replaced };
+  }
+
+  /** 🆕 读画布激活技能 id(无则 undefined) */
+  getActiveSkillId(projectId: string, canvasId: string): string | undefined {
+    return this.get(projectId).canvasMemory[canvasId]?.activeSkillId;
+  }
+
+  /** 🆕 激活/停用画布技能(skillId=null 停用);持久化,跨会话恢复 */
+  setActiveSkillId(projectId: string, canvasId: string, skillId: string | null): void {
+    const m = this.get(projectId);
+    const cur = m.canvasMemory[canvasId];
+    if (!cur) {
+      if (!skillId) return;
+      m.canvasMemory[canvasId] = {
+        summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [],
+        activeSkillId: skillId,
+      };
+    } else {
+      m.canvasMemory[canvasId] = { ...cur, activeSkillId: skillId ?? undefined };
+    }
+    this.persist(projectId);
   }
 
   /** 检索 recall(当前画布最近 N 条) */
@@ -177,12 +200,70 @@ export class MemoryStore {
   }
 
   /**
-   * 组装发给 LLM 的上下文:
-   * system prompt(core 全量) + 其他画布 summary 注入 + 当前画布 recall 最近 N 条 + archival 检索
+   * 生成「当前画布」实时状态段(注入 system prompt 首轮感知):
+   * 节点按 kind 统计 + 标题清单;关键连线(shot 接续链 / 参考图 / 分镜文档 → 生成节点的提示词注入)。
+   * 长度受控(节点标题限量、连线限量),避免 prompt 膨胀;完整结构仍以 canvas.list_nodes 为准。
    */
-  buildContext(projectId: string, canvasId: string, userInput: string): {
+  static canvasStateSummary(
+    snap: { name: string; nodes: CanvasNode[]; edges: CanvasEdge[] },
+    maxTitlesPerKind = 6,
+    maxEdges = 6,
+  ): string {
+    const counts: Record<string, number> = {};
+    const titlesByKind: Record<string, string[]> = {};
+    for (const n of snap.nodes) {
+      counts[n.kind] = (counts[n.kind] ?? 0) + 1;
+      (titlesByKind[n.kind] ??= []).push(n.label || n.id);
+    }
+    const nodeLines = Object.entries(counts).map(([k, v]) => {
+      const titles = (titlesByKind[k] ?? []).slice(0, maxTitlesPerKind).map((t) => `「${t}」`).join('、');
+      const total = titlesByKind[k]?.length ?? 0;
+      const more = total > maxTitlesPerKind ? ` 等${total}个` : '';
+      return `${v}个${k}${titles ? `(${titles}${more})` : ''}`;
+    });
+    const idToKind = new Map(snap.nodes.map((n) => [n.id, n.kind]));
+    const idToLabel = new Map(snap.nodes.map((n) => [n.id, n.label || n.id]));
+    // 关键连线:first-frame(镜头接续/首帧直通)、ref-image(参考图)、prompt(分镜表/文档 → 生成节点)
+    const keyEdges = snap.edges.filter((e) => {
+      const label = e.label ?? '';
+      const srcKind = idToKind.get(e.source);
+      return (
+        label === 'first-frame' ||
+        label === 'ref-image' ||
+        (label === 'prompt' && (srcKind === 'document' || srcKind === 'storyboard'))
+      );
+    });
+    const edgeLines = keyEdges.slice(0, maxEdges).map((e) => {
+      const from = idToLabel.get(e.source) ?? e.source;
+      const to = idToLabel.get(e.target) ?? e.target;
+      return `- ${from} → ${to}${e.label ? `(${e.label})` : ''}`;
+    });
+    const edgeHead = edgeLines.length
+      ? `关键连线:\n${edgeLines.join('\n')}${snap.edges.length > maxEdges ? `\n…(共 ${snap.edges.length} 条连线,详查 canvas.connectors / canvas.list_nodes)` : ''}`
+      : '';
+    return (
+      `【当前画布】「${snap.name}」· ${snap.nodes.length} 节点 / ${snap.edges.length} 连线\n` +
+      `节点:${nodeLines.join('、') || '(空画布)'}${edgeHead ? `\n${edgeHead}` : ''}\n` +
+      `提示:需要节点 id 与最新结构时,以 canvas.list_nodes 返回为准;圆点/标题等细节可 canvas.get_node。`
+    );
+  }
+
+  /**
+   * 组装发给 LLM 的上下文:
+   * system prompt(core 全量) + 画布激活技能指令 + 其他画布 summary 注入 + 当前画布 recall 最近 N 条 + archival 检索
+   * @param resolveSkill 技能解析器(由调用方注入 SkillStore.get,避免 memory 依赖 skills 层;
+   *                     激活技能经它取 name/instructions/inject 注入「【当前技能】」段)
+   * @param canvas 当前画布快照(选传;由调用方从 store 读,避免 memory 依赖 store;注入「【当前画布】」实时状态段)
+   */
+  buildContext(
+    projectId: string,
+    canvasId: string,
+    userInput: string,
+    resolveSkill?: (skillId: string) => { name: string; instructions?: string; inject?: 'full' | 'summary' } | undefined,
+    canvas?: { name: string; nodes: CanvasNode[]; edges: CanvasEdge[] } | undefined,
+  ): {
     systemPrompt: string;
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   } {
     const m = this.get(projectId);
     const parts: string[] = [];
@@ -215,11 +296,31 @@ export class MemoryStore {
         '已有分镜表要铺节点用 storyboard.materialize;改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
         '铺节点只创建节点、不触发运行 —— 生成须用 engine.submit 逐节点或批跑,先跟用户确认。'].join('\n'),
     );
+    // ①c 当前画布激活技能(Agent 指令段注入;full=全量 / summary=摘要+skills.read 提示。
+    //  解析器缺失或技能不存在时静默跳过,保持零开销)
+    const activeSkillId = m.canvasMemory[canvasId]?.activeSkillId;
+    if (activeSkillId && resolveSkill) {
+      const skill = resolveSkill(activeSkillId);
+      if (skill?.instructions) {
+        parts.push(
+          skill.inject === 'summary'
+            ? `【当前技能】${skill.name}(summary 模式 · 已激活):${skill.instructions.slice(0, 160)}…\n需要完整指令时调用 skills.read(skillId="${activeSkillId}")`
+            : `【当前技能】${skill.name} 的操作指令:\n${skill.instructions}`,
+        );
+      } else if (skill) {
+        parts.push(`【当前技能】${skill.name} · 画布模板已激活(该技能无操作指令段)`);
+      }
+    }
     const core = m.core;
     if (core.projectGoal) parts.push(`【项目目标】${core.projectGoal}`);
     if (core.styleGuide) parts.push(`【风格规则】${core.styleGuide}`);
     if (core.constraints) parts.push(`【硬性约束】${core.constraints}`);
     if (core.userPreferences) parts.push(`【用户偏好】${core.userPreferences}`);
+
+    // ①d 当前画布实时状态(节点/连线摘要)——让 Agent 首轮就感知画布轮廓,不必盲调 list_nodes
+    if (canvas && (canvas.nodes.length > 0 || canvas.edges.length > 0)) {
+      parts.push(MemoryStore.canvasStateSummary(canvas));
+    }
 
     // ② 当前画布的对话压缩摘要(/compact 生成)注入 —— 压缩后仍保留全局脉络
     const curMem = m.canvasMemory[canvasId];
@@ -238,10 +339,11 @@ export class MemoryStore {
     }
 
     // ③ 当前画布 recall(最近 N 条) —— 转 messages
+    //    role=system(工具成功后的动作记录)也注入:让下一轮感知"刚才发生了什么",避免凭对话文本猜画布状态
     const recent = this.recentRecall(projectId, canvasId);
-    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = recent
-      .filter((r) => r.role === 'user' || r.role === 'assistant')
-      .map((r) => ({ role: r.role as 'user' | 'assistant', content: r.content }));
+    const messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = recent
+      .filter((r) => r.role === 'user' || r.role === 'assistant' || r.role === 'system')
+      .map((r) => ({ role: r.role as 'user' | 'assistant' | 'system', content: r.content }));
 
     // ④ archival 检索注入(进 system prompt)
     const arc = this.searchArchival(projectId, userInput);

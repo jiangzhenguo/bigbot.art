@@ -1,12 +1,13 @@
 /**
- * AgentComposer — Agent 对话输入区(附件行 + 输入框 + 模型/技能弹层 + 发送/打断)
+ * AgentComposer — Agent 对话输入区(附件行 + 技能 chip + 输入框 + 模型/技能弹层 + 发送/打断)
  *
- * 纯展示:对话状态来自 useAgentChat;附件/技能标签/弹层是本组件的本地 UI 状态。
+ * 纯展示:对话状态来自 useAgentChat;附件/弹层是本组件的本地 UI 状态。
+ * 技能:弹层选项来自真实技能库(listSkills),选中即真实激活(skillActivate)——
+ * 激活/停用是画布级配置事件,由 useAgentChat.activateSkill/deactivateSkill 落盘并生成注入卡。
  */
-import React, { useState } from 'react';
-import type { Asset } from '@bigbotart/shared';
+import React, { useEffect, useState } from 'react';
+import type { Asset, Skill } from '@bigbotart/shared';
 import type { AgentChatApi } from './useAgentChat';
-import { COMPOSER_SKILLS } from './constants';
 
 export function AgentComposer({
   chat,
@@ -15,18 +16,32 @@ export function AgentComposer({
   chat: AgentChatApi;
   toastMsg: (msg: string) => void;
 }) {
-  /* 本地 UI 状态:弹层 / 附件 / 技能标签(不进对话逻辑) */
+  /* 本地 UI 状态:弹层 / 附件 */
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Asset[]>([]);
-  const [skill, setSkill] = useState('无技能');
-  const skillOn = !!skill && skill !== '无技能';
+  /** 技能弹层选项(真实技能库;unmounted 清理) */
+  const [skillOptions, setSkillOptions] = useState<Skill[]>([]);
 
   const {
     sending, send, interrupt,
     clearChat, compactChat,
     setChatInput, inputRef, autoGrow,
     model, modelOptions, loadModelOptions, pickModel,
+    activeSkill, activateSkill, deactivateSkill,
   } = chat;
+
+  useEffect(() => {
+    let alive = true;
+    void window.bigbotart
+      .listSkills()
+      .then((list) => {
+        if (alive) setSkillOptions(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   /** 发送(带附件;发出后清空附件区) */
   const sendWithAttachments = () => {
@@ -67,15 +82,15 @@ export function AgentComposer({
         ))}
       </div>
       <div className="input-box">
-        {skillOn ? (
-          <span className="skill-tag" data-od-id="composer-skill-tag">
+        {activeSkill ? (
+          <span className="skill-tag" data-od-id="composer-skill-tag" title={`已激活技能「${activeSkill.name}」,对话已注入其操作指令`}>
             <svg viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
             </svg>
             <span>
-              技能：<b style={{ fontWeight: 600 }}>{skill}</b>
+              技能：<b style={{ fontWeight: 600 }}>{activeSkill.name}</b>
             </span>
-            <button className="x" aria-label="移除技能" onClick={() => setSkill('无技能')}>
+            <button className="x" aria-label="停用技能" onClick={deactivateSkill}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4}>
                 <path d="M6 6l12 12M18 6 6 18" />
               </svg>
@@ -182,24 +197,25 @@ export function AgentComposer({
           <div
             className="pop-it"
             onClick={() => {
-              setSkill('无技能');
+              deactivateSkill();
               setOpenPop(null);
             }}
           >
             无技能 · 自由编排
-            {skill === '无技能' ? <span className="ck">✓</span> : null}
+            {!activeSkill ? <span className="ck">✓</span> : null}
           </div>
-          {COMPOSER_SKILLS.map((s) => (
+          {skillOptions.map((s) => (
             <div
               className="pop-it"
-              key={s}
+              key={s.id}
               onClick={() => {
-                setSkill(s);
+                activateSkill({ skillId: s.id, name: s.name, inject: s.inject });
                 setOpenPop(null);
               }}
             >
-              {s}
-              {skill === s ? <span className="ck">✓</span> : null}
+              {s.name}
+              {s.instructions ? <span className="mut mono" style={{ fontSize: 10 }}> · 指令</span> : null}
+              {activeSkill?.skillId === s.id ? <span className="ck">✓</span> : null}
             </div>
           ))}
         </div>

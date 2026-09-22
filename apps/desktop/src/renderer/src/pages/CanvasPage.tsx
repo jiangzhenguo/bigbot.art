@@ -43,6 +43,8 @@ import { QueueBar } from './canvas/QueueBar';
 import { AssetPickerPop } from './canvas/AssetPickerPop';
 import { useAgentChat } from './agent/useAgentChat';
 
+/** 节点尚未测得高度时的估算兜底(px):连线端点/预览线首帧用,实测后立即被替换 */
+const UNMEASURED_NODE_H = 72;
 
 export default function CanvasPage({
   onNavigate,
@@ -59,6 +61,9 @@ export default function CanvasPage({
   const worldRef = useRef<HTMLDivElement | null>(null);
   const edgesSvgRef = useRef<SVGSVGElement | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  /** 节点尺寸观测器(连线端口/弹层定位用):注册回调即时 observe,不依赖 nodes.length 重建 —
+     整数组替换且数量不变时旧 observer 会盯住已卸载 DOM,新节点 h 缺失 → 连线端点到节点顶部 */
+  const roRef = useRef<ResizeObserver | null>(null);
   const gripRef = useRef<HTMLButtonElement | null>(null);
   const agentRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<HTMLDivElement | null>(null);
@@ -171,7 +176,10 @@ export default function CanvasPage({
     };
   }, [toast]);
 
-  /* ── 尺寸观测:连线端口 + 「+」弹层定位 ── */
+  /* ── 尺寸观测:连线端口 + 「+」弹层定位 ──
+     RO 只创建一次,由 registerNodeRef 在 DOM 挂载时即时 observe/unobserve:
+     修复「整数组替换(切画布/刷新/快照推送)且节点数不变时,effect 不重建、
+     新节点 DOM 从未被测量 → n.h 缺失 → 连线端点到节点顶部(位置错误)」 */
   const measure = useCallback((id: string, h: number) => {
     const el = nodeRefs.current.get(id);
     if (!el) return;
@@ -191,9 +199,14 @@ export default function CanvasPage({
         measure(id, (e.target as HTMLElement).offsetHeight);
       }
     });
+    roRef.current = ro;
+    // 首屏节点在 effect 前已由 ref 回调注册,这里补齐观察(observe 幂等)
     nodeRefs.current.forEach((el) => ro.observe(el));
-    return () => ro.disconnect();
-  }, [nodes.length, measure]);
+    return () => {
+      ro.disconnect();
+      roRef.current = null;
+    };
+  }, [measure]);
 
   /* ── 节点定位 + 拖拽(scale 校正,和 canvas.js 一致) ── */
   const dragRef = useRef<{
@@ -242,7 +255,7 @@ export default function CanvasPage({
     if (!src) return null;
     const v = viewRef.current;
     const sx = src.x + (src.w ?? 236);
-    const sy = src.y + 36; // 节点头部中点近似
+    const sy = src.y + (src.h ?? UNMEASURED_NODE_H) / 2; // 右缘垂直中点(与定稿线 edgePaths 同口径)
     const wx = (cx - v.x) / v.z;
     const wy = (cy - v.y) / v.z;
     // 中点加一个小弧度让连接线有方向感
@@ -803,11 +816,15 @@ export default function CanvasPage({
   }, [projectId, activeCanvasId, applyCanvasSnapshot]);
 
   /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
+  /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;渲染期同步保持稳定引用) */
+  const selectedNodeRef = useRef<string | null>(null);
+  selectedNodeRef.current = selected;
   const chat = useAgentChat({
     projectId,
     canvasId: activeCanvasId,
     onCanvasMutated: () => void refreshCanvasFromStore(),
     toastMsg,
+    selectedNodeRef,
   });
 
   /* 画布自动持久化(防抖 800ms;只在 active canvas 有内容时写) */
@@ -948,9 +965,28 @@ export default function CanvasPage({
       setApOpen(true);
       setApOpenCount((c) => c + 1);
       const n = nodesRef.current.find((x) => x.id === nodeId);
+      const stage = stageRef.current;
       if (n) {
-        const x = Math.min(n.x + (n.w ?? 236) + 18, 1600 - 290);
-        const y = Math.max(10, Math.min(n.y - 10, 1000 - 360));
+        const v = viewRef.current;
+        // 基准:节点右侧 18px、顶部上移 10px(对齐「+」按钮)
+        let x = n.x + (n.w ?? 236) + 18;
+        let y = n.y - 10;
+        // 在舞台视口内钳制,而不是写死的世界盒(1600×1000):
+        // 节点可摆在世界盒外(无限画布),旧写法会把弹层钳到盒子边缘,远离节点
+        if (stage) {
+          const popW = 272; // .add-pop 固定宽度
+          const popH = 360; // 弹层高度估算(仅用于上下钳制;超出自身可滚动)
+          // 世界坐标 → 屏幕坐标(与 .world 的 translate/scale 一致)
+          const sx = v.x + x * v.z;
+          const sy = v.y + y * v.z;
+          const minX = 8;
+          const minY = 8;
+          const maxX = Math.max(minX, stage.clientWidth - popW - 8);
+          const maxY = Math.max(minY, stage.clientHeight - popH - 8);
+          // 屏幕坐标 → 世界坐标
+          x = (Math.min(maxX, Math.max(minX, sx)) - v.x) / v.z;
+          y = (Math.min(maxY, Math.max(minY, sy)) - v.y) / v.z;
+        }
         setApPos({ x, y });
       }
     },
@@ -1805,9 +1841,9 @@ export default function CanvasPage({
         const b = byId.get(e.to);
         if (!a || !b) return null;
         const x1 = a.x + (a.w ?? 236);
-        const y1 = a.y + (a.h ?? 0) / 2;
+        const y1 = a.y + (a.h ?? UNMEASURED_NODE_H) / 2;
         const x2 = b.x;
-        const y2 = b.y + (b.h ?? 0) / 2;
+        const y2 = b.y + (b.h ?? UNMEASURED_NODE_H) / 2;
         const dx = Math.max(50, Math.abs(x2 - x1) / 2);
         return {
           key: `${e.from}-${e.to}`,
@@ -1942,8 +1978,13 @@ export default function CanvasPage({
               setConnectDrag(null);
             }}
             registerNodeRef={(id, el) => {
-              if (el) nodeRefs.current.set(id, el);
-              else nodeRefs.current.delete(id);
+              if (el) {
+                nodeRefs.current.set(id, el);
+                // 新 DOM 挂载即测量(observe 幂等,重复调用无副作用)
+                roRef.current?.observe(el);
+              } else {
+                nodeRefs.current.delete(id);
+              }
             }}
             popover={
               /* 「+」下游节点弹层 */
@@ -1994,6 +2035,7 @@ export default function CanvasPage({
                 setAgentWidth(agentW - 16, true);
               }
             }}
+            onEditSkill={() => onNavigate('skills')}
             inspector={
               <InspectorPane
                 tab={tab}

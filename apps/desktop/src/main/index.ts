@@ -36,7 +36,7 @@ import {
   resolveLlmEndpoint,
   testConnection,
 } from './llm';
-import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage } from '@bigbotart/shared';
+import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge } from '@bigbotart/shared';
 import { referenceMediaIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
@@ -50,6 +50,68 @@ process.env.BIGBOTART_MOCK_OUTPUTS ??= join(H3_OUTPUTS_DIR, 'mock');
 process.env.BIGBOTART_MLXGEN_OUTPUTS ??= join(H3_OUTPUTS_DIR, 'images');
 
 let win: BrowserWindow | null = null;
+
+/**
+ * 工具动作的人类可读摘要(成功后写入 role=system 的 recall,让下一轮对话感知画布变化)。
+ * 与 role=tool 的机器记录(reply 卡回看用)并存:system 随最近消息注入 LLM,tool 仅留痕。
+ */
+function describeToolAction(name: string, args: Record<string, unknown>, nodeId?: string): string {
+  const j = (v: unknown) => String(v ?? '');
+  switch (name) {
+    case 'canvas.create_node':
+      return `已创建节点 ${nodeId ? `${nodeId} ` : ''}· ${j(args.kind)}「${j(args.label)}」`;
+    case 'canvas.update_node':
+      return `已更新节点 ${j(args.nodeId)}`;
+    case 'canvas.delete_node':
+      return `已删除节点 ${j(args.nodeId)} 及其连线`;
+    case 'canvas.connect':
+      return `已连线 ${j(args.from)} → ${j(args.to)}${args.label ? `(${j(args.label)})` : ''}`;
+    case 'canvas.disconnect':
+      return `已断开连线 ${j(args.from)} → ${j(args.to)}${args.label ? `(${j(args.label)})` : ''}`;
+    case 'storyboard.plan':
+      return `已生成分镜表${nodeId ? `(节点 ${nodeId})` : ''}`;
+    case 'storyboard.materialize':
+      return `已按分镜表 ${j(args.nodeId)} 铺出生成节点`;
+    case 'engine.submit':
+      return `已提交生成 ${j(args.nodeId)}`;
+    case 'timeline.export':
+      return `已发起时间线导出${args.outputName ? `(${j(args.outputName)})` : ''}`;
+    case 'skills.activate':
+      return `已激活技能「${j(args.skillId)}」`;
+    case 'skills.deactivate':
+      return '已停用当前技能';
+    default:
+      return `已执行 ${name}`;
+  }
+}
+
+/** 选中节点详情摘要(附进本轮 user 消息,风格对齐 canvas.get_node 但只挑关键信息控制长度) */
+function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: CanvasNode[]): string {
+  const idToLabel = new Map(nodes.map((n) => [n.id, n.label || n.id]));
+  const ins = edges
+    .filter((e) => e.target === node.id)
+    .map((e) => `  ← ${idToLabel.get(e.source) ?? e.source}${e.label ? ` [${e.label}]` : ''}`);
+  const outs = edges
+    .filter((e) => e.source === node.id)
+    .map((e) => `  → ${idToLabel.get(e.target) ?? e.target}${e.label ? ` [${e.label}]` : ''}`);
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  let dataNote = '';
+  if (node.kind === 'document' || node.kind === 'storyboard') {
+    const md = String(d.markdown ?? '');
+    if (md.trim()) dataNote = `\n内容摘要:${md.trim().slice(0, 300)}${md.length > 300 ? '…' : ''}`;
+  } else if (node.kind === 'shot' && typeof d.prompt === 'string') {
+    dataNote = `\n提示词:${d.prompt.slice(0, 200)}${d.prompt.length > 200 ? '…' : ''}`;
+  } else {
+    const j = JSON.stringify(d);
+    if (j && j !== '{}') dataNote = `\ndata:${j.slice(0, 200)}${j.length > 200 ? '…' : ''}`;
+  }
+  return (
+    `[当前选中节点] ${node.id} · ${node.kind}「${node.label}」` +
+    dataNote +
+    (ins.length ? `\n入边:\n${ins.join('\n')}` : '') +
+    (outs.length ? `\n出边:\n${outs.join('\n')}` : '')
+  );
+}
 
 /**
  * 自定义协议 bba-asset:// —— 仅允许读取 ~/.bigbotart/assets/ 下的资产文件,
@@ -465,21 +527,48 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
   );
   ipcMain.handle('list-archivable-products', (_e, projectId: string) => listArchivableProducts(store, projectId));
 
-// ---------- IPC:Skills ----------
+// ---------- IPC:Skills(画布模板 + Agent 指令段双形态,激活状态持久化在 canvasMemory) ----------
 ipcMain.handle('list-skills', () => skills.list());
-ipcMain.handle('save-skill', (_e, input: { name: string; projectId: string; canvasId?: string }) => {
+ipcMain.handle('save-skill', (_e, input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) => {
   const pc = store.loadProjectCanvases(input.projectId);
   const cur = input.canvasId
     ? pc.canvases.find((c) => c.id === input.canvasId)
     : pc.canvases.find((c) => c.id === pc.activeCanvasId) ?? pc.canvases[0];
   if (!cur) throw new Error('项目下没有任何画布可保存');
-  return skills.save(input.name, cur);
+  const instructions = input.instructions?.trim() ? input.instructions.trim() : undefined;
+  return skills.save(input.name, cur, {
+    instructions,
+    inject: instructions ? (input.inject === 'summary' ? 'summary' : 'full') : undefined,
+  });
 });
-ipcMain.handle('apply-skill', (_e, skillId: string, projectName: string) => {
+ipcMain.handle('apply-skill', (_e, skillId: string, projectName: string, activate = false) => {
   const project = skills.apply(skillId, projectName, store);
+  if (activate) {
+    const canvasId = project.activeCanvasId || 'main';
+    memory.setActiveSkillId(project.id, canvasId, skillId);
+  }
   return { project };
 });
 ipcMain.handle('delete-skill', (_e, id: string) => skills.delete(id));
+ipcMain.handle('skill-read', (_e, skillId: string) => skills.get(skillId) ?? null);
+ipcMain.handle('skill-update', (_e, skillId: string, patch: { name?: string; description?: string; instructions?: string | null; inject?: 'full' | 'summary' }) => skills.update(skillId, patch));
+ipcMain.handle('skill-activate', (_e, projectId: string, canvasId: string, skillId: string) => {
+  const skill = skills.get(skillId);
+  if (!skill) return { ok: false as const, error: 'Skill 不存在' };
+  memory.setActiveSkillId(projectId, canvasId, skillId);
+  return { ok: true as const, preview: (skill.instructions ?? '').slice(0, 60), hasInstructions: !!skill.instructions };
+});
+ipcMain.handle('skill-deactivate', (_e, projectId: string, canvasId: string) => {
+  memory.setActiveSkillId(projectId, canvasId, null);
+  return { ok: true as const };
+});
+ipcMain.handle('skill-active', (_e, projectId: string, canvasId: string) => {
+  const skillId = memory.getActiveSkillId(projectId, canvasId);
+  if (!skillId) return null;
+  const skill = skills.get(skillId);
+  if (!skill) return null;
+  return { skillId: skill.id, name: skill.name, inject: skill.inject };
+});
 
 // ---------- IPC:时间线导出 ----------
 ipcMain.handle('export-timeline', (_e, req) => {
@@ -648,8 +737,16 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     return { ok: false, error: `LLM 来源不可用:${(e as Error).message}` };
   }
 
-  // 记忆上下文组装
-  const ctx = memory.buildContext(req.projectId, req.canvasId, req.text);
+  // 记忆上下文组装(skillResolver:激活技能经 SkillStore 解析,注入「【当前技能】」指令段;
+  // canvas 快照:注入「【当前画布】」实时状态段,让 Agent 首轮就感知画布轮廓)
+  const ctxSnap = store.loadProjectCanvases(req.projectId).canvases.find((c) => c.id === req.canvasId);
+  const ctx = memory.buildContext(
+    req.projectId,
+    req.canvasId,
+    req.text,
+    (id) => skills.get(id),
+    ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
+  );
   const chatKey = `${req.projectId}:${req.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const toolCtx = { projectId: req.projectId, canvasId: req.canvasId };
   activeToolCtx.set(chatKey, toolCtx);
@@ -690,11 +787,20 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
         .join('\n')}]`
     : '';
 
+  // 选中节点注入:用户正在操作哪个节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
+  const selNote =
+    req.selectedNodeId && ctxSnap
+      ? (() => {
+          const n = ctxSnap.nodes.find((x) => x.id === req.selectedNodeId);
+          return n ? `\n\n${describeSelectedNode(n, ctxSnap.edges, ctxSnap.nodes)}` : '';
+        })()
+      : '';
+
   try {
     const result = await agent.chat({
       projectId: req.projectId,
       canvasId: req.canvasId,
-      text: req.text + attNote,
+      text: req.text + attNote + selNote,
       context: ctx,
       llm,
     });
@@ -706,13 +812,19 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     if (result.reply) {
       memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'assistant', content: result.reply });
     }
-    // 工具调用记入 recall(role=tool)
+    // 工具调用记入 recall(role=tool,留痕回看)+ 成功动作记入 recall(role=system,注入下一轮上下文)
     for (const tc of result.toolCalls) {
       memory.addRecall(req.projectId, {
         canvasId: req.canvasId, role: 'tool',
         content: `${tc.name}(${JSON.stringify(tc.args).slice(0, 120)})`,
         toolName: tc.name, toolArgs: tc.args, toolResult: tc.result,
       });
+      if (tc.ok) {
+        memory.addRecall(req.projectId, {
+          canvasId: req.canvasId, role: 'system',
+          content: describeToolAction(tc.name, tc.args, tc.nodeId),
+        });
+      }
     }
     // ask.user 暂停卡也记入 recall(被 worker 拦截、不经工具桥):刷新/切换后恢复成可点选的确认卡,而不是丢成纯文本
     if (result.ask) {
@@ -763,6 +875,9 @@ function compactContext(msgs: RecallMessage[]): { systemPrompt: string; messages
           role: 'user',
           content: `[工具调用] ${r.toolName ?? '?'}(${JSON.stringify(r.toolArgs ?? {}).slice(0, 100)}) → ${(r.toolResult ?? '').slice(0, 200)}`,
         };
+      }
+      if (r.role === 'system') {
+        return { role: 'user', content: `[系统] ${r.content}` };
       }
       return { role: 'user', content: r.content };
     }),

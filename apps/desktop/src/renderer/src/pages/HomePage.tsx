@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
+import type { RenderJob } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
+import { useRenderQueue } from './useRenderQueue';
 
 export type HomePageTarget =
   | 'home'
@@ -63,6 +65,40 @@ function formatDate(iso: string) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/** 引擎 provider 展示名(队列状态文案用) */
+const PROVIDER_LABEL: Record<string, string> = { h3c: 'h3.c', mlxgen: 'mlxgen', mock: '演示', llm: 'LLM' };
+
+/** 首页 live-card 三态视图数据(纯函数;运行中 / 排队中 / 空闲) */
+function liveCardView(
+  running: RenderJob | null,
+  queued: number,
+  projects: Array<{ id: string; name: string }>,
+): { title: string; badge: string; pct: number; showBar: boolean; note: string; projectId?: string } {
+  if (running) {
+    const provider = PROVIDER_LABEL[running.provider] ?? running.provider;
+    const pct = Math.round((running.progress ?? 0) * 100);
+    const name = running.projectId ? projects.find((p) => p.id === running.projectId)?.name : undefined;
+    return {
+      title: name ?? '渲染任务',
+      badge: `${provider} · ${pct}%`,
+      pct,
+      showBar: true,
+      note: `${provider} ${running.stage ?? '生成中…'}`,
+      projectId: running.projectId,
+    };
+  }
+  if (queued > 0) {
+    return {
+      title: '任务排队中',
+      badge: `排队 #${queued}`,
+      pct: 0,
+      showBar: false,
+      note: `${queued} 个任务等待 · FIFO 串行`,
+    };
+  }
+  return { title: '队列空闲', badge: '空闲', pct: 0, showBar: false, note: '暂无进行中任务 · 点此进入画布' };
+}
+
 export default function HomePage({
   onNavigate,
   onGenerate,
@@ -81,6 +117,10 @@ export default function HomePage({
   const [attachments, setAttachments] = useState<Array<{ name: string; tag: string; img: string }>>([]);
   const [attachIdx, setAttachIdx] = useState(0);
   const [hoverId, setHoverId] = useState<string | null>(null);
+
+  /* ── 真实渲染队列:主进程 RenderQueue 状态(提交/进度/完成/取消 均经 onQueueChanged 推送) ── */
+  const { running, queued } = useRenderQueue();
+  const live = liveCardView(running, queued, projects);
 
   /* ── 新建项目弹窗 ── */
   const [newOpen, setNewOpen] = useState(false);
@@ -444,17 +484,31 @@ export default function HomePage({
           </div>
           <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border-soft)' }}>
             <div className="lbl" style={{ marginBottom: '8px' }}>进行中</div>
-            <div className="live-card" data-od-id="live-project" onClick={() => onNavigate('canvas')}>
+            <div
+              className="live-card"
+              data-od-id="live-project"
+              onClick={() => {
+                // 有活跃任务时精确进入其所属项目(否则当前会话没有项目上下文,App 会先跳项目列表)
+                const pid = live.projectId && projects.some((p) => p.id === live.projectId) ? live.projectId : null;
+                if (pid) onSelectProject(pid);
+                else onNavigate('canvas');
+              }}
+            >
               <div className="row" style={{ justifyContent: 'space-between' }}>
-                <b>草原之河 · 短剧</b>
+                <b>{live.title}</b>
                 <span className="badge">
-                  <span className="dot live"></span>镜头 3/8
+                  <span className={`dot${live.showBar ? ' live' : ''}`}></span>
+                  {live.badge}
                 </span>
               </div>
-              <div className="pbar" style={{ margin: '10px 0 8px' }}>
-                <i style={{ width: '38%' }}></i>
-              </div>
-              <div className="mono mut" style={{ fontSize: '11px' }}>h3.c 生成中 · 默认档 · 预计剩余 06:12</div>
+              {live.showBar ? (
+                <div className="pbar" style={{ margin: '10px 0 8px' }}>
+                  <i style={{ width: `${live.pct}%` }}></i>
+                </div>
+              ) : (
+                <div style={{ height: '5px', margin: '10px 0 8px' }} />
+              )}
+              <div className="mono mut" style={{ fontSize: '11px' }}>{live.note}</div>
             </div>
           </div>
           <div className="proj-body">

@@ -446,6 +446,24 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .tr-v{margin:0;font-family:var(--font-mono);font-size:10.5px;line-height:1.6;color:var(--fg-2);white-space:pre-wrap;word-break:break-word}
 .pg-canvas .tr-v.err{color:var(--danger)}
 
+/* ─── SkillInjectCard:技能注入卡(配置事件,与工具卡并列但独立;design稿 trc-skill)─── */
+.pg-canvas .skc{max-width:100%;border:1px solid color-mix(in oklab,var(--accent) 26%,var(--border-soft));border-radius:14px 14px 14px 4px;background:color-mix(in oklab,var(--accent) 4%,var(--bg));overflow:hidden}
+.pg-canvas .skc-head{display:flex;align-items:center;gap:8px;padding:8px 10px}
+.pg-canvas .skc-ico{flex:none;width:22px;height:22px;border-radius:7px;display:grid;place-items:center;background:color-mix(in oklab,var(--accent) 12%,transparent);color:var(--accent)}
+.pg-canvas .skc-tx{flex:1;min-width:0;font-size:var(--text-xs);line-height:1.5;color:var(--fg)}
+.pg-canvas .skc-tx b{font-weight:600}
+.pg-canvas .skc-inj{font-size:10px;color:var(--muted)}
+.pg-canvas .skc-sub{font-size:10.5px;color:var(--muted)}
+.pg-canvas .skc-toggle{flex:none;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;color:var(--muted);cursor:pointer}
+.pg-canvas .skc-toggle:hover{background:color-mix(in oklab,var(--fg) 7%,transparent);color:var(--fg)}
+.pg-canvas .skc-toggle svg{width:12px;height:12px}
+.pg-canvas .skc-body{padding:0 10px 9px}
+.pg-canvas .skc-pre{margin:0;padding:8px 10px;border:1px solid var(--border-soft);border-radius:var(--radius-sm);background:var(--bg);font-size:10.5px;line-height:1.6;color:var(--fg-2);white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto}
+.pg-canvas .skc-hint{margin:2px 0 0;font-size:10.5px;color:var(--muted)}
+.pg-canvas .skc-foot{display:flex;align-items:center;gap:10px;margin-top:7px;font-size:10.5px}
+.pg-canvas .skc-foot .locate{flex:none;color:var(--accent);cursor:pointer;font-weight:600;white-space:nowrap}
+.pg-canvas .skc-foot .locate:hover{text-decoration:underline}
+
 /* ─── AskCard:ask.user 确认卡片(agent-cards.html ③)─── */
 .pg-canvas .ask{border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg);box-shadow:0 1px 3px rgba(0,0,0,.05);overflow:hidden;max-width:100%}
 .pg-canvas .ask-h{display:flex;align-items:center;gap:7px;padding:7px 12px;border-bottom:1px solid var(--border-soft);background:var(--surface)}

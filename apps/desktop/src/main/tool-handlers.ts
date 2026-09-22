@@ -576,17 +576,49 @@ export class ToolHandlers {
       };
     },
 
-    /* ── skills 域 ── */
+    /* ── skills 域(画布模板 + Agent 指令段双形态,见 docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md) ── */
     'skills.list': async () => {
       const list = this.skills.list();
-      const lines = list.map((s) => `- ${s.id} ${s.name}(${s.nodes.length} 节点)`).join('\n');
+      const lines = list.map((s) => `- ${s.id} ${s.name}(${s.nodes.length} 节点${s.instructions ? ' · 有操作指令' : ''})`).join('\n');
       return { ok: true, result: `Skills 库 ${list.length} 个:\n${lines || '(空)'}` };
+    },
+    'skills.read': async (a) => {
+      const skill = this.skills.get(String(a.skillId ?? ''));
+      if (!skill) return { ok: false, result: 'Skill 不存在' };
+      if (!skill.instructions) return { ok: true, result: `Skill「${skill.name}」仅画布模板,无操作指令段` };
+      const injectNote = skill.inject === 'summary' ? '(summary 模式:上下文只注摘要,以下为全文)' : '';
+      return { ok: true, result: `【${skill.name} 操作指令】${injectNote}\n${skill.instructions}` };
+    },
+    'skills.activate': async (a, ctx) => {
+      const skillId = String(a.skillId ?? '');
+      const skill = this.skills.get(skillId);
+      if (!skill) return { ok: false, result: 'Skill 不存在' };
+      if (!ctx.canvasId) return { ok: false, result: '当前无画布上下文,无法激活' };
+      this.memory.setActiveSkillId(ctx.projectId, ctx.canvasId, skillId);
+      const preview = (skill.instructions ?? '').slice(0, 60).replace(/\n/g, ' ');
+      return {
+        ok: true,
+        result: skill.instructions
+          ? `已激活技能「${skill.name}」,操作指令已注入当前画布上下文${skill.inject === 'summary' ? '(summary 模式,可 skills.read 读全文)' : ''} · ${preview}…`
+          : `已激活技能「${skill.name}」,但该技能无操作指令(仅画布模板)`,
+      };
+    },
+    'skills.deactivate': async (_a, ctx) => {
+      if (!ctx.canvasId) return { ok: false, result: '当前无画布上下文' };
+      this.memory.setActiveSkillId(ctx.projectId, ctx.canvasId, null);
+      return { ok: true, result: '已停用当前画布技能,不再注入指令' };
     },
     'skills.apply': async (a, ctx) => {
       const skillId = String(a.skillId ?? '');
       const projectName = String(a.projectName ?? `Skill 应用 ${Date.now()}`);
       try {
         const project = this.skills.apply(skillId, projectName, this.store);
+        // 可选:应用后直接在新项目主画布激活该技能(铺结构 + 载入操作指令)
+        if (a.activate === true) {
+          const canvasId = project.activeCanvasId || 'main';
+          this.memory.setActiveSkillId(project.id, canvasId, skillId);
+          return { ok: true, result: `已应用 Skill 到新项目「${project.name}」(${project.id})并激活该技能指令` };
+        }
         return { ok: true, result: `已应用 Skill 到新项目「${project.name}」(${project.id})` };
       } catch (e) {
         return { ok: false, result: `应用失败: ${(e as Error).message}` };
@@ -597,8 +629,13 @@ export class ToolHandlers {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '当前画布不存在' };
-      const skill = this.skills.save(name, cur);
-      return { ok: true, result: `已保存 Skill「${skill.name}」(${skill.nodes.length} 节点)` };
+      const instructions = a.instructions != null ? String(a.instructions) : undefined;
+      const inject = instructions != null ? (a.inject === 'summary' ? 'summary' : 'full') : undefined;
+      const skill = this.skills.save(name, cur, { instructions, inject });
+      return {
+        ok: true,
+        result: `已保存 Skill「${skill.name}」(${skill.nodes.length} 节点${skill.instructions ? ' · 含操作指令段' : ''})`,
+      };
     },
 
     /* ── timeline 域 ── */

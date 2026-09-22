@@ -13,12 +13,15 @@ export function AgentChatView({
   hidden,
   onLocate,
   onOpenSettings,
+  onEditSkill,
 }: {
   chat: AgentChatApi;
   /** 页签切到检查器时隐藏消息流(composer 保持可见,与原布局一致) */
   hidden: boolean;
   onLocate: (nodeId: string) => void;
   onOpenSettings: () => void;
+  /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页(可为空 = 不显示入口) */
+  onEditSkill?: () => void;
 }) {
   const { msgs, send, askPick, askReset, chatRef, pinToBottom, model, modelOverridden } = chat;
 
@@ -46,6 +49,7 @@ export function AgentChatView({
           onOpenSettings={onOpenSettings}
           onAskPick={askPick}
           onAskReset={askReset}
+          onEditSkill={onEditSkill}
         />
       </div>
     </>

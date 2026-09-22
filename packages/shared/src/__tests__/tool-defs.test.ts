@@ -34,6 +34,26 @@ describe('工具清单完整性', () => {
     }
   });
 
+  it('skills 域双形态工具齐全(read/activate/deactivate 新增)', () => {
+    for (const n of ['skills.list', 'skills.read', 'skills.activate', 'skills.deactivate', 'skills.apply', 'skills.save']) {
+      expect(names).toContain(n);
+    }
+  });
+
+  it('skills.activate 必填 skillId,描述说明画布级激活', () => {
+    const t = toolDefinitions().find((x) => x.name === 'skills.activate')!;
+    const p = t.parameters as { properties: Record<string, unknown>; required?: string[] };
+    expect(p.required).toContain('skillId');
+    expect(t.description).toContain('激活');
+  });
+
+  it('skills.save 支持 instructions/inject(指令段保存)', () => {
+    const t = toolDefinitions().find((x) => x.name === 'skills.save')!;
+    const p = t.parameters as { properties: Record<string, unknown> };
+    expect(p.properties.instructions).toBeDefined();
+    expect(p.properties.inject).toBeDefined();
+  });
+
   it('工具名唯一', () => {
     expect(new Set(names).size).toBe(names.length);
   });

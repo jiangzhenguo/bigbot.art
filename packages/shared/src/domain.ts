@@ -504,16 +504,23 @@ export interface RenderJob {
   updatedAt: string;
 }
 
-/** Skill — 画布工作流模板(节点结构 + 参数 + 提示词模板),可保存/套用 */
+/** Skill — 画布工作流模板(节点结构 + 参数 + 提示词模板),可保存/套用
+ *  双形态:画布模板(nodes/edges 克隆实体化)+ Agent 指令段(instructions 对话自动注入) */
 export interface Skill {
   id: string;
   name: string;
-  /** 模板画布快照(保存时深拷贝,应用时换新 id 实体化) */
+  /** 模板画布快照(保存时深拷贝,应用时换新 id 实体化;纯指令技能可空) */
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   /** 占位参数(如 {主题} {旁白} {时长}),应用时可替换 */
   params: string[];
   description?: string;
+  /** 🆕 Agent 操作指令段:Markdown 操作手册/提示词,激活后注入 buildContext 的 systemPrompt */
+  instructions?: string;
+  /** 🆕 注入模式:full=全量注入(缺省) / summary=上下文只放摘要,按需用 skills.read 取全文 */
+  inject?: 'full' | 'summary';
+  /** 🆕 官方精选出厂技能(首次启动 seed,可删除;区别于「我的 Skill」) */
+  builtin?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -594,6 +601,8 @@ export interface CanvasMemory {
   keyDecisions: string[];
   /** /compact 生成的对话压缩摘要(注入当前画布上下文,压缩后仍保留全局脉络) */
   conversationSummary?: string;
+  /** 🆕 当前画布激活的 Agent 技能 id(对话自动注入该技能指令段;同一画布至多一个) */
+  activeSkillId?: string;
 }
 
 /** 分层记忆(MemGPT 式):core 核心记忆 + 画布总结 + recall 对话流 + archival 归档 */
@@ -617,7 +626,8 @@ export interface ProjectMemory {
 export interface RecallMessage {
   id: string;
   canvasId: string;
-  role: 'user' | 'assistant' | 'tool';
+  /** system = 工具成功后的动作记录(人类可读,随最近消息注入下一轮上下文) */
+  role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   /** role=tool 时的工具名与参数 */
   toolName?: string;
@@ -652,6 +662,8 @@ export interface AgentChatRequest {
   text: string;
   /** 用户从资产库挑选的附件(已在资产库,Agent 可按 id 引用/连线) */
   attachments?: Array<{ id: string; name: string; kind: string; localPath: string }>;
+  /** 画布当前选中节点 id(可选;主进程把节点详情摘要附进本轮 user 消息,让 Agent 感知用户在操作谁) */
+  selectedNodeId?: string;
 }
 /** ask.user 结构化提问选项(🆕 支持副说明与推荐徽标;worker 已把字符串归一化为对象) */
 export interface AskOption {

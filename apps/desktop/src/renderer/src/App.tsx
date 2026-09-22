@@ -274,7 +274,11 @@ export default function App() {
       )}
       {currentPage === 'skills' && (
         <ErrorBoundary name="技能">
-          <SkillsPage onNavigate={handleNavigate} />
+          <SkillsPage
+            onNavigate={handleNavigate}
+            projectId={projectId}
+            canvasId={projectCanvases?.activeCanvasId ?? projectCanvases?.canvases[0]?.id ?? null}
+          />
         </ErrorBoundary>
       )}
       {currentPage === 'timeline' && (

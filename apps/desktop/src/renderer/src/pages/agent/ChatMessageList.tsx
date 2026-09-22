@@ -12,6 +12,7 @@ import ErrorCard from './cards/ErrorCard';
 import ThinkingBlock from './cards/ThinkingBlock';
 import ContinuityCard from './cards/ContinuityCard';
 import PlanCard from './cards/PlanCard';
+import SkillInjectCard from './cards/SkillInjectCard';
 import type { ChatMsg } from './types';
 
 export function ChatMessageList({
@@ -21,6 +22,7 @@ export function ChatMessageList({
   onOpenSettings,
   onAskPick,
   onAskReset,
+  onEditSkill,
 }: {
   msgs: ChatMsg[];
   /** 发送一条用户消息(ask 点选 / 错误卡重试) */
@@ -31,6 +33,8 @@ export function ChatMessageList({
   onAskPick: (msgId: number, label: string) => void;
   /** ask 确认卡「重新选择」:父级清除 ask.picked,回到可点选 */
   onAskReset: (msgId: number) => void;
+  /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页 */
+  onEditSkill?: () => void;
 }) {
   return (
     <>
@@ -88,6 +92,10 @@ export function ChatMessageList({
         if (m.toolRuns) {
           // 工具聚合卡:一轮调用一张卡(设计文档 §3)
           return <ToolRunCard key={m.id} runs={m.toolRuns} onLocate={onLocate} />;
+        }
+        if (m.skill) {
+          // 技能注入卡(配置事件;设计稿 trc-skill,与工具卡并列但独立计数)
+          return <SkillInjectCard key={m.id} data={m.skill} onEdit={onEditSkill} />;
         }
         if (m.check) {
           return <ContinuityCard key={m.id} check={m.check} />;

@@ -67,8 +67,8 @@ export interface ChatParams {
   /** 记忆上下文(主进程组装好发给 worker) */
   context: {
     systemPrompt: string;
-    /** 历史消息(user/assistant 文本) */
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    /** 历史消息(user/assistant 文本 + system 动作记录);system 在 worker 里转成 user 角色注入(pi-ai 无原生 system 消息) */
+    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   };
   llm?: import('@bigbotart/shared').LlmSource;
 }

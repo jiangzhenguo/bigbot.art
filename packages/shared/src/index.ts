@@ -104,11 +104,21 @@ export interface BigBotArtApi {
   }): Promise<{ ok: boolean; assets: import('./domain').Asset[]; error?: string }>;
   /** 列项目画布中「有产物」的节点(「从画布产物导入」弹层的候选项) */
   listArchivableProducts(projectId: string): Promise<Array<{ nodeId: string; name: string; path: string; meta: string }>>;
-  // Skills 库
+  // Skills 库(画布模板 + Agent 指令段双形态;激活状态持久化在 canvasMemory,见 docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md)
   listSkills(): Promise<import('./domain').Skill[]>;
-  saveSkill(input: { name: string; projectId: string }): Promise<import('./domain').Skill>;
-  applySkill(skillId: string, projectName: string): Promise<{ project: import('./domain').Project }>;
+  saveSkill(input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }): Promise<import('./domain').Skill>;
+  applySkill(skillId: string, projectName: string, activate?: boolean): Promise<{ project: import('./domain').Project }>;
   deleteSkill(id: string): Promise<{ ok: boolean; error?: string }>;
+  /** 读单个技能完整定义(含操作指令段;summary 模式按需取全文) */
+  skillRead(skillId: string): Promise<import('./domain').Skill | null>;
+  /** 更新技能元信息/指令段(指令编辑器;不动画布模板) */
+  skillUpdate(skillId: string, patch: { name?: string; description?: string; instructions?: string | null; inject?: 'full' | 'summary' }): Promise<{ ok: boolean; skill?: import('./domain').Skill; error?: string }>;
+  /** 激活技能到指定画布(同一画布至多一个;激活后对话自动注入指令段) */
+  skillActivate(projectId: string, canvasId: string, skillId: string): Promise<{ ok: boolean; preview?: string; hasInstructions?: boolean; error?: string }>;
+  /** 停用画布技能 */
+  skillDeactivate(projectId: string, canvasId: string): Promise<{ ok: boolean }>;
+  /** 查询画布当前激活技能(进入页面恢复 chip/注入卡;未激活返回 null) */
+  skillActive(projectId: string, canvasId: string): Promise<{ skillId: string; name: string; inject?: 'full' | 'summary' } | null>;
   // 时间线导出(FFmpeg)
   exportTimeline(req: import('./domain').TimelineExportRequest): Promise<{ ok: boolean; taskId?: string; error?: string }>;
   exportStatus(taskId: string): Promise<import('./domain').ExportTask>;

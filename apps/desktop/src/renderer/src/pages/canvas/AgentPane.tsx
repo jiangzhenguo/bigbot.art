@@ -26,6 +26,8 @@ interface AgentPaneProps {
   onGripPointerDown: (e: React.PointerEvent) => void;
   onGripDoubleClick: () => void;
   onGripKeyDown: (e: React.KeyboardEvent) => void;
+  /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页 */
+  onEditSkill?: () => void;
 }
 
 export function AgentPane({
@@ -42,6 +44,7 @@ export function AgentPane({
   onGripPointerDown,
   onGripDoubleClick,
   onGripKeyDown,
+  onEditSkill,
 }: AgentPaneProps) {
   /* 面板容器 ref(原 CanvasPage 的 agentRef;拆分后无外部读取,收到本组件本地管理) */
   const agentRef = useRef<HTMLElement | null>(null);
@@ -82,6 +85,7 @@ export function AgentPane({
           hidden={tab !== 'chat'}
           onLocate={onLocate}
           onOpenSettings={onOpenSettings}
+          onEditSkill={onEditSkill}
         />
         {inspector}
         {/* 输入区(pages/agent/AgentComposer) */}
