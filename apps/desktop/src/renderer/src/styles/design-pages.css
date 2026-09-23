@@ -68,8 +68,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-body);
   --glass-border: rgba(255,255,255,.62);
   --glass-spec-hi: rgba(255,255,255,.66);
   --glass-spec-lo: rgba(29,29,31,.05);
-  --glass-shadow: 0 14px 44px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.05);
-  --glass-shadow-lg: 0 24px 70px rgba(0,0,0,.16);
+  --glass-shadow: 0 8px 28px rgba(0,0,0,.07), 0 1px 4px rgba(0,0,0,.03);
+  --glass-shadow-lg: 0 16px 48px rgba(0,0,0,.10);
   --glass-spec: inset 0 1px 0 var(--glass-spec-hi), inset 0 -1px 0 var(--glass-spec-lo);
   --glass-blur: blur(24px) saturate(180%);
   --glass-blur-sm: blur(14px) saturate(160%);
@@ -851,6 +851,23 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .chip{background:var(--glass-well);-webkit-backdrop-filter:var(--glass-blur-sm);backdrop-filter:var(--glass-blur-sm)}
 .pg-settings .chip.on{background:var(--fg);-webkit-backdrop-filter:none;backdrop-filter:none}
 
+/* ═══ 页面:projects(仅公共顶栏所需类,页面主体仍用 design.ts 内联样式) ═══ */
+.pg-projects .topbar{height:52px;flex:none;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface-warm)}
+.pg-projects .topbar .sep{width:1px;height:20px;background:var(--border)}
+.pg-projects .crumb{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-sm)}
+.pg-projects .crumb .chev{color:var(--meta)}
+.pg-projects .spacer{flex:1}
+.pg-projects .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 16px;border-radius:var(--radius-md);font-size:var(--text-sm);font-weight:500;line-height:1.25;border:1px solid transparent;white-space:nowrap;cursor:pointer;transition:background var(--motion-fast),border-color var(--motion-fast)}
+.pg-projects .btn:active{transform:scale(.97)}
+.pg-projects .btn-p{background:var(--accent);color:var(--accent-on)}
+.pg-projects .btn-p:hover{background:var(--accent-hover)}
+.pg-projects .btn-g{color:var(--fg-2);background:none}
+.pg-projects .btn-g:hover{background:color-mix(in oklab,var(--fg) 6%,transparent)}
+.pg-projects .btn-sm{padding:5px 11px;font-size:var(--text-xs);border-radius:var(--radius-sm)}
+.pg-projects .topbar{margin:10px 12px 0;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec)}
+.pg-projects .btn-p{background:var(--glass-accent);-webkit-backdrop-filter:var(--glass-blur-sm);backdrop-filter:var(--glass-blur-sm);box-shadow:inset 0 1px 0 var(--glass-spec-hi),0 4px 14px color-mix(in oklab,var(--accent) 30%,transparent)}
+.pg-projects .btn-p:hover{background:var(--glass-accent-hover)}
+
 /* ═══ 页面:onboarding ═══ */
 .pg-onboarding *, .pg-onboarding *::before, .pg-onboarding *::after{box-sizing:border-box}
 .pg-onboarding{margin:0;background:var(--surface);color:var(--fg);font-family:var(--font-body);font-size:var(--text-sm);line-height:var(--leading-body);-webkit-font-smoothing:antialiased;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px;min-height:100vh}
@@ -1300,3 +1317,17 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 /* 行动条(主行动) */
 .pg-canvas .insp .action-bar{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border-soft);padding:10px 0 2px;margin-top:2px}
 .pg-canvas .insp .action-bar .btn-p{font-weight:500;font-size:13px;padding:8px 16px}
+
+/* ═══ 无边框窗口(macOS titleBarStyle:'hiddenInset') ═══
+ * 顶部 34px 全局拖拽条(App.tsx 的 .titlebar-drag):所有页面内容整体下移为红绿灯让位,
+ * 拖拽条点击拖动即可移动窗口;各页 .app 高度同步扣除 34px。
+ * 注意:本块须保持在各页规则之后(同优先级,后写覆盖 height) */
+.titlebar-drag{height:34px;flex:none;position:relative;z-index:100;-webkit-app-region:drag;background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var(--accent) 7%,transparent), transparent 62%),radial-gradient(900px 640px at -8% 108%, color-mix(in oklab,var(--fg) 7%,transparent), transparent 58%),var(--bg);background-attachment:fixed}
+/* 与当前页背景保持一致:projects 是纯底色,onboarding 用另一组渐变(均与各页根背景同款) */
+.titlebar-drag[data-page="projects"]{background:var(--bg)}
+.titlebar-drag[data-page="onboarding"]{background:radial-gradient(1000px 660px at 85% -8%, color-mix(in oklab,var(--accent) 10%,transparent), transparent 60%),radial-gradient(860px 620px at 8% 108%, color-mix(in oklab,var(--fg) 9%,transparent), transparent 56%),var(--surface);background-attachment:fixed}
+/* 整窗禁止滚动:页面内部滚动由各自的 overflow:auto 容器承担;
+ * .pg-* 根的 min-height:100vh 也要扣除拖拽条,否则 34px+100vh 超出窗口产生整窗滚动 */
+html,body{height:100%;overflow:hidden}
+.pg-home .app,.pg-canvas .app,.pg-assets .app,.pg-skills .app,.pg-settings .app{height:calc(100vh - 34px)}
+.pg-home,.pg-canvas,.pg-assets,.pg-skills,.pg-settings,.pg-onboarding{min-height:calc(100vh - 34px)}

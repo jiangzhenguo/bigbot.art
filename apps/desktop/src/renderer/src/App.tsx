@@ -277,6 +277,8 @@ export default function App() {
   return (
     <I18nProvider lang={lang} setLang={setLang}>
     <>
+      {/* macOS 无边框窗口:顶部全局拖拽条(为悬浮红绿灯让位,点击拖动移动窗口;背景随当前页) */}
+      <div className="titlebar-drag" data-page={currentPage} />
       {currentPage === 'home' && (
         <ErrorBoundary name="首页">
           <HomePage
@@ -354,6 +356,8 @@ export default function App() {
             onRenameProject={handleRenameProject}
             onNewProject={handleNewProject}
             onNavigate={handleNavigate}
+            onBack={handleBack}
+            backLabel={backLabel}
           />
         </ErrorBoundary>
       )}

@@ -1,7 +1,6 @@
 /** 页面字典(以中文原文为 key,缺译回退中文) */
 export default {
   /* 顶栏与页头 */
-  '← 返回首页': '← Back to Home',
   '项目管理': 'Project Management',
   '新建项目': 'New Project',
   '所有项目': 'All Projects',

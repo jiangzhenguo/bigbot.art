@@ -300,6 +300,8 @@ async function createWindow() {
     height: 900,
     title: 'BigBotArt',
     backgroundColor: '#14161a',
+    // 隐藏 macOS 原生标题栏:红绿灯悬浮内嵌,窗口拖拽由渲染层 .topbar/侧栏的 -webkit-app-region 承担
+    titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,

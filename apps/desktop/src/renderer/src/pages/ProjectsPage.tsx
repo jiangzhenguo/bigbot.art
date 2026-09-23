@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { baseStyles, btnStyles, cardStyles, colors, spacing, textSizes } from '../styles/design';
 import { usePrompt } from '../components/usePrompt';
 import { useT } from '../i18n';
+import PageTopBar from '../components/PageTopBar';
 
 interface Project {
   id: string;
@@ -11,6 +12,10 @@ interface Project {
 
 interface ProjectsPageProps {
   onNavigate: (page: 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects') => void;
+  /** 返回上一页(App 导航栈出栈,回到来源页) */
+  onBack: () => void;
+  /** 返回按钮文案(来源页名,如「首页」「画布」) */
+  backLabel: string;
   projects: Project[];
   onSelectProject: (id: string) => void;
   onDeleteProject: (id: string) => void;
@@ -18,7 +23,7 @@ interface ProjectsPageProps {
   onNewProject: (name: string) => void;
 }
 
-export default function ProjectsPage({ onNavigate, projects, onSelectProject, onDeleteProject, onRenameProject, onNewProject }: ProjectsPageProps) {
+export default function ProjectsPage({ onBack, backLabel, projects, onSelectProject, onDeleteProject, onRenameProject, onNewProject }: ProjectsPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewModal, setShowNewModal] = useState(false);
   const [newName, setNewName] = useState('');
@@ -55,20 +60,15 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
   };
 
   return (
-    <div style={{ ...baseStyles.app, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="pg-projects" style={{ ...baseStyles.app, height: 'calc(100vh - 34px)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {promptDialog}
-      {/* 顶栏 */}
-      <div style={{ height: '52px', flexShrink: 0, borderBottom: `1px solid ${colors.borderSoft}`, display: 'flex', alignItems: 'center', gap: spacing[3], padding: `0 ${spacing[5]}`, background: colors.surfaceWarm }}>
-        <button onClick={() => onNavigate('home')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: textSizes.sm, color: colors.fg2, display: 'flex', alignItems: 'center', gap: spacing[1] }}>
-          {t('← 返回首页')}
+      {/* 公共顶部栏:返回来源页 + 面包屑 + 新建项目(与其它页同款) */}
+      <PageTopBar odId="projects" backLabel={backLabel} onBack={onBack} crumb={<b>{t('项目管理')}</b>}>
+        <span className="spacer" />
+        <button className="btn btn-p btn-sm" data-od-id="project-new" onClick={() => setShowNewModal(true)}>
+          {t('新建项目')}
         </button>
-        <span style={{ fontFamily: '"SF Pro Display", sans-serif', fontSize: textSizes.base, fontWeight: 600 }}>{t('项目管理')}</span>
-        <div style={{ marginLeft: 'auto' }}>
-          <button onClick={() => setShowNewModal(true)} style={{ ...btnStyles.base, ...btnStyles.primary }}>
-            {t('新建项目')}
-          </button>
-        </div>
-      </div>
+      </PageTopBar>
 
       {/* 主体 */}
       <div style={{ flex: 1, overflow: 'auto', padding: spacing[8], background: colors.bg }}>
