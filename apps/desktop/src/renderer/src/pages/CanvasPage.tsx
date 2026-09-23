@@ -813,44 +813,72 @@ export default function CanvasPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCanvasId, projectId, projectCanvases]);
 
-  /** 物化 sessionStorage 里的 Agent 规划(从首页跳到画布时;支持新模式分镜表与旧模式 Brief 两种结构) */
+  /** 物化 sessionStorage 里的 Agent 规划(从首页跳到画布时;支持新模式分镜表与旧模式 Brief 两种结构)。
+   *  首页「生成」先跳转后异步规划:挂载时先消费一次(已就绪的情况),再监听 bba-plan-ready 事件(后就绪的情况) */
   useEffect(() => {
-    const raw = sessionStorage.getItem('bba.plan');
-    if (!raw) return;
-    sessionStorage.removeItem('bba.plan');
-    try {
-      const plan = JSON.parse(raw) as {
-        document?: unknown;
-        shots?: unknown[];
-        images?: unknown[];
-        storyboard?: unknown;
-        edges: Array<{ source: string; target: string }>;
-        report?: string;
-      };
-      if (plan.storyboard) {
-        // 新模式:Agent 先出分镜表(分步) → 落 storyboard 节点(+自动档铺出的节点)
-        const sbNode = fromSharedNode(plan.storyboard as never);
-        const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
-        const imgNodes = (plan.images ?? []).map((s) => fromSharedNode(s as never));
-        setNodes([sbNode, ...imgNodes, ...shotNodes]);
-        setEdges(toLocalEdges(plan.edges ?? []));
-        setSelected(shotNodes[0]?.id ?? sbNode.id);
-        chat.pushMsg({
-          kind: 'sys',
-          text: `Agent 已生成分镜表 · ${plan.report ?? ''} · 选中分镜表可在检查器改表后一键铺节点`,
-        });
-      } else {
-        // 旧模式(Brief):document + shots
-        const docNode = fromSharedNode(plan.document as never);
-        const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
-        setNodes([docNode, ...shotNodes]);
-        setEdges(toLocalEdges(plan.edges ?? []));
-        setSelected(shotNodes[0]?.id ?? docNode.id);
-        chat.pushMsg({ kind: 'agent', odId: 'agent-plan', plan: plan as never });
+    const consumePlan = () => {
+      const raw = sessionStorage.getItem('bba.plan');
+      if (!raw) return;
+      sessionStorage.removeItem('bba.plan');
+      try {
+        const plan = JSON.parse(raw) as {
+          document?: unknown;
+          shots?: unknown[];
+          images?: unknown[];
+          storyboard?: unknown;
+          edges: Array<{ source: string; target: string }>;
+          report?: string;
+        };
+        if (plan.storyboard) {
+          // 新模式:Agent 先出分镜表(分步) → 落 storyboard 节点(+自动档铺出的节点)
+          const sbNode = fromSharedNode(plan.storyboard as never);
+          const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
+          const imgNodes = (plan.images ?? []).map((s) => fromSharedNode(s as never));
+          setNodes([sbNode, ...imgNodes, ...shotNodes]);
+          setEdges(toLocalEdges(plan.edges ?? []));
+          setSelected(shotNodes[0]?.id ?? sbNode.id);
+          chat.pushMsg({
+            kind: 'sys',
+            text: `Agent 已生成分镜表 · ${plan.report ?? ''} · 选中分镜表可在检查器改表后一键铺节点`,
+          });
+        } else {
+          // 旧模式(Brief):document + shots
+          const docNode = fromSharedNode(plan.document as never);
+          const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
+          setNodes([docNode, ...shotNodes]);
+          setEdges(toLocalEdges(plan.edges ?? []));
+          setSelected(shotNodes[0]?.id ?? docNode.id);
+          chat.pushMsg({ kind: 'agent', odId: 'agent-plan', plan: plan as never });
+        }
+      } catch (e) {
+        console.error('规划落地失败', e);
       }
-    } catch (e) {
-      console.error('规划落地失败', e);
-    }
+    };
+    consumePlan();
+    window.addEventListener('bba-plan-ready', consumePlan);
+    return () => window.removeEventListener('bba-plan-ready', consumePlan);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 首页「生成」带入的对话:把首页 brief(含附件)作为画布 Agent 的首条消息自动发送,
+   *  附件经 agent-chat 流程拷入项目文件夹并登记为项目资源(与手动发送同链路)。
+   *  同样「挂载消费一次 + bba-newchat-ready 事件」双通道,覆盖先跳转后播种的时序 */
+  useEffect(() => {
+    const consumeSeed = () => {
+      const raw = sessionStorage.getItem('bba.newChat');
+      if (!raw) return;
+      sessionStorage.removeItem('bba.newChat');
+      try {
+        const seed = JSON.parse(raw) as { text?: string; attachments?: Asset[] };
+        if (seed.text) chat.send(seed.text, seed.attachments ?? []);
+      } catch (e) {
+        console.error('播种首页对话失败', e);
+      }
+    };
+    consumeSeed();
+    window.addEventListener('bba-newchat-ready', consumeSeed);
+    return () => window.removeEventListener('bba-newchat-ready', consumeSeed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** 资产本地路径缓存 + 分类字典(挂载时拉取) */

@@ -96,7 +96,7 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: spacing[4], marginTop: spacing[2] }}>
               {filteredProjects.map((p) => (
-                <div key={p.id} style={{ ...cardStyles.base, padding: spacing[4], display: 'flex', flexDirection: 'column', gap: spacing[3], cursor: 'pointer', position: 'relative' }} onClick={() => onSelectProject(p.id)}>
+                <div key={p.id} className="proj-card" style={{ ...cardStyles.base, padding: spacing[4], display: 'flex', flexDirection: 'column', gap: spacing[3], cursor: 'pointer', position: 'relative' }} onClick={() => onSelectProject(p.id)}>
                   <div style={{ width: '100%', height: '120px', borderRadius: '8px', overflow: 'hidden', background: colors.surface, position: 'relative' }}>
                     <img src="./assets/env-dusk.jpg" alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>

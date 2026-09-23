@@ -133,22 +133,58 @@ export default function App() {
   /** 来源页文案(返回按钮标签);导航栈只在事件里改,渲染期读取最新值即可 */
   const backLabel = translate(lang, PAGE_LABEL[navStackRef.current[navStackRef.current.length - 1] ?? 'home']);
 
-  const handleGenerate = async (brief: string) => {
+  const handleGenerate = async (
+    brief: string,
+    opts?: {
+      skillId?: string | null;
+      llm?: import('@bigbotart/shared').LlmSource | null;
+      attachments?: Array<{ id: string; name: string; kind: string; localPath: string }>;
+    },
+  ) => {
     try {
-      let pid = projectId;
-      if (!pid) {
-        const p = await window.bigbotart.createProject(brief.slice(0, 24) || '新项目');
-        await loadProjects();
-        setProjectId(p.id);
-        pid = p.id;
-        await loadCanvasesForProject(pid);
+      // 首页「生成」= 总是开一个新项目(新创作空间),不复用当前项目
+      const p = await window.bigbotart.createProject(brief.slice(0, 24) || '新项目');
+      await loadProjects();
+      setProjectId(p.id);
+      const pid = p.id;
+      await loadCanvasesForProject(pid);
+
+      // 模型带入:首页选择的 LLM 来源写为新项目的项目级覆盖(画布 Agent 优先读项目级覆盖)
+      if (opts?.llm) {
+        await window.bigbotart.setProjectLlm(pid, opts.llm).catch((e) => console.error('设置项目 LLM 失败', e));
       }
+      // 资源带入:首页附件从全局资产转为项目资源(项目资源页可见;对话发送时主进程会再拷入项目文件夹)
+      for (const a of opts?.attachments ?? []) {
+        await window.bigbotart.updateAsset(a.id, { projectId: pid }).catch((e) => console.error('资产归入项目失败', e));
+      }
+
+      // 先跳转:项目与画布就绪后立刻进画布(规划是秒级 LLM 调用,期间用户已能看到画布);
+      // 规划/对话随后经 bba-plan-ready / bba-newchat-ready 事件投递给已挂载的 CanvasPage
+      setCurrentPage('canvas');
+
       const st = await window.bigbotart.agentStart();
       if (!st.running) throw new Error('Agent 启动失败');
+      // 附件注入:首页导入的真实资产以引用注记拼进规划 brief(assetId 可供 Agent 引用)
+      const attNote = opts?.attachments?.length
+        ? `\n\n[参考附件:${opts.attachments.map((a) => `${a.name}(${a.kind},assetId=${a.id})`).join('、')}]`
+        : '';
       // 新模式(分镜表):Agent 先出分镜表(表格可干预),进画布确认后一键铺节点
-      const plan = await window.bigbotart.agentPlanStoryboard(brief, { projectId: pid });
+      const plan = await window.bigbotart.agentPlanStoryboard(brief + attNote, { projectId: pid });
       sessionStorage.setItem('bba.plan', JSON.stringify(plan));
-      setCurrentPage('canvas');
+      window.dispatchEvent(new Event('bba-plan-ready'));
+      // 技能带入:选中的技能注入到新项目当前画布(对话自动加载指令段)
+      if (opts?.skillId) {
+        try {
+          const pc = await window.bigbotart.loadProjectCanvases(pid);
+          const canvasId = pc.activeCanvasId ?? pc.canvases[0]?.id;
+          if (canvasId) await window.bigbotart.skillActivate(pid, canvasId, opts.skillId);
+        } catch (e) {
+          console.error('激活技能失败', e);
+        }
+      }
+      // 对话带入:首页 brief(含附件)作为画布 Agent 的首条消息,由 CanvasPage 自动发送
+      sessionStorage.setItem('bba.newChat', JSON.stringify({ text: brief, attachments: opts?.attachments ?? [] }));
+      window.dispatchEvent(new Event('bba-newchat-ready'));
     } catch (e) {
       console.error('规划失败', e);
       alert('规划失败: ' + (e instanceof Error ? e.message : String(e)));

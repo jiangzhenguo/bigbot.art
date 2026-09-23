@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { RenderJob } from '@bigbotart/shared';
+import type { AppSettings, Asset, LlmSource, RenderJob, Skill } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import { useRenderQueue } from './useRenderQueue';
 import { useT } from '../i18n';
+import { llmDisplayName } from './agent/llm-display';
 
 export type HomePageTarget =
   | 'home'
@@ -14,9 +15,17 @@ export type HomePageTarget =
   | 'onboarding'
   | 'projects';
 
+/** 生成请求附带的选项(技能 + 模型 + 参考附件),由 App 带新项目进画布 Agent */
+export interface GenerateOpts {
+  skillId?: string | null;
+  /** 首页选择的 LLM 来源 → 写为新项目的项目级覆盖(画布 Agent 优先读项目级) */
+  llm?: LlmSource | null;
+  attachments?: Array<{ id: string; name: string; kind: string; localPath: string }>;
+}
+
 interface HomePageProps {
   onNavigate: (page: HomePageTarget) => void;
-  onGenerate: (brief: string) => void;
+  onGenerate: (brief: string, opts?: GenerateOpts) => void;
   onNewProject: (name?: string) => void;
   projects: Array<{ id: string; name: string; createdAt: string }>;
   onSelectProject: (id: string) => void;
@@ -29,22 +38,6 @@ interface HomePageProps {
   };
 }
 
-const DEFAULT_MODEL = 'Ornith-1.5-35B · 本地';
-
-const MODELS = [
-  { value: 'Ornith-1.5-35B · 本地', label: 'Ornith-1.5-35B-A3B · 本地' },
-  { value: 'Ornith-1.5-9B · 本地', label: 'Ornith-1.5-9B · 本地' },
-];
-
-const SKILLS = [
-  { name: '无技能', label: '无技能 · 自由编排' },
-  { name: '纸拼贴剧情片', label: '纸拼贴剧情片' },
-  { name: '剧情短片', label: '剧情短片' },
-  { name: '电商产品', label: '电商产品' },
-  { name: '科普讲解', label: '科普讲解' },
-  { name: '水墨', label: '水墨' },
-];
-
 const QUICK_SKILLS = [
   { label: '剧情短片', fill: '用三幕结构写一部 45 秒剧情短片：主角在旧车站错过一班列车，却在站台重逢多年未见的朋友。', skill: '剧情短片' },
   { label: '电商产品', fill: '为保温杯生成 3 个视角的产品视频：侧视旋转、开盖特写、户外使用场景，统一浅灰背景。', skill: '电商产品' },
@@ -53,10 +46,14 @@ const QUICK_SKILLS = [
   { label: '纸拼贴', fill: '帮我在导演台搭一场戏：男女主在草原上走，遇到一条很宽的河，女主跃过河，男主在岸边踱步。纸拼贴风格，60 秒以内。', skill: '纸拼贴剧情片' },
 ];
 
-const ATTACH_DEMOS = [
-  { name: '女主设定 v3.png', tag: '角色锁定', img: './assets/char-female.jpg' },
-  { name: '草原空镜.mov', tag: '运镜参考', img: './assets/env-dusk.jpg' },
-];
+/** 附件媒体类型中文名(t() key,与 assets 字典共用) */
+const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', audio: '音频', document: '文档' };
+
+/** 资产缩略图(仅图片有;与 AssetCard.thumbOf 同口径) */
+function thumbOf(a: { kind: string; localPath: string }): string | null {
+  if (a.kind === 'image' && a.localPath) return `bba-asset://${a.localPath.split('/').pop()}`;
+  return null;
+}
 
 const PROJ_THUMBS = ['./assets/shot-01.jpg', './assets/eclipse.jpg', './assets/prop-bottle.jpg', './assets/ink.jpg'];
 
@@ -116,13 +113,43 @@ export default function HomePage({
 }: HomePageProps) {
   const t = useT();
   const [brief, setBrief] = useState('');
-  const [model, setModel] = useState<string>(DEFAULT_MODEL);
-  const [skill, setSkill] = useState('无技能');
+  /* ── 真实 LLM 来源(getSettings 回填;切换经 setSettings 持久化) ── */
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [llmSrc, setLlmSrc] = useState<LlmSource | null>(null);
+  /* ── 真实技能列表(listSkills);skillId=null = 无技能 ── */
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillId, setSkillId] = useState<string | null>(null);
   const [showModelPop, setShowModelPop] = useState(false);
   const [showSkillPop, setShowSkillPop] = useState(false);
-  const [attachments, setAttachments] = useState<Array<{ name: string; tag: string; img: string }>>([]);
-  const [attachIdx, setAttachIdx] = useState(0);
+  /* ── 真实附件(importAssets 从磁盘导入进资产库) ── */
+  const [attachments, setAttachments] = useState<Asset[]>([]);
   const [hoverId, setHoverId] = useState<string | null>(null);
+
+  /* 挂载时拉取设置与技能列表 */
+  useEffect(() => {
+    let alive = true;
+    window.bigbotart
+      .getSettings()
+      .then((s) => {
+        if (!alive) return;
+        setAppSettings(s);
+        setLlmSrc(s.llm ?? null);
+      })
+      .catch((e) => console.error('读取设置失败', e));
+    window.bigbotart
+      .listSkills()
+      .then((list) => {
+        if (alive) setSkills(list);
+      })
+      .catch((e) => console.error('读取技能列表失败', e));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const llmLabel = llmDisplayName(llmSrc, appSettings);
+  const skillName = skillId ? (skills.find((s) => s.id === skillId)?.name ?? t('无技能')) : t('无技能');
+  const cloudProviders = appSettings?.cloudProviders ?? [];
 
   /* ── 真实渲染队列:主进程 RenderQueue 状态(提交/进度/完成/取消 均经 onQueueChanged 推送) ── */
   const { running, queued } = useRenderQueue();
@@ -178,7 +205,11 @@ export default function HomePage({
 
   const handleGenerate = () => {
     if (!brief.trim()) return;
-    onGenerate(brief);
+    onGenerate(brief, {
+      skillId,
+      llm: llmSrc,
+      attachments: attachments.map((a) => ({ id: a.id, name: a.name, kind: a.kind, localPath: a.localPath })),
+    });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -188,28 +219,40 @@ export default function HomePage({
     }
   };
 
-  const handlePickModel = (value: string) => {
-    setModel(value);
+  /* 切换 LLM 来源:本地默认 / 云端供应商模型,写回 settings.json */
+  const pickLlm = (src: LlmSource) => {
+    setLlmSrc(src);
     setShowModelPop(false);
+    window.bigbotart
+      .setSettings({ llm: src })
+      .then((s) => {
+        setAppSettings(s);
+        setLlmSrc(s.llm ?? src);
+      })
+      .catch((e) => console.error('保存 LLM 来源失败', e));
   };
 
-  const handlePickSkill = (name: string) => {
-    setSkill(name);
+  const handlePickSkill = (id: string | null) => {
+    setSkillId(id);
     setShowSkillPop(false);
   };
 
   const handleQuickSkill = (fill: string, skillName: string) => {
     setBrief(fill);
-    setSkill(skillName);
+    // 按名称匹配真实技能(内置技能如「纸拼贴剧情片」在技能库中;匹配不到则为无技能)
+    setSkillId(skills.find((s) => s.name === skillName)?.id ?? null);
     areaRef.current?.focus();
   };
 
-  const handleAddAttachment = () => {
-    if (attachIdx >= ATTACH_DEMOS.length) return;
-    const d = ATTACH_DEMOS[attachIdx];
-    if (!d) return;
-    setAttachments([...attachments, d]);
-    setAttachIdx(attachIdx + 1);
+  /* 真实附件导入:系统对话框选文件 → 复制进资产库(全局);取消则静默 */
+  const handleAddAttachment = async () => {
+    try {
+      const res = await window.bigbotart.importAssets();
+      if (res.assets.length === 0) return;
+      setAttachments((prev) => [...prev, ...res.assets.filter((a) => !prev.some((x) => x.id === a.id))]);
+    } catch (e) {
+      console.error('导入附件失败', e);
+    }
   };
 
   const handleRemoveAttachment = (index: number) => {
@@ -362,20 +405,23 @@ export default function HomePage({
           <div className="composer" data-od-id="intake-composer">
             {attachments.length > 0 && (
               <div className="attach-row" id="attachRow">
-                {attachments.map((att, i) => (
-                  <span className="attach" key={i}>
-                    <span className="thumb">
-                      <img src={att.img} alt="" />
+                {attachments.map((att, i) => {
+                  const thumb = thumbOf(att);
+                  return (
+                    <span className="attach" key={att.id}>
+                      <span className="thumb">
+                        {thumb ? <img src={thumb} alt="" /> : null}
+                      </span>
+                      <span>{att.name}</span>
+                      <span className="mono mut" style={{ fontSize: '10px' }}>{t(KIND_LABEL[att.kind] ?? att.kind)}</span>
+                      <button className="x" aria-label={t('移除附件')} onClick={() => handleRemoveAttachment(i)}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4">
+                          <path d="M6 6l12 12M18 6 6 18" />
+                        </svg>
+                      </button>
                     </span>
-                    <span>{att.name}</span>
-                    <span className="mono mut" style={{ fontSize: '10px' }}>{t(att.tag)}</span>
-                    <button className="x" aria-label={t('移除附件')} onClick={() => handleRemoveAttachment(i)}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4">
-                        <path d="M6 6l12 12M18 6 6 18" />
-                      </svg>
-                    </button>
-                  </span>
-                ))}
+                  );
+                })}
               </div>
             )}
             <textarea
@@ -397,26 +443,43 @@ export default function HomePage({
                 className="chip"
                 id="modelChip"
                 ref={modelChipRef}
+                data-od-id="intake-model"
                 onClick={() => {
                   setShowSkillPop(false);
                   setShowModelPop((v) => !v);
                 }}
               >
-                {t(model)}
+                {llmLabel}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
               </button>
               {showModelPop && (
                 <div className="pop open" id="modelPop" ref={modelPopRef} style={{ bottom: '44px', left: '150px' }}>
-                  {MODELS.map((m) => (
-                    <div key={m.value} className="pop-it" data-model={m.value} onClick={() => handlePickModel(m.value)}>
-                      {t(m.label)}
-                      {model === m.value && <span className="ck">✓</span>}
-                    </div>
-                  ))}
-                  <div className="pop-it dim" data-model="">
-                    {t('云端模型 · 需先在设置中配置凭据')}
+                  <div className="pop-it" onClick={() => pickLlm({ kind: 'lmstudio', model: appSettings?.lmStudioModel })}>
+                    {`${appSettings?.lmStudioModel ?? '默认模型'} · 本地`}
+                    {llmSrc?.kind === 'lmstudio' && <span className="ck">✓</span>}
+                  </div>
+                  {cloudProviders.flatMap((p) =>
+                    p.models.map((m) => (
+                      <div
+                        key={`${p.id}:${m}`}
+                        className="pop-it"
+                        onClick={() => pickLlm({ kind: 'cloud', provider: p.id, model: m })}
+                      >
+                        {m} · {p.name}
+                        {llmSrc?.kind === 'cloud' && llmSrc.provider === p.id && llmSrc.model === m && <span className="ck">✓</span>}
+                      </div>
+                    )),
+                  )}
+                  <div
+                    className="pop-it dim"
+                    onClick={() => {
+                      setShowModelPop(false);
+                      onNavigate('settings');
+                    }}
+                  >
+                    {t('更多模型 · 到设置页配置…')}
                   </div>
                 </div>
               )}
@@ -424,28 +487,34 @@ export default function HomePage({
                 className="chip"
                 id="skillChip"
                 ref={skillChipRef}
+                data-od-id="intake-skill"
                 onClick={() => {
                   setShowModelPop(false);
                   setShowSkillPop((v) => !v);
                 }}
               >
-                {t(skill)}
+                {skillName}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
               </button>
               {showSkillPop && (
                 <div className="pop open" id="skillPop" ref={skillPopRef} style={{ bottom: '44px', left: '290px' }}>
-                  {SKILLS.map((s) => (
-                    <div key={s.name} className="pop-it" data-skill={s.name} onClick={() => handlePickSkill(s.name)}>
-                      {t(s.label)}
-                      {skill === s.name && <span className="ck">✓</span>}
+                  <div className="pop-it" onClick={() => handlePickSkill(null)}>
+                    {t('无技能 · 自由编排')}
+                    {skillId === null && <span className="ck">✓</span>}
+                  </div>
+                  {skills.map((s) => (
+                    <div key={s.id} className="pop-it" data-skill={s.id} onClick={() => handlePickSkill(s.id)}>
+                      {s.name}
+                      {skillId === s.id && <span className="ck">✓</span>}
                     </div>
                   ))}
+                  {skills.length === 0 && <div className="pop-it dim">{t('技能库为空 · 可在 Skills 库页创建')}</div>}
                 </div>
               )}
               <span className="spacer"></span>
-              <span className="mono mut" style={{ fontSize: '11px' }}>{t('规划 Agent · 本地 LLM')}</span>
+              <span className="mono mut" style={{ fontSize: '11px' }}>{t('规划 Agent · {model}', { model: llmLabel })}</span>
               <button className="btn btn-p" id="goBtn" data-od-id="intake-generate" onClick={handleGenerate}>
                 {t('生成')}
               </button>

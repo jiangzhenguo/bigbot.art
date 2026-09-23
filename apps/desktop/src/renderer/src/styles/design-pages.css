@@ -852,6 +852,9 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .chip.on{background:var(--fg);-webkit-backdrop-filter:none;backdrop-filter:none}
 
 /* ═══ 页面:projects(仅公共顶栏所需类,页面主体仍用 design.ts 内联样式) ═══ */
+/* 项目卡片 hover:边框加深 + 阴影浮起(对齐 design.ts cardStyles.hover) */
+.pg-projects .proj-card{transition:border-color var(--motion-fast,150ms),box-shadow var(--motion-base,220ms),transform var(--motion-base,220ms)}
+.pg-projects .proj-card:hover{border-color:var(--border);box-shadow:0 12px 32px rgba(0,0,0,.08);transform:translateY(-2px)}
 .pg-projects .topbar{height:52px;flex:none;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface-warm)}
 .pg-projects .topbar .sep{width:1px;height:20px;background:var(--border)}
 .pg-projects .crumb{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-sm)}

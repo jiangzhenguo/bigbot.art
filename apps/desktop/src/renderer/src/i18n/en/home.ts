@@ -22,8 +22,10 @@ export default {
   '移除附件': 'Remove attachment',
   '角色锁定': 'Character Lock',
   '运镜参考': 'Camera Reference',
-  '云端模型 · 需先在设置中配置凭据': 'Cloud Models · Configure credentials in Settings first',
-  '规划 Agent · 本地 LLM': 'Planning Agent · Local LLM',
+  '更多模型 · 到设置页配置…': 'More models · configure in Settings…',
+  '规划 Agent · {model}': 'Planning Agent · {model}',
+  '技能库为空 · 可在 Skills 库页创建': 'No skills yet · create one in the Skills page',
+  '默认模型': 'Default model',
   '生成': 'Generate',
   /* 模型与技能选择 */
   'Ornith-1.5-35B · 本地': 'Ornith-1.5-35B · Local',
