@@ -583,6 +583,8 @@ export interface AppSettings {
   llm?: LlmSource;
   /** 渲染模式:demo=始终 mock 占位;real=引擎就绪则真实推理 */
   renderMode: 'demo' | 'real';
+  /** 界面语言(默认 zh-CN;en 为增量覆盖,缺译回退中文) */
+  language?: 'zh-CN' | 'en';
   /** h3 视频生成:SSD 流式读权重(--ssd-streaming)。省 RAM(峰值≈6GB)但慢约 30%;64GB+ 默认关更快 */
   ssdStreaming?: boolean;
   lmStudioModel?: string;

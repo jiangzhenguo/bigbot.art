@@ -1,0 +1,76 @@
+/** 页面字典(以中文原文为 key,缺译回退中文) */
+export default {
+  /* 顶栏 / 筛选 / 搜索 */
+  '保存当前画布为 Skill': 'Save Current Canvas as Skill',
+  内置模板: 'Built-in Templates',
+  '我的 Skill': 'My Skills',
+  派生分支: 'Forks',
+  '搜索 Skill 名称、指令内容…': 'Search Skill names, instructions…',
+  /* 区块标题 */
+  官方精选: 'Featured',
+  '双形态齐备 · 画布模板 + Agent 操作指令': 'Dual form ready · canvas template + Agent instructions',
+  '保存自画布 · 节点结构 + 参数 + 操作指令 · 可编辑': 'Saved from canvas · node structure + params + instructions · editable',
+  从当前画布保存: 'Save from Current Canvas',
+  '节点结构 + 参数 + 操作指令整体入库': 'Node structure + params + instructions, saved together',
+  /* 卡片徽章 / 副标题 */
+  指令: 'Instructions',
+  已激活: 'Active',
+  '节点数 {n} · 参数 {m} · {updated}': '{n} nodes · {m} params · {updated}',
+  '节点数 {n} · 参数 {m}': '{n} nodes · {m} params',
+  '节点结构 + 参数 + 提示词模板': 'Node structure + params + prompt template',
+  时间未知: 'Unknown time',
+  刚刚更新: 'Updated just now',
+  '{n} 分钟前更新': 'Updated {n} min ago',
+  '{n} 小时前更新': 'Updated {n} hr ago',
+  '{n} 天前更新': 'Updated {n} d ago',
+  /* 参数化字段 */
+  秒: 's',
+  '从资产中心选择…': 'Pick from Asset Center…',
+  '沿用模板文案结构…': 'Reuse the template copy structure…',
+  '填写{p}…': 'Enter {p}…',
+  '{v}s → 自动拆 {n} 镜': '{v}s → auto-split into {n} shots',
+  /* 详情面板 */
+  'Skill 详情': 'Skill Details',
+  'Skill 模板预览': 'Skill template preview',
+  参数化字段: 'Parameter Fields',
+  保留的视觉包装: 'Preserved Visual Style',
+  '操作指令(Agent)': 'Instructions (Agent)',
+  '指令 · {mode}': 'Instructions · {mode}',
+  '# 任务流程\n1. canvas.list_nodes 读需求…(支持 {占位};撰写规范见 docs/Agent技能文档-撰写指南与模板.md)':
+    '# Task flow\n1. Read requirements via canvas.list_nodes… (supports {placeholder}; writing guide: docs/Agent技能文档-撰写指南与模板.md)',
+  全量注入: 'Full Inject',
+  摘要模式: 'Summary Mode',
+  '⚠ 超长建议摘要模式': '⚠ Too long — summary mode recommended',
+  '{n} 字': '{n} chars',
+  保存指令: 'Save Instructions',
+  '该技能仅画布模板——添加操作指令后,对话可自动按此执行':
+    'This Skill is canvas-template only — add instructions so chats can follow them automatically',
+  编辑指令: 'Edit Instructions',
+  添加操作指令: 'Add Instructions',
+  '已注入当前画布 · 点击停用': 'Injected into current canvas · click to deactivate',
+  注入指令到当前画布: 'Inject Instructions into Current Canvas',
+  铺节点到新项目: 'Apply Nodes to New Project',
+  编辑模板画布: 'Edit Template Canvas',
+  派生版本: 'Derived Versions',
+  '删除 Skill': 'Delete Skill',
+  /* 弹窗 / 提示 */
+  'Skill 名称': 'Skill Name',
+  '操作指令(可选,空则跳过)': 'Instructions (optional, leave empty to skip)',
+  '如「先 storyboard.plan 再 materialize,提交前 ask.user 确认档位;措辞段…」(支持 {占位})':
+    'E.g. "run storyboard.plan, then materialize; confirm tier via ask.user before submitting; wording section…" (supports {placeholder})',
+  请先创建项目并搭建画布: 'Please create a project and build a canvas first',
+  新项目名称: 'New Project Name',
+  '请先选择一个「我的 Skill」再应用': 'Select one of "My Skills" first, then apply',
+  '确定删除 Skill「{title}」?删除后不可恢复。': 'Delete Skill "{title}"? This cannot be undone.',
+  '请先打开一个项目与画布,再注入指令': 'Open a project and canvas first, then inject instructions',
+  '「{name}」只有画布模板,没有操作指令段 · 可在下方编辑器中添加':
+    '"{name}" only has a canvas template and no instructions · you can add them in the editor below',
+  /* 错误提示 */
+  '加载 Skill 失败': 'Failed to load Skills',
+  '保存 Skill 失败': 'Failed to save Skill',
+  保存指令失败: 'Failed to save instructions',
+  注入指令失败: 'Failed to inject instructions',
+  停用失败: 'Failed to deactivate',
+  '应用 Skill 失败': 'Failed to apply Skill',
+  '删除 Skill 失败': 'Failed to delete Skill',
+} satisfies Record<string, string>;

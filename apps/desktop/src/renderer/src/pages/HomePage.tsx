@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { RenderJob } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import { useRenderQueue } from './useRenderQueue';
+import { useT } from '../i18n';
 
 export type HomePageTarget =
   | 'home'
@@ -68,35 +69,39 @@ function formatDate(iso: string) {
 /** 引擎 provider 展示名(队列状态文案用) */
 const PROVIDER_LABEL: Record<string, string> = { h3c: 'h3.c', mlxgen: 'mlxgen', mock: '演示', llm: 'LLM' };
 
+/** t() 的函数签名(模块级纯函数无法直接用 hook,由组件注入) */
+type TFn = (s: string, vars?: Record<string, string | number>) => string;
+
 /** 首页 live-card 三态视图数据(纯函数;运行中 / 排队中 / 空闲) */
 function liveCardView(
+  t: TFn,
   running: RenderJob | null,
   queued: number,
   projects: Array<{ id: string; name: string }>,
 ): { title: string; badge: string; pct: number; showBar: boolean; note: string; projectId?: string } {
   if (running) {
-    const provider = PROVIDER_LABEL[running.provider] ?? running.provider;
+    const provider = t(PROVIDER_LABEL[running.provider] ?? running.provider);
     const pct = Math.round((running.progress ?? 0) * 100);
     const name = running.projectId ? projects.find((p) => p.id === running.projectId)?.name : undefined;
     return {
-      title: name ?? '渲染任务',
+      title: name ?? t('渲染任务'),
       badge: `${provider} · ${pct}%`,
       pct,
       showBar: true,
-      note: `${provider} ${running.stage ?? '生成中…'}`,
+      note: `${provider} ${running.stage ?? t('生成中…')}`,
       projectId: running.projectId,
     };
   }
   if (queued > 0) {
     return {
-      title: '任务排队中',
-      badge: `排队 #${queued}`,
+      title: t('任务排队中'),
+      badge: t('排队 #{n}', { n: queued }),
       pct: 0,
       showBar: false,
-      note: `${queued} 个任务等待 · FIFO 串行`,
+      note: t('{n} 个任务等待 · FIFO 串行', { n: queued }),
     };
   }
-  return { title: '队列空闲', badge: '空闲', pct: 0, showBar: false, note: '暂无进行中任务 · 点此进入画布' };
+  return { title: t('队列空闲'), badge: t('空闲'), pct: 0, showBar: false, note: t('暂无进行中任务 · 点此进入画布') };
 }
 
 export default function HomePage({
@@ -109,6 +114,7 @@ export default function HomePage({
   onRenameProject,
   engineStatus,
 }: HomePageProps) {
+  const t = useT();
   const [brief, setBrief] = useState('');
   const [model, setModel] = useState<string>(DEFAULT_MODEL);
   const [skill, setSkill] = useState('无技能');
@@ -120,7 +126,7 @@ export default function HomePage({
 
   /* ── 真实渲染队列:主进程 RenderQueue 状态(提交/进度/完成/取消 均经 onQueueChanged 推送) ── */
   const { running, queued } = useRenderQueue();
-  const live = liveCardView(running, queued, projects);
+  const live = liveCardView(t, running, queued, projects);
 
   /* ── 新建项目弹窗 ── */
   const [newOpen, setNewOpen] = useState(false);
@@ -135,7 +141,7 @@ export default function HomePage({
   };
   const submitNewProject = () => {
     const name = newName.trim();
-    onNewProject(name || `未命名项目 ${projects.length + 1}`);
+    onNewProject(name || t('未命名项目 {n}', { n: projects.length + 1 }));
     setNewOpen(false);
   };
 
@@ -213,14 +219,14 @@ export default function HomePage({
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
 
   const handleRename = async (id: string, currentName: string) => {
-    const next = await askPrompt({ title: '重命名项目', initial: currentName });
+    const next = await askPrompt({ title: t('重命名项目'), initial: currentName });
     if (next && next.trim() && next !== currentName) {
       onRenameProject(id, next.trim());
     }
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (confirm(`确定删除项目「${name}」吗?此操作不可恢复。`)) {
+    if (confirm(t('确定删除项目「{name}」吗?此操作不可恢复。', { name }))) {
       onDeleteProject(id);
     }
   };
@@ -235,7 +241,7 @@ export default function HomePage({
       }}
     >
       {icon}
-      {item.label}
+      {t(item.label)}
     </a>
   );
 
@@ -248,7 +254,7 @@ export default function HomePage({
           <a
             className="side-brand"
             href="#"
-            title="返回原型总览"
+            title={t('返回原型总览')}
             onClick={(e) => {
               e.preventDefault();
               onNavigate('home');
@@ -268,11 +274,11 @@ export default function HomePage({
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4">
                 <path d="M12 5v14M5 12h14" />
               </svg>
-              新建项目
+              {t('新建项目')}
             </button>
           </div>
           <nav className="side-nav">
-            <div className="lbl">创作</div>
+            <div className="lbl">{t('创作')}</div>
             {renderSideLink(
               { label: '首页', page: 'home' },
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -289,7 +295,7 @@ export default function HomePage({
                 <rect x="14" y="14" width="7" height="7" rx="1.5" />
               </svg>,
             )}
-            <div className="lbl">资源</div>
+            <div className="lbl">{t('资源')}</div>
             {renderSideLink(
               { label: '资产中心', page: 'assets' },
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -304,7 +310,7 @@ export default function HomePage({
                 <path d="m12 3 2.2 5.3L20 9.2l-4.2 3.9 1.2 5.9-5-3-5 3 1.2-5.9L4 9.2l5.8-.9Z" />
               </svg>,
             )}
-            <div className="lbl">系统</div>
+            <div className="lbl">{t('系统')}</div>
             {renderSideLink(
               { label: '设置', page: 'settings' },
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -321,19 +327,19 @@ export default function HomePage({
             )}
           </nav>
           <div className="side-foot" data-od-id="home-engine-status">
-            <div className="lbl" style={{ marginBottom: '8px' }}>引擎状态</div>
+            <div className="lbl" style={{ marginBottom: '8px' }}>{t('引擎状态')}</div>
             <div className="eng-card">
               <div className="row">
                 <span className="row g6">
                   <span className={`dot${engineStatus.h3c.ready ? ' ok' : ''}`}></span>
-                  视频槽位 · h3.c
+                  {t('视频槽位 · h3.c')}
                 </span>
                 <span className="mono mut" style={{ fontSize: '11px' }}>{engineStatus.h3c.text}</span>
               </div>
               <div className="row">
                 <span className="row g6">
                   <span className={`dot${engineStatus.mlxgen.ready ? ' ok' : ''}`}></span>
-                  图片槽位 · mlxgen
+                  {t('图片槽位 · mlxgen')}
                 </span>
                 <span className="mono mut" style={{ fontSize: '11px' }}>{engineStatus.mlxgen.text}</span>
               </div>
@@ -350,8 +356,8 @@ export default function HomePage({
 
         {/* 中间:需求输入 */}
         <main className="intake" data-od-id="home-intake">
-          <p className="lbl" style={{ margin: 0 }}>本地优先 · 全部数据留在本机</p>
-          <h1>今天想创作什么？</h1>
+          <p className="lbl" style={{ margin: 0 }}>{t('本地优先 · 全部数据留在本机')}</p>
+          <h1>{t('今天想创作什么？')}</h1>
 
           <div className="composer" data-od-id="intake-composer">
             {attachments.length > 0 && (
@@ -362,8 +368,8 @@ export default function HomePage({
                       <img src={att.img} alt="" />
                     </span>
                     <span>{att.name}</span>
-                    <span className="mono mut" style={{ fontSize: '10px' }}>{att.tag}</span>
-                    <button className="x" aria-label="移除附件" onClick={() => handleRemoveAttachment(i)}>
+                    <span className="mono mut" style={{ fontSize: '10px' }}>{t(att.tag)}</span>
+                    <button className="x" aria-label={t('移除附件')} onClick={() => handleRemoveAttachment(i)}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4">
                         <path d="M6 6l12 12M18 6 6 18" />
                       </svg>
@@ -375,7 +381,7 @@ export default function HomePage({
             <textarea
               id="intakeText"
               ref={areaRef}
-              placeholder="一句话描述你的视频 / 图片需求，例如：「帮我在导演台搭一场戏：男女主在草原上走，遇到一条很宽的河……」"
+              placeholder={t('一句话描述你的视频 / 图片需求，例如：「帮我在导演台搭一场戏：男女主在草原上走，遇到一条很宽的河……」')}
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -385,7 +391,7 @@ export default function HomePage({
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path d="m21 11.5-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.85 1.85 0 0 1-2.6-2.6l7.8-7.8" />
                 </svg>
-                参考图 / 文件
+                {t('参考图 / 文件')}
               </button>
               <button
                 className="chip"
@@ -396,7 +402,7 @@ export default function HomePage({
                   setShowModelPop((v) => !v);
                 }}
               >
-                {model}
+                {t(model)}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
@@ -405,12 +411,12 @@ export default function HomePage({
                 <div className="pop open" id="modelPop" ref={modelPopRef} style={{ bottom: '44px', left: '150px' }}>
                   {MODELS.map((m) => (
                     <div key={m.value} className="pop-it" data-model={m.value} onClick={() => handlePickModel(m.value)}>
-                      {m.label}
+                      {t(m.label)}
                       {model === m.value && <span className="ck">✓</span>}
                     </div>
                   ))}
                   <div className="pop-it dim" data-model="">
-                    云端模型 · 需先在设置中配置凭据
+                    {t('云端模型 · 需先在设置中配置凭据')}
                   </div>
                 </div>
               )}
@@ -423,7 +429,7 @@ export default function HomePage({
                   setShowSkillPop((v) => !v);
                 }}
               >
-                {skill}
+                {t(skill)}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
@@ -432,43 +438,43 @@ export default function HomePage({
                 <div className="pop open" id="skillPop" ref={skillPopRef} style={{ bottom: '44px', left: '290px' }}>
                   {SKILLS.map((s) => (
                     <div key={s.name} className="pop-it" data-skill={s.name} onClick={() => handlePickSkill(s.name)}>
-                      {s.label}
+                      {t(s.label)}
                       {skill === s.name && <span className="ck">✓</span>}
                     </div>
                   ))}
                 </div>
               )}
               <span className="spacer"></span>
-              <span className="mono mut" style={{ fontSize: '11px' }}>规划 Agent · 本地 LLM</span>
+              <span className="mono mut" style={{ fontSize: '11px' }}>{t('规划 Agent · 本地 LLM')}</span>
               <button className="btn btn-p" id="goBtn" data-od-id="intake-generate" onClick={handleGenerate}>
-                生成
+                {t('生成')}
               </button>
             </div>
           </div>
 
           <div className="skill-quick" data-od-id="skill-quick">
-            <span className="lbl" style={{ width: '100%', textAlign: 'center', marginBottom: '2px' }}>从 Skill 模板开始</span>
+            <span className="lbl" style={{ width: '100%', textAlign: 'center', marginBottom: '2px' }}>{t('从 Skill 模板开始')}</span>
             {QUICK_SKILLS.map((opt) => (
-              <button key={opt.label} className="chip" data-fill={opt.fill} data-skillpick={opt.skill} onClick={() => handleQuickSkill(opt.fill, opt.skill)}>
-                {opt.label}
+              <button key={opt.label} className="chip" data-fill={opt.fill} data-skillpick={opt.skill} onClick={() => handleQuickSkill(t(opt.fill), opt.skill)}>
+                {t(opt.label)}
               </button>
             ))}
           </div>
 
           <div style={{ width: '100%', maxWidth: '660px', marginTop: '34px' }}>
-            <span className="lbl">也可以这样开始</span>
+            <span className="lbl">{t('也可以这样开始')}</span>
             <div className="alt-grid">
               <div className="card" data-od-id="alt-i2v">
-                <b>图片 → 视频管线</b>
-                <span className="mut">Z-Image 静帧作首帧</span>
+                <b>{t('图片 → 视频管线')}</b>
+                <span className="mut">{t('Z-Image 静帧作首帧')}</span>
               </div>
               <div className="card" data-od-id="alt-batch">
-                <b>批量产品视频</b>
-                <span className="mut">多角度图逐镜生成</span>
+                <b>{t('批量产品视频')}</b>
+                <span className="mut">{t('多角度图逐镜生成')}</span>
               </div>
               <div className="card" data-od-id="alt-import">
-                <b>导入 H3Mise 项目</b>
-                <span className="mut">M3 · 迁移既有数据</span>
+                <b>{t('导入 H3Mise 项目')}</b>
+                <span className="mut">{t('M3 · 迁移既有数据')}</span>
               </div>
             </div>
           </div>
@@ -477,13 +483,13 @@ export default function HomePage({
         {/* 右:项目流 */}
         <aside className="proj" data-od-id="home-projects">
           <div className="proj-head">
-            <b style={{ fontSize: 'var(--text-sm)' }}>项目流</b>
+            <b style={{ fontSize: 'var(--text-sm)' }}>{t('项目流')}</b>
             <button className="btn btn-g btn-sm" onClick={() => onNavigate('projects')}>
-              全部项目
+              {t('全部项目')}
             </button>
           </div>
           <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border-soft)' }}>
-            <div className="lbl" style={{ marginBottom: '8px' }}>进行中</div>
+            <div className="lbl" style={{ marginBottom: '8px' }}>{t('进行中')}</div>
             <div
               className="live-card"
               data-od-id="live-project"
@@ -512,10 +518,10 @@ export default function HomePage({
             </div>
           </div>
           <div className="proj-body">
-            <span className="lbl">最近项目</span>
+            <span className="lbl">{t('最近项目')}</span>
             {projects.length === 0 ? (
               <div className="mut" style={{ textAlign: 'center', padding: '26px 0', fontSize: 'var(--text-xs)' }}>
-                暂无项目，点「生成」开始
+                {t('暂无项目，点「生成」开始')}
               </div>
             ) : (
               projects.map((p, i) => {
@@ -531,12 +537,12 @@ export default function HomePage({
                     onMouseLeave={() => setHoverId(null)}
                   >
                     <span className="thumb">
-                      <img src={thumb} alt={`${p.name}封面`} />
+                      <img src={thumb} alt={t('{name}封面', { name: p.name })} />
                     </span>
                     <div className="grow">
                       <b>{p.name}</b>
                       <div className="mut" style={{ fontSize: 'var(--text-xs)' }}>
-                        创建于 {formatDate(p.createdAt)}
+                        {t('创建于 {date}', { date: formatDate(p.createdAt) })}
                       </div>
                     </div>
                     {/* 悬停时出现的重命名 / 删除操作(静态结构保持不变,仅获焦时显示) */}
@@ -559,8 +565,8 @@ export default function HomePage({
                         <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
-                          aria-label="重命名项目"
-                          title="重命名"
+                          aria-label={t('重命名项目')}
+                          title={t('重命名')}
                           onClick={() => handleRename(p.id, p.name)}
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -570,8 +576,8 @@ export default function HomePage({
                         <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
-                          aria-label="删除项目"
-                          title="删除"
+                          aria-label={t('删除项目')}
+                          title={t('删除')}
                           onClick={() => handleDelete(p.id, p.name)}
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -588,7 +594,7 @@ export default function HomePage({
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                 <path d="M12 5v14M5 12h14" />
               </svg>
-              从 H3Mise 导入项目…
+              {t('从 H3Mise 导入项目…')}
             </div>
           </div>
         </aside>
@@ -635,10 +641,10 @@ export default function HomePage({
                 letterSpacing: '-.01em',
               }}
             >
-              新建项目
+              {t('新建项目')}
             </h3>
             <p style={{ margin: '4px 0 14px', color: 'var(--muted)', fontSize: 'var(--text-xs)', lineHeight: 1.6 }}>
-              为你的创作单独建一个画布与资产空间，数据全部留在本机。
+              {t('为你的创作单独建一个画布与资产空间，数据全部留在本机。')}
             </p>
             <input
               ref={newInputRef}
@@ -648,7 +654,7 @@ export default function HomePage({
                 if (e.key === 'Enter') submitNewProject();
                 if (e.key === 'Escape') setNewOpen(false);
               }}
-              placeholder="项目名称，如：草原之河 · 短剧"
+              placeholder={t('项目名称，如：草原之河 · 短剧')}
               style={{
                 width: '100%',
                 boxSizing: 'border-box',
@@ -663,10 +669,10 @@ export default function HomePage({
             />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
               <button className="btn btn-g btn-sm" onClick={() => setNewOpen(false)}>
-                取消
+                {t('取消')}
               </button>
               <button className="btn btn-p btn-sm" onClick={submitNewProject}>
-                创建项目
+                {t('创建项目')}
               </button>
             </div>
           </div>

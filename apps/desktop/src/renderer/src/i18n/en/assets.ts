@@ -1,0 +1,83 @@
+/** 页面字典(以中文原文为 key,缺译回退中文) */
+export default {
+  /* 顶部栏 / 面包屑 */
+  资源管理: 'Assets',
+  总资源库: 'All Assets',
+  把画布里有产物的节点归档为项目资源: 'Archive nodes with products on the canvas as project assets',
+  从画布产物导入: 'Import from Canvas Products',
+  导入: 'Import',
+  回收站: 'Trash',
+  '搜索资源名 / id / 标签…': 'Search name / id / tags…',
+  /* 视图信息条 */
+  '项目资源 · 仅本项目': 'Project assets · this project only',
+  '打开总资源库 →': 'Open All Assets →',
+  '跨项目聚合 · 全局资源': 'Aggregated across projects · global assets',
+  点项目名进入该项目资源页: 'Click a project name to open its assets',
+  /* 筛选条 */
+  分类: 'Category',
+  全部: 'All',
+  未分类: 'Uncategorized',
+  未知: 'Unknown',
+  右键重命名: 'Right-click to rename',
+  分类名: 'Category name',
+  全局分类名: 'Global category name',
+  '＋ 新建分类': '+ New Category',
+  '项目分类 · 仅本项目可见': 'Project categories · visible in this project only',
+  '{n} 个全局分类': '{n} global categories',
+  媒体: 'Media',
+  图片: 'Image',
+  视频: 'Video',
+  音频: 'Audio',
+  文档: 'Document',
+  标签: 'Tags',
+  清除筛选: 'Clear filters',
+  /* 空态 / 分组 */
+  还没有资源: 'No assets yet',
+  当前筛选条件下没有结果: 'No results under current filters',
+  '点击「导入」添加图片 / 视频 / 音频 / 文档': 'Click "Import" to add images / videos / audio / documents',
+  试着清空标签或换个分类: 'Try clearing tags or switching category',
+  导入资产: 'Import Assets',
+  清除全部筛选: 'Clear All Filters',
+  没有归入任何分类的资源: 'Assets not in any category',
+  项目分类: 'Project category',
+  /* 加载 / 导入 */
+  '资源加载失败:{msg}': 'Failed to load assets: {msg}',
+  '导入完成:成功 {ok} 项,失败 {fail} 项 — {detail}': 'Import finished: {ok} succeeded, {fail} failed — {detail}',
+  '已导入 {n} 项资源': 'Imported {n} assets',
+  ' · 归入本项目': ' · added to this project',
+  '导入失败:{msg}': 'Import failed: {msg}',
+  /* 分类管理 */
+  '创建分类失败:{msg}': 'Failed to create category: {msg}',
+  重命名分类: 'Rename Category',
+  重命名失败: 'Rename failed',
+  '分类「{name}」下有 {n} 个资源。\n删除后这些资源将转「未分类」,原资源文件保留。\n继续?':
+    'Category "{name}" contains {n} assets.\nThey will become "Uncategorized" after deletion; the asset files are kept.\nContinue?',
+  删除分类失败: 'Failed to delete category',
+  /* 更新 / 删除 */
+  更新失败: 'Update failed',
+  '「{name}」被 {n} 处画布节点引用。\n删除后文件进入回收站(7 天后清理),引用节点标记为「资产已移除」。\n继续?':
+    '"{name}" is referenced by {n} canvas nodes.\nAfter deletion the file goes to the trash (purged after 7 days), and referencing nodes will be marked "Asset removed".\nContinue?',
+  '将「{name}」移到回收站?(7 天后清理,期间可恢复)': 'Move "{name}" to the trash? (Purged after 7 days; restorable until then)',
+  删除失败: 'Delete failed',
+  '已移到回收站 ·「{name}」': 'Moved to trash · "{name}"',
+  /* 从画布产物导入弹层 */
+  '读取画布产物失败:{msg}': 'Failed to read canvas products: {msg}',
+  归档失败: 'Archive failed',
+  '已归档 {n} 个产物为项目资源': 'Archived {n} products as project assets',
+  '勾选画布中有产物的节点 · 归档为本项目资源': 'Check nodes with products on the canvas · archive as this project\'s assets',
+  关闭: 'Close',
+  本项目画布暂无已生成产物: 'No generated products on this project\'s canvas yet',
+  可归档: 'Archivable',
+  归档到分类: 'Archive to category',
+  取消: 'Cancel',
+  '归档 {n} 个产物': 'Archive {n} products',
+  /* 回收站弹层 */
+  '7 天后自动清理 · 期间可恢复': 'Auto-purged after 7 days · restorable until then',
+  清空回收站: 'Empty Trash',
+  '永久清空回收站?文件将被物理删除,不可恢复。': 'Empty the trash permanently? Files will be physically deleted and cannot be recovered.',
+  回收站是空的: 'Trash is empty',
+  恢复: 'Restore',
+  恢复失败: 'Restore failed',
+  /* 详情面板联动 */
+  '已打开画布 · 可在资产节点「更换资产…」中选择该资源': 'Canvas opened · choose this asset via "Change asset…" on an asset node',
+} satisfies Record<string, string>;

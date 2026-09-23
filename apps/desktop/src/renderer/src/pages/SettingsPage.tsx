@@ -11,6 +11,7 @@ import type {
   RuntimeProbe,
 } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
+import { useI18n, useT } from '../i18n';
 
 interface SettingsPageProps {
   onNavigate: (
@@ -133,6 +134,7 @@ function LmPopover(props: {
   onClose: () => void;
 }) {
   const { anchor, title, items, markLoaded, onSelect, onClose } = props;
+  const t = useT();
   const popRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -192,12 +194,12 @@ function LmPopover(props: {
           {(it.sizeBytes != null || it.vramGb != null || it.needsDownload || it.note) && (
             <span className="sz">
               {it.sizeBytes != null ? `${(it.sizeBytes / 1e9).toFixed(1)} GB · ` : ''}
-              显存 ≈ {it.vramGb ?? '—'} GB
+              {t('显存 ≈ {v} GB', { v: it.vramGb ?? '—' })}
               {it.note ? ` · ${it.note}` : ''}
-              {it.needsDownload ? ' · 需下载' : ''}
+              {it.needsDownload ? t(' · 需下载') : ''}
             </span>
           )}
-          {markLoaded && it.selected && <span className="ld">已加载</span>}
+          {markLoaded && it.selected && <span className="ld">{t('已加载')}</span>}
         </button>
       ))}
     </div>,
@@ -320,7 +322,9 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
 
   /* ---- 通用:外观 / 语言 chip ---- */
   const [appearance, setAppearance] = useState<'系统' | '浅色' | '深色'>('系统');
-  const [language, setLanguage] = useState<'简体中文' | 'English'>('简体中文');
+  /* 界面语言:全局 i18n 上下文(切换即生效并持久化到 settings.json,见 App.setLang) */
+  const { lang, setLang } = useI18n();
+  const t = useT();
 
   /* ==== LLM:本地来源辅助 ==== */
 
@@ -336,7 +340,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const localLoadedLabel = (kind: LocalKind): string => {
     const info = locals[kind].info;
     const m = loadedModel(info);
-    return m ? m.displayName || m.id : '未加载';
+    return m ? m.displayName || m.id : t('未加载');
   };
 
   const localBadge = (kind: LocalKind): ReactNode => {
@@ -345,7 +349,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       return (
         <span className="badge">
           <span className="spin" />
-          加载模型中…
+          {t('加载模型中…')}
         </span>
       );
     }
@@ -361,14 +365,14 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       return (
         <span className="badge">
           <span className="spin" />
-          探测中…
+          {t('探测中…')}
         </span>
       );
     }
     if (!info.available) {
       return (
         <span className="badge" title={info.detail}>
-          {info.detail ?? '未检测到'}
+          {info.detail ?? t('未检测到')}
         </span>
       );
     }
@@ -376,14 +380,14 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       return (
         <span className="badge ok">
           <span className="dot ok" />
-          已就绪 · 模型按需下载
+          {t('已就绪 · 模型按需下载')}
         </span>
       );
     }
     return (
       <span className="badge ok">
         <span className="dot ok" />
-        已连接 · 模型自动发现
+        {t('已连接 · 模型自动发现')}
       </span>
     );
   };
@@ -402,7 +406,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
           <span className={`vram-fill${warn ? ' warn' : ''}`} style={{ width: `${pct}%` }} />
         </span>
         <span className="vram-txt mono">
-          显存预估 ≈ <b>{m.vramGb}</b> GB / {total} GB 统一内存 · 与生成引擎共享
+          {t('显存预估 ≈ {v} GB / {total} GB 统一内存 · 与生成引擎共享', { v: m.vramGb, total })}
         </span>
       </div>
     );
@@ -411,13 +415,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const localSub = (kind: LocalKind): string => {
     const info = locals[kind].info;
     if (kind === 'pimlx') {
-      return 'MLX 原生 4bit · 免代理直跑 · 支持工具调用与识图（VLM）· 首次加载自动从 HuggingFace 拉取';
+      return t('MLX 原生 4bit · 免代理直跑 · 支持工具调用与识图（VLM）· 首次加载自动从 HuggingFace 拉取');
     }
     const n = info ? info.models.filter((m) => m.supportsTools).length : 0;
     if (kind === 'ollama') {
-      return `原生 API :11434 · 兼容 OpenAI /v1 · 发现 ${n} 个支持工具调用的已装模型 · 热加载切换约 8s`;
+      return t('原生 API :11434 · 兼容 OpenAI /v1 · 发现 {n} 个支持工具调用的已装模型 · 热加载切换约 8s', { n });
     }
-    return `发现 ${n} 个本地模型 · 单模型驻留显存，切换时自动卸载旧模型（约 20s · 首次 Metal 预热）`;
+    return t('发现 {n} 个本地模型 · 单模型驻留显存，切换时自动卸载旧模型（约 20s · 首次 Metal 预热）', { n });
   };
 
   /** 加载本地模型 → 更新 loaded/vram/badge → 持久化 llm + lmStudioModel → radio 自动 on */
@@ -427,7 +431,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     let errMsg = '';
     try {
       const res = await window.bigbotart.llmLoadModel(kind, id);
-      if (!res.ok) throw new Error(res.error ?? '加载失败');
+      if (!res.ok) throw new Error(res.error ?? t('加载失败'));
       ok = true;
     } catch (e) {
       errMsg = e instanceof Error ? e.message : String(e);
@@ -501,7 +505,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             .then((s) => setLlmSource(s.llm ?? src))
             .catch(() => setLlmSource(src));
         } else {
-          flashHint(key, '尚未加载模型 —— 请先在下方的「加载模型」中选择要驻留的模型');
+          flashHint(key, t('尚未加载模型 —— 请先在下方的「加载模型」中选择要驻留的模型'));
         }
         return;
       }
@@ -509,7 +513,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         if (compatModel) {
           persistKind({ kind: 'openai-compatible', baseUrl: compatUrl.trim() || COMPAT_DEFAULT_URL, model: compatModel });
         } else {
-          flashHint('compat', '请先「测试连接」并在下方选择模型');
+          flashHint('compat', t('请先「测试连接」并在下方选择模型'));
         }
         return;
       case 'cloud': {
@@ -528,7 +532,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
           if (!target.enabled) patchProvider(target.id, (p) => ({ ...p, enabled: true }));
           persistKind({ kind: 'cloud', provider: target.id, model: target.models[0]! });
         } else {
-          flashHint('cloud', '请先添加云端供应商并选择模型');
+          flashHint('cloud', t('请先添加云端供应商并选择模型'));
         }
         return;
       }
@@ -567,7 +571,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     try {
       const r = await window.bigbotart.llmTestConnection({ baseUrl: url });
       if (!r.ok) {
-        setCompatTest({ state: 'err', detail: r.detail ?? '连接失败' });
+        setCompatTest({ state: 'err', detail: r.detail ?? t('连接失败') });
         return;
       }
       setCompatTest({ state: 'ok', modelCount: r.modelCount, detail: r.detail });
@@ -584,20 +588,20 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         return (
           <span className="badge">
             <span className="spin" />
-            连接中…
+            {t('连接中…')}
           </span>
         );
       case 'ok':
         return (
           <span className="badge ok">
             <span className="dot ok" />
-            已连接 · {compatTest.modelCount ?? 'N'} 个模型 · v1 兼容
+            {t('已连接 · {n} 个模型 · v1 兼容', { n: compatTest.modelCount ?? 'N' })}
           </span>
         );
       case 'err':
         return (
           <span className="badge err" title={compatTest.detail}>
-            {compatTest.detail ?? '连接失败'}
+            {compatTest.detail ?? t('连接失败')}
           </span>
         );
       default:
@@ -619,7 +623,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         setCompatKey('');
         setCompatKeySaved(true);
       } else {
-        flashHint('compat', r.error ?? '保存失败');
+        flashHint('compat', r.error ?? t('保存失败'));
       }
     } catch (e) {
       flashHint('compat', e instanceof Error ? e.message : String(e));
@@ -657,7 +661,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         setPvKeyErr((e) => ({ ...e, [id]: '' }));
         patchProvider(id, (p) => ({ ...p, hasKey: true }));
       } else {
-        setPvKeyErr((e) => ({ ...e, [id]: r.error ?? '保存失败' }));
+        setPvKeyErr((e) => ({ ...e, [id]: r.error ?? t('保存失败') }));
       }
     } catch (err) {
       setPvKeyErr((e) => ({ ...e, [id]: err instanceof Error ? err.message : String(err) }));
@@ -668,7 +672,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     if (!p) return;
     const host = (pvHostVals[id] ?? p.host).trim();
     if (!host) {
-      setPvChecks((c) => ({ ...c, [id]: { state: 'err', detail: '未设置 API Host' } }));
+      setPvChecks((c) => ({ ...c, [id]: { state: 'err', detail: t('未设置 API Host') } }));
       return;
     }
     if (host !== p.host) patchProvider(id, (x) => ({ ...x, host }));
@@ -677,7 +681,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       const r = await window.bigbotart.llmTestConnection({ baseUrl: host, providerId: id });
       setPvChecks((c) => ({
         ...c,
-        [id]: r.ok ? { state: 'ok', modelCount: r.modelCount } : { state: 'err', detail: r.detail ?? '连接失败' },
+        [id]: r.ok ? { state: 'ok', modelCount: r.modelCount } : { state: 'err', detail: r.detail ?? t('连接失败') },
       }));
     } catch (e) {
       setPvChecks((c) => ({ ...c, [id]: { state: 'err', detail: e instanceof Error ? e.message : String(e) } }));
@@ -690,7 +694,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       return (
         <span className="badge">
           <span className="spin" />
-          检查中…
+          {t('检查中…')}
         </span>
       );
     }
@@ -698,13 +702,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       return (
         <span className="badge ok">
           <span className="dot ok" />
-          连接正常 · v1 兼容
+          {t('连接正常 · v1 兼容')}
         </span>
       );
     }
     return (
       <span className="badge err" title={c.detail}>
-        {c.detail ?? '连接失败'}
+        {c.detail ?? t('连接失败')}
       </span>
     );
   };
@@ -749,7 +753,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     patchProvider(id, (p) => ({ ...p, models: p.models.filter((m) => m !== model) }));
   };
   const hostShort = (p: CloudProviderEntry): string =>
-    p.host ? p.host.replace(/^https?:\/\//, '') : '未设置 API Host';
+    p.host ? p.host.replace(/^https?:\/\//, '') : t('未设置 API Host');
   /** 当前生效的云端选择(设置页里高亮对应 pv-mrow / 云 radio 联动) */
   const curCloudSource = llmSource?.kind === 'cloud' ? llmSource : null;
 
@@ -781,7 +785,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     try {
       const r = await window.bigbotart.llmListRemoteModels({ baseUrl: p.host, providerId: pid });
       if (r.ok && r.models.length > 0) setMdlState({ status: 'ready', models: r.models });
-      else setMdlState({ status: 'error', detail: r.error ?? '该供应商未返回可枚举的模型清单' });
+      else setMdlState({ status: 'error', detail: r.error ?? t('该供应商未返回可枚举的模型清单') });
     } catch (e) {
       setMdlState({ status: 'error', detail: e instanceof Error ? e.message : String(e) });
     }
@@ -926,16 +930,16 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
 
   /* ---- ComfyUI ---- */
   const [comfy, setComfy] = useState<{ chip: string; btn: string; busy: boolean; done: boolean }>({
-    chip: '未连接',
-    btn: '连接',
+    chip: t('未连接'),
+    btn: t('连接'),
     busy: false,
     done: false,
   });
   const connectComfy = (): void => {
     if (comfy.busy || comfy.done) return;
-    setComfy({ chip: '连接中…', btn: '连接', busy: true, done: false });
+    setComfy({ chip: t('连接中…'), btn: t('连接'), busy: true, done: false });
     window.setTimeout(
-      () => setComfy({ chip: '未响应 · 稍后可在向导中安装', btn: '重试', busy: false, done: false }),
+      () => setComfy({ chip: t('未响应 · 稍后可在向导中安装'), btn: t('重试'), busy: false, done: false }),
       1300,
     );
   };
@@ -1011,14 +1015,14 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       .then((res) => {
         const jobId = res.jobId;
         if (!res.ok || !jobId) {
-          setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: res.error ?? '启动下载失败' } }));
+          setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: res.error ?? t('启动下载失败') } }));
           return;
         }
         setDownloads((d) => ({ ...d, [id]: { status: 'downloading', jobId, pct: 0 } }));
         startPolling(id, jobId);
       })
       .catch(() => {
-        setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: '下载启动失败' } }));
+        setDownloads((d) => ({ ...d, [id]: { status: 'failed', error: t('下载启动失败') } }));
       });
   };
 
@@ -1026,19 +1030,19 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const cancelDownload = (id: string, jobId?: string): void => {
     if (!jobId) {
       stopPolling(id);
-      setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', error: '已取消' } }));
+      setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', error: t('已取消') } }));
       return;
     }
     void window.bigbotart
       .mlxgenDownloadCancel(jobId)
       .then((r) => {
         stopPolling(id);
-        setDownloads((d) => ({ ...d, [id]: { status: r.ok ? 'cancelled' : 'downloading', jobId, error: r.ok ? '已取消 · 保留断点续传' : r.error ?? '取消失败' } }));
+        setDownloads((d) => ({ ...d, [id]: { status: r.ok ? 'cancelled' : 'downloading', jobId, error: r.ok ? t('已取消 · 保留断点续传') : r.error ?? t('取消失败') } }));
         if (r.ok) refreshMlxModels();
       })
       .catch(() => {
         stopPolling(id);
-        setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', jobId, error: '已取消' } }));
+        setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', jobId, error: t('已取消') } }));
       });
   };
 
@@ -1061,16 +1065,16 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   }, []);
   const installAccel = (): void => {
     if (!accelForm.name.trim() || !accelForm.path.trim()) {
-      setAccelMsg('请填名称与目录路径');
+      setAccelMsg(t('请填名称与目录路径'));
       return;
     }
     void window.bigbotart.accelInstall(accelForm).then((r) => {
       if (r.ok) {
         setAccelPacks(r.packs ?? []);
         setAccelForm({ name: '', path: '', steps: 8 });
-        setAccelMsg(`已安装「${accelForm.name.trim()}」· 登记完成(文件未拷贝)`);
+        setAccelMsg(t('已安装「{name}」· 登记完成(文件未拷贝)', { name: accelForm.name.trim() }));
       } else {
-        setAccelMsg(r.error ?? '安装失败');
+        setAccelMsg(r.error ?? t('安装失败'));
       }
     });
   };
@@ -1078,16 +1082,16 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     void window.bigbotart.accelRemove(id).then((r) => {
       if (r.ok) {
         setAccelPacks(r.packs ?? []);
-        setAccelMsg('已删除登记(磁盘文件保留)');
+        setAccelMsg(t('已删除登记(磁盘文件保留)'));
       } else {
-        setAccelMsg(r.error ?? '删除失败');
+        setAccelMsg(r.error ?? t('删除失败'));
       }
     });
   };
   const setDefaultAccel = (id: string): void => {
     void window.bigbotart.accelSetDefault(id).then((r) => {
       if (r.ok) setAccelPacks(r.packs ?? []);
-      else setAccelMsg(r.error ?? '操作失败');
+      else setAccelMsg(r.error ?? t('操作失败'));
     });
   };
 
@@ -1095,11 +1099,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const engineBadge = (id: RuntimeProbe['id']): { text: string; ok: boolean } => {
     const p = findProbe(id);
     if (p) {
-      if (p.status === 'ready') return { text: `已就绪${p.version ? ` · ${p.version}` : ''}`, ok: true };
-      if (p.status === 'error') return { text: '异常', ok: false };
-      return { text: '未检测到', ok: false };
+      if (p.status === 'ready') return { text: p.version ? t('已就绪 · {v}', { v: p.version }) : t('已就绪'), ok: true };
+      if (p.status === 'error') return { text: t('异常'), ok: false };
+      return { text: t('未检测到'), ok: false };
     }
-    return { text: '检测', ok: false };
+    return { text: t('检测'), ok: false };
   };
 
   const h3 = engineBadge('h3c');
@@ -1114,9 +1118,9 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
           onBack={onBack}
           crumb={
             <>
-              <b>设置</b>
+              <b>{t('设置')}</b>
               <span className="chev">›</span>
-              <span>{GROUP_LABEL[group]}</span>
+              <span>{t(GROUP_LABEL[group])}</span>
             </>
           }
         />
@@ -1129,49 +1133,49 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               data-panel="general"
               onClick={() => setGroup('general')}
             >
-              通用
+              {t('通用')}
             </a>
             <a
               className={`side-link${group === 'llm' ? ' on' : ''}`}
               data-panel="llm"
               onClick={() => setGroup('llm')}
             >
-              LLM 来源
+              {t('LLM 来源')}
             </a>
             <a
               className={`side-link${group === 'engines' ? ' on' : ''}`}
               data-panel="engines"
               onClick={() => setGroup('engines')}
             >
-              引擎（Provider）
+              {t('引擎（Provider）')}
             </a>
             <a
               className={`side-link${group === 'queue' ? ' on' : ''}`}
               data-panel="queue"
               onClick={() => setGroup('queue')}
             >
-              队列与资源
+              {t('队列与资源')}
             </a>
             <a
               className={`side-link${group === 'storage' ? ' on' : ''}`}
               data-panel="storage"
               onClick={() => setGroup('storage')}
             >
-              存储与项目
+              {t('存储与项目')}
             </a>
             <a
               className={`side-link${group === 'models' ? ' on' : ''}`}
               data-panel="models"
               onClick={() => setGroup('models')}
             >
-              模型下载
+              {t('模型下载')}
             </a>
             <a
               className={`side-link${group === 'lora' ? ' on' : ''}`}
               data-panel="lora"
               onClick={() => setGroup('lora')}
             >
-              🚀 加速 LoRA
+              {t('🚀 加速 LoRA')}
             </a>
             <a
               className="side-link"
@@ -1181,14 +1185,14 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                 onNavigate('onboarding');
               }}
             >
-              引擎引导向导…
+              {t('引擎引导向导…')}
             </a>
           </div>
           <div className="side-foot">
             <div className="local-card">
-              <b style={{ color: 'var(--fg)' }}>本地优先</b>
+              <b style={{ color: 'var(--fg)' }}>{t('本地优先')}</b>
               <br />
-              不自动上传任何数据；云端 LLM 仅在显式配置凭据后启用。
+              {t('不自动上传任何数据；云端 LLM 仅在显式配置凭据后启用。')}
             </div>
           </div>
         </aside>
@@ -1199,54 +1203,56 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             {/* 通用 */}
             <div className="group" data-group="general" hidden={group !== 'general'}>
               <div className="gh">
-                <b>通用</b>
+                <b>{t('通用')}</b>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>外观</b>
-                  <div className="sub">跟随系统（当前：浅色）</div>
+                  <b>{t('外观')}</b>
+                  <div className="sub">{t('跟随系统（当前：浅色）')}</div>
                 </div>
                 <span
                   className={`chip${appearance === '系统' ? ' on' : ''}`}
                   onClick={() => setAppearance('系统')}
                 >
-                  系统
+                  {t('系统')}
                 </span>
                 <span
                   className={`chip${appearance === '浅色' ? ' on' : ''}`}
                   onClick={() => setAppearance('浅色')}
                 >
-                  浅色
+                  {t('浅色')}
                 </span>
                 <span
                   className={`chip${appearance === '深色' ? ' on' : ''}`}
                   onClick={() => setAppearance('深色')}
                 >
-                  深色
+                  {t('深色')}
                 </span>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>语言</b>
-                  <div className="sub">界面文案语言</div>
+                  <b>{t('语言')}</b>
+                  <div className="sub">{t('界面文案语言')}</div>
                 </div>
                 <span
-                  className={`chip${language === '简体中文' ? ' on' : ''}`}
-                  onClick={() => setLanguage('简体中文')}
+                  className={`chip${lang === 'zh-CN' ? ' on' : ''}`}
+                  data-od-id="lang-zh"
+                  onClick={() => setLang('zh-CN')}
                 >
                   简体中文
                 </span>
                 <span
-                  className={`chip${language === 'English' ? ' on' : ''}`}
-                  onClick={() => setLanguage('English')}
+                  className={`chip${lang === 'en' ? ' on' : ''}`}
+                  data-od-id="lang-en"
+                  onClick={() => setLang('en')}
                 >
                   English
                 </span>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>启动时恢复上次项目</b>
-                  <div className="sub">多标签页并发时带项目锁标记</div>
+                  <b>{t('启动时恢复上次项目')}</b>
+                  <div className="sub">{t('多标签页并发时带项目锁标记')}</div>
                 </div>
                 <span
                   className={`sw${sw['general.restore'] ? ' on' : ''}`}
@@ -1256,8 +1262,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow" data-od-id="settings-ssd-streaming">
                 <div className="grow">
-                  <b>SSD 流式读权重（--ssd-streaming）</b>
-                  <div className="sub">h3 视频生成专用 · 省 RAM（峰值≈6GB）但慢约 30%；64GB+ 默认关更快，内存紧张（OOM/被系统杀进程）时再开</div>
+                  <b>{t('SSD 流式读权重（--ssd-streaming）')}</b>
+                  <div className="sub">{t('h3 视频生成专用 · 省 RAM（峰值≈6GB）但慢约 30%；64GB+ 默认关更快，内存紧张（OOM/被系统杀进程）时再开')}</div>
                 </div>
                 <span
                   className={`sw${ssdStreaming ? ' on' : ''}`}
@@ -1270,10 +1276,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             {/* LLM 来源 */}
             <div className="group" data-group="llm" data-od-id="settings-llm" hidden={group !== 'llm'}>
               <div className="gh">
-                <b>LLM 来源（Agent 内核 · Pi Harness）</b>
+                <b>{t('LLM 来源（Agent 内核 · Pi Harness）')}</b>
                 <span className="spacer" />
                 <span className="mono mut" style={{ fontSize: 11 }}>
-                  仅列出支持工具调用的模型
+                  {t('仅列出支持工具调用的模型')}
                 </span>
               </div>
 
@@ -1284,7 +1290,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   onClick={() => onLlmRadio('lmstudio')}
                 />
                 <div className="grow">
-                  <b>本地 · LM Studio（默认，自动发现）</b>
+                  <b>{t('本地 · LM Studio（默认，自动发现）')}</b>
                   <div className="row g8" style={{ marginTop: 9 }}>
                     <span className="input-w mono">{localEndpoint('lmstudio')}</span>
                     {localBadge('lmstudio')}
@@ -1293,13 +1299,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     <button
                       className={`lm-select${locals.lmstudio.loading ? ' loading' : ''}`}
                       aria-haspopup="listbox"
-                      title="选择要加载到 LM Studio 的模型"
+                      title={t('选择要加载到 LM Studio 的模型')}
                       onClick={(e) => openLmPop('lmstudio', e)}
                     >
-                      <span className="mut" style={{ fontSize: 11 }}>加载模型</span>
+                      <span className="mut" style={{ fontSize: 11 }}>{t('加载模型')}</span>
                       {locals.lmstudio.loading ? (
                         <b className="mono">
-                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> 加载中…
+                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> {t('加载中…')}
                         </b>
                       ) : (
                         <b className="mono">{localLoadedLabel('lmstudio')}</b>
@@ -1322,7 +1328,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   onClick={() => onLlmRadio('ollama')}
                 />
                 <div className="grow">
-                  <b>本地 · Ollama（自动发现）</b>
+                  <b>{t('本地 · Ollama（自动发现）')}</b>
                   <div className="row g8" style={{ marginTop: 9 }}>
                     <span className="input-w mono">{localEndpoint('ollama')}</span>
                     {localBadge('ollama')}
@@ -1331,13 +1337,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     <button
                       className={`lm-select${locals.ollama.loading ? ' loading' : ''}`}
                       aria-haspopup="listbox"
-                      title="选择 Ollama 加载的模型"
+                      title={t('选择 Ollama 加载的模型')}
                       onClick={(e) => openLmPop('ollama', e)}
                     >
-                      <span className="mut" style={{ fontSize: 11 }}>加载模型</span>
+                      <span className="mut" style={{ fontSize: 11 }}>{t('加载模型')}</span>
                       {locals.ollama.loading ? (
                         <b className="mono">
-                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> 加载中…
+                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> {t('加载中…')}
                         </b>
                       ) : (
                         <b className="mono">{localLoadedLabel('ollama')}</b>
@@ -1360,8 +1366,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   onClick={() => onLlmRadio('pimlx')}
                 />
                 <div className="grow">
-                  <b>本地 · pi-mlx-provider（免 LM Studio）</b>
-                  <div className="sub mono">@sinamtz/pi-mlx-provider · MLX-VLM server · Apple Silicon 直跑</div>
+                  <b>{t('本地 · pi-mlx-provider（免 LM Studio）')}</b>
+                  <div className="sub mono">{t('@sinamtz/pi-mlx-provider · MLX-VLM server · Apple Silicon 直跑')}</div>
                   <div className="row g8" style={{ marginTop: 9 }}>
                     {localBadge('pimlx')}
                   </div>
@@ -1369,13 +1375,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     <button
                       className={`lm-select${locals.pimlx.loading ? ' loading' : ''}`}
                       aria-haspopup="listbox"
-                      title="选择 pi-mlx 加载的模型"
+                      title={t('选择 pi-mlx 加载的模型')}
                       onClick={(e) => openLmPop('pimlx', e)}
                     >
-                      <span className="mut" style={{ fontSize: 11 }}>加载模型</span>
+                      <span className="mut" style={{ fontSize: 11 }}>{t('加载模型')}</span>
                       {locals.pimlx.loading ? (
                         <b className="mono">
-                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> 加载中…
+                          <span className="spin" style={{ display: 'inline-block', verticalAlign: -2 }} /> {t('加载中…')}
                         </b>
                       ) : (
                         <b className="mono">{localLoadedLabel('pimlx')}</b>
@@ -1398,17 +1404,17 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   onClick={() => onLlmRadio('openai-compat')}
                 />
                 <div className="grow">
-                  <b>本地 · OpenAI 兼容端点</b>
+                  <b>{t('本地 · OpenAI 兼容端点')}</b>
                   <div className="row g8" style={{ marginTop: 9 }}>
                     <span className="input-w">
                       <input
-                        placeholder="vLLM / llama.cpp 等兼容端点，如 http://127.0.0.1:8000/v1"
+                        placeholder={t('vLLM / llama.cpp 等兼容端点，如 http://127.0.0.1:8000/v1')}
                         value={compatUrl}
                         onChange={(e) => setCompatUrl(e.target.value)}
                       />
                     </span>
                     <button className="btn btn-s btn-sm" onClick={() => void testCompat()}>
-                      测试连接
+                      {t('测试连接')}
                     </button>
                     {compatBadge()}
                   </div>
@@ -1417,11 +1423,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       <button
                         className="lm-select"
                         aria-haspopup="listbox"
-                        title="选择要使用的模型"
+                        title={t('选择要使用的模型')}
                         onClick={(e) => openLmPop('compat', e)}
                       >
-                        <span className="mut" style={{ fontSize: 11 }}>选择模型</span>
-                        <b className="mono">{compatModel || '未选择'}</b>
+                        <span className="mut" style={{ fontSize: 11 }}>{t('选择模型')}</span>
+                        <b className="mono">{compatModel || t('未选择')}</b>
                         <span className="lm-caret">▾</span>
                       </button>
                     </div>
@@ -1430,13 +1436,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     <span className="input-w">
                       <input
                         type="password"
-                        placeholder={compatKeySaved ? '已保存到本机钥匙串 ••••••••' : 'sk-… · 仅存本机钥匙串'}
+                        placeholder={compatKeySaved ? t('已保存到本机钥匙串 ••••••••') : t('sk-… · 仅存本机钥匙串')}
                         value={compatKey}
                         onChange={(e) => setCompatKey(e.target.value)}
                       />
                     </span>
                     <button className="btn btn-s btn-sm" onClick={() => void saveCompatKey()}>
-                      保存
+                      {t('保存')}
                     </button>
                   </div>
                   {compatHint && (
@@ -1454,11 +1460,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   onClick={() => onLlmRadio('cloud')}
                 />
                 <div className="grow">
-                  <b>云端 Provider（可选增强）</b>
-                  <div className="sub">按供应商管理凭据与模型 · 均为 OpenAI 兼容协议 · 凭据仅存本机钥匙串</div>
+                  <b>{t('云端 Provider（可选增强）')}</b>
+                  <div className="sub">{t('按供应商管理凭据与模型 · 均为 OpenAI 兼容协议 · 凭据仅存本机钥匙串')}</div>
                   <div className="pv-list" id="pvList">
                     {cloudProviders.length === 0 && (
-                      <div className="pv-empty" style={{ border: 0 }}>尚未配置云端供应商</div>
+                      <div className="pv-empty" style={{ border: 0 }}>{t('尚未配置云端供应商')}</div>
                     )}
                     {cloudProviders.map((p) => (
                       <div
@@ -1470,14 +1476,14 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                           <span className="pv-av">{p.avatar}</span>
                           <div className="grow">
                             <b>{p.name}</b>
-                            <div className="pv-sub mono">{hostShort(p)} · {p.models.length} 个模型</div>
+                            <div className="pv-sub mono">{hostShort(p)} · {t('{n} 个模型', { n: p.models.length })}</div>
                           </div>
                           <span
                             className={`sw${p.enabled ? ' on' : ''}`}
                             data-pv-sw=""
                             role="switch"
                             aria-checked={p.enabled}
-                            title="启用 / 停用"
+                            title={t('启用 / 停用')}
                             onClick={(e) => togglePvEnabled(e, p.id)}
                           />
                           <span className="pv-caret">›</span>
@@ -1490,13 +1496,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                 <input
                                   type="password"
                                   data-pv-key=""
-                                  placeholder={p.hasKey ? '已保存到本机钥匙串 ••••••••' : 'sk-… · 仅存本机钥匙串'}
+                                  placeholder={p.hasKey ? t('已保存到本机钥匙串 ••••••••') : t('sk-… · 仅存本机钥匙串')}
                                   value={pvKeyVals[p.id] ?? ''}
                                   onChange={(e) => setPvKeyVals((v) => ({ ...v, [p.id]: e.target.value }))}
                                 />
                               </span>
                               <button className="btn btn-s btn-sm" data-pv-save="" onClick={() => void savePvKey(p.id)}>
-                                保存
+                                {t('保存')}
                               </button>
                             </div>
                             {pvKeyErr[p.id] && (
@@ -1513,19 +1519,19 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                 />
                               </span>
                               <button className="btn btn-s btn-sm" data-pv-check="" onClick={() => void checkPvHost(p.id)}>
-                                检查
+                                {t('检查')}
                               </button>
                               {pvCheckBadge(p.id)}
                             </div>
                             <div className="pv-mhead">
-                              <span className="lbl">模型 · {p.models.length}</span>
+                              <span className="lbl">{t('模型 · {n}', { n: p.models.length })}</span>
                               <span className="spacer" />
                               <button className="btn btn-s btn-sm" data-pv-addm="" onClick={() => void openMdl(p.id)}>
-                                ＋ 添加模型
+                                {t('＋ 添加模型')}
                               </button>
                             </div>
                             {p.models.length === 0 ? (
-                              <div className="pv-empty">尚未添加模型 —— 添加后会出现在画布 Agent 的模型选择器中</div>
+                              <div className="pv-empty">{t('尚未添加模型 —— 添加后会出现在画布 Agent 的模型选择器中')}</div>
                             ) : (
                               p.models.map((m) => {
                                 const cur = curCloudSource?.provider === p.id && curCloudSource.model === m;
@@ -1533,7 +1539,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                   <div
                                     key={m}
                                     className={`pv-mrow${cur ? ' on' : ''}`}
-                                    title={cur ? '当前 LLM 来源' : '点击设为当前 LLM 来源'}
+                                    title={cur ? t('当前 LLM 来源') : t('点击设为当前 LLM 来源')}
                                     onClick={() => selectCloudModel(p.id, m)}
                                   >
                                     <div className="grow">
@@ -1542,8 +1548,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                     {cur && <span className="pv-sel">✓</span>}
                                     <button
                                       className="pv-mdel"
-                                      title="移除模型"
-                                      aria-label="移除模型"
+                                      title={t('移除模型')}
+                                      aria-label={t('移除模型')}
                                       onClick={(e) => delPvModel(e, p.id, m)}
                                     >
                                       ×
@@ -1558,13 +1564,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                 className="btn btn-s btn-sm"
                                 data-od-id={`provider-del-${p.id}`}
                                 style={{ color: 'var(--warn)' }}
-                                title="删除该供应商(连同本机钥匙串凭据;不影响已生成的画布内容)"
+                                title={t('删除该供应商(连同本机钥匙串凭据;不影响已生成的画布内容)')}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void removeProvider(p.id);
                                 }}
                               >
-                                {pvDelConfirm === p.id ? '再点一次确认删除' : '删除供应商'}
+                                {pvDelConfirm === p.id ? t('再点一次确认删除') : t('删除供应商')}
                               </button>
                             </div>
                           </div>
@@ -1579,7 +1585,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     style={{ marginTop: 10 }}
                     onClick={() => setAddPvOpen(true)}
                   >
-                    ＋ 添加供应商
+                    {t('＋ 添加供应商')}
                   </button>
                   {cloudHint && (
                     <div className="sub" style={{ color: 'var(--warn)', marginTop: 8 }}>{cloudHint}</div>
@@ -1590,8 +1596,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               {/* ── 项目级覆盖说明 ── */}
               <div className="srow" style={{ background: 'var(--surface-warm)' }}>
                 <div className="grow" style={{ fontSize: 'var(--text-xs)', color: 'var(--muted)' }}>
-                  <b style={{ color: 'var(--fg)' }}>项目级覆盖</b> ·
-                  每个项目可单独指定 LLM 来源（项目设置面板）；未配置本地模型时自动回退云端，或纯模板 + 手工（AI-optional）。
+                  <b style={{ color: 'var(--fg)' }}>{t('项目级覆盖')}</b> ·
+                  {t('每个项目可单独指定 LLM 来源（项目设置面板）；未配置本地模型时自动回退云端，或纯模板 + 手工（AI-optional）。')}
                 </div>
               </div>
 
@@ -1599,7 +1605,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               {lmPop && (
                 <LmPopover
                   anchor={lmPop.anchor}
-                  title="选择要加载的本地模型"
+                  title={t('选择要加载的本地模型')}
                   markLoaded={lmPop.kind !== 'compat'}
                   items={lmPopItems(lmPop.kind)}
                   onSelect={(id) => {
@@ -1623,12 +1629,12 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       if (e.target === e.currentTarget) setAddPvOpen(false);
                     }}
                   >
-                    <div className="mcard" role="dialog" aria-label="添加供应商" data-od-id="provider-add-dialog">
+                    <div className="mcard" role="dialog" aria-label={t('添加供应商')} data-od-id="provider-add-dialog">
                       <div className="mhead">
-                        <b>添加供应商</b>
-                        <span className="mut" style={{ fontSize: 11 }}>均为 OpenAI 兼容协议</span>
+                        <b>{t('添加供应商')}</b>
+                        <span className="mut" style={{ fontSize: 11 }}>{t('均为 OpenAI 兼容协议')}</span>
                         <span className="spacer" />
-                        <button className="mx" data-ovl-x="" aria-label="关闭" onClick={() => setAddPvOpen(false)}>
+                        <button className="mx" data-ovl-x="" aria-label={t('关闭')} onClick={() => setAddPvOpen(false)}>
                           ×
                         </button>
                       </div>
@@ -1648,7 +1654,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                 <b>{c.name}</b>
                                 <i>{c.sub}</i>
                               </span>
-                              {added && <span className="mut" style={{ fontSize: 11, flex: 'none' }}>已添加</span>}
+                              {added && <span className="mut" style={{ fontSize: 11, flex: 'none' }}>{t('已添加')}</span>}
                             </button>
                           );
                         })}
@@ -1676,15 +1682,15 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                         if (e.target === e.currentTarget) setMdlOvlOpen(false);
                       }}
                     >
-                      <div className="mcard" role="dialog" aria-label="添加模型" data-od-id="model-add-dialog">
+                      <div className="mcard" role="dialog" aria-label={t('添加模型')} data-od-id="model-add-dialog">
                         <div className="mhead">
-                          <b id="mdlTitle">添加模型 · {p.name}</b>
+                          <b id="mdlTitle">{t('添加模型 · {name}', { name: p.name })}</b>
                           <span className="spacer" />
                           <button
                             className={`mx mdl-refresh${mdlState.status === 'loading' ? ' spinning' : ''}`}
                             data-od-id="model-refresh-btn"
-                            title="重新拉取模型列表"
-                            aria-label="重新拉取模型列表"
+                            title={t('重新拉取模型列表')}
+                            aria-label={t('重新拉取模型列表')}
                             disabled={mdlState.status === 'loading'}
                             onClick={() => void fetchMdl(mdlFor)}
                           >
@@ -1702,31 +1708,31 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                               <polyline points="21 3 21 9 15 9" />
                             </svg>
                           </button>
-                          <button className="mx" data-ovl-x="" aria-label="关闭" onClick={() => setMdlOvlOpen(false)}>
+                          <button className="mx" data-ovl-x="" aria-label={t('关闭')} onClick={() => setMdlOvlOpen(false)}>
                             ×
                           </button>
                         </div>
                         <div className="mdl-meta" id="mdlMeta">
                           <span className="mono">GET {mdlEp(p.host)}</span>
                           <span className="spacer" />
-                          {mdlState.status === 'loading' && <span>拉取中…</span>}
+                          {mdlState.status === 'loading' && <span>{t('拉取中…')}</span>}
                           {mdlState.status === 'ready' && (
-                            <span>{mdlState.models.length} 个模型 · 刚刚更新</span>
+                            <span>{t('{n} 个模型 · 刚刚更新', { n: mdlState.models.length })}</span>
                           )}
                           {mdlState.status === 'error' && (
-                            <span style={{ color: 'var(--danger)' }}>加载失败</span>
+                            <span style={{ color: 'var(--danger)' }}>{t('加载失败')}</span>
                           )}
                         </div>
                         <div className="mlist" id="mdlList">
                           {mdlState.status === 'loading' && (
                             <div className="mdl-loading">
                               <span className="spin" />
-                              正在从 {mdlEp(p.host)} 拉取模型列表…
+                              {t('正在从 {ep} 拉取模型列表…', { ep: mdlEp(p.host) })}
                             </div>
                           )}
                           {mdlState.status === 'error' && (
                             <div className="mdl-error">
-                              <div className="mdl-error-title">模型清单加载失败</div>
+                              <div className="mdl-error-title">{t('模型清单加载失败')}</div>
                               <div className="mdl-error-detail">{mdlState.detail}</div>
                             </div>
                           )}
@@ -1744,12 +1750,12 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                                   <div className="grow">
                                     <b className="mono">{m}</b>
                                   </div>
-                                  {added && <span className="mtag">已添加</span>}
+                                  {added && <span className="mtag">{t('已添加')}</span>}
                                 </div>
                               );
                             })}
                           {mdlState.status === 'ready' && mdlState.models.length === 0 && (
-                            <div className="pv-empty">该供应商未返回可用模型</div>
+                            <div className="pv-empty">{t('该供应商未返回可用模型')}</div>
                           )}
                         </div>
                         <div className="mfoot">
@@ -1759,11 +1765,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                             disabled={mdlState.status !== 'ready'}
                             onClick={mdlAll}
                           >
-                            全选
+                            {t('全选')}
                           </button>
                           <span className="spacer" />
                           <span className="mut" style={{ fontSize: 11 }} id="mdlCnt">
-                            已选 {mdlSel.size} 个
+                            {t('已选 {n} 个', { n: mdlSel.size })}
                           </span>
                           <button
                             className="btn btn-p btn-sm"
@@ -1771,7 +1777,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                             disabled={mdlSel.size === 0}
                             onClick={addMdlOk}
                           >
-                            添加所选
+                            {t('添加所选')}
                           </button>
                         </div>
                       </div>
@@ -1789,12 +1795,12 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               hidden={group !== 'engines'}
             >
               <div className="gh">
-                <b>引擎（Provider 注册表）</b>
+                <b>{t('引擎（Provider 注册表）')}</b>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>真实推理</b>
-                  <div className="sub">关闭时一律用占位引擎演示，秒回；开启后引擎就绪则真实生成（慢）</div>
+                  <b>{t('真实推理')}</b>
+                  <div className="sub">{t('关闭时一律用占位引擎演示，秒回；开启后引擎就绪则真实生成（慢）')}</div>
                 </div>
                 <span
                   className={`sw${renderReal ? ' on' : ''}`}
@@ -1804,30 +1810,30 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>h3.c（视频主引擎）</b>
+                  <b>{t('h3.c（视频主引擎）')}</b>
                   <div className="sub mono">
-                    模型目录 ~/models/h3 · 144GB · 带声直出 · 能力：文生/首帧/尾帧/首尾帧/Ref2VA/参考视频音频
+                    {t('模型目录 ~/models/h3 · 144GB · 带声直出 · 能力：文生/首帧/尾帧/首尾帧/Ref2VA/参考视频音频')}
                   </div>
                 </div>
-                <span className="chip on">默认 · 视频</span>
+                <span className="chip on">{t('默认 · 视频')}</span>
                 <button className="btn btn-s btn-sm" data-detect="" onClick={probe} disabled={detecting}>
                   {detecting ? <span className="spin" /> : h3.text}
                 </button>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>mlxgen（图片主引擎）</b>
-                  <div className="sub mono">Z-Image-Turbo 默认 · Qwen Edit / FLUX.2 Klein / SeedVR2 · 模型按需下载</div>
+                  <b>{t('mlxgen（图片主引擎）')}</b>
+                  <div className="sub mono">{t('Z-Image-Turbo 默认 · Qwen Edit / FLUX.2 Klein / SeedVR2 · 模型按需下载')}</div>
                 </div>
-                <span className="chip on">默认 · 图片</span>
+                <span className="chip on">{t('默认 · 图片')}</span>
                 <button className="btn btn-s btn-sm" onClick={() => setGroup('models')}>
-                  管理模型
+                  {t('管理模型')}
                 </button>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>ComfyUI（补充引擎）</b>
-                  <div className="sub mono">http://127.0.0.1:8188 · 仅 localhost · 导入 workflow_api.json（krea2 可直接导入）</div>
+                  <b>{t('ComfyUI（补充引擎）')}</b>
+                  <div className="sub mono">{t('http://127.0.0.1:8188 · 仅 localhost · 导入 workflow_api.json（krea2 可直接导入）')}</div>
                 </div>
                 <span className="chip" id="comfyChip">
                   {comfy.chip}
@@ -1843,10 +1849,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>备选视频：mlxgen Wan2.2 / Bernini-R</b>
-                  <div className="sub mono">资源空闲时可用；能力差异在节点 UI 可见（不支持的模式禁用）</div>
+                  <b>{t('备选视频：mlxgen Wan2.2 / Bernini-R')}</b>
+                  <div className="sub mono">{t('资源空闲时可用；能力差异在节点 UI 可见（不支持的模式禁用）')}</div>
                 </div>
-                <span className="chip">可选</span>
+                <span className="chip">{t('可选')}</span>
                 <button
                   className="btn btn-s btn-sm"
                   id="wanBtn"
@@ -1854,7 +1860,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   disabled={wanEnabled}
                   style={wanEnabled ? { opacity: 0.6 } : undefined}
                 >
-                  {wanEnabled ? '已启用 ✓' : '启用'}
+                  {wanEnabled ? t('已启用 ✓') : t('启用')}
                 </button>
               </div>
               </div>
@@ -1862,12 +1868,12 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             {/* 队列与资源 */}
             <div className="group" data-group="queue" data-od-id="settings-queue" hidden={group !== 'queue'}>
               <div className="gh">
-                <b>队列与资源</b>
+                <b>{t('队列与资源')}</b>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>视频槽位</b>
-                  <div className="sub mono">同一时刻一个 h3 任务 · FIFO</div>
+                  <b>{t('视频槽位')}</b>
+                  <div className="sub mono">{t('同一时刻一个 h3 任务 · FIFO')}</div>
                 </div>
                 <span
                   className={`sw${sw['queue.videoSlot'] ? ' on' : ''}`}
@@ -1877,8 +1883,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>图片槽位与视频槽位互斥</b>
-                  <div className="sub mono">64GB 内存策略 · 不并发双引擎</div>
+                  <b>{t('图片槽位与视频槽位互斥')}</b>
+                  <div className="sub mono">{t('64GB 内存策略 · 不并发双引擎')}</div>
                 </div>
                 <span
                   className={`sw${sw['queue.exclusive'] ? ' on' : ''}`}
@@ -1888,8 +1894,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>预览档优先插队</b>
-                  <div className="sub mono">需用户确认后执行</div>
+                  <b>{t('预览档优先插队')}</b>
+                  <div className="sub mono">{t('需用户确认后执行')}</div>
                 </div>
                 <span
                   className={`sw${sw['queue.previewJump'] ? ' on' : ''}`}
@@ -1899,10 +1905,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>首次 Metal 预热提示</b>
-                  <div className="sub mono">约 30 分钟 · 档位防呆白名单已启用</div>
+                  <b>{t('首次 Metal 预热提示')}</b>
+                  <div className="sub mono">{t('约 30 分钟 · 档位防呆白名单已启用')}</div>
                 </div>
-                <span className="badge ok">已提示</span>
+                <span className="badge ok">{t('已提示')}</span>
               </div>
             </div>
 
@@ -1914,19 +1920,19 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               hidden={group !== 'storage'}
             >
               <div className="gh">
-                <b>存储与项目</b>
+                <b>{t('存储与项目')}</b>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>数据目录</b>
-                  <div className="sub mono">~/.bigbotart · SQLite（node:sqlite）+ 本地媒体目录</div>
+                  <b>{t('数据目录')}</b>
+                  <div className="sub mono">{t('~/.bigbotart · SQLite（node:sqlite）+ 本地媒体目录')}</div>
                 </div>
-                <button className="btn btn-s btn-sm">更改…</button>
+                <button className="btn btn-s btn-sm">{t('更改…')}</button>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>项目锁</b>
-                  <div className="sub mono">多标签页并发锁（参考 H3Mise）</div>
+                  <b>{t('项目锁')}</b>
+                  <div className="sub mono">{t('多标签页并发锁（参考 H3Mise）')}</div>
                 </div>
                 <span
                   className={`sw${sw['storage.projectLock'] ? ' on' : ''}`}
@@ -1936,10 +1942,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>画布 JSON 导出 / 导入</b>
-                  <div className="sub mono">可复现：每个 Take 记录完整参数 + seed + 引擎版本</div>
+                  <b>{t('画布 JSON 导出 / 导入')}</b>
+                  <div className="sub mono">{t('可复现：每个 Take 记录完整参数 + seed + 引擎版本')}</div>
                 </div>
-                <button className="btn btn-s btn-sm">导出</button>
+                <button className="btn btn-s btn-sm">{t('导出')}</button>
               </div>
             </div>
 
@@ -1951,29 +1957,29 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               hidden={group !== 'models'}
             >
               <div className="gh">
-                <b>模型下载</b>
+                <b>{t('模型下载')}</b>
                 <span className="spacer" />
                 <span className="mono mut" style={{ fontSize: 11 }}>
-                  按需下载 · 断点续传
+                  {t('按需下载 · 断点续传')}
                 </span>
               </div>
               <div className="mdl-row">
                 <div className="grow">
                   <b>Ornith-1.5-35B-A3B · MLX 4bit</b>
                   <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                    LLM · 推荐
+                    {t('LLM · 推荐')}
                   </div>
                 </div>
-                <span className="badge ok">已就绪</span>
+                <span className="badge ok">{t('已就绪')}</span>
               </div>
               {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
                 // 模型大小按 HF 官方文件清单实测(2026-09,hf-mirror tree 汇总 / ModelScope 直连清单):
                 //   z-image-turbo-8bit 10.99GB · qwen-image-edit-8bit 37.5GB · seedvr2-3b-8bit 4.72GB · qwen2.5-vl-7b 16.6GB
                 const meta: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], { name: string; desc: string }> = {
-                  'z-image-turbo': { name: 'Z-Image-Turbo', desc: '文生图 · 推荐 · ~11GB' },
-                  'qwen-image-edit': { name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 推荐 · 37.5GB' },
-                  'seedvr2-3b': { name: 'SeedVR2 3B', desc: '超分修复 · 可选 · ~4.7GB' },
-                  'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · 可选 · ~16.6GB' },
+                  'z-image-turbo': { name: 'Z-Image-Turbo', desc: t('文生图 · 推荐 · ~11GB') },
+                  'qwen-image-edit': { name: 'Qwen Image Edit', desc: t('指令编辑 / Inpaint · 推荐 · 37.5GB') },
+                  'seedvr2-3b': { name: 'SeedVR2 3B', desc: t('超分修复 · 可选 · ~4.7GB') },
+                  'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: t('视觉 LLM · Agent 识图 · 可选 · ~16.6GB') },
                 };
                 const m = meta[id];
                 const dl = downloads[id] ?? { status: 'idle' as const, pct: 0 };
@@ -1987,20 +1993,20 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       </div>
                       {dl.status === 'failed' && (
                         <div className="mut" style={{ fontSize: 11, color: 'var(--danger)' }}>
-                          {dl.error ?? '下载失败'}
+                          {dl.error ?? t('下载失败')}
                         </div>
                       )}
                     </div>
                     {ready ? (
-                      <span className="badge ok">已就绪</span>
+                      <span className="badge ok">{t('已就绪')}</span>
                     ) : dl.status === 'idle' ? (
                       <button className="btn btn-s btn-sm" data-dl="" onClick={() => startDownload(id)}>
-                        下载
+                        {t('下载')}
                       </button>
                     ) : dl.status === 'downloading' ? (
                       <div style={{ minWidth: 130 }}>
                         <div className="row" style={{ justifyContent: 'space-between', fontSize: 10.5 }}>
-                          <span className="mut">下载中</span>
+                          <span className="mut">{t('下载中')}</span>
                           <span className="mono mut pct">{Math.round(dl.pct ?? 0)}%</span>
                         </div>
                         <div className="pbar" style={{ marginTop: 4 }}>
@@ -2013,50 +2019,50 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                           style={{ marginTop: 6 }}
                           onClick={() => cancelDownload(id, dl.jobId)}
                         >
-                          取消下载
+                          {t('取消下载')}
                         </button>
                       </div>
                     ) : dl.status === 'cancelled' ? (
                       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <span className="badge" title={dl.error}>已取消</span>
+                        <span className="badge" title={dl.error}>{t('已取消')}</span>
                         <button className="btn btn-s btn-sm" data-dl="" onClick={() => startDownload(id)}>
-                          重新下载
+                          {t('重新下载')}
                         </button>
                       </div>
                     ) : (
-                      <span className="badge">{dl.error ? '下载出错' : '未下载'}</span>
+                      <span className="badge">{dl.error ? t('下载出错') : t('未下载')}</span>
                     )}
                   </div>
                 );
               })}
               <div className="mdl-row">
-                <div className="grow mut">更多：GLM-4 / DeepSeek / Llama 3.x / Mistral / Phi / Gemma 3 / MiniCPM…（§5.2.4 清单）</div>
+                <div className="grow mut">{t('更多：GLM-4 / DeepSeek / Llama 3.x / Mistral / Phi / Gemma 3 / MiniCPM…（§5.2.4 清单）')}</div>
               </div>
             </div>
 
             {/* 🚀 加速 LoRA(蒸馏模型包):h3.c 不接受 --lora,加速 = 蒸馏目录(-d)+ 4/8 步 */}
             <div className="group" data-group="lora" data-od-id="settings-lora" hidden={group !== 'lora'}>
               <div className="gh">
-                <b>🚀 加速 LoRA</b>
+                <b>{t('🚀 加速 LoRA')}</b>
                 <span className="spacer" />
                 <span className="mono mut" style={{ fontSize: 11 }}>
-                  蒸馏模型包 · h3.c -d 加速目录(非 .safetensors)
+                  {t('蒸馏模型包 · h3.c -d 加速目录(非 .safetensors)')}
                 </span>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>蒸馏模型包管理</b>
+                  <b>{t('蒸馏模型包管理')}</b>
                   <div className="sub">
-                    镜头开启「加速 LoRA」时 -d 换用所选包目录 + 4/8 步 · 默认包在镜头未选包时兜底(手册 §8)
+                    {t('镜头开启「加速 LoRA」时 -d 换用所选包目录 + 4/8 步 · 默认包在镜头未选包时兜底(手册 §8)')}
                   </div>
                 </div>
                 <span className="badge ok">
-                  {accelPacks.filter((p) => p.exists).length}/{accelPacks.length} 就绪
+                  {t('{a}/{b} 就绪', { a: accelPacks.filter((p) => p.exists).length, b: accelPacks.length })}
                 </span>
               </div>
               {accelPacks.length === 0 ? (
                 <div className="srow">
-                  <div className="grow mut">还没有模型包 · 在下方安装(如手册 §1.2 的 MiniMax-H3-turbo-T8test 目录)</div>
+                  <div className="grow mut">{t('还没有模型包 · 在下方安装(如手册 §1.2 的 MiniMax-H3-turbo-T8test 目录)')}</div>
                 </div>
               ) : (
                 accelPacks.map((p) => (
@@ -2064,34 +2070,34 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     <div className="grow">
                       <b>
                         {p.name}
-                        {p.default ? ' · 默认' : ''}
+                        {p.default ? t(' · 默认') : ''}
                       </b>
                       <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                        {p.path} · 推荐 {p.steps ?? 8} 步
+                        {p.path} · {t('推荐 {n} 步', { n: p.steps ?? 8 })}
                       </div>
                     </div>
                     {p.exists ? (
-                      <span className="badge ok">就绪</span>
+                      <span className="badge ok">{t('就绪')}</span>
                     ) : (
-                      <span className="badge err">目录缺失</span>
+                      <span className="badge err">{t('目录缺失')}</span>
                     )}
                     {!p.default && (
                       <button className="btn btn-s btn-sm" onClick={() => setDefaultAccel(p.id)}>
-                        设默认
+                        {t('设默认')}
                       </button>
                     )}
                     <button className="btn btn-s btn-sm" onClick={() => removeAccel(p.id)}>
-                      删除
+                      {t('删除')}
                     </button>
                   </div>
                 ))
               )}
               <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-                <b>安装模型包</b>
+                <b>{t('安装模型包')}</b>
                 <div className="row g8" style={{ flexWrap: 'wrap' }}>
                   <span className="input-w">
                     <input
-                      placeholder="名称,如 MiniMax-H3-turbo-T8test"
+                      placeholder={t('名称,如 MiniMax-H3-turbo-T8test')}
                       value={accelForm.name}
                       onChange={(e) => setAccelForm((f) => ({ ...f, name: e.target.value }))}
                     />
@@ -2104,18 +2110,18 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       onChange={(e) => setAccelForm((f) => ({ ...f, path: e.target.value }))}
                     />
                   </span>
-                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>推荐步数</span>
+                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('推荐步数')}</span>
                   {([4, 8] as const).map((s) => (
                     <span
                       key={s}
                       className={`chip${accelForm.steps === s ? ' on' : ''}`}
                       onClick={() => setAccelForm((f) => ({ ...f, steps: s }))}
                     >
-                      {s} 步
+                      {t('{n} 步', { n: s })}
                     </span>
                   ))}
                   <button className="btn btn-p btn-sm" onClick={installAccel}>
-                    安装
+                    {t('安装')}
                   </button>
                 </div>
                 {accelMsg ? (
@@ -2124,8 +2130,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   </div>
                 ) : (
                   <div className="mut" style={{ fontSize: 11 }}>
-                    目录须存在且含 FL2VA/(turbo 目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora,
-                    此为蒸馏模型包加速(手册 §8)
+                    {t('目录须存在且含 FL2VA/(turbo 目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora, 此为蒸馏模型包加速(手册 §8)')}
                   </div>
                 )}
               </div>

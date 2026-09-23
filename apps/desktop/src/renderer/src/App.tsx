@@ -8,6 +8,7 @@ import SettingsPage from './pages/SettingsPage';
 import OnboardingPage from './pages/OnboardingPage';
 import ProjectsPage from './pages/ProjectsPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import { I18nProvider, translate, type Lang } from './i18n';
 import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
@@ -38,6 +39,8 @@ export interface EngineStatus {
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('home');
+  /* 界面语言(启动时从 settings.json 回填,设置页切换即持久化) */
+  const [lang, setLangState] = useState<Lang>('zh-CN');
   /* 简易导航栈:handleNavigate 压栈,详情页「返回」经 handleBack 出栈回到来源页
      (此前资源管理页写死回画布/凭 projects.length 猜来源,返回目标不对) */
   const navStackRef = useRef<Page[]>([]);
@@ -53,6 +56,18 @@ export default function App() {
   useEffect(() => {
     loadProjects();
     loadEngineStatus();
+    window.bigbotart
+      .getSettings()
+      .then((s) => {
+        if (s.language) setLangState(s.language);
+      })
+      .catch((e) => console.error('读取语言设置失败', e));
+  }, []);
+
+  /** 切换界面语言(立即生效 + 持久化到 settings.json) */
+  const setLang = useCallback((l: Lang) => {
+    setLangState(l);
+    window.bigbotart.setSettings({ language: l }).catch((e) => console.error('保存语言设置失败', e));
   }, []);
 
   async function loadProjects() {
@@ -116,7 +131,7 @@ export default function App() {
   }, [projectId]);
 
   /** 来源页文案(返回按钮标签);导航栈只在事件里改,渲染期读取最新值即可 */
-  const backLabel = PAGE_LABEL[navStackRef.current[navStackRef.current.length - 1] ?? 'home'];
+  const backLabel = translate(lang, PAGE_LABEL[navStackRef.current[navStackRef.current.length - 1] ?? 'home']);
 
   const handleGenerate = async (brief: string) => {
     try {
@@ -260,6 +275,7 @@ export default function App() {
   }, [projectId]);
 
   return (
+    <I18nProvider lang={lang} setLang={setLang}>
     <>
       {currentPage === 'home' && (
         <ErrorBoundary name="首页">
@@ -342,5 +358,6 @@ export default function App() {
         </ErrorBoundary>
       )}
     </>
+    </I18nProvider>
   );
 }

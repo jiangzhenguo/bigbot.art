@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { baseStyles, btnStyles, cardStyles, colors, spacing, textSizes } from '../styles/design';
 import { usePrompt } from '../components/usePrompt';
+import { useT } from '../i18n';
 
 interface Project {
   id: string;
@@ -22,6 +23,7 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
   const [showNewModal, setShowNewModal] = useState(false);
   const [newName, setNewName] = useState('');
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
+  const t = useT();
 
   const filteredProjects = projects.filter((p) =>
     p.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -35,14 +37,14 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
   };
 
   const handleRename = async (id: string, currentName: string) => {
-    const newName = await askPrompt({ title: '重命名项目', initial: currentName });
+    const newName = await askPrompt({ title: t('重命名项目'), initial: currentName });
     if (newName && newName !== currentName) {
       onRenameProject(id, newName);
     }
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (confirm(`确定删除项目「${name}」吗?此操作不可恢复。`)) {
+    if (confirm(t('确定删除项目「{name}」吗?此操作不可恢复。', { name }))) {
       onDeleteProject(id);
     }
   };
@@ -58,12 +60,12 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
       {/* 顶栏 */}
       <div style={{ height: '52px', flexShrink: 0, borderBottom: `1px solid ${colors.borderSoft}`, display: 'flex', alignItems: 'center', gap: spacing[3], padding: `0 ${spacing[5]}`, background: colors.surfaceWarm }}>
         <button onClick={() => onNavigate('home')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: textSizes.sm, color: colors.fg2, display: 'flex', alignItems: 'center', gap: spacing[1] }}>
-          ← 返回首页
+          {t('← 返回首页')}
         </button>
-        <span style={{ fontFamily: '"SF Pro Display", sans-serif', fontSize: textSizes.base, fontWeight: 600 }}>项目管理</span>
+        <span style={{ fontFamily: '"SF Pro Display", sans-serif', fontSize: textSizes.base, fontWeight: 600 }}>{t('项目管理')}</span>
         <div style={{ marginLeft: 'auto' }}>
           <button onClick={() => setShowNewModal(true)} style={{ ...btnStyles.base, ...btnStyles.primary }}>
-            新建项目
+            {t('新建项目')}
           </button>
         </div>
       </div>
@@ -73,12 +75,12 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
         <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
           {/* 页头 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: spacing[4], marginBottom: spacing[8] }}>
-            <h1 style={{ fontFamily: '"SF Pro Display", sans-serif', fontSize: textSizes.xl, fontWeight: 600, margin: 0 }}>所有项目</h1>
+            <h1 style={{ fontFamily: '"SF Pro Display", sans-serif', fontSize: textSizes.xl, fontWeight: 600, margin: 0 }}>{t('所有项目')}</h1>
             <div style={{ display: 'flex', alignItems: 'center', gap: spacing[2], padding: `${spacing[2]} ${spacing[3]}`, background: colors.surfaceWarm, border: `1px solid ${colors.border}`, borderRadius: '12px', width: '280px' }}>
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索项目名称…"
+                placeholder={t('搜索项目名称…')}
                 style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: textSizes.sm }}
               />
             </div>
@@ -87,9 +89,9 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
           {/* 项目网格 */}
           {filteredProjects.length === 0 ? (
             <div style={{ textAlign: 'center', padding: `${spacing[12]} ${spacing[5]}`, color: colors.muted }}>
-              <h2 style={{ fontSize: textSizes.lg, fontWeight: 600, color: colors.fg, margin: `${spacing[4]} 0 ${spacing[2]}` }}>还没有项目</h2>
-              <p style={{ fontSize: textSizes.sm, margin: `0 0 ${spacing[5]}` }}>创建你的第一个项目,开始创作</p>
-              <button onClick={() => setShowNewModal(true)} style={{ ...btnStyles.base, ...btnStyles.primary }}>新建项目</button>
+              <h2 style={{ fontSize: textSizes.lg, fontWeight: 600, color: colors.fg, margin: `${spacing[4]} 0 ${spacing[2]}` }}>{t('还没有项目')}</h2>
+              <p style={{ fontSize: textSizes.sm, margin: `0 0 ${spacing[5]}` }}>{t('创建你的第一个项目,开始创作')}</p>
+              <button onClick={() => setShowNewModal(true)} style={{ ...btnStyles.base, ...btnStyles.primary }}>{t('新建项目')}</button>
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: spacing[4], marginTop: spacing[2] }}>
@@ -106,9 +108,9 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: spacing[2], marginTop: 'auto', paddingTop: spacing[2], borderTop: `1px solid ${colors.borderSoft}` }}>
-                    <button onClick={(e) => { e.stopPropagation(); onSelectProject(p.id); }} style={{ ...btnStyles.base, ...btnStyles.secondary, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>打开</button>
-                    <button onClick={(e) => { e.stopPropagation(); handleRename(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>重命名</button>
-                    <button onClick={(e) => { e.stopPropagation(); handleDelete(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.danger, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>删除</button>
+                    <button onClick={(e) => { e.stopPropagation(); onSelectProject(p.id); }} style={{ ...btnStyles.base, ...btnStyles.secondary, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('打开')}</button>
+                    <button onClick={(e) => { e.stopPropagation(); handleRename(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('重命名')}</button>
+                    <button onClick={(e) => { e.stopPropagation(); handleDelete(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.danger, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('删除')}</button>
                   </div>
                 </div>
               ))}
@@ -122,23 +124,23 @@ export default function ProjectsPage({ onNavigate, projects, onSelectProject, on
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.4)', display: 'grid', placeItems: 'center', zIndex: 100 }}>
           <div style={{ background: colors.bg, border: `1px solid ${colors.border}`, borderRadius: '16px', boxShadow: '0 24px 70px rgba(0,0,0,.16)', width: '480px', maxWidth: '90vw', padding: spacing[6] }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: spacing[3], marginBottom: spacing[4] }}>
-              <h2 style={{ fontSize: textSizes.base, fontWeight: 600, margin: 0 }}>新建项目</h2>
+              <h2 style={{ fontSize: textSizes.base, fontWeight: 600, margin: 0 }}>{t('新建项目')}</h2>
               <button onClick={() => setShowNewModal(false)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px', color: colors.muted }}>×</button>
             </div>
             <div style={{ marginBottom: spacing[5] }}>
-              <label style={{ display: 'block', fontSize: textSizes.sm, fontWeight: 500, marginBottom: spacing[2], color: colors.fg }}>项目名称</label>
+              <label style={{ display: 'block', fontSize: textSizes.sm, fontWeight: 500, marginBottom: spacing[2], color: colors.fg }}>{t('项目名称')}</label>
               <input
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                placeholder="输入项目名称,如:草原之河 · 短剧"
+                placeholder={t('输入项目名称,如:草原之河 · 短剧')}
                 style={{ width: '100%', padding: `${spacing[2]} ${spacing[3]}`, border: `1px solid ${colors.border}`, borderRadius: '12px', fontSize: textSizes.sm, background: colors.surfaceWarm }}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleNewProject(); }}
                 autoFocus
               />
             </div>
             <div style={{ display: 'flex', gap: spacing[2], justifyContent: 'flex-end' }}>
-              <button onClick={() => setShowNewModal(false)} style={{ ...btnStyles.base, ...btnStyles.ghost }}>取消</button>
-              <button onClick={handleNewProject} style={{ ...btnStyles.base, ...btnStyles.primary }}>创建</button>
+              <button onClick={() => setShowNewModal(false)} style={{ ...btnStyles.base, ...btnStyles.ghost }}>{t('取消')}</button>
+              <button onClick={handleNewProject} style={{ ...btnStyles.base, ...btnStyles.primary }}>{t('创建')}</button>
             </div>
           </div>
         </div>

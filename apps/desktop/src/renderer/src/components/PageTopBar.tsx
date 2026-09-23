@@ -10,6 +10,7 @@
  * 只统一结构与返回交互,不自带样式。
  */
 import React from 'react';
+import { useT } from '../i18n';
 
 interface PageTopBarProps {
   /** 返回按钮文案(返回目标名),如「画布」「首页」 */
@@ -25,9 +26,10 @@ interface PageTopBarProps {
 }
 
 export default function PageTopBar({ backLabel, onBack, crumb, odId, children }: PageTopBarProps) {
+  const t = useT();
   return (
     <header className="topbar" data-od-id={`${odId}-toolbar`}>
-      <button className="btn btn-g btn-sm" data-od-id={`${odId}-back`} title={`返回${backLabel}`} onClick={onBack}>
+      <button className="btn btn-g btn-sm" data-od-id={`${odId}-back`} title={t('返回{label}', { label: backLabel })} onClick={onBack}>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
           <path d="m14 6-6 6 6 6" />
         </svg>
