@@ -125,15 +125,40 @@ describe('submit · edit(编辑四模式)', () => {
     expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
   });
 
-  it('img2img:imageStrength 在 (0,1] 时拼 --image-strength(0 不传)', async () => {
+  it('img2img:--image-strength 必填(latent 路由缺省报错),未设/0/越界回退 0.5,合法值透传', async () => {
     const p = makeProvider();
     await p.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png', imageStrength: 0.45 }));
-    const cmd = lastCmd(p);
-    expect(cmd).toContain('--image-strength');
+    let cmd = lastCmd(p);
     expect(cmd[cmd.indexOf('--image-strength') + 1]).toBe('0.45');
+    // 未设置 → 默认 0.5(实测:latent 模式不带 --image-strength 会 exit 2 "is required")
     const p0 = makeProvider();
     await p0.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png', imageStrength: 0 }));
-    expect(lastCmd(p0)).not.toContain('--image-strength');
+    cmd = lastCmd(p0);
+    expect(cmd[cmd.indexOf('--image-strength') + 1]).toBe('0.50');
+    const pUndef = makeProvider();
+    await pUndef.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png' }));
+    cmd = lastCmd(pUndef);
+    expect(cmd[cmd.indexOf('--image-strength') + 1]).toBe('0.50');
+  });
+
+  it('img2img + Qwen Image Edit 模型:提交前拒绝(mlxgen exit 2 防呆),提示换 Z-Image Turbo', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png', model: 'mlx-community/Qwen-Image-Edit-8bit' })),
+    ).rejects.toThrow(/latent I2I.*z-image-turbo/s);
+    // instruction 模式不受影响(Qwen Edit 的主场)
+    const p2 = makeProvider();
+    await expect(
+      p2.submit(req('instruction', { prompt: '换背景', inputPath: '/tmp/in.png', model: 'mlx-community/Qwen-Image-Edit-8bit' })),
+    ).resolves.toBeTruthy();
+  });
+
+  it('短别名 qwen-image-edit 归一化为 8bit 社区仓库(全量 57.7GB 未下载会 exit 1),并补 --base-model', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { prompt: '换背景', inputPath: '/tmp/in.png', model: 'qwen-image-edit' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe('mlx-community/Qwen-Image-Edit-8bit');
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('Qwen/Qwen-Image-Edit');
   });
 
   it('inpaint:额外带 --mask-path', async () => {

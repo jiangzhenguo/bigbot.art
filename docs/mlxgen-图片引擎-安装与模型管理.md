@@ -102,7 +102,7 @@ mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwe
 |---|---|---|---|
 | `image-gen` | Text→Image,多 seed 批量 | ✅ 命令构造完整(generate) | 默认 `z-image-turbo-8bit` |
 | `image-edit` `instruction` | 指令编辑 | 🟠 命令薄映射 | 只拼 `--image-path + --prompt + --output`;真实 CLI 参数(如 mask/强度)待模型就绪后按 `mlxgen edit --help` 校准 |
-| `image-edit` `img2img` | latent I2I | 🟠 命令薄映射 | 无 denoise/强度参数,与 instruction 同命令 |
+| `image-edit` `img2img` | latent I2I | ✅ 真实 CLI 已校准(2026-09 实测) | `--i2i-mode latent` + `--image-strength`;**模型须为 Z-Image Turbo**——Qwen Image Edit 无 latent I2I 能力(mlxgen exit 2),Provider 提交前防呆拦截并提示换模型 |
 | `image-edit` `inpaint` | 遮罩编辑 | 🟠 支持 `--mask-path` | 需 `maskAssetId` → mask 路径桥接 |
 | `image-edit` `outpaint` | 扩图 | 🟠 命令薄映射 | `outpaintSides` 已定义未透传 |
 | `image-upscale` | 超分修复 | ✅ 命令构造完整(upscale) | `--resolution 2x/4x` |
@@ -120,6 +120,9 @@ mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwe
 | 探测 `ready=false` 但 CLI 在 | `--help` 执行失败(版本不兼容) | `mlxgen --help` 手动看报错;`uv tool install --upgrade mlx-gen` |
 | 提交成功但产物不存在(dry-run) | 未关 dry-run 或 demo 模式 | 设置「真实推理」+ `BIGBOTART_DRYRUN=0` |
 | 真实推理 `exit != 0` | 模型未下载 / 显存不足 | `mlxgen download --model <id>`;关视频槽位任务后重试 |
+| `exit 1: mlxgen download --model Qwen/Qwen-Image-Edit`(DownloadRequired) | 模型字段用了短别名 `qwen-image-edit`,被解析成全量 57.7GB 仓库(未下载) | Provider 已把短别名归一化为 `mlx-community/Qwen-Image-Edit-8bit`;新节点默认即为 8bit 仓库。⚠️ 不要在 64GB 机器下载全量版 |
+| `exit 2: --image-strength is required for latent image-to-image mode` | img2img(latent)模式必填强度参数,未设置时旧版 Provider 漏传 | 已修复:未设置/越界自动回退 0.5;检查器滑块可调 |
+| `exit 2: Qwen Image Edit does not support latent image-to-image` | img2img 模式配了 Qwen Edit 模型(无 latent I2I) | 检查器把模型改为 `AbstractFramework/z-image-turbo-8bit`,或改用指令编辑模式(Provider 已前置拦截此组合) |
 | 图片编辑命令行为与模式不符 | 骨架期薄映射(§6) | 暂以手动指定模型兜底;后续按真实 CLI 校准 |
 | 图片槽位一直排队 | 与视频任务互斥 | 等视频任务完成(FIFO) |
 

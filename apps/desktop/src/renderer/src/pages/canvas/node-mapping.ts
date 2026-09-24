@@ -55,11 +55,17 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
         seeds: [42],
       };
     case 'image-edit':
-      return { engine: 'mlxgen', model: 'qwen-image-edit', prompt: '', mode: 'instruction' };
+      // 默认 8bit 量化仓库(短别名 'qwen-image-edit' 会被 mlxgen 解析成全量 57.7GB 仓库 → 未下载 exit 1;
+      // Provider 侧 MODEL_ALIASES 也为存量节点兜底归一化)
+      return { engine: 'mlxgen', model: 'mlx-community/Qwen-Image-Edit-8bit', prompt: '', mode: 'instruction' };
     case 'image-upscale':
       return { model: 'AbstractFramework/seedvr2-3b-8bit', scale: 2 };
     case 'image-crop':
       return { aspect: '9:16', focus: 'center' };
+    case 'image-stitch':
+      return { mode: 'column', gridCols: 3, gap: 0, bg: 'white' };
+    case 'image-split':
+      return { mode: 'grid', gridCols: 3, gridRows: 3, count: 3 };
     case 'shot':
       return {
         engine: 'h3c',

@@ -101,11 +101,21 @@ export class MlXGenProvider implements Provider {
     'mlx-community/Qwen-Image-Edit-8bit': 'Qwen/Qwen-Image-Edit',
   };
 
+  /**
+   * mlxgen 短别名 → 本机可用量化仓库(实测 2026-09:短别名 `qwen-image-edit` 被 CLI 解析为
+   * 全量 `Qwen/Qwen-Image-Edit` 57.7GB,64GB 内存跑不动且未下载 → exit 1 DownloadRequiredError;
+   * 归一化到 8bit 社区仓库,BASE_MODEL_HINTS 再补路由提示)
+   */
+  private static readonly MODEL_ALIASES: Record<string, string> = {
+    'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
+  };
+
   async submit(req: RenderRequest): Promise<RenderJobHandle> {
     if (req.slot !== 'image') throw new Error('mlxgen 仅支持图片任务');
     const p = req.params as Record<string, unknown>;
     const kind = (p.kind as string) ?? 'generate';
-    const model = String(p.model ?? 'AbstractFramework/z-image-turbo-8bit');
+    const rawModel = String(p.model ?? 'AbstractFramework/z-image-turbo-8bit');
+    const model = MlXGenProvider.MODEL_ALIASES[rawModel] ?? rawModel;
     const taskId = `mlxgen-${kind}-${Date.now()}`;
     const outBase = `${this.outDir}/${req.nodeId}_${taskId}`;
 
@@ -144,10 +154,21 @@ export class MlXGenProvider implements Provider {
       // edit:instruction / img2img / inpaint / outpaint(统一走 mlxgen generate 路由)
       if (p.inputPath) cmd.push('--image-path', String(p.inputPath));
       if (kind === 'img2img') {
+        // 实测防呆(2026-09 真实跑):Qwen Image Edit 无 latent I2I 能力,
+        // mlxgen 直接 exit 2("Qwen Image Edit does not support latent image-to-image generation");
+        // 图生图须用 Z-Image Turbo(capabilities:z-image.latent / latent-img2img,本机已验证)
+        if (model in MlXGenProvider.BASE_MODEL_HINTS || /qwen.*image.*edit/i.test(model)) {
+          throw new Error(
+            `图生图(img2img)模式不支持模型 ${model}(Qwen Image Edit 无 latent I2I 能力);` +
+              '请在检查器把模型改为 AbstractFramework/z-image-turbo-8bit,或改用「指令编辑」模式',
+          );
+        }
         cmd.push('--i2i-mode', 'latent');
-        // 图像强度(0-1):CLI 要求 (0,1] 区间内数值,0 视为未设置不传
+        // 图像强度(0-1):实测 latent 路由 **--image-strength 必填**(exit 2: is required for
+        // latent image-to-image mode);未设置/越界时回退 0.5(与检查器默认值一致),不省略该参数
         const st = Number(p.imageStrength);
-        if (Number.isFinite(st) && st > 0 && st <= 1) cmd.push('--image-strength', st.toFixed(2));
+        const strength = Number.isFinite(st) && st > 0 && st <= 1 ? st : 0.5;
+        cmd.push('--image-strength', strength.toFixed(2));
       }
       if (kind === 'inpaint' && p.maskPath) cmd.push('--mask-path', String(p.maskPath));
       if (kind === 'outpaint') {
