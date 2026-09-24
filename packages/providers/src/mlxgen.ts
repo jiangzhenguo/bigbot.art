@@ -47,6 +47,8 @@ export class MlXGenProvider implements Provider {
   private outPaths = new Map<string, string>();
   /** 失败诊断:taskId → 累计 stderr 尾部 */
   private stderrs = new Map<string, string>();
+  /** 实时进度:taskId → 最近一次 --json-events 运行时事件(stdout JSONL,2026-09 实测各路由均支持) */
+  private events = new Map<string, MlxgenEvent>();
 
   constructor(opts: MlXGenProviderOptions = {}) {
     this.bin = opts.bin ?? MLXGEN_DEFAULTS.bin;
@@ -126,7 +128,7 @@ export class MlXGenProvider implements Provider {
     // - edit 的 img2img 需 `--i2i-mode latent`(否则被路由成指令编辑);outpaint 需 `--outpaint-padding`
     // - 自定义量化仓库需 `--base-model` 提示(实测:mlx-community/Qwen-Image-Edit-8bit 不给提示会被
     //   误路由成 qwen.generate 文生图,给了才走 qwen.edit 编辑 handler)
-    const cmd = ['generate', '--model', model, '--prompt', String(p.prompt ?? '')];
+    const cmd = ['generate', '--model', model, '--prompt', String(p.prompt ?? ''), '--json-events'];
     const baseHint = MlXGenProvider.BASE_MODEL_HINTS[model];
     if (baseHint) cmd.push('--base-model', baseHint);
     const seeds = normalizeSeeds(p.seeds);
@@ -192,6 +194,23 @@ export class MlXGenProvider implements Provider {
         errAcc.push(d.toString());
         this.stderrs.set(taskId, errAcc.join('').slice(-1600));
       });
+      // --json-events:stdout 逐行 JSON(phase/step/total_steps/progress),解析成实时进度
+      let buf = '';
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('{')) continue;
+          try {
+            const ev = JSON.parse(t) as MlxgenEvent;
+            if (ev && typeof ev === 'object') this.events.set(taskId, ev);
+          } catch {
+            /* 非 JSON 行忽略 */
+          }
+        }
+      });
       this.running.set(taskId, child);
     }
     return { providerTaskId: taskId };
@@ -209,7 +228,8 @@ export class MlXGenProvider implements Provider {
       const errTail = (this.stderrs.get(handle.providerTaskId) ?? '').split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 300);
       return { status: 'FAILED', error: `mlxgen exit ${child.exitCode}: ${errTail || '见日志'}` };
     }
-    return { status: 'RUNNING', progress: undefined, stage: 'mlxgen 推理中' };
+    const ev = this.events.get(handle.providerTaskId);
+    return { status: 'RUNNING', progress: ev?.progress, stage: ev ? mlxgenStage(ev) : 'mlxgen 推理中' };
   }
 
   async cancel(handle: RenderJobHandle): Promise<void> {
@@ -217,6 +237,28 @@ export class MlXGenProvider implements Provider {
     if (child) child.kill('SIGTERM');
     this.running.delete(handle.providerTaskId);
   }
+}
+
+/** mlxgen --json-events 的运行时事件(stdout JSONL) */
+interface MlxgenEvent {
+  phase?: string;
+  step?: number;
+  total_steps?: number;
+  progress?: number;
+}
+
+/** phase → 中文阶段名(未知阶段原样透传),有步数时附「当前/总步数」 */
+const MLXGEN_PHASE_LABELS: Record<string, string> = {
+  start: '初始化/加载模型',
+  denoise: '去噪',
+  generated: '解码出图',
+  save: '保存产物',
+  complete: '完成',
+};
+
+function mlxgenStage(ev: MlxgenEvent): string {
+  const label = MLXGEN_PHASE_LABELS[ev.phase ?? ''] ?? (ev.phase || 'mlxgen 推理中');
+  return ev.step != null && ev.total_steps ? `${label} ${ev.step}/${ev.total_steps}` : label;
 }
 
 /** 归一化 seeds:数组成员 / 单整数 / 逗号或空格分隔字符串 → number[] */

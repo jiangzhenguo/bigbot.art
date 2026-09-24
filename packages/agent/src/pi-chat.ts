@@ -28,9 +28,13 @@ const MAX_TOOL_ROUNDS = 20;
 /**
  * 敏感操作强制确认闸(结构兜底,与 memory.ts 的提问规则对应)。
  * 模型不守 prompt、用纯文本提问/直接执行时,由这里拦截:不执行,改发 ask.user 确认卡。
- * 用户点选确认后,下一轮 chat 凭选项文本授权放行。
+ * 用户点选确认后,授权签名粘滞(approvedSensitive),同操作本会话内不再二次拦截。
+ *
+ * ⚠️ 只拦「不可逆」操作:canvas.delete_node(Agent 侧删除不经过渲染层撤销栈,不可恢复)。
+ * engine.submit / storyboard.materialize / timeline.export / create / connect 等均可回退或有产物留档,
+ * 一律不拦——确认卡太多会把对话卡死在「确认 → 再确认」循环里(真实事故)。
  */
-const SENSITIVE_TOOLS = new Set(['canvas.delete_node', 'storyboard.materialize', 'timeline.export', 'engine.submit']);
+const SENSITIVE_TOOLS = new Set(['canvas.delete_node']);
 /** 否定/取消类选项(用户选了这些 = 未授权) */
 const NEGATIVE_RE = /不|取消|算了|想想|保持|别/;
 
@@ -123,9 +127,23 @@ export class PiChatSession {
   private abort: AbortController | null = null;
   private toolCallSeq = 0;
   /** 确认闸:挂起的敏感操作确认(用户点选后,下一轮 chat 用选项文本放行) */
-  private pendingConfirm: { options: string[] } | null = null;
+  private pendingConfirm: { options: string[]; calls: Array<{ name: string; args: Record<string, unknown> }> } | null = null;
+  /** 已授权的敏感操作签名(name+args):用户点过「确认执行」后,同一操作本会话内不再二次拦截。
+   *  真实事故:授权只放行一轮,模型若在该轮复述确认问题而未重发工具调用,授权即失效,
+   *  之后每次 engine.submit 都被确认闸拦回,陷入「确认执行 → 再确认」死循环。 */
+  private approvedSensitive = new Set<string>();
+  /** 上一次暂停待答的问题文本(确认闸/模型自己的 ask.user 都记录)。
+   *  真实事故:确认卡「确认继续吗?」作为 assistant 消息留在上下文里,模型下一轮不复读工具调用
+   *  而是复述同一个确认问题——用户点「确认执行」它再问一遍,永不执行(engine.submit 死循环)。
+   *  判定:模型再发 ask.user 且问题与上次逐字相同 → 驳回并督促执行,不再暂停。 */
+  private lastAskQuestion: string | null = null;
   /** worker → 主进程的工具调用回调(由 worker.ts 注入) */
   onToolCall: ((req: ToolCallRequest) => Promise<ToolCallResponse>) | null = null;
+
+  /** 敏感操作签名:同名同参视为同一操作(重跑同节点同参数 = 用户已授权过的动作) */
+  private static sensitiveSig(name: string, args: Record<string, unknown>): string {
+    return `${name}:${JSON.stringify(args)}`;
+  }
 
   /** 中止当前对话(真实打断) */
   cancel(): void {
@@ -161,8 +179,15 @@ export class PiChatSession {
       const picked = this.pendingConfirm.options.find((o) => o === params.text.trim());
       if (picked && !NEGATIVE_RE.test(picked)) {
         sensitiveApproved = true;
-        // 给模型一个明确授权信号,防止它再追问一轮
-        userText = `${params.text}\n\n(系统:用户已在确认卡片中授权本次操作,请直接执行对应工具,不要再追问)`;
+        // 授权粘滞:这批操作的签名记入 approvedSensitive,之后同操作不再二次拦截
+        for (const c of this.pendingConfirm.calls) {
+          this.approvedSensitive.add(PiChatSession.sensitiveSig(c.name, c.args));
+        }
+        // 给模型明确授权信号 + 要执行的确切工具调用(只写「请直接执行」太泛,模型会复述确认问题再绕回确认闸)
+        const callLines = this.pendingConfirm.calls
+          .map((c) => `- ${c.name}(${JSON.stringify(c.args)})`)
+          .join('\n');
+        userText = `${params.text}\n\n(系统:用户已在确认卡片中授权,请立即逐条执行以下工具调用,不要再提问、不要再确认:\n${callLines})`;
       }
       this.pendingConfirm = null;
     }
@@ -239,6 +264,7 @@ export class PiChatSession {
 
       // 收集本轮 toolCalls 并执行
       const calls = blocks.filter((c): c is ToolCall => c.type === 'toolCall');
+      console.error(`[pi-chat] round=${round} calls=${calls.map((c) => c.name).join(',') || '(none)'}`);
 
       // 结构化提问拦截:ask.user → 暂停本轮,返回 {ask},等待用户在确认卡片选择后继续
       const askCall = calls.find((c) => c.name === 'ask.user');
@@ -247,6 +273,26 @@ export class PiChatSession {
         const question = String(args.question ?? '').trim() || '需要你确认一下';
         const options = normalizeAskOptions(args.options);
         if (options.length >= 2 && !signal.aborted) {
+          // 逐字比对前先做空白归一化:模型复述确认问题时常有换行/空格微差
+          const norm = (s: string) => s.replace(/\s+/g, '');
+          if (this.lastAskQuestion && norm(this.lastAskQuestion) === norm(question)) {
+            // 同一问题逐字重复(确认死循环特征)→ 不暂停:驳回这次提问,督促直接执行
+            const approved = [...this.approvedSensitive];
+            const nudge =
+              '(系统)该问题用户刚刚已经回答过,禁止就同一事项重复提问/二次确认。' +
+              (approved.length ? `已授权的操作:${approved.join('; ')}——请立即执行。` : '请直接执行相应工具,或给出最终回复。');
+            messages.push(assistant);
+            messages.push({
+              role: 'toolResult' as const,
+              toolCallId: askCall.id,
+              toolName: 'ask.user',
+              content: [{ type: 'text' as const, text: nudge }],
+              isError: true,
+              timestamp: Date.now(),
+            } as never);
+            continue;
+          }
+          this.lastAskQuestion = question;
           const ask = { question, options };
           // 提问本身也作为一次"用户可见回复",便于渲染层只渲染卡片即可
           return { reply: question, thinking: collectThinking(), toolCalls, ask };
@@ -268,14 +314,25 @@ export class PiChatSession {
 
       // 敏感操作确认闸(结构兜底):未授权时一个都不执行,改发 ask.user 确认卡
       // —— 防模型绕过 prompt 直接 delete/materialize/export/submit
-      const sensitiveCalls = calls.filter((c) => SENSITIVE_TOOLS.has(c.name));
+      // 已授权过的签名(用户点过「确认执行」的同 name+args 操作)直接放行,不再二次拦截
+      const sensitiveCalls = calls.filter(
+        (c) =>
+          SENSITIVE_TOOLS.has(c.name) &&
+          !this.approvedSensitive.has(
+            PiChatSession.sensitiveSig(c.name, (c.arguments ?? {}) as Record<string, unknown>),
+          ),
+      );
       if (sensitiveCalls.length > 0 && !sensitiveApproved && !signal.aborted) {
         const lines = sensitiveCalls.slice(0, 5).map((c) => describeAction(c.name, (c.arguments ?? {}) as Record<string, unknown>));
         const more = sensitiveCalls.length > 5 ? `\n- … 共 ${sensitiveCalls.length} 项` : '';
         const question = `即将执行 ${sensitiveCalls.length} 项不可轻易撤销的操作:${lines.map((l) => `\n- ${l}`).join('')}${more}\n\n确认继续吗?`;
         const confirmLabel = '确认执行';
         const cancelLabel = '先不执行';
-        this.pendingConfirm = { options: [confirmLabel, cancelLabel] };
+        this.pendingConfirm = {
+          options: [confirmLabel, cancelLabel],
+          calls: sensitiveCalls.map((c) => ({ name: c.name, args: (c.arguments ?? {}) as Record<string, unknown> })),
+        };
+        this.lastAskQuestion = question; // 确认卡问题也记入:模型复述它时按重复提问驳回
         const ask = {
           question,
           options: [

@@ -41,6 +41,20 @@ describe('submit · generate(文生图)', () => {
     expect(cmd[cmd.indexOf('--output') + 1]!).toMatch(/\.png$/);
   });
 
+  it('命令带 --json-events(真实跑时 stdout 输出 JSONL 进度事件,Provider 解析供 status() 上报)', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: '晨雾森林' }));
+    expect(lastCmd(p)).toContain('--json-events');
+  });
+
+  it('upscale / edit 路由同样带 --json-events', async () => {
+    const p = makeProvider();
+    await p.submit(req('upscale', { inputPath: '/tmp/a.png', scale: '2x' }));
+    expect(lastCmd(p)).toContain('--json-events');
+    await p.submit(req('instruction', { prompt: '改站姿', inputPath: '/tmp/a.png' }));
+    expect(lastCmd(p)).toContain('--json-events');
+  });
+
   it('多 seed 批量:--seed 展开为独立参数(单 token 会被后端 int 解析拒绝)', async () => {
     const p = makeProvider();
     await p.submit(req('generate', { seeds: [1, 2, 3] }));

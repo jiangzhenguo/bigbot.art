@@ -507,9 +507,11 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .attach .x{color:var(--muted);display:inline-flex;padding:2px;border-radius:4px}
 .pg-canvas .attach .x:hover{color:var(--fg);background:color-mix(in oklab,var(--fg) 8%,transparent)}
 .pg-canvas .attach .x svg{width:10px;height:10px}
-.pg-canvas .input-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:8px 11px 9px;display:flex;flex-direction:column;gap:7px;transition:border-color var(--motion-fast)}
+.pg-canvas .input-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:4px;display:flex;flex-direction:column;gap:7px;transition:border-color var(--motion-fast)}
 .pg-canvas .input-box:focus-within{border-color:var(--meta)}
 .pg-canvas .input-box textarea{font-size:var(--text-sm);line-height:1.55;min-height:50px;max-height:120px}
+/* 输入框聚焦环:比全局 --focus-ring 窄(2px),配合 input-box 等距 padding,蓝框到黑边四边距离一致 */
+.pg-canvas .input-box textarea:focus-visible{box-shadow:0 0 0 2px color-mix(in oklab,var(--accent),transparent 55%)}
 .pg-canvas .skill-tag{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;max-width:100%;padding:3px 6px 3px 8px;background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-pill);font-size:11px;line-height:1.4;color:var(--fg-2)}
 .pg-canvas .skill-tag>svg{width:11px;height:11px;color:var(--muted);flex:none}
 .pg-canvas .skill-tag .x{color:var(--muted);display:inline-flex;padding:2px;border-radius:4px}
