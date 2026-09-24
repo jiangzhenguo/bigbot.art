@@ -81,6 +81,10 @@ const api: BigBotArtApi = {
   extractFrame: (videoPath, mode) => ipcRenderer.invoke('extract-frame', videoPath, mode),
   cropImage: (input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
     ipcRenderer.invoke('crop-image', input),
+  stitchImages: (input: { paths: string[]; mode: 'row' | 'column' | 'grid'; gridCols?: number; gap?: number; bg?: string }) =>
+    ipcRenderer.invoke('stitch-images', input),
+  splitImage: (input: { path: string; mode: 'rows' | 'cols' | 'grid'; count?: number; gridCols?: number; gridRows?: number }) =>
+    ipcRenderer.invoke('split-image', input),
   revealInFinder: (target: { path: string }) => ipcRenderer.invoke('reveal-in-finder', target),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('set-settings', patch),

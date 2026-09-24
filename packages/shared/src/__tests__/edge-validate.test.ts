@@ -246,3 +246,57 @@ describe('D · 提交前防呆', () => {
     expect(validateEdge(nodes, [], edge('g', 's', 'ref-image')).ok).toBe(true);
   });
 });
+
+describe('A+ · 图片拼接/拆分(image-stitch / image-split)', () => {
+  const stitchNode = (id: string): EdgeNodeMin => ({ id, kind: 'image-stitch', data: {} });
+  const splitNode = (id: string): EdgeNodeMin => ({
+    id,
+    kind: 'image-split',
+    data: { resultPath: '/out/sp-p1.png', pieces: ['/out/sp-p1.png', '/out/sp-p2.png', '/out/sp-p3.png'] },
+  });
+
+  it('图片产物/asset(图)→ image-stitch piece 合法;piece 是多值端口(多条入边不冲突)', () => {
+    const nodes = [imageNode('g'), cropNode('c'), stitchNode('st')];
+    expect(validateEdge(nodes, [], edge('g', 'st', 'piece')).ok).toBe(true);
+    const res = validateEdge(nodes, [edge('g', 'st', 'piece')], edge('c', 'st', 'piece'));
+    expect(res.ok).toBe(true); // 多值端口:第二条 piece 入边不算单值冲突
+  });
+
+  it('shot(视频)→ image-stitch piece 被拒(媒体不匹配:piece 要求图片)', () => {
+    const nodes = [shotNode('s'), stitchNode('st')];
+    expect(validateEdge(nodes, [], edge('s', 'st', 'piece')).ok).toBe(false);
+  });
+
+  it('image-split → edit 的 piece-N 合法(piece-2),越界格式(piece-0/piece-x)被拒', () => {
+    const nodes = [splitNode('sp'), { id: 'e', kind: 'image-edit', data: {} }];
+    expect(validateEdge(nodes, [], edge('sp', 'e', 'piece-2')).ok).toBe(true);
+    expect(validateEdge(nodes, [], edge('sp', 'e', 'piece-0')).ok).toBe(false);
+    expect(validateEdge(nodes, [], edge('sp', 'e', 'piece-x')).ok).toBe(false);
+  });
+
+  it('image-split → image-stitch 可用 piece-N 选片作拼接件', () => {
+    const nodes = [splitNode('sp'), stitchNode('st')];
+    expect(validateEdge(nodes, [], edge('sp', 'st', 'piece-3')).ok).toBe(true);
+    expect(validateEdge(nodes, [], edge('sp', 'st', 'piece')).ok).toBe(true);
+  });
+
+  it('image-stitch/image-split → shot first-frame 合法(产物是图片)', () => {
+    const nodes = [stitchNode('st'), splitNode('sp'), shotNode('s')];
+    expect(validateEdge(nodes, [], edge('st', 's', 'first-frame')).ok).toBe(true);
+    expect(validateEdge(nodes, [], edge('sp', 's', 'first-frame')).ok).toBe(true);
+  });
+
+  it('长名目标 kind 回退短 id:image-gen → image-edit(input)/ image-stitch(piece) 可校验', () => {
+    // CONNECTOR_MAP 目标键是渲染层短 id;画布节点 kind 是长名,TARGET_KIND_ALIAS 兜底
+    const nodes = [imageNode('g'), { id: 'e', kind: 'image-edit', data: {} }, stitchNode('st')];
+    expect(allowedPortLabels(imageNode('g'), 'image-edit')).toContain('input');
+    expect(allowedPortLabels(imageNode('g'), 'image-stitch')).toContain('piece');
+    expect(validateEdge(nodes, [], edge('g', 'e', 'input')).ok).toBe(true);
+    expect(validateEdge(nodes, [], edge('g', 'st', 'piece')).ok).toBe(true);
+  });
+
+  it('image-split 的 allowedPortLabels 追加 piece-N 模板(图片处理目标)', () => {
+    expect(allowedPortLabels(splitNode('sp'), 'image-edit')).toContain('piece-N');
+    expect(allowedPortLabels(splitNode('sp'), 'shot')).not.toContain('piece-N');
+  });
+});

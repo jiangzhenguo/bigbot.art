@@ -33,6 +33,19 @@ export const ICON_CROP = (
     <path d="m15 9-6 6M15 15H9V9" />
   </>
 );
+export const ICON_STITCH = (
+  <>
+    <rect x="2.5" y="7" width="8.5" height="10" rx="1.5" />
+    <rect x="13" y="7" width="8.5" height="10" rx="1.5" />
+    <path d="M11 12h2" />
+  </>
+);
+export const ICON_SPLIT = (
+  <>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M4 12h16M12 4v16" strokeDasharray="3 2" />
+  </>
+);
 export const ICON_SHOT = (
   <>
     <rect x="2.5" y="5" width="19" height="14" rx="2" />
@@ -88,6 +101,8 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   edit: ICON_EDIT,
   upscale: ICON_UPSCALE,
   crop: ICON_CROP,
+  stitch: ICON_STITCH,
+  split: ICON_SPLIT,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   audio: ICON_AUDIO,
@@ -104,6 +119,8 @@ export const TYPE_ICON: Record<string, React.ReactNode> = {
   'image-edit': ICON_EDIT,
   'image-upscale': ICON_UPSCALE,
   'image-crop': ICON_CROP,
+  'image-stitch': ICON_STITCH,
+  'image-split': ICON_SPLIT,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   'audio-ref': ICON_AUDIO,

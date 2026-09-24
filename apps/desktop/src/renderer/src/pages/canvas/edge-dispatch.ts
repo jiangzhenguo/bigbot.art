@@ -38,6 +38,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
   const framePatch = new Map<string, { videoNodeId: string; at: 'first' | 'last' } | null>();
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
+  /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
+  const stitchPatch = new Map<string, Array<{ nodeId: string; x: number; y: number }>>();
   const promptFromPatch = new Map<string, { nodeId: string } | null>();
   /** 镜头画面规格继承(shot → shot):目标节点 → 要写入的规格键值 */
   const specPatch = new Map<string, Record<string, unknown>>();
@@ -146,6 +148,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           'image-edit': 'image',
           'image-upscale': 'image',
           'image-crop': 'image',
+          'image-stitch': 'image',
+          'image-split': 'image',
           'audio-ref': 'audio',
           asset: String(s.mediaType ?? ''),
         };
@@ -237,6 +241,22 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         }
         break;
       }
+      case 'image-split': {
+        // 输入图端口 input(拆分源):静帧产物直通 / 素材引用;无条件登记(幂等)
+        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+          imageFromPatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
+      case 'image-stitch': {
+        // 拼接件端口 piece(多值):静帧产物 / 素材;记录源坐标供排序(横排按 x,竖排/网格按 y)
+        if ((IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') && (e.label ?? '').startsWith('piece')) {
+          const arr = stitchPatch.get(e.to) ?? [];
+          arr.push({ nodeId: e.from, x: src.x, y: src.y });
+          stitchPatch.set(e.to, arr);
+        }
+        break;
+      }
     }
   }
 
@@ -310,10 +330,20 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       else delete data.inputFrameSource;
     }
     // 输入图端口 input(静帧直通 / 素材):与边同步,删除边即撤销
-    if (n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop') {
+    if (n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop' || n.kind === 'image-split') {
       const target = imageFromPatch.get(n.id) ?? null;
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;
+    }
+    // 拼接件端口 piece(多值):按目标 mode 排序(row 按 x,column/grid 按 y;同级再按另一轴),边删除即撤销
+    if (n.kind === 'image-stitch') {
+      const ents = stitchPatch.get(n.id) ?? [];
+      const mode = String(data.mode ?? 'column');
+      const sorted = [...ents].sort((a, b) =>
+        mode === 'row' ? a.x - b.x || a.y - b.y : a.y - b.y || a.x - b.x,
+      );
+      if (sorted.length) data.piecesFrom = sorted.map((e2) => ({ nodeId: e2.nodeId }));
+      else delete data.piecesFrom;
     }
     // 提示词端口 prompt:与边同步(运行期「自身 prompt 为空才用文档全文」)
     if (['image-gen', 'image-edit', 'shot', 'director'].includes(n.kind ?? '')) {

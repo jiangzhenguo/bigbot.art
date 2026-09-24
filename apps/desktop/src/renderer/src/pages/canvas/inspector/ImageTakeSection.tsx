@@ -14,8 +14,8 @@ export interface ImageTakeSectionProps {
   node: CanvasNode;
   projectId: string | null;
   jobs: RenderJob[];
-  /** 切换 Take:把产物写回节点(与 shot 检查器 onSelectTake 同语义) */
-  onSelectTake?: (take: { id: string; attempt: number; status: string; resultPath?: string }) => void;
+  /** 切换 Take:把产物写回节点(与 shot 检查器 onSelectTake 同语义);拆分节点附带 pieces 恢复 */
+  onSelectTake?: (take: { id: string; attempt: number; status: string; resultPath?: string; pieces?: string[] }) => void;
   toastMsg: (msg: string) => void;
 }
 
@@ -58,6 +58,10 @@ export function ImageTakeSection({ node, projectId, jobs, onSelectTake, toastMsg
       attempt: t.attempt,
       status: t.status,
       resultPath: t.resultPath,
+      // image-split 一次运行记一条 Take、params.pieces 存全部切片;切换时一并恢复
+      pieces: Array.isArray((t.params as { pieces?: unknown } | undefined)?.pieces)
+        ? ((t.params as { pieces: unknown[] }).pieces as string[])
+        : undefined,
     });
     toastMsg(`已切换图片 Take ${t.attempt}${t.resultPath ? ' · 预览已更新' : ' · 无产物文件'}`);
   };

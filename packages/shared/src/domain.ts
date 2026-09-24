@@ -12,6 +12,8 @@ export type NodeKind =
   | 'image-edit' // I2I / 指令编辑 / Inpaint / Outpaint
   | 'image-upscale' // 超分修复
   | 'image-crop' // 图片裁切:按目标画幅裁剪原图,供下游节点使用(如 1:1 → 9:16)
+  | 'image-stitch' // 🆕 图片拼接:多张图按横排/竖排/网格拼成一张(纯 ffmpeg,不推理)
+  | 'image-split' // 🆕 图片拆分:一张图等分成多片(长图切片/九宫格切图,纯 ffmpeg)
   | 'shot' // 视频镜头(h3.c)
   | 'director' // 运镜调度小样(占位)
   | 'timeline' // 时间线/剪辑
@@ -128,6 +130,8 @@ export interface NodeDataMap {
   'image-edit': ImageEditParams;
   'image-upscale': { model: string; scale: number };
   'image-crop': ImageCropParams;
+  'image-stitch': ImageStitchParams;
+  'image-split': ImageSplitParams;
   shot: ShotParams;
   director: { prompt: string };
   timeline: TimelineData;
@@ -296,6 +300,41 @@ export interface ImageCropParams {
   inputImageFrom?: { nodeId: string };
   /** 输入图 Asset id(手动绑定,与连线二选一) */
   inputAssetId?: string;
+  /** 🆕 提示词来源追溯(占位,保持结构一致) */
+  promptFrom?: PromptSource;
+}
+
+/** 图片拼接参数(image-stitch 节点:不推理,ffmpeg 把多张图按行/列/网格拼成一张) */
+export interface ImageStitchParams {
+  /** 拼接方式:row=横排 / column=竖排(长图)/ grid=网格(九宫格等) */
+  mode: 'row' | 'column' | 'grid';
+  /** grid 模式列数(行数 = ceil(片数/列数)),默认 3 */
+  gridCols?: number;
+  /** 图片间距 px,默认 0 */
+  gap?: number;
+  /** 间距/留白底色(ffmpeg 色名或 #hex),默认 white */
+  bg?: string;
+  /** 拼接件来源(piece 多值端口连线派生,渲染层按源节点画布位置排序写入:横排按 x、竖排/网格按 y) */
+  piecesFrom?: Array<{ nodeId: string }>;
+  /** 🆕 提示词来源追溯(占位,保持结构一致) */
+  promptFrom?: PromptSource;
+}
+
+/** 图片拆分参数(image-split 节点:不推理,ffmpeg 把一张图等分成多片) */
+export interface ImageSplitParams {
+  /** 拆分方式:rows=横切 N 段(水平条)/ cols=竖切 N 段(竖条)/ grid=gridCols×gridRows 网格 */
+  mode: 'rows' | 'cols' | 'grid';
+  /** rows/cols 模式份数,默认 3 */
+  count?: number;
+  /** grid 模式列数/行数,默认 3×3(九宫格) */
+  gridCols?: number;
+  gridRows?: number;
+  /** 输入图来源(素材连线直通,渲染层写入) */
+  inputImageFrom?: { nodeId: string };
+  /** 输入图 Asset id(手动绑定,与连线二选一) */
+  inputAssetId?: string;
+  /** 最近一次运行的全部切片产物路径(第 1 片同步写 resultPath;下游 piece-N 端口按序号取片) */
+  pieces?: string[];
   /** 🆕 提示词来源追溯(占位,保持结构一致) */
   promptFrom?: PromptSource;
 }

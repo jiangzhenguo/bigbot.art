@@ -135,6 +135,30 @@ export interface BigBotArtApi {
     /** 裁切锚点:center(默认)/ top / bottom / left / right */
     focus?: 'center' | 'top' | 'bottom' | 'left' | 'right';
   }): Promise<{ ok: boolean; path?: string; error?: string }>;
+  /** 图片拼接:多张图按横排/竖排/网格 ffmpeg 拼成一张(image-stitch 节点用;产物落 outputs/stitches/) */
+  stitchImages(input: {
+    /** 有序图片路径(2-16 张;顺序即拼接顺序) */
+    paths: string[];
+    /** 拼接方式:row=横排 / column=竖排 / grid=网格 */
+    mode: 'row' | 'column' | 'grid';
+    /** grid 模式列数(默认 3) */
+    gridCols?: number;
+    /** 图片间距 px(默认 0) */
+    gap?: number;
+    /** 间距/留白底色(ffmpeg 色名或 #hex,默认 white) */
+    bg?: string;
+  }): Promise<{ ok: boolean; path?: string; error?: string }>;
+  /** 图片拆分:一张图等分成多片(image-split 节点用;产物落 outputs/splits/) */
+  splitImage(input: {
+    path: string;
+    /** 拆分方式:rows=横切 N 段 / cols=竖切 N 段 / grid=gridCols×gridRows 网格 */
+    mode: 'rows' | 'cols' | 'grid';
+    /** rows/cols 模式份数(默认 3,上限 16) */
+    count?: number;
+    /** grid 模式列/行数(默认 3×3) */
+    gridCols?: number;
+    gridRows?: number;
+  }): Promise<{ ok: boolean; paths?: string[]; error?: string }>;
   // 系统 / 文件
   /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
   revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;

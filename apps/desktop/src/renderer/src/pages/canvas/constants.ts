@@ -8,6 +8,8 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
   { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分', p1: true },
   { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
+  { id: 'stitch', kind: 'image-stitch', name: '图片拼接', sub: '多图横排/竖排/网格 · ffmpeg' },
+  { id: 'split', kind: 'image-split', name: '图片拆分', sub: '长图切片 · 九宫格切图' },
   { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/Ref2VA' },
   { id: 'director', kind: 'director', name: '导演台', sub: '运镜参考小样', p1: true },
   { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
@@ -32,6 +34,8 @@ export const COMPAT: Record<string, string[]> = {
   image: ['wf-output'],
   edit: ['wf-output'],
   upscale: ['wf-output'],
+  stitch: ['wf-output'],
+  split: ['wf-output'],
   shot: ['wf-output'],
   director: ['wf-output'],
   // asset 也可直接收口(素材直接当产物,虽然不推荐,但合法)

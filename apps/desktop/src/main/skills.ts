@@ -8,9 +8,21 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Skill, CanvasNode, CanvasEdge, Project } from '@bigbotart/shared';
 import type { ProjectStore } from './store';
+// MiniMax 官方技能(MiniMax-AI/MiniMax-H3,适配为 BigBotArt 工具流程后的指令文档,?raw 打进 main 包)
+import h3PromptWriting from './builtin-skills/h3-prompt-writing.md?raw';
+import paperCollageExplainer from './builtin-skills/paper-collage-explainer.md?raw';
+import papercraftStopMotion from './builtin-skills/papercraft-stop-motion.md?raw';
+import animation3dShort from './builtin-skills/3d-animation-short.md?raw';
+import brandPromoVideo from './builtin-skills/brand-promo-video.md?raw';
+import minimalistProductAd from './builtin-skills/minimalist-product-ad.md?raw';
+import handdrawnLiveVideo from './builtin-skills/handdrawn-live-video.md?raw';
+import musicVideoSubtitle from './builtin-skills/music-video-subtitle.md?raw';
+import coOpGameIntro from './builtin-skills/co-op-game-intro.md?raw';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 const SKILLS_FILE = join(DATA_DIR, 'skills.json');
+/** 用户删除过的内置技能 id 名单(防止种子合并时复活) */
+const BUILTIN_TOMBSTONE_FILE = join(DATA_DIR, 'skills-builtin-deleted.json');
 
 /** 从节点数据里收集参数占位,如 {主题} {旁白} {时长} */
 export function collectParams(nodes: CanvasNode[]): string[] {
@@ -29,7 +41,7 @@ export function collectParams(nodes: CanvasNode[]): string[] {
  * 官方精选出厂技能(纯指令技能;instructions 与 docs/Agent技能文档-撰写指南与模板.md §5 示例同源)。
  * 仅在 skills.json 首次创建时 seed(builtin:true);用户删除后不再自动复活。
  */
-const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; instructions: string }> = [
+const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; instructions: string; inject?: 'full' | 'summary' }> = [
   {
     id: 'paper-collage',
     name: '纸拼贴剧情片',
@@ -110,6 +122,71 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
 
 - 数据数值不得虚构;旁白与画面必须一一对应`,
   },
+  /* ---- MiniMax 官方技能(适配版;源:github.com/MiniMax-AI/MiniMax-H3 skills/) ----
+   * 大文件一律 inject:'summary'(注入摘要 + skills.read 按需取全文),控制 systemPrompt 体积 */
+  {
+    id: 'h3-prompt-writing',
+    name: 'H3 提示词写作规范',
+    description: 'MiniMax 官方:T2VA/I2VA/FL2VA/L2VA/Ref2VA 五种模式的 H3 视频提示词结构规范(含完整附录)',
+    instructions: h3PromptWriting,
+    inject: 'summary',
+  },
+  {
+    id: 'paper-collage-explainer',
+    name: '纸拼贴讲解动画生成器',
+    description: 'MiniMax 官方:基于文案或抽象概念,完成隐喻设计、拼贴分镜和动画生成,适用于讲解类内容',
+    instructions: paperCollageExplainer,
+    inject: 'summary',
+  },
+  {
+    id: 'papercraft-stop-motion',
+    name: '纸艺定格科普视频生成器',
+    description: 'MiniMax 官方:根据知识主题,完成纸偶、分层布景、分镜与提示词设计,输出纸艺定格科普视频创作包',
+    instructions: papercraftStopMotion,
+    inject: 'summary',
+  },
+  {
+    id: '3d-animation-short',
+    name: '3D动画短片生成器',
+    description: 'MiniMax 官方:根据故事创意,完成人物与场景设定、镜头规划、分镜生成和视频合成',
+    instructions: animation3dShort,
+    inject: 'summary',
+  },
+  {
+    id: 'brand-promo-video',
+    name: '品牌宣传短片生成器',
+    description: 'MiniMax 官方:基于品牌素材与推广目标,完成事实核验、创意方向、分镜和音画合成',
+    instructions: brandPromoVideo,
+    inject: 'summary',
+  },
+  {
+    id: 'minimalist-product-ad',
+    name: '极简产品广告生成器',
+    description: 'MiniMax 官方:基于产品图片和广告需求,完成卖点提炼、英文文案与节拍分镜设计,适用于电商推广',
+    instructions: minimalistProductAd,
+    inject: 'summary',
+  },
+  {
+    id: 'handdrawn-live-video',
+    name: '手绘实拍融合视频生成器',
+    description: 'MiniMax 官方:基于场景创意,生成手绘动画与实拍接触变形的 15 秒创意短片',
+    instructions: handdrawnLiveVideo,
+    inject: 'summary',
+  },
+  {
+    id: 'music-video-subtitle',
+    name: '音乐MV动态字幕生成器',
+    description: 'MiniMax 官方:基于音乐和歌词,完成节奏拆解、镜头设计与动态字幕方案,适用于 AI MV 创作',
+    instructions: musicVideoSubtitle,
+    inject: 'summary',
+  },
+  {
+    id: 'co-op-game-intro',
+    name: '双人游戏开场视频生成器',
+    description: 'MiniMax 官方:根据玩家信息、角色参考图和视觉风格,完成首图确认与界面动效设计',
+    instructions: coOpGameIntro,
+    inject: 'summary',
+  },
 ];
 
 /** 官方精选出厂版本(seed 时写入;更新时间固定为初始化时刻) */
@@ -123,11 +200,20 @@ function builtinSeed(): Skill[] {
     params: collectParams([{ data: { markdown: b.instructions } } as CanvasNode]),
     description: b.description,
     instructions: b.instructions,
-    inject: 'full',
+    inject: b.inject ?? 'full',
     builtin: true,
     createdAt: now,
     updatedAt: now,
   }));
+}
+
+function readTombstones(): Set<string> {
+  if (!existsSync(BUILTIN_TOMBSTONE_FILE)) return new Set();
+  try {
+    return new Set(JSON.parse(readFileSync(BUILTIN_TOMBSTONE_FILE, 'utf-8')) as string[]);
+  } catch {
+    return new Set();
+  }
 }
 
 export class SkillStore {
@@ -135,14 +221,19 @@ export class SkillStore {
 
   constructor() {
     mkdirSync(DATA_DIR, { recursive: true });
-    // 首次创建 或 空库(从未保存过)时 seed 官方精选(builtin);已有真实技能的文件按现状读,不覆盖用户数据
+    const tombstones = readTombstones();
+    const seeds = builtinSeed().filter((b) => !tombstones.has(b.id));
     const existing = this.read();
     if (existing.length === 0) {
-      const seeded = builtinSeed();
-      writeFileSync(SKILLS_FILE, JSON.stringify(seeded, null, 2));
-      this.skills = seeded;
+      // 首次创建 或 空库(从未保存过)时 seed 官方精选(builtin)
+      writeFileSync(SKILLS_FILE, JSON.stringify(seeds, null, 2));
+      this.skills = seeds;
     } else {
-      this.skills = existing;
+      // 已有技能库:合并官方新增的内置技能(按 id 去重;用户删除过的在 tombstone 里,不复活)
+      const have = new Set(existing.map((s) => s.id));
+      const missing = seeds.filter((b) => !have.has(b.id));
+      this.skills = missing.length ? [...existing, ...missing] : existing;
+      if (missing.length) this.persist();
     }
   }
 
@@ -170,7 +261,13 @@ export class SkillStore {
   delete(id: string): { ok: boolean; error?: string } {
     const idx = this.skills.findIndex((s) => s.id === id);
     if (idx < 0) return { ok: false, error: 'Skill 不存在' };
-    this.skills.splice(idx, 1);
+    const [removed] = this.skills.splice(idx, 1);
+    // 内置技能被用户删除 → 记 tombstone,下次启动的种子合并不再复活它
+    if (removed?.builtin) {
+      const tombstones = readTombstones();
+      tombstones.add(id);
+      writeFileSync(BUILTIN_TOMBSTONE_FILE, JSON.stringify([...tombstones], null, 2));
+    }
     this.persist();
     return { ok: true };
   }

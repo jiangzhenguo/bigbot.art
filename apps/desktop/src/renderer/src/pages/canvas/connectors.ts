@@ -54,6 +54,8 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
+    stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+    split: ['input', '输入图 · 拆分源'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
@@ -65,6 +67,8 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     edit: ['input', '输入图 · 直通'],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
+    stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+    split: ['input', '输入图 · 拆分源'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-upscale': {
@@ -74,6 +78,8 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     ],
     edit: ['input', '输入图 · 直通'],
     crop: ['input', '输入图 · 原图裁切'],
+    stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+    split: ['input', '输入图 · 拆分源'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
@@ -84,8 +90,33 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     ],
     edit: ['input', '输入图 · 裁切结果'],
     upscale: ['input', '输入图 · 超分源'],
+    stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+    split: ['input', '输入图 · 拆分源'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
+  },
+  'image-stitch': {
+    shot: [
+      ['first-frame', '首帧 · 拼接直通'],
+      ['ref-image', '参考图 · 拼接结果作 Ref2VA'],
+    ],
+    edit: ['input', '输入图 · 拼接结果'],
+    upscale: ['input', '输入图 · 超分源'],
+    crop: ['input', '输入图 · 原图裁切'],
+    stitch: ['piece', '拼接件 · 拼接结果再拼接'],
+    split: ['input', '输入图 · 拼接长图再切片'],
+    image: ['ref-image', '参考图'],
+    timeline: ['clip', '静帧片段 · 入轨'],
+  },
+  // image-split 作为源的图片处理目标走动态 piece-N 端口(resolvePortOptions 特判);
+  // 这里只列 shot / 参考图 / 时间线等固定端口(默认取第 1 片)
+  'image-split': {
+    shot: [
+      ['first-frame', '首帧 · 第 1 片直通'],
+      ['ref-image', '参考图 · 第 1 片作 Ref2VA'],
+    ],
+    image: ['ref-image', '参考图 · 第 1 片'],
+    timeline: ['clip', '静帧片段 · 第 1 片入轨'],
   },
   'audio-ref': {
     shot: ['ref-audio', '音轨参考 · 带声直出'],
@@ -124,7 +155,7 @@ const BY_TARGET: Record<string, PortRow> = {
 };
 
 /** 图片产物类节点(静帧直通) */
-export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop'];
+export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
 
 /** 能收口到 workflow-output 的源(必须与 dispatch 的收集逻辑一致,否则弹窗会承诺不存在的边) */
 const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS];
@@ -168,14 +199,47 @@ export const PORT_LABEL: Record<string, string> = {
   'ref-video': '参考视频',
   prompt: '提示词',
   input: '输入图',
+  piece: '拼接件',
   clip: '入轨',
 };
+
+/**
+ * 领域 kind → 节点库短 id(dstTypeId)归一表。
+ * BY_KIND/asset 矩阵的目标键是 NodeTag 短 id(image/edit/crop/…),而拖拽连到**已存在节点**
+ * 时(快照加载的节点没有 tag)传入的是长 kind —— 不归一会静默查不到端口、连线无反应。
+ */
+export const KIND_TO_TAGID: Record<string, string> = {
+  'image-gen': 'image',
+  'image-edit': 'edit',
+  'image-upscale': 'upscale',
+  'image-crop': 'crop',
+  'image-stitch': 'stitch',
+  'image-split': 'split',
+  document: 'doc',
+  'audio-ref': 'audio',
+  'workflow-input': 'wf-input',
+  'workflow-output': 'wf-output',
+};
+
+/** 拆分节点片数:已跑出产物按实际片数,否则按参数配置推算(上限 16) */
+export function splitPieceCount(n: CanvasNode): number {
+  const d = (n.data ?? {}) as Record<string, unknown>;
+  const actual = Array.isArray(d.pieces) ? d.pieces.length : 0;
+  if (actual > 0) return actual;
+  const mode = String(d.mode ?? 'grid');
+  const conf = mode === 'grid'
+    ? Number(d.gridCols ?? 3) * Number(d.gridRows ?? 3)
+    : Number(d.count ?? 3);
+  return Math.min(Math.max(2, Math.round(conf) || 2), 16);
+}
 
 /**
  * 解析:该源 → 该目标类型的所有可用端口选项(首个为默认)。
  * 多数组合只有一个端口;asset(图) → shot 支持「首帧参考 / 参考图参考」两种,由连接时 UI 选择。
  */
 export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortResolution[] {
+  // 长 kind(快照加载的节点无 tag,拖拽连线传入 kind)归一为节点库短 id
+  dstTypeId = KIND_TO_TAGID[dstTypeId] ?? dstTypeId;
   const byId = BY_ID[src.id]?.[dstTypeId];
   if (byId) return [{ port: byId[0], desc: byId[1] }];
 
@@ -196,6 +260,8 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
         edit: ['input', '输入图 · 原图编辑'],
         upscale: ['input', '输入图 · 超分源'],
         crop: ['input', '输入图 · 原图裁切'],
+        stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+        split: ['input', '输入图 · 拆分源'],
         timeline: ['clip', '静帧片段 · 入轨'],
       },
       video: {
@@ -227,6 +293,25 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
 
   if (src.kind === 'document' && dstTypeId === 'wf-input') {
     return [{ port: 'slot-<名称>', desc: '文本槽位 · 全文注入' }];
+  }
+
+  // image-split 作为源 → 图片处理目标:动态 piece-N 端口(按片数出「取第几片」chips,默认第 1 片)
+  if (src.kind === 'image-split') {
+    const PIECE_TARGETS: Record<string, string> = {
+      edit: '输入图',
+      upscale: '输入图 · 超分源',
+      crop: '输入图 · 原图裁切',
+      stitch: '拼接件',
+      split: '输入图 · 拆分源',
+    };
+    const useAs = PIECE_TARGETS[dstTypeId];
+    if (useAs) {
+      const count = splitPieceCount(src);
+      return Array.from({ length: count }, (_, i) => ({
+        port: `piece-${i + 1}`,
+        desc: `第 ${i + 1} 片 · ${useAs}`,
+      }));
+    }
   }
 
   const byKind = BY_KIND[src.kind ?? '']?.[dstTypeId];

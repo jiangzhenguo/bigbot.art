@@ -58,8 +58,15 @@ export function ChatMessageList({
         if (m.kind === 'sys') {
           return (
             <div className="msg-sys" key={m.id}>
-              {m.loading ? <span className="spin" style={{ marginRight: 6 }} /> : null}
-              {m.text}
+              {m.loading ? (
+                /* 加载态复用工具调用「运行中」动效:小 spinner + accent 色文字(与 tr-row.running 同款) */
+                <span className="tr-st" style={{ margin: '0 auto', color: 'color-mix(in oklab,var(--accent) 82%,var(--fg))' }}>
+                  <span className="spin sm" />
+                  {m.text}
+                </span>
+              ) : (
+                m.text
+              )}
             </div>
           );
         }

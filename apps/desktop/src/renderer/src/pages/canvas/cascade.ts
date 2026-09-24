@@ -9,7 +9,7 @@
 import type { CanvasNode, Edge } from './types';
 
 /** 参与接力的生成类节点(可运行节点;文档/分镜/时间线/工作流出入口不接力) */
-export const CASCADE_KINDS = new Set(['shot', 'image-gen', 'image-edit', 'image-upscale', 'image-crop']);
+export const CASCADE_KINDS = new Set(['shot', 'image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split']);
 
 /**
  * 直接下游生成节点:sourceId 的所有出边指向的生成类节点(id 去重,保持边序)。

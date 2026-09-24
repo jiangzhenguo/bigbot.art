@@ -21,6 +21,8 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     edit: 'input',
     upscale: 'input',
     crop: 'input', // 原图裁切源
+    stitch: 'piece', // 拼接件(多值,按画布位置排序)
+    split: 'input', // 拆分源
     image: 'ref-image', // 参考图
     timeline: 'clip',
   },
@@ -29,12 +31,16 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     edit: 'input',
     upscale: 'input',
     crop: 'input', // 原图裁切源
+    stitch: 'piece',
+    split: 'input', // 拆分源
     timeline: 'clip',
   },
   'image-upscale': {
     shot: 'first-frame/ref-image',
     edit: 'input',
     crop: 'input', // 原图裁切源
+    stitch: 'piece',
+    split: 'input', // 拆分源
     image: 'ref-image',
     timeline: 'clip',
   },
@@ -42,7 +48,30 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     shot: 'first-frame/ref-image', // 裁切结果 → 首帧直通 / 参考图注入
     edit: 'input', // 裁切结果作输入图
     upscale: 'input',
+    stitch: 'piece',
+    split: 'input', // 拆分源
     image: 'ref-image', // 裁切结果作参考图
+    timeline: 'clip',
+  },
+  'image-stitch': {
+    shot: 'first-frame/ref-image', // 拼接结果 → 首帧直通 / 参考图注入
+    edit: 'input', // 拼接结果作输入图
+    upscale: 'input',
+    crop: 'input',
+    stitch: 'piece', // 拼接结果可再作拼接件
+    split: 'input', // 拼接长图再切片(拼接→拆分回路)
+    image: 'ref-image',
+    timeline: 'clip',
+  },
+  'image-split': {
+    // 拆分产物多片:下游经 piece-N 端口按序号取片(piece-1 缺省 = 第 1 片)
+    shot: 'first-frame/ref-image', // 选定片 → 首帧直通 / 参考图注入
+    edit: 'input', // 选定片作输入图
+    upscale: 'input',
+    crop: 'input',
+    stitch: 'piece', // 选定片作拼接件(拆分→拼接回路)
+    split: 'input',
+    image: 'ref-image',
     timeline: 'clip',
   },
   'audio-ref': {
@@ -78,6 +107,8 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     edit: 'input', // 输入图/取帧源
     upscale: 'input', // 超分源
     crop: 'input', // 裁切源
+    stitch: 'piece', // 拼接件(图片素材)
+    split: 'input', // 拆分源(图片素材)
     timeline: 'clip', // 静帧/视频素材入轨;音频为 audio-track
     doc: 'prompt', // 文档资产 → 文档引用
   },
@@ -98,6 +129,8 @@ export const PORT_SEMANTICS: Record<string, string> = {
   'ref-audio': '音轨参考(带声直出)',
   'ref-video': '参考视频(风格/动作参考)',
   input: '输入图/输入帧(编辑/超分源)',
+  piece: '拼接件(图片拼接 · 多值端口,按源节点画布位置排序)',
+  'piece-N': '取拆分产物第 N 片(piece-1/piece-2/…,替代 input/piece 端口)',
   clip: '视频/静帧入轨(时间线)',
   sequence: '镜头编排序列入轨',
   'audio-track': '音轨随片导出',
@@ -142,6 +175,8 @@ export const NODE_KIND_GUIDE = [
   ['image-gen', '图片生成(mlxgen 文生图)'],
   ['image-edit', '图片编辑(指令/I2I/Inpaint/Outpaint)'],
   ['image-crop', '图片裁切(按目标画幅裁剪,如 1:1 → 9:16,供下游作输入图)'],
+  ['image-stitch', '图片拼接(纯 ffmpeg:多张图横排/竖排/网格拼成一张;piece 多值入边,按源节点画布位置排序)'],
+  ['image-split', '图片拆分(纯 ffmpeg:一张图等分多片,长图切片/九宫格;下游经 piece-N 端口按序号取片)'],
   ['image-upscale', '图片增强(超分)'],
   ['shot', '视频镜头(h3.c:文生/首帧/首尾帧/参考图;支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
   ['director', '导演台(运镜参考小样)'],

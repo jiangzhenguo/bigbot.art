@@ -55,7 +55,7 @@ export interface ValidateEdgeOptions {
 }
 
 /** 图片产物类节点(静帧直通;与渲染层 IMAGE_KINDS 同口径) */
-export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop'];
+export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
 
 /** 非 asset 节点的输出媒体(asset 按资产元数据动态判定) */
 export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'text'> = {
@@ -67,6 +67,8 @@ export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'te
   'image-edit': 'image',
   'image-upscale': 'image',
   'image-crop': 'image',
+  'image-stitch': 'image',
+  'image-split': 'image',
   document: 'text',
   storyboard: 'text',
 };
@@ -79,7 +81,9 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
   'ref-video': 'video',
   'ref-audio': 'audio',
   'audio-track': 'audio',
-  input: undefined, // edit/upscale/crop 输入:图片直通或视频取帧皆可
+  input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可
+  piece: 'image', // stitch 拼接件:仅图片
+  'piece-N': 'image', // split 产物按序号取片(piece-1/piece-2/…;替代 input/piece 端口)
   clip: undefined, // 静帧/视频皆可入轨
   sequence: undefined,
   prompt: undefined,
@@ -87,6 +91,23 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
 };
 
 /** 《单值端口集合 SINGLE_VALUE_PORTS 定义在 ./connector-map.js(规则表文件)》 */
+
+/** 拆分产物取片 label:piece-1 / piece-2 / …(1-based) */
+export const PIECE_LABEL_RE = /^piece-([1-9]\d*)$/;
+
+/**
+ * CONNECTOR_MAP 的目标键沿用渲染层短 id(edit/crop/image/…),而画布节点 kind 是长名
+ * (image-edit/…)。直连查不到时按本表回退,让 Agent 侧 canvas.connect 校验与渲染层同口径。
+ */
+const TARGET_KIND_ALIAS: Record<string, string> = {
+  'image-gen': 'image',
+  'image-edit': 'edit',
+  'image-upscale': 'upscale',
+  'image-crop': 'crop',
+  'image-stitch': 'stitch',
+  'image-split': 'split',
+  document: 'doc',
+};
 
 /** 可收口到 workflow-output 的源 kind(与渲染层 COLLECTABLE_KINDS 同口径) */
 export const OUTPUT_COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS];
@@ -136,14 +157,20 @@ export function allowedPortLabels(
     return OUTPUT_COLLECTABLE_KINDS.includes(source.kind) ? ['output'] : [];
   }
   if (source.kind === 'workflow-input') return [];
-  const raw = CONNECTOR_MAP[source.kind]?.[targetKind];
+  const raw = CONNECTOR_MAP[source.kind]?.[targetKind]
+    ?? CONNECTOR_MAP[source.kind]?.[TARGET_KIND_ALIAS[targetKind] ?? ''];
   if (!raw) return [];
-  return splitPorts(raw).filter((label) => {
+  const labels = splitPorts(raw).filter((label) => {
     const need = PORT_REQUIRED_MEDIA[label];
     if (!need) return true;
     const pm = portPayloadMedia(source, label, opts);
     return pm === undefined || pm === need;
   });
+  // 拆分产物 → 图片处理目标(input/piece 端口):追加 piece-N 取片模板(替代 input/piece 直连整图)
+  if (source.kind === 'image-split' && labels.some((l) => l === 'input' || l === 'piece')) {
+    labels.push('piece-N');
+  }
+  return labels;
 }
 
 function describeAllowed(source: EdgeNodeMin, targetKind: string, opts?: ValidateEdgeOptions): string {
@@ -221,7 +248,7 @@ export function validateEdge(
       });
       return { ok: false, errors };
     }
-  } else if (!allowed.includes(lbl)) {
+  } else if (!allowed.includes(lbl) && !(allowed.includes('piece-N') && PIECE_LABEL_RE.test(lbl))) {
     const sm = sourceMedia(src, opts);
     const need = PORT_REQUIRED_MEDIA[lbl];
     const mediaPart = need

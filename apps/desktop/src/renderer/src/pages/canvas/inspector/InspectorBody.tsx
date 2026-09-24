@@ -78,7 +78,7 @@ export function InspectorBody({
     setInfoMap((m) => ({ ...m, [node.id]: { ...(m[node.id] ?? { t: node.title, img: null, meta: [] }), ...patch } }));
   };
   /** 图片节点切换 Take → 回写画布节点(产物预览 + 绑定标记;与 shot 检查器 onSelectTake 同语义) */
-  const selectImageTake = (t: { id: string; attempt: number; status: string; resultPath?: string }) => {
+  const selectImageTake = (t: { id: string; attempt: number; status: string; resultPath?: string; pieces?: string[] }) => {
     onCommitEdit?.(`切换「${node.title}」的 Take`);
     setNodes((ns) =>
       ns.map((n) => {
@@ -89,11 +89,19 @@ export function InspectorBody({
           ghost: t.status === 'succeeded' ? !t.resultPath : n.ghost,
           stale: false,
           badge: undefined,
-          extra: t.resultPath ? `✓ ${name}` : t.status === 'succeeded' ? '✓·无产物' : t.status === 'failed' ? '失败' : n.extra,
+          extra: t.resultPath
+            ? `✓ ${t.pieces?.length ? `${t.pieces.length} 片 · ` : ''}${name}`
+            : t.status === 'succeeded'
+              ? '✓·无产物'
+              : t.status === 'failed'
+                ? '失败'
+                : n.extra,
           data: {
             ...(n.data ?? {}),
             currentTakeId: t.id,
             resultPath: t.resultPath ?? undefined,
+            // image-split:切换 Take 同步恢复该片组(piece-N 下游取片以 data.pieces 为准)
+            ...(t.pieces ? { pieces: t.pieces } : {}),
           },
         };
       }),
@@ -305,6 +313,178 @@ export function InspectorBody({
           )}
           <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['输出', `裁剪至 ${aspect} · 保持原分辨率`]]} />
           <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} />
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
+        </div>
+      );
+    }
+    case 'image-stitch': {
+      const mode = String(d.mode ?? 'column');
+      const gridCols = Number(d.gridCols ?? 3);
+      const gap = Number(d.gap ?? 0);
+      const bg = String(d.bg ?? 'white');
+      const piecesFrom = (d.piecesFrom as Array<{ nodeId?: string }> | undefined) ?? [];
+      const outPath = String(d.resultPath ?? '');
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <Lbl>拼接方式</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['row', '横排'],
+                ['column', '竖排长图'],
+                ['grid', '网格'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${mode === v ? ' on' : ''}`} onClick={() => setData({ mode: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          {mode === 'grid' && (
+            <div>
+              <Lbl>网格列数(行数按图片数自动)</Lbl>
+              <div className="row g6" style={{ flexWrap: 'wrap' }}>
+                {[2, 3, 4].map((c) => (
+                  <span key={c} className={`chip${gridCols === c ? ' on' : ''}`} onClick={() => setData({ gridCols: c })}>
+                    {c} 列
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="row g6">
+            <div style={{ flex: 1 }}>
+              <Lbl>间距(px)</Lbl>
+              <input
+                className="input-w mono"
+                type="number"
+                min={0}
+                max={200}
+                value={gap}
+                onChange={(e) => setData({ gap: Math.max(0, Number(e.target.value) || 0) })}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <Lbl>底色</Lbl>
+              <input
+                className="input-w mono"
+                value={bg}
+                onChange={(e) => setData({ bg: e.target.value })}
+                placeholder="white / #ffffff"
+                style={{ width: '100%' }}
+              />
+            </div>
+          </div>
+          <div>
+            <Lbl>拼接件(由连线直通 · {piecesFrom.length} 件)</Lbl>
+            {piecesFrom.length > 0 ? (
+              <div className="mono mut" style={{ fontSize: 11 }}>
+                {piecesFrom.map((p, i) => {
+                  const up = (nodes ?? []).find((x) => x.id === p.nodeId);
+                  return <div key={`${p.nodeId}-${i}`}>{i + 1}. {up?.title ?? p.nodeId ?? '?'}</div>;
+                })}
+                <div style={{ marginTop: 4 }}>顺序按源节点画布位置排({mode === 'row' ? '从左到右' : '从上到下'}),拖动上游节点可改序</div>
+              </div>
+            ) : (
+              <div className="mut" style={{ fontSize: 11 }}>连 2-16 个 图片节点 / asset 作为拼接件(多值 piece 端口)</div>
+            )}
+          </div>
+          <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['对齐', '按最小边等比缩放(只缩不放)'], ['输出', mode === 'grid' ? `网格 · ${gridCols} 列` : mode === 'row' ? '横排长图' : '竖排长图']]} />
+          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="拼接结果" emptyHint="运行后显示拼接结果" />
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
+        </div>
+      );
+    }
+    case 'image-split': {
+      const mode = String(d.mode ?? 'grid');
+      const count = Number(d.count ?? 3);
+      const gridCols = Number(d.gridCols ?? 3);
+      const gridRows = Number(d.gridRows ?? 3);
+      const inputAssetId = String(d.inputAssetId ?? '');
+      const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+      const pieces = (d.pieces as string[] | undefined) ?? [];
+      const splitSrc = (() => {
+        if (inputAssetId && assetCache[inputAssetId]) return assetCache[inputAssetId];
+        if (imgFrom?.nodeId) {
+          const up = (nodes ?? []).find((x) => x.id === imgFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          if (up?.kind === 'asset') {
+            const aid = String(upData.assetId ?? '');
+            if (aid && assetCache[aid]) return assetCache[aid];
+          }
+          return String(upData.resultPath ?? '') || null;
+        }
+        return null;
+      })();
+      const pieceCount = mode === 'grid' ? gridCols * gridRows : count;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <Lbl>拆分方式</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['rows', '横切(长图切片)'],
+                ['cols', '竖切'],
+                ['grid', '网格(九宫格)'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${mode === v ? ' on' : ''}`} onClick={() => setData({ mode: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          {mode !== 'grid' ? (
+            <div>
+              <Lbl>份数(2-16)</Lbl>
+              <div className="row g6" style={{ flexWrap: 'wrap' }}>
+                {[2, 3, 4, 6, 9].map((c) => (
+                  <span key={c} className={`chip${count === c ? ' on' : ''}`} onClick={() => setData({ count: c })}>
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="row g6">
+              <div style={{ flex: 1 }}>
+                <Lbl>列数</Lbl>
+                <input className="input-w mono" type="number" min={1} max={8} value={gridCols}
+                  onChange={(e) => setData({ gridCols: Math.min(8, Math.max(1, Number(e.target.value) || 1)) })} style={{ width: '100%' }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Lbl>行数</Lbl>
+                <input className="input-w mono" type="number" min={1} max={8} value={gridRows}
+                  onChange={(e) => setData({ gridRows: Math.min(8, Math.max(1, Number(e.target.value) || 1)) })} style={{ width: '100%' }} />
+              </div>
+            </div>
+          )}
+          <TextAreaField label="输入图 Asset ID(与连线二选一)" value={inputAssetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ inputAssetId: v })} />
+          {imgFrom?.nodeId ? (
+            <div>
+              <Lbl>输入图源(由连线直通)</Lbl>
+              <div className="mono mut" style={{ fontSize: 11 }}>节点 {imgFrom.nodeId.slice(0, 10)} · 上游产物/素材直接作为拆分源</div>
+            </div>
+          ) : (
+            <div className="mut" style={{ fontSize: 11 }}>连一个 图片节点 / asset 可自动作为拆分源</div>
+          )}
+          <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['输出', `等分 ${pieceCount} 片(末行/末列吃余数)`], ['下游取值', '连线选 piece-N = 取第 N 片']]} />
+          {pieces.length > 0 ? (
+            <div>
+              <Lbl>切片结果(共 {pieces.length} 片 · 按切分形态排布)</Lbl>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${mode === 'rows' ? 1 : mode === 'cols' ? count : gridCols}, 1fr)`, gap: 3, alignItems: 'start' }}>
+                {pieces.map((p, i) => (
+                  <div key={p} style={{ position: 'relative', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-soft)' }}>
+                    <img src={previewUrlOf(p) ?? ''} alt={`第 ${i + 1} 片`} style={{ display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }} />
+                    <span className="mono" style={{ position: 'absolute', left: 4, top: 2, fontSize: 10, color: 'var(--fg)', background: 'var(--surface-warm)', padding: '0 4px', borderRadius: 4 }}>{i + 1}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>下游取片:从本节点连出时在「取第 N 片」里选;不选默认第 1 片</div>
+            </div>
+          ) : (
+            <ImagePreview src={splitSrc ? previewUrlOf(splitSrc) : null} label="源图预览" emptyHint="运行后显示切片结果 · 未运行时显示源图" />
+          )}
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );

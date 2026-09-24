@@ -440,9 +440,10 @@ export class ToolHandlers {
       const node = cur?.nodes.find((n) => n.id === nodeId);
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
       if (!cur) return { ok: false, result: '画布不存在' };
-      if (node.kind === 'image-crop') {
-        // 裁切不走引擎队列(ffmpeg 本地裁剪,由画布运行);Agent 侧提示用户到画布执行
-        return { ok: false, result: '图片裁切节点不走引擎队列:请在画布上选中该节点并运行(本地 ffmpeg,秒级)' };
+      if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split') {
+        // 裁切/拼接/拆分不走引擎队列(ffmpeg 本地处理,由画布运行);Agent 侧提示用户到画布执行
+        const label = node.kind === 'image-crop' ? '图片裁切' : node.kind === 'image-stitch' ? '图片拼接' : '图片拆分';
+        return { ok: false, result: `${label}节点不走引擎队列:请在画布上选中该节点并运行(本地 ffmpeg,秒级)` };
       }
       const isImage = node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale' || node.kind === 'asset';
       // 方案 B+D:shot 的参考引用由连线推导(不再信任 agent 直写的 data.refs),提交前防呆拦截

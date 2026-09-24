@@ -313,6 +313,55 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
         </div>
       );
     }
+    case 'image-stitch': {
+      const mode = String(d.mode ?? 'column');
+      const modeLabel = mode === 'row' ? '横排' : mode === 'grid' ? `网格×${Number(d.gridCols ?? 3)}` : '竖排长图';
+      const gap = Number(d.gap ?? 0);
+      const pieces = (d.piecesFrom as Array<{ nodeId?: string }> | undefined) ?? [];
+      const outImg = productOf(n);
+      return (
+        <div className="nb">
+          {outImg ? (
+            <div className="nthumb fit"><img src={outputUrlOf(outImg)} alt="拼接产物" /></div>
+          ) : (
+            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+              {modeLabel}拼接 · {pieces.length > 0 ? `${pieces.length} 件` : '待连拼接件'}
+            </div>
+          )}
+          <div className="nmeta mono">{modeLabel} · {pieces.length} 件{gap > 0 ? ` · 间距 ${gap}px` : ''}</div>
+        </div>
+      );
+    }
+    case 'image-split': {
+      const mode = String(d.mode ?? 'grid');
+      const count = Number(d.count ?? 3);
+      const gridCols = Number(d.gridCols ?? 3);
+      const modeLabel = mode === 'rows' ? `横切 ${count} 段` : mode === 'cols' ? `竖切 ${count} 段` : `${gridCols}×${Number(d.gridRows ?? 3)} 网格`;
+      const pieces = (d.pieces as string[] | undefined) ?? [];
+      const inputState = String(d.inputAssetId ?? '')
+        ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+        : (d.inputImageFrom as { nodeId?: string } | undefined)?.nodeId
+          ? `输入 · 节点 ${String((d.inputImageFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
+          : '输入待绑定';
+      // 切片按切分形态排布:横切=单列横条竖叠 / 竖切=N 列竖条 / 网格=M 列;自然比例无缝拼回原图观感
+      const viewCols = mode === 'rows' ? 1 : mode === 'cols' ? count : gridCols;
+      return (
+        <div className="nb">
+          {pieces.length > 0 ? (
+            <div className="nthumb" style={{ display: 'grid', gridTemplateColumns: `repeat(${viewCols}, 1fr)`, gap: 2, background: 'var(--surface-warm)', alignItems: 'start' }}>
+              {pieces.map((p, i) => (
+                <img key={p} src={outputUrlOf(p)} alt={`第 ${i + 1} 片`} style={{ width: '100%', height: 'auto', display: 'block', objectFit: 'contain' }} />
+              ))}
+            </div>
+          ) : (
+            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+              {modeLabel} · {inputState}
+            </div>
+          )}
+          <div className="nmeta mono">{modeLabel}{pieces.length > 0 ? ` · 已切 ${pieces.length} 片` : ''}</div>
+        </div>
+      );
+    }
     case 'shot': {
       const mode = String(d.mode ?? 'text2video');
       // 白名单归一(与 ShotInspector 同规则):老数据/自定义画幅(如 '5:3')不在表内 → 回退 16:9,

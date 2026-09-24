@@ -48,6 +48,33 @@ import { useAgentChat } from './agent/useAgentChat';
 /** 节点尚未测得高度时的估算兜底(px):连线端点/预览线首帧用,实测后立即被替换 */
 const UNMEASURED_NODE_H = 72;
 
+/** 拆分节点取片 label(piece-1 / piece-2 / …,1-based;与 shared edge-validate PIECE_LABEL_RE 同口径) */
+const PIECE_LABEL_RE = /^piece-([1-9]\d*)$/;
+
+/**
+ * 解析上游节点的图片产物路径(运行时统一入口):
+ * - asset 节点 → 资产本地路径
+ * - image-split 且边 label 为 piece-N → 取第 N 片(无该片 = undefined,不静默回退)
+ * - 其余图片产物节点 → data.resultPath
+ */
+function upstreamImagePath(
+  up: CanvasNode | undefined,
+  edgeLabel: string | undefined,
+  assetCache: Record<string, string>,
+): string | undefined {
+  if (!up) return undefined;
+  const upData = (up.data ?? {}) as Record<string, unknown>;
+  if (up.kind === 'asset') return assetCache[String(upData.assetId ?? '')] || undefined;
+  if (up.kind === 'image-split') {
+    const m = PIECE_LABEL_RE.exec(edgeLabel ?? '');
+    if (m) {
+      const pieces = Array.isArray(upData.pieces) ? (upData.pieces as string[]) : [];
+      return pieces[Number(m[1]) - 1] || undefined;
+    }
+  }
+  return String(upData.resultPath ?? '') || undefined;
+}
+
 /** 默认视图(无持久化 viewport 的画布:新画布 / 旧项目文件) */
 const DEFAULT_VIEW = { x: 20, y: 10, z: 0.86 };
 
@@ -1602,10 +1629,8 @@ export default function CanvasPage({
         const cropFrom = d.inputImageFrom as { nodeId?: string } | undefined;
         if (!srcPath && cropFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === cropFrom.nodeId);
-          const upData = (up?.data ?? {}) as Record<string, unknown>;
-          srcPath = up?.kind === 'asset'
-            ? assetCache.current[String(upData.assetId ?? '')]
-            : String(upData.resultPath ?? '') || undefined;
+          const inEdge = edgesRef.current.find((e) => e.from === cropFrom.nodeId && e.to === nodeId);
+          srcPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
         }
         if (!srcPath) {
           toastMsg('图片裁切需要输入图:连一个 图片生成/编辑/增强 节点或 asset,或在检查器填 Asset ID');
@@ -1648,6 +1673,115 @@ export default function CanvasPage({
         // 下游 ghost 边转正(裁切绕过渲染队列,补一次与队列完成相同的边状态刷新)
         setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
         toastMsg(`已裁切至 ${aspect} · ${n.title}`);
+        return;
+      }
+      // 图片拼接节点(image-stitch):不推理,ffmpeg 把多张图按行/列/网格拼成一张 → 直接出产物 + 记 Take
+      if (n.kind === 'image-stitch') {
+        const mode = String(d.mode ?? 'column') as 'row' | 'column' | 'grid';
+        const piecesFrom = (d.piecesFrom as Array<{ nodeId?: string }> | undefined) ?? [];
+        // 按 piecesFrom 顺序(边派生时已按源节点位置排好)解析各拼接件路径;piece-N 边取拆分片
+        const paths: string[] = [];
+        for (const p of piecesFrom) {
+          const up = nodesRef.current.find((x) => x.id === p.nodeId);
+          const inEdge = edgesRef.current.find((e) => e.from === p.nodeId && e.to === nodeId);
+          const path = upstreamImagePath(up, inEdge?.label, assetCache.current);
+          if (path) paths.push(path);
+        }
+        if (paths.length < 2) {
+          toastMsg(`图片拼接需要 ≥2 张有产物的拼接件(已解析 ${paths.length} 张):连多个 图片节点 / asset 到本节点(piece 端口)`);
+          return;
+        }
+        const gridCols = Number(d.gridCols ?? 3);
+        const gap = Number(d.gap ?? 0);
+        const bg = String(d.bg ?? 'white');
+        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '拼接中…', ghost: false } : x)));
+        const res = await window.bigbotart.stitchImages({ paths, mode, gridCols, gap, bg });
+        if (!res.ok || !res.path) {
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `拼接失败 · ${res.error ?? '未知错误'}` } : x)));
+          toastMsg(`拼接失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: res.path,
+            params: { kind: 'stitch', mode, gridCols, gap, bg, inputs: paths },
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  extra: `✓ ${basenameOf(res.path as string)}`,
+                  data: { ...(x.data ?? {}), resultPath: res.path, currentTakeId: takeId },
+                }
+              : x,
+          ),
+        );
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(`已拼接 ${paths.length} 张图 · ${n.title}`);
+        return;
+      }
+      // 图片拆分节点(image-split):不推理,ffmpeg 把一张图等分多片 → 产物组 + 记 Take(一次运行一条 Take,pieces 记全部)
+      if (n.kind === 'image-split') {
+        let srcPath: string | undefined;
+        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        const splitFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+        if (!srcPath && splitFrom?.nodeId) {
+          const up = nodesRef.current.find((x) => x.id === splitFrom.nodeId);
+          const inEdge = edgesRef.current.find((e) => e.from === splitFrom.nodeId && e.to === nodeId);
+          srcPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
+        }
+        if (!srcPath) {
+          toastMsg('图片拆分需要输入图:连一个 图片节点 / asset,或在检查器填 Asset ID');
+          return;
+        }
+        const mode = String(d.mode ?? 'grid') as 'rows' | 'cols' | 'grid';
+        const count = Number(d.count ?? 3);
+        const gridCols = Number(d.gridCols ?? 3);
+        const gridRows = Number(d.gridRows ?? 3);
+        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '拆分中…', ghost: false } : x)));
+        const res = await window.bigbotart.splitImage({ path: srcPath, mode, count, gridCols, gridRows });
+        if (!res.ok || !res.paths || res.paths.length === 0) {
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `拆分失败 · ${res.error ?? '未知错误'}` } : x)));
+          toastMsg(`拆分失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        const pieces = res.paths;
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: pieces[0],
+            params: { kind: 'split', mode, count, gridCols, gridRows, inputPath: srcPath, pieces },
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  extra: `✓ ${pieces.length} 片`,
+                  // resultPath = 第 1 片(下游不选片时的默认);pieces = 全部切片(piece-N 端口按序号取)
+                  data: { ...(x.data ?? {}), resultPath: pieces[0], pieces, currentTakeId: takeId },
+                }
+              : x,
+          ),
+        );
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(`已拆分 ${pieces.length} 片 · ${n.title}`);
         return;
       }
       const isImage = n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale';
@@ -1775,10 +1909,8 @@ export default function CanvasPage({
         const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
         if (!inputPath && imgFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === imgFrom.nodeId);
-          const upData = (up?.data ?? {}) as Record<string, unknown>;
-          inputPath = up?.kind === 'asset'
-            ? assetCache.current[String(upData.assetId ?? '')]
-            : String(upData.resultPath ?? '') || undefined;
+          const inEdge = edgesRef.current.find((e) => e.from === imgFrom.nodeId && e.to === nodeId);
+          inputPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
         }
         const maskAssetId = String(d.maskAssetId ?? '');
         if (maskAssetId) maskPath = assetCache.current[maskAssetId];
@@ -1905,7 +2037,7 @@ export default function CanvasPage({
 
   const [agentRunText, setAgentRunText] = useState('Agent 已规划参数 · 等视频槽位 · 可提前改参');
   const runAll = () => {
-    const ids = nodesRef.current.filter((n) => n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop').map((n) => n.id);
+    const ids = nodesRef.current.filter((n) => n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop' || n.kind === 'image-stitch' || n.kind === 'image-split').map((n) => n.id);
     if (ids.length === 0) {
       toastMsg('画布上没有可运行的生成节点');
       return;

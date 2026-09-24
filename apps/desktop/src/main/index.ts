@@ -15,6 +15,7 @@ import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachments
 import { SkillStore } from './skills';
 import { ExportService } from './export';
 import { extractFrame, cropImage } from './frames';
+import { stitchImages, splitImage } from './stitch';
 import { RenderQueue } from './render-queue';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
@@ -587,6 +588,18 @@ ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last') 
 // 图片裁切(image-crop 节点):按目标画幅裁剪原图
 ipcMain.handle('crop-image', (_e, input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
   cropImage(input.path, input.aspect, input.focus));
+// 图片拼接(image-stitch 节点):多图横排/竖排/网格拼成一张
+ipcMain.handle(
+  'stitch-images',
+  (_e, input: { paths: string[]; mode: 'row' | 'column' | 'grid'; gridCols?: number; gap?: number; bg?: string }) =>
+    stitchImages(input.paths, { mode: input.mode, gridCols: input.gridCols, gap: input.gap, bg: input.bg }),
+);
+// 图片拆分(image-split 节点):一张图等分多片(长图切片/九宫格)
+ipcMain.handle(
+  'split-image',
+  (_e, input: { path: string; mode: 'rows' | 'cols' | 'grid'; count?: number; gridCols?: number; gridRows?: number }) =>
+    splitImage(input.path, { mode: input.mode, count: input.count, gridCols: input.gridCols, gridRows: input.gridRows }),
+);
 
 // ---------- IPC:在系统文件管理器中显示(Finder) ----------
 // 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;
