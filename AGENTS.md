@@ -6,7 +6,7 @@
 
 ## 0. 项目速览(30 秒版)
 
-Electron 31 + React 18 + React Flow 12 的无限画布视频/图片生成 Agent,pnpm workspace:
+Electron 31 + React 18 的无限画布视频/图片生成 Agent(画布为自研实现:DOM 节点 + SVG 连线 + 原生 CSS transform,**未使用 React Flow**),pnpm workspace:
 
 - `apps/desktop` — Electron 外壳(main / preload / renderer 三进程,各自独立构建)
 - `packages/shared` — 领域类型 + IPC 契约 `BigBotArtApi`(**唯一的类型事实来源**)
@@ -91,7 +91,7 @@ pnpm build                       # electron-vite build
 - TypeScript ESM,`"type": "module"`;workspace 内部引用用 `@bigbotart/*` 包名,不跨包相对路径
 - 注释与文档用中文;标识符用英文;环境变量统一 `BIGBOTART_` 前缀
 - 主进程模块化:新能力优先加到 `src/main/` 下的独立模块(assets/export/frames/llm/lora/memory/settings/skills/store/takes 已是先例),不要继续堆 `index.ts`(已 645 行)
-- renderer 的 React Flow 画布逻辑集中在 `src/renderer/src/pages/canvas/`;新节点类型要同步 `node-mapping.ts` / `connectors.ts` / `constants.ts`
+- renderer 的自研画布逻辑集中在 `src/renderer/src/pages/canvas/`;新节点类型要同步 `node-mapping.ts` / `connectors.ts` / `constants.ts`
 - renderer 的 Agent 对话面板在 `src/renderer/src/pages/agent/`:`useAgentChat.ts`(全部状态与副作用)+ `AgentChatView`/`AgentComposer`(展示)+ `cards/`(消息卡片,纯展示)
 
 ## 5. React 开发规范(渲染层强制)

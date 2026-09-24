@@ -19,6 +19,7 @@ import {
   chunkText,
   chunkNav,
   validateEdge,
+  PIECE_LABEL_RE,
   deriveShotRefsFromEdges,
   validateRefsForSubmit,
   referenceMediaIssues,
@@ -32,6 +33,9 @@ import type { ExportService } from './export';
 import type { RenderQueue } from './render-queue';
 import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
+import type { TakeStore } from './takes';
+import { cropImage } from './frames';
+import { stitchImages, splitImage } from './stitch';
 export { toolDefinitions } from '@bigbotart/shared';
 
 export interface ToolContext {
@@ -58,6 +62,84 @@ const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
 
 const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
 
+/* ── ffmpeg 本地图片节点(image-crop / image-stitch / image-split)输入解析:纯函数,与渲染层
+ * CanvasPage.upstreamImagePath 同口径,供 engine.submit 本地执行路径与单测复用 ── */
+
+/** 解析上游节点的图片产物路径:asset → 资产本地路径;image-split + piece-N 边 → 第 N 片;其余 → data.resultPath */
+export function resolveNodeImagePath(
+  src: CanvasNode | undefined,
+  edgeLabel: string | undefined,
+  assetPath: (assetId: string) => string | undefined,
+): string | undefined {
+  if (!src) return undefined;
+  const sd = (src.data ?? {}) as Record<string, unknown>;
+  if (src.kind === 'asset') return assetPath(String(sd.assetId ?? ''));
+  if (src.kind === 'image-split') {
+    const m = PIECE_LABEL_RE.exec(edgeLabel ?? '');
+    if (m) {
+      const pieces = Array.isArray(sd.pieces) ? (sd.pieces as string[]) : [];
+      return pieces[Number(m[1]) - 1] || undefined;
+    }
+  }
+  const rp = String(sd.resultPath ?? '');
+  return rp || undefined;
+}
+
+/** 裁切/拆分的单值输入图:连线(input / piece-N)> data.inputImageFrom(渲染层边派生)> data.inputAssetId(检查器手填) */
+export function resolveSingleImageInput(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): string | undefined {
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  for (const e of canvas.edges) {
+    if (e.target !== node.id) continue;
+    if (!(e.label === 'input' || PIECE_LABEL_RE.test(e.label ?? ''))) continue;
+    const p = resolveNodeImagePath(canvas.nodes.find((n) => n.id === e.source), e.label, assetPath);
+    if (p) return p;
+  }
+  const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+  if (imgFrom?.nodeId) {
+    const edge = canvas.edges.find((e) => e.source === imgFrom.nodeId && e.target === node.id);
+    const p = resolveNodeImagePath(canvas.nodes.find((n) => n.id === imgFrom.nodeId), edge?.label, assetPath);
+    if (p) return p;
+  }
+  const assetId = String(d.inputAssetId ?? '');
+  return assetId ? assetPath(assetId) : undefined;
+}
+
+/** 拼接的多值输入:piece / piece-N 入边按源节点画布位置排序(row 按 x,column/grid 按 y)> data.piecesFrom 回退 */
+export function resolveStitchInputs(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): string[] {
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  const mode = String(d.mode ?? 'column');
+  const pieceEdges = canvas.edges.filter((e) => e.target === node.id && (e.label === 'piece' || PIECE_LABEL_RE.test(e.label ?? '')));
+  if (pieceEdges.length > 0) {
+    const sorted = pieceEdges
+      .map((e) => ({ e, src: canvas.nodes.find((n) => n.id === e.source) }))
+      .sort((a, b) => {
+        const pa = a.src?.position ?? { x: 0, y: 0 };
+        const pb = b.src?.position ?? { x: 0, y: 0 };
+        return mode === 'row' ? pa.x - pb.x : pa.y - pb.y;
+      });
+    const paths = sorted
+      .map(({ e, src }) => resolveNodeImagePath(src, e.label, assetPath))
+      .filter((p): p is string => !!p);
+    if (paths.length > 0) return paths;
+  }
+  const piecesFrom = Array.isArray(d.piecesFrom) ? (d.piecesFrom as Array<{ nodeId?: string }>) : [];
+  const out: string[] = [];
+  for (const pf of piecesFrom) {
+    const edge = canvas.edges.find((e) => e.source === pf.nodeId && e.target === node.id);
+    const p = resolveNodeImagePath(canvas.nodes.find((n) => n.id === pf.nodeId), edge?.label, assetPath);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 /** 分镜表规划服务(由主进程注入,内部走 agent.planStoryboard → LLM / 确定性兜底) */
 export interface StoryboardPlanFn {
   (
@@ -75,6 +157,7 @@ export interface StoryboardPlanFn {
 export class ToolHandlers {
   private planStoryboard?: StoryboardPlanFn;
   private accel?: AccelStore;
+  private takes?: TakeStore;
 
   constructor(
     private store: ProjectStore,
@@ -83,10 +166,11 @@ export class ToolHandlers {
     private exportSvc: ExportService,
     private queue: RenderQueue,
     private memory: MemoryStore,
-    opts: { planStoryboard?: StoryboardPlanFn; accel?: AccelStore } = {},
+    opts: { planStoryboard?: StoryboardPlanFn; accel?: AccelStore; takes?: TakeStore } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
     this.accel = opts.accel;
+    this.takes = opts.takes;
   }
 
   /** 工具路由表 */
@@ -115,7 +199,7 @@ export class ToolHandlers {
         const acc = (d.accel ?? {}) as { enabled?: boolean };
         return acc.enabled ? ' ⚡' : '';
       };
-      const lines = cur.nodes.map((n) => `- ${n.id} [${n.kind}] ${n.label}${sizeOfNode(n)}${accelMark(n)}`).join('\n');
+      const lines = cur.nodes.map((n) => `- 「${n.label || n.id}」 [${n.kind}]${sizeOfNode(n)}${accelMark(n)} (id=${n.id})`).join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
     'canvas.get_node': async (a, ctx) => {
@@ -124,13 +208,15 @@ export class ToolHandlers {
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       const node = cur?.nodes.find((n) => n.id === nodeId);
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      // 入/出边用对端标题展示(id 兜底),与「标题为主、id 为辅」的称呼规则一致
+      const idToLabel = new Map((cur?.nodes ?? []).map((n) => [n.id, n.label || n.id]));
       const ins = (cur?.edges ?? [])
         .filter((e) => e.target === nodeId)
-        .map((e) => `  ← ${e.source}${e.label ? ` [${e.label}]` : ''}`)
+        .map((e) => `  ← 「${idToLabel.get(e.source) ?? e.source}」${e.label ? ` [${e.label}]` : ''}`)
         .join('\n');
       const outs = (cur?.edges ?? [])
         .filter((e) => e.source === nodeId)
-        .map((e) => `  → ${e.target}${e.label ? ` [${e.label}]` : ''}`)
+        .map((e) => `  → 「${idToLabel.get(e.target) ?? e.target}」${e.label ? ` [${e.label}]` : ''}`)
         .join('\n');
       const dataJson = JSON.stringify(node.data ?? {}, null, 1);
       const dataTrunc =
@@ -138,7 +224,7 @@ export class ToolHandlers {
       return {
         ok: true,
         result:
-          `节点 ${nodeId}\n[${node.kind}] ${node.label}\n` +
+          `节点「${node.label}」 [${node.kind}] (id=${nodeId})\n` +
           `位置 (${node.position.x}, ${node.position.y})\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}\ndata:\n${dataTrunc}`,
       };
     },
@@ -441,9 +527,8 @@ export class ToolHandlers {
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
       if (!cur) return { ok: false, result: '画布不存在' };
       if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split') {
-        // 裁切/拼接/拆分不走引擎队列(ffmpeg 本地处理,由画布运行);Agent 侧提示用户到画布执行
-        const label = node.kind === 'image-crop' ? '图片裁切' : node.kind === 'image-stitch' ? '图片拼接' : '图片拆分';
-        return { ok: false, result: `${label}节点不走引擎队列:请在画布上选中该节点并运行(本地 ffmpeg,秒级)` };
+        // ffmpeg 本地节点:不进渲染队列,主进程同步执行(秒级),输入由连线解析,产物回写 + 记 Take
+        return this.runLocalImageNode(ctx, cur, node);
       }
       const isImage = node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale' || node.kind === 'asset';
       // 方案 B+D:shot 的参考引用由连线推导(不再信任 agent 直写的 data.refs),提交前防呆拦截
@@ -731,6 +816,74 @@ export class ToolHandlers {
       return await h(args, ctx);
     } catch (e) {
       return { ok: false, result: `工具执行异常:${(e as Error).message}` };
+    }
+  }
+
+  /**
+   * ffmpeg 本地图片节点(image-crop / image-stitch / image-split)的 engine.submit 执行路径:
+   * 同步执行(秒级,不进渲染队列)→ 记一条 succeeded Take → 产物路径/分片回写节点 data →
+   * saveCanvasSnapshot 落盘并广播(渲染层据 canvas-snapshot-updated 同步)。
+   * 与渲染层 runNode 快路径同口径(输入解析、Take 参数形状、data 字段一致)。
+   */
+  private async runLocalImageNode(ctx: ToolContext, cur: CanvasSnapshot, node: CanvasNode): Promise<ToolResult> {
+    const d = (node.data ?? {}) as Record<string, unknown>;
+    const assetPath = (id: string): string | undefined => (id ? this.assets.get(id)?.localPath : undefined);
+    /** Take 归档 + 产物回写 + 落盘(saveCanvasSnapshot 自带版本防护与写盘广播) */
+    const finish = (resultPath: string, params: Record<string, unknown>, extra?: Record<string, unknown>): void => {
+      const takeId = this.takes?.append(ctx.projectId, {
+        shotNodeId: node.id,
+        status: 'succeeded',
+        resultPath,
+        params,
+      }).id;
+      node.data = {
+        ...(node.data as Record<string, unknown>),
+        resultPath,
+        ...(extra ?? {}),
+        ...(takeId ? { currentTakeId: takeId } : {}),
+      } as unknown as CanvasNode['data'];
+      cur.updatedAt = new Date().toISOString();
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+    };
+    try {
+      if (node.kind === 'image-crop') {
+        const srcPath = resolveSingleImageInput(cur, node, assetPath);
+        if (!srcPath) return { ok: false, result: '图片裁切需要输入图:把图片节点/asset 连到本节点(input 端口),或在检查器填输入图 Asset ID' };
+        const aspect = String(d.aspect ?? '9:16');
+        const focus = String(d.focus ?? 'center') as 'center' | 'top' | 'bottom' | 'left' | 'right';
+        const res = await cropImage(srcPath, aspect, focus);
+        if (!res.ok || !res.path) return { ok: false, result: `裁切失败:${res.error ?? '未知错误'}` };
+        finish(res.path, { kind: 'crop', aspect, focus, inputPath: srcPath });
+        return { ok: true, result: `已裁切至 ${aspect}:${basenameOf(res.path)}`, nodeId: node.id };
+      }
+      if (node.kind === 'image-stitch') {
+        const paths = resolveStitchInputs(cur, node, assetPath);
+        if (paths.length < 2) return { ok: false, result: `图片拼接需要 ≥2 张有产物的拼接件(已解析 ${paths.length} 张):把多个图片节点/asset 连到本节点(piece 端口)` };
+        const mode = String(d.mode ?? 'column') as 'row' | 'column' | 'grid';
+        const gridCols = Number(d.gridCols ?? 3);
+        const gap = Number(d.gap ?? 0);
+        const bg = String(d.bg ?? 'white');
+        const res = await stitchImages(paths, { mode, gridCols, gap, bg });
+        if (!res.ok || !res.path) return { ok: false, result: `拼接失败:${res.error ?? '未知错误'}` };
+        finish(res.path, { kind: 'stitch', mode, gridCols, gap, bg, inputs: paths });
+        return { ok: true, result: `已拼接 ${paths.length} 张图:${basenameOf(res.path)}`, nodeId: node.id };
+      }
+      // image-split
+      const srcPath = resolveSingleImageInput(cur, node, assetPath);
+      if (!srcPath) return { ok: false, result: '图片拆分需要输入图:把图片节点/asset 连到本节点(input 端口),或在检查器填输入图 Asset ID' };
+      const mode = String(d.mode ?? 'grid') as 'rows' | 'cols' | 'grid';
+      const count = Number(d.count ?? 3);
+      const gridCols = Number(d.gridCols ?? 3);
+      const gridRows = Number(d.gridRows ?? 3);
+      const res = await splitImage(srcPath, { mode, count, gridCols, gridRows });
+      if (!res.ok || !res.paths || res.paths.length === 0) return { ok: false, result: `拆分失败:${res.error ?? '未知错误'}` };
+      // resultPath = 第 1 片(下游不选片时的默认);pieces = 全部切片(piece-N 端口按序号取)
+      const first = res.paths[0]!; // 上面已保证 paths.length > 0
+      finish(first, { kind: 'split', mode, count, gridCols, gridRows, inputPath: srcPath, pieces: res.paths }, { pieces: res.paths });
+      return { ok: true, result: `已拆分 ${res.paths.length} 片:${basenameOf(first)} 等`, nodeId: node.id };
+    } catch (e) {
+      return { ok: false, result: `本地图像处理异常:${(e as Error).message}`, nodeId: node.id };
     }
   }
 

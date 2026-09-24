@@ -1063,9 +1063,9 @@ export default function CanvasPage({
   }, [projectId, activeCanvasId, applyCanvasSnapshot]);
 
   /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
-  /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;渲染期同步保持稳定引用) */
-  const selectedNodeRef = useRef<string | null>(null);
-  selectedNodeRef.current = selected;
+  /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;带标题供用户气泡回显;渲染期同步保持稳定引用) */
+  const selectedNodeRef = useRef<{ id: string; title: string } | null>(null);
+  selectedNodeRef.current = selNode ? { id: selNode.id, title: selNode.title } : null;
   const chat = useAgentChat({
     projectId,
     canvasId: activeCanvasId,
@@ -2486,6 +2486,7 @@ export default function CanvasPage({
               }
             }}
             onEditSkill={() => onNavigate('skills')}
+            focusNode={selNode ? { id: selNode.id, title: selNode.title } : null}
             inspector={
               <InspectorPane
                 tab={tab}

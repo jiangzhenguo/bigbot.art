@@ -34,6 +34,8 @@ export interface ChatMsg {
   text?: string;
   /** 用户消息携带的附件(展示用) */
   attachments?: Array<{ name: string; kind: string }>;
+  /** 本轮发送时画布选中的「关注节点」(用户气泡回显徽标;recall 恢复时从 selectedNodeId/Title 还原) */
+  contextNode?: { id: string; title: string };
   /** 模型思考内容(ThinkingBlock 折叠展示;不进记忆) */
   thinking?: string;
   /** 设计稿里的 data-od-id 标识 */

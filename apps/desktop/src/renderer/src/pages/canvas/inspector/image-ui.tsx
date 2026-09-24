@@ -468,7 +468,7 @@ export function ActionBar({
       {secondary ? (
         <button className="btn btn-s" type="button" onClick={onSecondary}>{secondary}</button>
       ) : null}
-      {hint ? <span className="mut" style={{ fontSize: 10.5, marginLeft: 'auto', alignSelf: 'center' }}>{hint}</span> : null}
+      {hint ? <span className="mut" style={{ fontSize: 10.5, alignSelf: 'center' }}>{hint}</span> : null}
     </div>
   );
 }

@@ -136,21 +136,20 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
         ]}
       />
 
-      <ActionBar
-        primary={() => runNode(node.id)}
-        primaryLabel={hasTake ? '重新生成' : '生成'}
-        primaryIcon={hasTake ? 'regen' : 'gen'}
-        disabled={running}
-        secondary="保存预设"
-        onSecondary={() => toastMsg('预设保存规划中 · 后续版本开放')}
-      />
-
       <ImageTakeSection
         node={node}
         projectId={projectId}
         jobs={jobs}
         onSelectTake={onSelectTake}
         toastMsg={toastMsg}
+      />
+
+      {/* 运行行动条放最底部,与检查器面板的「仅重跑该节点」按钮相邻(「保存预设」未实现已下线) */}
+      <ActionBar
+        primary={() => runNode(node.id)}
+        primaryLabel={hasTake ? '重新生成' : '生成'}
+        primaryIcon={hasTake ? 'regen' : 'gen'}
+        disabled={running}
       />
     </div>
   );

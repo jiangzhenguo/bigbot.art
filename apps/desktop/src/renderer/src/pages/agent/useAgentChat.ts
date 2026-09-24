@@ -28,8 +28,8 @@ export interface UseAgentChatOptions {
   /** 工具改动画布后回调(CanvasPage 重拉节点) */
   onCanvasMutated: () => void;
   toastMsg: (msg: string) => void;
-  /** 画布当前选中节点 id(ref 稳定引用,避免选中变化重建 send;随对话请求注入让 Agent 感知) */
-  selectedNodeRef?: RefObject<string | null>;
+  /** 画布当前选中节点(ref 稳定引用,避免选中变化重建 send;随对话请求注入让 Agent 感知,标题供用户气泡回显) */
+  selectedNodeRef?: RefObject<{ id: string; title: string } | null>;
 }
 
 export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, selectedNodeRef }: UseAgentChatOptions) {
@@ -249,6 +249,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           return;
         }
       }
+      // 本轮关注节点:updater 外一次读取(StrictMode 双跑安全),记入用户消息供回显
+      const ctxNode = selectedNodeRef?.current ?? null;
       setMsgs((m) => [
         ...m,
         {
@@ -256,6 +258,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           kind: 'user',
           text: v || '(附件)',
           attachments: atts.length ? atts.map((a) => ({ name: a.name, kind: a.kind })) : undefined,
+          contextNode: ctxNode ?? undefined,
         },
       ]);
       setChatInput('');
@@ -278,7 +281,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           canvasId: cid,
           text: v,
           attachments: atts.length ? atts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, localPath: a.localPath })) : undefined,
-          selectedNodeId: selectedNodeRef?.current ?? undefined,
+          selectedNodeId: ctxNode?.id ?? undefined,
         })
         .then((res) => {
           // StrictMode 下 setMsgs updater 会双跑:ref 的读与清必须在 updater 外完成,
@@ -440,7 +443,16 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           (toolGroup ??= []).push({ name: r.toolName, args: r.toolArgs ?? {}, status: 'success', result: r.toolResult });
         } else {
           flushTools();
-          restored.push({ id: ++msgId.current, kind: r.role === 'user' ? 'user' : 'agent', text: r.content });
+          restored.push({
+            id: ++msgId.current,
+            kind: r.role === 'user' ? 'user' : 'agent',
+            text: r.content,
+            // 关注节点徽标还原(recall 留痕,2026-09 起新记录才有;旧记录无字段则不回显)
+            contextNode:
+              r.role === 'user' && r.selectedNodeId
+                ? { id: r.selectedNodeId, title: r.selectedNodeTitle ?? r.selectedNodeId }
+                : undefined,
+          });
         }
       }
       flushTools();

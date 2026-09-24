@@ -28,6 +28,8 @@ interface AgentPaneProps {
   onGripKeyDown: (e: React.KeyboardEvent) => void;
   /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页 */
   onEditSkill?: () => void;
+  /** 画布当前选中节点(输入区「关注节点」chip;null = 未选中) */
+  focusNode?: { id: string; title: string } | null;
 }
 
 export function AgentPane({
@@ -45,6 +47,7 @@ export function AgentPane({
   onGripDoubleClick,
   onGripKeyDown,
   onEditSkill,
+  focusNode,
 }: AgentPaneProps) {
   /* 面板容器 ref(原 CanvasPage 的 agentRef;拆分后无外部读取,收到本组件本地管理) */
   const agentRef = useRef<HTMLElement | null>(null);
@@ -88,8 +91,8 @@ export function AgentPane({
           onEditSkill={onEditSkill}
         />
         {inspector}
-        {/* 输入区(pages/agent/AgentComposer) */}
-        <AgentComposer chat={chat} toastMsg={toastMsg} />
+        {/* 输入区(pages/agent/AgentComposer);focusNode = 画布当前选中节点,发送时随消息注入 Agent 上下文 */}
+        <AgentComposer chat={chat} toastMsg={toastMsg} focusNode={focusNode} onLocate={onLocate} />
       </aside>
 
       {/* Agent 面板宽度拖拽把手 */}

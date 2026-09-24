@@ -686,6 +686,9 @@ export interface RecallMessage {
   toolArgs?: Record<string, unknown>;
   /** 工具执行结果摘要(role=tool) */
   toolResult?: string;
+  /** role=user 时,本轮随消息附带的画布选中节点(渲染层回显「关注节点」徽标;可选,旧记录无此字段) */
+  selectedNodeId?: string;
+  selectedNodeTitle?: string;
   createdAt: string;
 }
 

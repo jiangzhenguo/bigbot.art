@@ -109,8 +109,7 @@ export function InspectorPane({
       ) : null}
       {selected && (
         <button
-          className="btn btn-s"
-          style={{ width: '100%' }}
+          className="btn btn-s rerun-btn"
           onClick={onRerunSelected}
         >
           仅重跑该节点

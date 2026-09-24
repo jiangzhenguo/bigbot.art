@@ -86,7 +86,10 @@ function describeToolAction(name: string, args: Record<string, unknown>, nodeId?
   }
 }
 
-/** 选中节点详情摘要(附进本轮 user 消息,风格对齐 canvas.get_node 但只挑关键信息控制长度) */
+/** 选中节点详情摘要(附进本轮 user 消息,风格对齐 canvas.get_node 但只挑关键信息控制长度)。
+ *  顶部带指令性说明:选中 = 用户指着它,是本轮默认操作对象——
+ *  真实事故:用户选中 image-gen 节点说「编辑这个图片」,Agent 绕道 assets.import 复制产物
+ *  新建资产节点再连线,没有直接把选中节点连为上游。 */
 function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: CanvasNode[]): string {
   const idToLabel = new Map(nodes.map((n) => [n.id, n.label || n.id]));
   const ins = edges
@@ -107,7 +110,9 @@ function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: Canv
     if (j && j !== '{}') dataNote = `\ndata:${j.slice(0, 200)}${j.length > 200 ? '…' : ''}`;
   }
   return (
-    `[当前选中节点] ${node.id} · ${node.kind}「${node.label}」` +
+    `[当前选中节点]「${node.label}」 · ${node.kind} · id=${node.id}\n` +
+    `⚠️ 用户正选中这个节点:除非用户明确指向别处,本轮操作对象就是它;` +
+    `需要它的产物时直接用 canvas.connect 把它连为下游节点的上游,禁止绕道 assets.import 复制产物、另建资产节点。` +
     dataNote +
     (ins.length ? `\n入边:\n${ins.join('\n')}` : '') +
     (outs.length ? `\n出边:\n${outs.join('\n')}` : '')
@@ -169,6 +174,7 @@ const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
   accel,
+  takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
   // 分镜表规划:工具调用(对话里让 Agent 出分镜表)→ agent.planStoryboard(真 LLM,失败回退确定性模板)
   // LLM 来源与 agent-plan 同口径:项目级覆盖 → 全局设置 → worker 默认
   planStoryboard: async (brief, opts) => {
@@ -767,10 +773,17 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
 
-  // 记录用户消息到 recall(附件名一并留痕)
+  // 记录用户消息到 recall(附件名 + 当轮关注节点一并留痕,渲染层据此回显「关注:节点」徽标)
   const atts = req.attachments ?? [];
   const visibleText = req.text + (atts.length ? ` 📎${atts.map((a) => a.name).join('、')}` : '');
-  memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'user', content: visibleText });
+  const selNode = req.selectedNodeId && ctxSnap ? ctxSnap.nodes.find((x) => x.id === req.selectedNodeId) : undefined;
+  memory.addRecall(req.projectId, {
+    canvasId: req.canvasId,
+    role: 'user',
+    content: visibleText,
+    selectedNodeId: selNode?.id,
+    selectedNodeTitle: selNode?.label,
+  });
   logger.log('info', `agent.chat 开始 · "${req.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
 
   // 附件先拷入项目文件夹(projects/<pid>/assets/),Agent 一律使用项目内副本——
@@ -803,13 +816,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     : '';
 
   // 选中节点注入:用户正在操作哪个节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
-  const selNote =
-    req.selectedNodeId && ctxSnap
-      ? (() => {
-          const n = ctxSnap.nodes.find((x) => x.id === req.selectedNodeId);
-          return n ? `\n\n${describeSelectedNode(n, ctxSnap.edges, ctxSnap.nodes)}` : '';
-        })()
-      : '';
+  const selNote = selNode && ctxSnap ? `\n\n${describeSelectedNode(selNode, ctxSnap.edges, ctxSnap.nodes)}` : '';
 
   try {
     const result = await agent.chat({

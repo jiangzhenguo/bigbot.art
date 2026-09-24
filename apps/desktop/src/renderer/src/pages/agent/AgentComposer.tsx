@@ -12,9 +12,15 @@ import type { AgentChatApi } from './useAgentChat';
 export function AgentComposer({
   chat,
   toastMsg,
+  focusNode,
+  onLocate,
 }: {
   chat: AgentChatApi;
   toastMsg: (msg: string) => void;
+  /** 画布当前选中节点(发送时其详情会作为上下文一并发给 Agent;null/undefined = 未选中) */
+  focusNode?: { id: string; title: string } | null;
+  /** 点按关注节点 chip → 画布定位到该节点 */
+  onLocate?: (nodeId: string) => void;
 }) {
   /* 本地 UI 状态:弹层 / 附件 */
   const [openPop, setOpenPop] = useState<string | null>(null);
@@ -82,6 +88,27 @@ export function AgentComposer({
         ))}
       </div>
       <div className="input-box">
+        {focusNode ? (
+          <span
+            className="skill-tag focus-tag"
+            data-od-id="composer-focus-node"
+            role="button"
+            tabIndex={0}
+            title={`当前关注节点:发送时其详情会作为上下文一并发给 Agent\n点按定位到节点;在画布空白处点击可取消选中`}
+            onClick={() => onLocate?.(focusNode.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onLocate?.(focusNode.id);
+            }}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="12" r="7" />
+              <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" />
+            </svg>
+            <span>
+              关注：<b style={{ fontWeight: 600 }}>{focusNode.title}</b>
+            </span>
+          </span>
+        ) : null}
         {activeSkill ? (
           <span className="skill-tag" data-od-id="composer-skill-tag" title={`已激活技能「${activeSkill.name}」,对话已注入其操作指令`}>
             <svg viewBox="0 0 24 24" fill="currentColor">

@@ -43,9 +43,20 @@ export function ChatMessageList({
           return (
             <div className="msg-user" key={m.id}>
               {m.text}
-              {m.attachments?.length ? (
+              {m.contextNode || m.attachments?.length ? (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>
-                  {m.attachments.map((a) => (
+                  {m.contextNode ? (
+                    <span
+                      className="badge ctx-node"
+                      data-od-id="msg-context-node"
+                      style={{ fontSize: '10px' }}
+                      title={`本轮发送时已附带节点「${m.contextNode.title}」的详情作为 Agent 上下文 · 点按定位到节点`}
+                      onClick={() => onLocate(m.contextNode!.id)}
+                    >
+                      ◎ 关注:{m.contextNode.title}
+                    </span>
+                  ) : null}
+                  {m.attachments?.map((a) => (
                     <span key={a.name} className="badge" style={{ fontSize: '10px' }}>
                       {a.kind === 'image' ? '🖼' : a.kind === 'video' ? '🎬' : a.kind === 'audio' ? '🎵' : '📄'} {a.name}
                     </span>

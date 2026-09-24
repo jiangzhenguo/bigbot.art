@@ -16,7 +16,7 @@ import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 
-const RECALL_INJECT_LIMIT = 12; // 当前画布最近 N 条消息注入
+const RECALL_INJECT_LIMIT = 12; // 当前画布最近 N 条可注入消息(user/assistant/system;tool 留痕记录不占窗口)
 const ARCHIVAL_INJECT_LIMIT = 3; // archival 检索 top N
 const SUMMARY_FALLBACK_LEN = 200; // summary 生成的保底截断
 /** /compact 保留的最近消息条数(压缩更早的 old 部分;尾部保留以承接上下文/待确认 ask 卡) */
@@ -182,10 +182,29 @@ export class MemoryStore {
     this.persist(projectId);
   }
 
-  /** 检索 recall(当前画布最近 N 条) */
+  /** 检索 recall(当前画布最近 N 条注入消息)。
+   *  窗口只数可注入角色(user/assistant/system):role=tool 是留痕回看用的机器记录,不参与计数。
+   *  否则一轮「操作前必查」的工具调用(list_nodes + get_node×N,每条占 tool+system 两条)
+   *  就能把用户的原始指令挤出窗口 —— 真实事故:「编辑图片让女孩站立」经一轮 ask.user 往返后即掉出上下文。 */
   recentRecall(projectId: string, canvasId: string, limit = RECALL_INJECT_LIMIT): RecallMessage[] {
     const m = this.get(projectId);
-    return m.recall.filter((r) => r.canvasId === canvasId).slice(-limit);
+    return m.recall
+      .filter((r) => r.canvasId === canvasId && (r.role === 'user' || r.role === 'assistant' || r.role === 'system'))
+      .slice(-limit);
+  }
+
+  /** 当前任务链的首条用户指令:最近一条「非 ask.user 应答」的 user 消息。
+   *  ask 应答(点选项/自由回复)的前一条必是 ask.user 的 tool 记录,据此区分「新指令」与「链内应答」。 */
+  pinnedInstruction(projectId: string, canvasId: string): string | undefined {
+    const entries = this.get(projectId).recall.filter((r) => r.canvasId === canvasId);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const r = entries[i];
+      if (!r || r.role !== 'user') continue;
+      const prev = entries[i - 1];
+      if (prev && prev.role === 'tool' && prev.toolName === 'ask.user') continue; // ask 应答,不是新指令
+      return r.content;
+    }
+    return undefined;
   }
 
   /** archival 关键字检索(简单包含匹配 + 时间倒序) */
@@ -286,6 +305,10 @@ export class MemoryStore {
 
 【操作前必查】删除/更新/连线等以节点 id 为参数的操作,必须先调用 canvas.list_nodes 拉取当前画布最新节点列表(历史对话里的节点 id 可能已过期/已删除),再按返回的 id 执行;不允许凭记忆直接操作。
 
+【选中节点】用户消息带 [当前选中节点] 时,该节点就是本轮默认操作对象:改参数用 canvas.update_node 改它;做下游处理(编辑/裁切/拼接等)用 canvas.connect 把它直接连为新节点的上游。禁止绕道 assets.import 复制它的产物、另建资产节点再连线——那样新链路与原节点脱钩,原节点重新生成后下游不会跟随。
+
+【称呼规则】对用户说话时用节点标题称呼节点(如「镜头 02」「白底产品图」),禁止把节点 id(如 pal1-levm)直接写进回复正文或 ask.user 的选项;id 只用于工具参数。多个节点同名有歧义时,用「标题 + 关键差异(尺寸/位置/序号)」区分,仍不写裸 id。
+
 【示例】用户说「帮我删除所有节点」——错误做法:正文回复「这是不可逆操作,确认吗?」;正确做法:调用 ask.user,question 说明影响面(7 个 shot + 1 个时间线 + 全部连线将被删除),options 给 [{label:「全部删除」, sub:「节点与连线清空,不可恢复」}, {label:「只删未生成的空节点」, recommended:true}, {label:「先不删,我再想想」}]。`);
     // ①b 画布能力知识(节点类型 + 连接器端口语义 + 分镜表流程)——让 Agent 认知本产品的新节点与连线规则
     parts.push(
@@ -340,10 +363,33 @@ export class MemoryStore {
 
     // ③ 当前画布 recall(最近 N 条) —— 转 messages
     //    role=system(工具成功后的动作记录)也注入:让下一轮感知"刚才发生了什么",避免凭对话文本猜画布状态
+    //    连续重复的系统记录(如必查规则下的「已执行 canvas.get_node」×5)合并为「… ×N」,不占满注入窗口
     const recent = this.recentRecall(projectId, canvasId);
-    const messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = recent
-      .filter((r) => r.role === 'user' || r.role === 'assistant' || r.role === 'system')
-      .map((r) => ({ role: r.role as 'user' | 'assistant' | 'system', content: r.content }));
+    const collapsed: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
+    const counts: number[] = [];
+    for (const r of recent) {
+      const role = r.role as 'user' | 'assistant' | 'system';
+      const last = collapsed[collapsed.length - 1];
+      if (role === 'system' && last && last.role === 'system' && last.content === r.content) {
+        counts[counts.length - 1] = (counts[counts.length - 1] ?? 1) + 1;
+      } else {
+        collapsed.push({ role, content: r.content });
+        counts.push(1);
+      }
+    }
+    const messages = collapsed.map((msg, i) => {
+      const n = counts[i] ?? 1;
+      return n > 1 ? { ...msg, content: `${msg.content} ×${n}` } : msg;
+    });
+
+    // ③b 钉住当前任务链的首条用户指令:工具调用密集时原始指令可能掉出 recall 窗口
+    //    (真实事故:「编辑图片让女孩站立」第二轮起即丢失),这里兜底注入,直到用户发出新指令自然替换
+    const pinned = this.pinnedInstruction(projectId, canvasId);
+    if (pinned && !messages.some((msg) => msg.role === 'user' && msg.content === pinned)) {
+      parts.push(
+        `【进行中的任务】用户最初指令:「${pinned.slice(0, 200)}」——后续的问答与确认都围绕它推进,执行时不得丢失该目标;若用户最新消息开启了新任务,以最新消息为准。`,
+      );
+    }
 
     // ④ archival 检索注入(进 system prompt)
     const arc = this.searchArchival(projectId, userInput);

@@ -515,6 +515,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .skill-tag .x{color:var(--muted);display:inline-flex;padding:2px;border-radius:4px}
 .pg-canvas .skill-tag .x:hover{color:var(--fg);background:color-mix(in oklab,var(--fg) 8%,transparent)}
 .pg-canvas .skill-tag .x svg{width:10px;height:10px}
+/* 关注节点 chip(输入区):与技能 chip 同构,accent 淡底区分「本轮上下文来源」;点按定位到节点 */
+.pg-canvas .focus-tag{background:color-mix(in oklab,var(--accent) 10%,var(--surface));border-color:color-mix(in oklab,var(--accent) 34%,var(--border-soft));color:var(--fg);cursor:pointer}
+.pg-canvas .focus-tag>svg{color:var(--accent)}
+.pg-canvas .focus-tag:hover{border-color:var(--accent)}
+/* 用户气泡里的关注节点回显徽标(本轮实际带给 Agent 的节点) */
+.pg-canvas .msg-user .badge.ctx-node{background:color-mix(in oklab,var(--accent) 14%,transparent);color:var(--fg);cursor:pointer}
 .pg-canvas .toolrow{display:flex;gap:6px;margin-top:9px;align-items:center;flex-wrap:wrap;position:relative}
 .pg-canvas .toolrow .pop{bottom:calc(100% + 6px);left:0}
 .pg-canvas .composer-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:9px}
@@ -1317,9 +1323,13 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp .upstream .usub{font-size:10px;color:var(--muted);font-family:var(--font-mono);margin-top:1px}
 .pg-canvas .insp .upstream .upill{margin-left:auto;font-size:10px;color:var(--muted);font-family:var(--font-mono);border:1px solid var(--border);border-radius:var(--radius-pill);padding:1px 8px;flex:none}
 
-/* 行动条(主行动) */
-.pg-canvas .insp .action-bar{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border-soft);padding:10px 0 2px;margin-top:2px}
-.pg-canvas .insp .action-bar .btn-p{font-weight:500;font-size:13px;padding:8px 16px}
+/* 行动条(主行动):运行按钮加宽居中 + 最大宽度,与面板底部「仅重跑该节点」视觉成组 */
+.pg-canvas .insp .action-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;border-top:1px solid var(--border-soft);padding:10px 0 2px;margin-top:2px}
+.pg-canvas .insp .action-bar .btn-p{font-weight:500;font-size:13px;padding:8px 16px;flex:1 1 auto;max-width:320px;justify-content:center}
+.pg-canvas .insp .action-bar .btn svg{width:14px;height:14px;flex:none}
+/* 仅重跑该节点:与上方运行按钮同款限宽居中(最宽 320px) */
+.pg-canvas .insp .rerun-btn{display:flex;width:100%;max-width:320px;margin:6px auto 0;justify-content:center}
+.pg-canvas .insp .action-bar .mut{flex:1 1 100%;text-align:center}
 
 /* ═══ 无边框窗口(macOS titleBarStyle:'hiddenInset') ═══
  * 顶部 34px 全局拖拽条(App.tsx 的 .titlebar-drag):所有页面内容整体下移为红绿灯让位,

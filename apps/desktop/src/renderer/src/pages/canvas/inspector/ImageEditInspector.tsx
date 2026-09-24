@@ -9,6 +9,7 @@ import React, { useEffect, useState } from 'react';
 import type { RenderJob } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { ImageTakeSection } from './ImageTakeSection';
+import { ImagePreview } from './ImagePreview';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
 import { GenStatePanel } from './GenState';
@@ -34,6 +35,19 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
   { key: 'outpaint', label: '扩图', mono: 'outpaint' },
 ];
 
+/**
+ * 各编辑模式可用的已知模型 + 推荐默认(2026-09 mlxgen capabilities 实测):
+ * - instruction/inpaint/outpaint → qwen.edit handler(Qwen Edit / flux2)
+ * - img2img(latent)→ 只有 z-image / flux2 有 latent 能力,Qwen Edit 没有(Provider 侧也有防呆)
+ * 自定义 repoId(matchModel 匹配不到)不自动切换,由用户自行负责。
+ */
+const MODE_MODELS: Record<string, { allowed: string[]; recommend: string }> = {
+  instruction: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
+  img2img: { allowed: ['AbstractFramework/z-image-turbo-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'AbstractFramework/z-image-turbo-8bit' },
+  inpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'AbstractFramework/z-image-turbo-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
+  outpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
+};
+
 export function ImageEditInspector(p: ImageEditInspectorProps) {
   const { node, setData, jobs, projectId, nodes, assetCache, runNode, toastMsg, onSelectTake } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
@@ -48,7 +62,29 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
   const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
   const hasTake = !!d.currentTakeId || !!String(d.resultPath ?? '');
+  const resultPath = String(d.resultPath ?? '');
   const running = jobs.some((j) => j.nodeId === node.id && j.status === 'running');
+
+  // 模式切换:当前模型不在该模式可用集合里时自动切到推荐模型(自定义模型不动)
+  const onModeChange = (m: string) => {
+    const rule = MODE_MODELS[m];
+    const curRepo = matchModel(model)?.repoId;
+    if (rule && curRepo && !rule.allowed.includes(curRepo)) {
+      const to = matchModel(rule.recommend);
+      setData({ mode: m, model: rule.recommend });
+      toastMsg(`「${MODE_META.find((x) => x.key === m)?.label ?? m}」模式不支持当前模型,已自动切换为 ${to?.name ?? rule.recommend}`);
+    } else {
+      setData({ mode: m });
+    }
+  };
+
+  const onArchive = () => {
+    if (!projectId || !resultPath) { toastMsg('暂无产物可入库'); return; }
+    void window.bigbotart
+      .archiveProducts({ projectId, items: [{ nodeId: node.id, path: resultPath }] })
+      .then((r) => toastMsg(r.ok ? `已归档 ${r.assets.length} 项到资产库` : `归档失败:${r.error ?? ''}`))
+      .catch(() => toastMsg('归档失败'));
+  };
 
   // ── 输入图来源解析(Asset 直绑 > shot 抽帧 > 图片直通) ──
   const up = (() => {
@@ -135,7 +171,7 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         <div className="f-sec-h"><span className="lbl">编辑模式</span></div>
         <div className="modes" style={running ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
           {MODE_META.map((m) => (
-            <span key={m.key} className={`chip${mode === m.key ? ' on' : ''}`} onClick={() => setData({ mode: m.key })}>
+            <span key={m.key} className={`chip${mode === m.key ? ' on' : ''}`} onClick={() => onModeChange(m.key)}>
               {m.label}
               <span className="small mono">{m.mono}</span>
             </span>
@@ -144,6 +180,19 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
       </div>
 
       <UpstreamCard label={up.label} sub={up.sub} src={up.src} pill={up.pill} />
+      {/* 输入图大图预览(有源时;点 ⛶ 可全屏) */}
+      {up.src ? <ImagePreview src={up.src} alt="输入图预览" /> : null}
+
+      {/* 产物预览(与 image-gen 检查器同模式) */}
+      {resultPath ? (
+        <div className="kv" data-od-id="edit-result-preview">
+          <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
+          <ImagePreview src={previewUrlOf(resultPath)} label="" />
+          <div className="row g6">
+            <button className="btn btn-s btn-sm" data-od-id="cta-archive" type="button" onClick={onArchive}>作为素材入库</button>
+          </div>
+        </div>
+      ) : null}
 
       {/* 输入图 Asset ID(与连线二选一,保留原能力) */}
       <div className="f-sec" style={running ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
@@ -236,22 +285,21 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         ]}
       />
 
-      <ActionBar
-        primary={() => runNode(node.id)}
-        primaryLabel={hasTake ? '重新编辑' : '编辑'}
-        primaryIcon={hasTake ? 'regen' : 'gen'}
-        disabled={!canSubmit}
-        secondary="保存预设"
-        onSecondary={() => toastMsg('预设保存规划中 · 后续版本开放')}
-        hint={submitHint}
-      />
-
       <ImageTakeSection
         node={node}
         projectId={projectId}
         jobs={jobs}
         onSelectTake={onSelectTake}
         toastMsg={toastMsg}
+      />
+
+      {/* 运行行动条放最底部,与检查器面板的「仅重跑该节点」按钮相邻;措辞与其他检查器统一为「运行」 */}
+      <ActionBar
+        primary={() => runNode(node.id)}
+        primaryLabel={hasTake ? '重新运行' : '运行'}
+        primaryIcon={hasTake ? 'regen' : 'gen'}
+        disabled={!canSubmit}
+        hint={submitHint}
       />
     </div>
   );
