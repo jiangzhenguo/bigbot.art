@@ -4,6 +4,7 @@ import { usePrompt } from '../components/usePrompt';
 import { useRenderQueue } from './useRenderQueue';
 import { useT } from '../i18n';
 import { llmDisplayName } from './agent/llm-display';
+import brandIcon from '../assets/icon.png';
 
 export type HomePageTarget =
   | 'home'
@@ -303,12 +304,8 @@ export default function HomePage({
               onNavigate('home');
             }}
           >
-            <span className="mk">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="8" height="8" rx="2" />
-                <rect x="13" y="13" width="8" height="8" rx="2" />
-                <path d="M11 8h6a4 4 0 0 1 4 4v1" opacity=".65" />
-              </svg>
+            <span className="mk has-img">
+              <img src={brandIcon} alt="BigBotArt" />
             </span>
             BigBotArt
           </a>

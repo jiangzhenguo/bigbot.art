@@ -24,6 +24,42 @@ describe('submit · 槽位校验', () => {
   });
 });
 
+describe('submit · generate 参考图(多参考生成)', () => {
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image',
+      localPath: p,
+    }));
+
+  it('klein 模型 + ref-image references → --i2i-mode multi-reference + 逐张 --image', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: 'AbstractFramework/flux.2-klein-9b-8bit', prompt: '角色展示图' }),
+      references: refs(['/lib/r1.png', '/lib/r2.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('multi-reference');
+    const imgs = cmd.map((c, i) => (c === '--image' ? cmd[i + 1] : null)).filter(Boolean);
+    expect(imgs).toEqual(['/lib/r1.png', '/lib/r2.png']);
+  });
+
+  it('z-image-turbo(纯文生图)带参考图 → 明确报错指引换模型', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit({ ...req('generate', { model: 'AbstractFramework/z-image-turbo-8bit' }), references: refs(['/lib/r1.png']) }),
+    ).rejects.toThrow('多参考模型');
+  });
+
+  it('无参考图 → 不带 --i2i-mode/--image(纯文生图不变)', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: '晨雾森林' }));
+    const cmd = lastCmd(p);
+    expect(cmd).not.toContain('--i2i-mode');
+    expect(cmd).not.toContain('--image');
+  });
+});
+
 describe('submit · generate(文生图)', () => {
   it('命令以 generate 开头,含模型/提示词/宽高/步数/引导/输出', async () => {
     const p = makeProvider();
@@ -231,4 +267,31 @@ describe('check · 未安装 mlxgen 场景', () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+});
+describe('submit · 默认模型按 kind 分派', () => {
+  // req() 辅助函数固定注入 model,这里需要「未指定模型」的场景,单独构造
+  const reqNoModel = (kind: string, params: Record<string, unknown> = {}): RenderRequest =>
+    ({ provider: 'mlxgen', nodeId: 'n1', slot: 'image', params: { kind, ...params } }) as RenderRequest;
+
+  it('instruction(指令编辑)缺省模型 → Qwen-Image-Edit-8bit(而非 z-image 文生图)', async () => {
+    const p = makeProvider();
+    await p.submit(reqNoModel('instruction', { prompt: '去文字', inputPath: '/tmp/a.png' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe('mlx-community/Qwen-Image-Edit-8bit');
+    expect(cmd[cmd.indexOf('--image-path') + 1]).toBe('/tmp/a.png');
+  });
+
+  it('upscale 缺省模型 → SeedVR2;generate 缺省 → z-image-turbo', async () => {
+    const p = makeProvider();
+    await p.submit(reqNoModel('upscale', { inputPath: '/tmp/a.png', scale: '2x' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--model') + 1]).toBe('AbstractFramework/seedvr2-3b-8bit');
+    await p.submit(reqNoModel('generate', { prompt: 'x' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--model') + 1]).toBe('AbstractFramework/z-image-turbo-8bit');
+  });
+
+  it('显式给模型时不受默认分派影响', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { prompt: 'x', inputPath: '/tmp/a.png', model: 'AbstractFramework/flux.2-klein-9b-8bit' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--model') + 1]).toBe('AbstractFramework/flux.2-klein-9b-8bit');
+  });
 });

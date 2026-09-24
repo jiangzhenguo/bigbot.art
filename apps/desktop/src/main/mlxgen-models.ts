@@ -30,6 +30,8 @@ export interface MlxModelInfo {
 const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?: string }> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', repoId: 'AbstractFramework/z-image-turbo-8bit' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', msRepoId: 'mlx-community/Qwen-Image-Edit-8bit' },
+  // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需;MS 无此仓库,走 HF 通道)
+  { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', repoId: 'AbstractFramework/flux.2-klein-9b-8bit' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit' },
   { id: 'qwen2.5-vl', name: 'Qwen2.5-VL', repoId: 'Qwen/Qwen2.5-VL-7B-Instruct', msRepoId: 'Qwen/Qwen2.5-VL-7B-Instruct' },
 ];

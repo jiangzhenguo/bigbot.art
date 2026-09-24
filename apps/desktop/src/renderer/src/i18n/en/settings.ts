@@ -186,6 +186,7 @@ export default {
   'LLM · 推荐': 'LLM · Recommended',
   '文生图 · 推荐 · ~11GB': 'Text-to-image · Recommended · ~11GB',
   '指令编辑 / Inpaint · 推荐 · 37.5GB': 'Instruction editing / Inpaint · Recommended · 37.5GB',
+  '多参考生成/编辑 · Outpaint · ~18GB': 'Multi-reference generation/editing · Outpaint · ~18GB',
   '超分修复 · 可选 · ~4.7GB': 'Upscaling & restoration · Optional · ~4.7GB',
   '视觉 LLM · Agent 识图 · 可选 · ~16.6GB': 'Vision LLM · Agent image understanding · Optional · ~16.6GB',
   下载: 'Download',

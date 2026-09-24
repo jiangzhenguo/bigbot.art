@@ -116,7 +116,18 @@ export class MlXGenProvider implements Provider {
     if (req.slot !== 'image') throw new Error('mlxgen 仅支持图片任务');
     const p = req.params as Record<string, unknown>;
     const kind = (p.kind as string) ?? 'generate';
-    const rawModel = String(p.model ?? 'AbstractFramework/z-image-turbo-8bit');
+    // 默认模型按 kind 分派(真实事故:Agent 建 image-edit 节点只写了 prompt,没写 model,
+    // 缺省成 z-image 纯文生图模型,CLI auto 路由成 latent i2i 缺 --image-strength 直接 exit 2):
+    //   文生图/img2img → z-image-turbo;指令编辑/inpaint/outpaint → Qwen Image Edit;超分 → SeedVR2
+    const DEFAULT_MODEL_BY_KIND: Record<string, string> = {
+      generate: 'AbstractFramework/z-image-turbo-8bit',
+      img2img: 'AbstractFramework/z-image-turbo-8bit',
+      instruction: 'mlx-community/Qwen-Image-Edit-8bit',
+      inpaint: 'mlx-community/Qwen-Image-Edit-8bit',
+      outpaint: 'mlx-community/Qwen-Image-Edit-8bit',
+      upscale: 'AbstractFramework/seedvr2-3b-8bit',
+    };
+    const rawModel = String(p.model ?? DEFAULT_MODEL_BY_KIND[kind] ?? 'AbstractFramework/z-image-turbo-8bit');
     const model = MlXGenProvider.MODEL_ALIASES[rawModel] ?? rawModel;
     const taskId = `mlxgen-${kind}-${Date.now()}`;
     const outBase = `${this.outDir}/${req.nodeId}_${taskId}`;
@@ -137,6 +148,22 @@ export class MlXGenProvider implements Provider {
       cmd.push('--width', String(p.width ?? 768), '--height', String(p.height ?? 768));
       cmd.push('--steps', String(p.steps ?? 24), '--guidance', String(p.guidance ?? 1.0));
       if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
+      // 参考图(ref-image 连线):多参考生成路由 —— 实测(2026-09)CLI 接受 `--i2i-mode multi-reference`
+      // + 重复 `--image`(仅多参考 i2i 可重复);z-image-turbo 是纯文生图,带参考图时给明确指引报错
+      const refPaths = (req.references ?? [])
+        .filter((r) => r.role === 'ref-image' && r.localPath)
+        .map((r) => String(r.localPath));
+      if (refPaths.length > 0) {
+        if (!/flux.?2.*klein/i.test(model)) {
+          throw new Error(
+            `带参考图的生成需要多参考模型(当前 ${model} 是纯文生图):` +
+              '请把节点模型改为 AbstractFramework/flux.2-klein-9b-8bit(约 18GB,设置页「模型」可下载),' +
+              '或断开参考图连线再提交',
+          );
+        }
+        cmd.push('--i2i-mode', 'multi-reference');
+        for (const rp of refPaths) cmd.push('--image', rp);
+      }
       if (seeds.length > 0) {
         cmd.push('--seed');
         for (const s of seeds) cmd.push(String(s));

@@ -108,6 +108,48 @@ export function resolveSingleImageInput(
   return assetId ? assetPath(assetId) : undefined;
 }
 
+/** image-gen 的参考图输入:ref-image 入边 → 上游图片路径数组(资产节点取资产路径,产物节点取 resultPath)。
+ *  真实事故:Agent 连了两张参考图到 image-gen,提交时 references 只给 shot 推导,
+ *  图片节点的 ref-image 边被静默丢弃,生成了纯文生图。 */
+export function resolveRefImagePaths(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): string[] {
+  return canvas.edges
+    .filter((e) => e.target === node.id && e.label === 'ref-image')
+    .map((e) => resolveNodeImagePath(canvas.nodes.find((n) => n.id === e.source), e.label, assetPath))
+    .filter((p): p is string => !!p);
+}
+
+/** image 类节点的提交参数(与渲染层 runNode 同口径,真实事故修复):
+ *  - kind 从节点类型/编辑模式推导——node.data 里没有 kind 字段,直传 data 会让 Provider
+ *    缺省成 'generate',image-edit 被当成纯文生图,input 连线的图被静默丢弃
+ *  - image-edit / image-upscale 的 inputPath 从连线解析(input / piece-N 入边 > inputImageFrom > inputAssetId) */
+export function buildImageSubmitParams(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): { ok: true; params: Record<string, unknown> } | { ok: false; error: string } {
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  const params: Record<string, unknown> = { ...d };
+  params.kind =
+    node.kind === 'image-upscale' ? 'upscale' : node.kind === 'image-edit' ? String(d.mode ?? 'instruction') : 'generate';
+  if (node.kind === 'image-edit' || node.kind === 'image-upscale') {
+    if (!params.inputPath) {
+      const input = resolveSingleImageInput(canvas, node, assetPath);
+      if (input) params.inputPath = input;
+    }
+    if (!params.inputPath) {
+      return {
+        ok: false,
+        error: `节点「${node.label || node.id}」没有输入图:请先用 canvas.connect 把图片/资产节点连到它的 input 端口`,
+      };
+    }
+  }
+  return { ok: true, params };
+}
+
 /** 拼接的多值输入:piece / piece-N 入边按源节点画布位置排序(row 按 x,column/grid 按 y)> data.piecesFrom 回退 */
 export function resolveStitchInputs(
   canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
@@ -401,6 +443,15 @@ export class ToolHandlers {
         data = rest;
         refsNote = ` · refs 由连线推导已忽略(用 canvas.connect 管理参考)`;
       }
+      // 图片节点默认 engine/model/mode(与检查器/渲染层默认同口径)——真实事故:Agent 建 image-edit
+      // 只写了 prompt,缺省模型落到 z-image 纯文生图,提交时 CLI auto 路由 latent i2i 缺参数报错
+      if (kind === 'image-edit') {
+        data = { engine: 'mlxgen', model: 'mlx-community/Qwen-Image-Edit-8bit', mode: 'instruction', ...data };
+      } else if (kind === 'image-gen') {
+        data = { engine: 'mlxgen', model: 'AbstractFramework/z-image-turbo-8bit', ...data };
+      } else if (kind === 'image-upscale') {
+        data = { engine: 'mlxgen', model: 'AbstractFramework/seedvr2-3b-8bit', ...data };
+      }
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
@@ -576,11 +627,37 @@ export class ToolHandlers {
           return { ok: false, result: `提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}` };
         }
       }
+      // image-gen:ref-image 连线 → 参考图(多参考生成;mlxgen 侧对不支持的模型给指引报错)
+      if (node.kind === 'image-gen') {
+        const refPaths = resolveRefImagePaths(cur, node, (id) => this.assets.get(id)?.localPath);
+        const now = new Date().toISOString();
+        for (const p of refPaths) {
+          references.push({
+            asset: {
+              id: `ref:${basenameOf(p)}`,
+              kind: 'image',
+              name: basenameOf(p),
+              localPath: p,
+              tags: [],
+              createdAt: now,
+            },
+            role: 'ref-image',
+            localPath: p,
+          });
+        }
+      }
+      // image 类节点:kind 推导 + input 连线解析(直传 node.data 会让 image-edit 缺省成 generate 丢输入图)
+      let submitParams: Record<string, unknown> = (node.data as Record<string, unknown>) ?? {};
+      if (node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale') {
+        const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath);
+        if (!built.ok) return { ok: false, result: built.error };
+        submitParams = built.params;
+      }
       const handle = this.queue.submit({
         provider: (node.data as { engine?: string }).engine === 'mlxgen' ? 'mlxgen' : isImage ? 'mlxgen' : 'h3c',
         nodeId,
         slot: isImage ? 'image' : 'video',
-        params: (node.data as Record<string, unknown>) ?? {},
+        params: submitParams,
         references,
       });
       return { ok: true, result: `已提交生成任务(${handle.providerTaskId})${warnNote}`, nodeId };

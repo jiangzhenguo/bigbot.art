@@ -114,3 +114,70 @@ describe('resolveStitchInputs(拼接)', () => {
     expect(resolveStitchInputs(canvas, st, assets({}))).toEqual(['/o/A.png', '/o/B.png']);
   });
 });
+
+describe('resolveRefImagePaths(image-gen 参考图)', () => {
+  it('ref-image 入边 → 上游图片路径数组(asset 取资产路径,产物节点取 resultPath)', async () => {
+    const { resolveRefImagePaths } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('a1', 'asset', { assetId: 'asset-1' }),
+        node('g1', 'image-gen', { resultPath: '/o/g1.png' }),
+        node('g2', 'image-gen', {}), // 无产物,应被过滤
+        node('t', 'image-gen', {}),
+      ],
+      edges: [
+        edge('a1', 't', 'ref-image'),
+        edge('g1', 't', 'ref-image'),
+        edge('g2', 't', 'ref-image'),
+        edge('a1', 't', 'input'), // 非 ref-image 边不计入
+      ],
+    };
+    expect(resolveRefImagePaths(canvas, canvas.nodes[3]!, assets({ 'asset-1': '/lib/p1.png' }))).toEqual([
+      '/lib/p1.png',
+      '/o/g1.png',
+    ]);
+  });
+
+  it('无 ref-image 入边 → 空数组', async () => {
+    const { resolveRefImagePaths } = await import('../tool-handlers');
+    const canvas = { nodes: [node('t', 'image-gen', {})], edges: [] };
+    expect(resolveRefImagePaths(canvas, canvas.nodes[0]!, assets({}))).toEqual([]);
+  });
+});
+
+describe('buildImageSubmitParams(image 类节点提交参数)', () => {
+  it('image-edit:kind 从 mode 推导为 instruction,inputPath 从 input 连线解析', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [node('a1', 'asset', { assetId: 'asset-1' }), node('e', 'image-edit', { mode: 'instruction', prompt: '去文字' })],
+      edges: [edge('a1', 'e', 'input')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({ 'asset-1': '/lib/p.png' }));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.params.kind).toBe('instruction');
+      expect(r.params.inputPath).toBe('/lib/p.png');
+      expect(r.params.prompt).toBe('去文字');
+    }
+  });
+
+  it('image-edit 无输入图连线 → 明确报错(不再静默跑成文生图)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = { nodes: [node('e', 'image-edit', { mode: 'instruction' })], edges: [] };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[0]!, assets({}));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('没有输入图');
+  });
+
+  it('image-upscale:kind=upscale;image-gen:kind=generate 且不强制输入图', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const up = node('u', 'image-upscale', { scale: 2 });
+    const g = node('g', 'image-gen', { prompt: 'x' });
+    const canvas = { nodes: [up, g], edges: [] };
+    const r1 = buildImageSubmitParams(canvas, up, assets({}));
+    expect(r1.ok).toBe(false); // upscale 必须有输入图
+    const r2 = buildImageSubmitParams(canvas, g, assets({}));
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.params.kind).toBe('generate');
+  });
+});

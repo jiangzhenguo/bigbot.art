@@ -142,6 +142,9 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-home .side-brand{display:flex;align-items:center;gap:9px;padding:16px 16px 12px;font-family:var(--font-display);font-size:var(--text-base);font-weight:600;letter-spacing:var(--tracking-display)}
 .pg-home .side-brand .mk{width:26px;height:26px;border-radius:8px;background:var(--fg);color:var(--bg);display:grid;place-items:center;flex:none}
 .pg-home .side-brand .mk svg{width:14px;height:14px}
+/* 品牌图标图片版:透明底 PNG,不要深色底块 */
+.pg-home .side-brand .mk.has-img{background:none}
+.pg-home .side-brand .mk.has-img img{width:26px;height:26px;border-radius:6px;display:block}
 .pg-home .side-nav{padding:0 10px;display:flex;flex-direction:column;gap:1px;overflow:auto}
 .pg-home .side-nav .lbl{padding:12px 10px 4px}
 .pg-home .side-link{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--fg-2);transition:background var(--motion-fast)}

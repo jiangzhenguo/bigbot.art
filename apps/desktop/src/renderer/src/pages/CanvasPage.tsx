@@ -908,28 +908,24 @@ export default function CanvasPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 资产本地路径缓存 + 分类字典(挂载时拉取) */
+  /** 资产本地路径缓存 + 分类字典(挂载时拉取;Agent 对话中注册的新附件由快照推送触发刷新) */
+  const refreshAssets = useCallback(async () => {
+    try {
+      const [list, cats] = await Promise.all([
+        window.bigbotart.listAssets(),
+        window.bigbotart.listAssetCategories(),
+      ]);
+      assetCache.current = Object.fromEntries(list.map((a) => [a.id, a.localPath]));
+      setAssetsList(list);
+      setCategories(cats);
+    } catch {
+      /* 资产可为空 */
+    }
+  }, []);
+
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const [list, cats] = await Promise.all([
-          window.bigbotart.listAssets(),
-          window.bigbotart.listAssetCategories(),
-        ]);
-        if (alive) {
-          assetCache.current = Object.fromEntries(list.map((a) => [a.id, a.localPath]));
-          setAssetsList(list);
-          setCategories(cats);
-        }
-      } catch {
-        /* 资产可为空 */
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [projectId]);
+    void refreshAssets();
+  }, [projectId, refreshAssets]);
 
   /** assetId → 展示元信息(asset 节点渲染:缩略图/分类/媒体) */
   const assetMeta = useMemo(() => {
@@ -1058,9 +1054,12 @@ export default function CanvasPage({
       if (!projectId || snap.projectId !== projectId) return;
       if (activeCanvasId && snap.id !== activeCanvasId) return;
       applyCanvasSnapshot(snap);
+      // Agent 对话中可能刚注册了新附件资产(参考图等),刷新资产缓存,
+      // 否则 asset 节点显示「资产未加载」占位(真实事故:Agent 建了参考图节点但缩略图空白)
+      void refreshAssets();
     });
     return off;
-  }, [projectId, activeCanvasId, applyCanvasSnapshot]);
+  }, [projectId, activeCanvasId, applyCanvasSnapshot, refreshAssets]);
 
   /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
   /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;带标题供用户气泡回显;渲染期同步保持稳定引用) */
@@ -1808,6 +1807,29 @@ export default function CanvasPage({
           };
         })
         .filter(Boolean) as never[];
+
+      /* image-gen 的参考图:ref-image 入边 → references(多参考生成;mlxgen 对不支持的模型给指引报错)。
+         真实事故:连线在画布上可见但提交时被丢弃,参考图没进生成命令 */
+      if (n.kind === 'image-gen') {
+        for (const e of edgesRef.current.filter((x) => x.to === nodeId && x.label === 'ref-image')) {
+          const up = nodesRef.current.find((x) => x.id === e.from);
+          const p = upstreamImagePath(up, e.label, assetCache.current);
+          if (p) {
+            references.push({
+              asset: {
+                id: `ref:${p.split(/[\\/]/).pop() ?? p}`,
+                kind: 'image',
+                name: p.split(/[\\/]/).pop() ?? p,
+                localPath: p,
+                tags: [],
+                createdAt: new Date().toISOString(),
+              },
+              role: 'ref-image',
+              localPath: p,
+            } as never);
+          }
+        }
+      }
 
       /* 镜头接续兜底:入边来自上游 shot 但尾帧尚未归档时(旧数据 / 应用重启后),
          现场抽一次上游产物尾帧,保证「上一段的最后一帧 = 本段首帧」永远成立。

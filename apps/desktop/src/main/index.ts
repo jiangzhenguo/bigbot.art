@@ -2,7 +2,7 @@
  * Electron 主进程 — 窗口 + IPC + 服务编排
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
-import { app, BrowserWindow, ipcMain, protocol, net, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, net, shell, nativeImage } from 'electron';
 import { join, resolve } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -302,11 +302,15 @@ function wireDebugLog(win: BrowserWindow) {
 }
 
 async function createWindow() {
+  // 自定义应用图标(dev/unpacked 下 Electron 用默认图标;macOS 走 Dock,Windows/Linux 走窗口 icon。
+  //  打包时需另配 electron-builder 的 icon/extraResources,目前仓库尚无打包配置)
+  const iconPath = join(__dirname, '../../resources/icon.png');
   win = new BrowserWindow({
     width: 1440,
     height: 900,
     title: 'BigBotArt',
     backgroundColor: '#14161a',
+    ...(existsSync(iconPath) ? { icon: iconPath } : {}),
     // 隐藏 macOS 原生标题栏:红绿灯悬浮内嵌,窗口拖拽由渲染层 .topbar/侧栏的 -webkit-app-region 承担
     titleBarStyle: 'hiddenInset',
     webPreferences: {
@@ -974,6 +978,19 @@ async function probeSimple(
 }
 
 app.whenReady().then(async () => {
+  // macOS Dock 图标(dev 下默认是 Electron 图标,这里换成项目图标)
+  const dockIcon = join(__dirname, '../../resources/icon.png');
+  if (existsSync(dockIcon)) {
+    const img = nativeImage.createFromPath(dockIcon);
+    if (img.isEmpty()) {
+      logger.log('warn', `Dock 图标加载失败(图片为空):${dockIcon}`);
+    } else {
+      app.dock?.setIcon(img);
+      logger.log('info', `Dock 图标已设置:${dockIcon} (${img.getSize().width}×${img.getSize().height})`);
+    }
+  } else {
+    logger.log('warn', `Dock 图标文件不存在:${dockIcon}`);
+  }
   // 注册 bba-asset:// 协议:仅允许读取 ~/.bigbotart/assets/ 下的 asset-<id>.<ext> 文件
   // (renderer 用 <img src="bba-asset://<filename>"> 显示资产缩略图,无需 webSecurity:false)
   protocol.handle('bba-asset', async (req) => {
