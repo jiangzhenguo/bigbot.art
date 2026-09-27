@@ -13,6 +13,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   shot: {
     shot: 'first-frame', // 上游尾帧作为下游首帧(镜头接续链)
     edit: 'input', // 取帧作为输入图
+    'video-upscale': 'input', // 镜头成片 → 视频增强(超分 + 修脸)
     timeline: 'clip', // 整段入轨
   },
   'image-gen': {
@@ -43,6 +44,12 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     split: 'input', // 拆分源
     image: 'ref-image',
     timeline: 'clip',
+  },
+  // 🆕 视频增强(超分 + 合修脸):视频入 → 视频出;可作镜头首帧/参考视频,可入轨
+  'video-upscale': {
+    shot: 'first-frame/ref-video', // 增强结果 → 首帧直通 / 参考视频(风格/动作)
+    timeline: 'clip', // 增强成片入轨
+    'video-upscale': 'input', // 链式二次增强
   },
   'image-crop': {
     shot: 'first-frame/ref-image', // 裁切结果 → 首帧直通 / 参考图注入
@@ -109,6 +116,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     crop: 'input', // 裁切源
     stitch: 'piece', // 拼接件(图片素材)
     split: 'input', // 拆分源(图片素材)
+    'video-upscale': 'input', // 视频素材 → 视频增强(超分 + 修脸)
     timeline: 'clip', // 静帧/视频素材入轨;音频为 audio-track
     doc: 'prompt', // 文档资产 → 文档引用
   },
@@ -128,7 +136,7 @@ export const PORT_SEMANTICS: Record<string, string> = {
   'ref-image': '参考图(→ shot 是 Ref2VA 身份/场景锁定;→ image-gen 是多参考生成,需多参考模型 flux.2-klein)',
   'ref-audio': '音轨参考(带声直出)',
   'ref-video': '参考视频(风格/动作参考)',
-  input: '输入图/输入帧(编辑/超分源)',
+  input: '输入图/输入帧(编辑/超分源;→ video-upscale 时是待增强视频)',
   piece: '拼接件(图片拼接 · 多值端口,按源节点画布位置排序)',
   'piece-N': '取拆分产物第 N 片(piece-1/piece-2/…,替代 input/piece 端口)',
   clip: '视频/静帧入轨(时间线)',
@@ -144,7 +152,7 @@ export const SINGLE_VALUE_PORTS = new Set(['first-frame', 'last-frame', 'input',
 /** 人读的连接器能力摘要(给 Agent system prompt / 工具返回) */
 export function connectorSummary(): string {
   const lines: string[] = [];
-  const outRows = ['shot', 'director', 'audio-ref', 'image-gen', 'image-edit', 'image-upscale', 'asset'];
+  const outRows = ['shot', 'director', 'audio-ref', 'image-gen', 'image-edit', 'image-upscale', 'video-upscale', 'asset'];
   for (const [src, targets] of Object.entries(CONNECTOR_MAP)) {
     const per: string[] = [];
     for (const [dst, port] of Object.entries(targets)) {
@@ -178,6 +186,7 @@ export const NODE_KIND_GUIDE = [
   ['image-stitch', '图片拼接(纯 ffmpeg:多张图横排/竖排/网格拼成一张;piece 多值入边,按源节点画布位置排序)'],
   ['image-split', '图片拆分(纯 ffmpeg:一张图等分多片,长图切片/九宫格;下游经 piece-N 端口按序号取片)'],
   ['image-upscale', '图片增强(超分)'],
+  ['video-upscale', '视频增强(超分 + 合修脸):本地后处理,不走推理队列。三阶段可独立开关——去块(ffmpeg deblock)/ 超分(Real-ESRGAN,真人用 realesrgan-x4plus)/ 修脸(GFPGAN 或 CodeFormer)。输入连 shot 成片或视频 asset(input 端口),产物 mp4 接时间线入轨或作下游镜头参考。参数:data={scale, srModel, faceModel, faceWeight, deblock, device}'],
   ['shot', '视频镜头(h3.c:文生/首帧/首尾帧/参考图;支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
   ['director', '导演台(运镜参考小样)'],
   ['timeline', '时间线/剪辑(FFmpeg 导出)'],

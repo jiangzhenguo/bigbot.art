@@ -14,6 +14,7 @@ export type NodeKind =
   | 'image-crop' // 图片裁切:按目标画幅裁剪原图,供下游节点使用(如 1:1 → 9:16)
   | 'image-stitch' // 🆕 图片拼接:多张图按横排/竖排/网格拼成一张(纯 ffmpeg,不推理)
   | 'image-split' // 🆕 图片拆分:一张图等分成多片(长图切片/九宫格切图,纯 ffmpeg)
+  | 'video-upscale' // 🆕 视频增强(超分 + 合修脸):Real-ESRGAN 超分 + GFPGAN/CodeFormer 修脸 + ffmpeg 去块,不走推理队列
   | 'shot' // 视频镜头(h3.c)
   | 'director' // 运镜调度小样(占位)
   | 'timeline' // 时间线/剪辑
@@ -132,6 +133,8 @@ export interface NodeDataMap {
   'image-crop': ImageCropParams;
   'image-stitch': ImageStitchParams;
   'image-split': ImageSplitParams;
+  /** 🆕 视频增强(超分 + 合修脸):Real-ESRGAN + GFPGAN/CodeFormer + ffmpeg 去块 */
+  'video-upscale': VideoUpscaleParams;
   shot: ShotParams;
   director: { prompt: string };
   timeline: TimelineData;
@@ -340,9 +343,142 @@ export interface ImageSplitParams {
 }
 
 /**
+ * 视频增强参数(video-upscale 节点:纯本地后处理,不进推理队列)。
+ *
+ * 对应 POST_PROCESSING.md 的「超分 + 合修脸」流水线,三个阶段可独立开关:
+ *   ① 去块(deblock)— ffmpeg,消灭 h264 压缩块(超分前做,否则块被放大成方格)
+ *   ② 超分(upscale)— Real-ESRGAN 逐帧或整段(GFPGAN 内置超分时自动跳过,避免二次放大)
+ *   ③ 修脸(faceFix)— GFPGAN/CodeFormer 逐帧人脸修复
+ *
+ * 字段全部可选,缺省走 POST_PROCESSING.md §9 的「标准(无方格问题)」配方。
+ */
+export interface VideoUpscaleParams {
+  /** 放大倍数:1=只修脸不放大(方案 C)/ 2=2x(默认)/ 3 / 4 */
+  scale?: number;
+  /** 超分引擎:realesrgan=单独 Real-ESRGAN 超分(默认) / none=不超分(仅修脸,等价 scale=1) */
+  superRes?: 'realesrgan' | 'none';
+  /** Real-ESRGAN 模型(见 POST_PROCESSING.md §2.1):
+   *  realesrgan-x4plus=真人/照片(默认,anim evideov3 对真人会产生方格)
+   *  realesr-animevideov3=动漫/插画 / realesrgan-x4plus-anime=动漫插画 */
+  srModel?: 'realesrgan-x4plus' | 'realesr-animevideov3' | 'realesrgan-x4plus-anime';
+  /** 修脸模型:gfpgan(默认)/ codeformer(保真度可调,更保留身份)/ none=仅超分不修脸 */
+  faceModel?: 'gfpgan' | 'codeformer' | 'none';
+  /** 修脸强度 0-1(GFPGAN weight,默认 0.5):0.3 轻修保留特征 / 0.7 强修 / 1.0 完全生成 */
+  faceWeight?: number;
+  /** CodeFormer 保真度 0-1(默认 0.7):0.5 偏修复 / 0.9 偏保真(仅 faceModel=codeformer 生效) */
+  fidelityWeight?: number;
+  /** 去块(deblock)开关:默认关;开 = 超分前先跑 ffmpeg deblock + 高码率重编码(方案 B 第 1 步) */
+  deblock?: boolean;
+  /** 高码率重编码 CRF(去块阶段用,默认 14;越低码率越高) */
+  deblockCrf?: number;
+  /** 输出编码 CRF(默认 18,与 face_fix_video.py 一致) */
+  crf?: number;
+  /** 计算设备:mps(默认,Apple Silicon GPU)/ cpu */
+  device?: 'mps' | 'cpu';
+  /** 输入视频来源(素材/镜头产物连线直通,渲染层写入) */
+  inputVideoFrom?: { nodeId: string };
+  /** 输入视频 Asset id(手动绑定,与连线二选一) */
+  inputAssetId?: string;
+  /** 最近一次运行的产物时长(秒;ffprobe 探测回写,时间线/回看用) */
+  durationSec?: number;
+  /** 最近一次运行的产物宽高(ffprobe 探测回写) */
+  width?: number;
+  height?: number;
+  /** 上次运行实际执行的阶段摘要(检查器/工具卡展示「做了哪几步」) */
+  appliedStages?: string[];
+  /** 🆕 提示词来源追溯(占位,保持结构一致) */
+  promptFrom?: PromptSource;
+}
+
+/** 视频增强请求(video-upscale IPC / video-upscale 节点提交;与 VideoUpscaleParams 同口径) */
+export interface VideoUpscaleRequest {
+  /** 输入视频绝对路径(须在允许目录内:产物/资产/项目目录) */
+  inputPath: string;
+  /** 发起该任务的节点 id(进度事件按此关联到画布节点;缺省不影响执行) */
+  nodeId?: string;
+  /** 放大倍数(缺省 2) */
+  scale?: number;
+  superRes?: 'realesrgan' | 'none';
+  srModel?: VideoUpscaleParams['srModel'];
+  faceModel?: VideoUpscaleParams['faceModel'];
+  faceWeight?: number;
+  fidelityWeight?: number;
+  deblock?: boolean;
+  deblockCrf?: number;
+  crf?: number;
+  device?: 'mps' | 'cpu';
+  /** 输出文件名前缀(缺省取输入文件基名);实际文件名 = <前缀>-post-<时间戳>.mp4 */
+  outputName?: string;
+}
+
+/** 视频增强结果 */
+export interface VideoUpscaleResult {
+  ok: boolean;
+  path?: string;
+  error?: string;
+  /** 实际执行的阶段摘要(如 ['去块', 'Real-ESRGAN ×2', 'GFPGAN 修脸']) */
+  stages?: string[];
+  /** 产物元数据(ffprobe 探测) */
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  /** 处理耗时(秒,墙钟) */
+  elapsedSec?: number;
+}
+
+/** 视频增强阶段进度事件(主进程 → 渲染层 push;长任务期间驱动 badge/进度条) */
+export interface VideoPostProgressEvent {
+  /** 节点 id(渲染层据此定位到具体节点;同一时刻全局只有一个后处理任务) */
+  nodeId: string;
+  /** 当前阶段名(人读,如「修脸」「超分」「去块」) */
+  stageLabel: string;
+  /** 阶段内细节(如「40/124 帧(32%)· 已 52s / 预计剩 1min50s」);无则为空串 */
+  detail?: string;
+  /** **整体**进度 0-1(按各阶段预估耗时加权,跨阶段单调递增,不会从 100% 退回 0) */
+  overall: number;
+  /** 当前阶段进度 0-1;不确定(不打印进度的阶段)时为 undefined → UI 用滚动动画 */
+  stageProgress?: number;
+  /** 已执行/计划执行的阶段清单(UI 可展示 N/M) */
+  stagesDone: number;
+  stagesTotal: number;
+}
+
+/** 正在运行的视频增强任务(主进程真源)。
+ *  渲染层用它恢复「运行中」UI 状态 —— 否则退出画布再进入时本地 state 丢失,
+ *  会错误地允许对正在跑的节点重复发起(真实反馈)。 */
+export interface VideoPostRun {
+  nodeId: string;
+  startedAt: string;
+  /** 最近一次进度阶段(给人读) */
+  stage?: string;
+}
+
+/** 视频增强工具链就绪状态(检查器提示 / 提交前防呆) */
+export interface VideoPostTooling {
+  /** Real-ESRGAN 入口可执行(~/.bin/realesrgan 或 realesrgan-ncnn-vulkan) */
+  realesrgan: boolean;
+  /** Real-ESRGAN 入口路径(探测到的) */
+  realesrganPath?: string;
+  /** face_fix_video.py 脚本存在 */
+  faceFixScript: boolean;
+  faceFixPath?: string;
+  /** 修脸用 Python 解释器(venv)存在 */
+  python: boolean;
+  pythonPath?: string;
+  /** GFPGAN 主权重存在 */
+  gfpganWeight: boolean;
+  /** CodeFormer 权重存在 */
+  codeformerWeight: boolean;
+  /** ffmpeg / ffprobe 可用 */
+  ffmpeg: boolean;
+  /** 缺失项人读摘要(空数组 = 全部就绪) */
+  missing: string[];
+}
+
+/**
  * 镜头加速档(🚀 加速 LoRA)。
  * h3.c CLI 不接受 --lora;加速 = 换蒸馏模型包目录(-d)+ 少步数(4/8 步),
- * 见 docs/MiniMax-H3-加速-LoRA-使用手册.md §8。提交时由主进程解析成实际 modelDir + steps。
+ * 见 docs/MiniMax-H3-加速-LoRA-使用手册.md §8。
  */
 export interface ShotAccel {
   /** 本镜头是否开启加速 */
@@ -512,6 +648,23 @@ export interface CanvasViewport {
   z: number;
 }
 
+/**
+ * 画布节点分组 —— 一组被命名的节点,整体拖动/删除/复制。
+ *
+ * 与「多选」的区别:多选是一次性临时集合(松手即散),组是**持久化**的整体。
+ * 组不写进 CanvasNode 而是独立成数组,单点真源 = members:
+ * 节点增删不必维护反向索引,删节点后由渲染层 pruneGroups 统一清脏 id。
+ */
+export interface CanvasNodeGroup {
+  id: string;
+  name: string;
+  /** 成员节点 id(顺序 = 入组顺序;拖动整组时按此算包围盒) */
+  members: string[];
+  /** 组色(设计 token 语义名;缺省 neutral) */
+  tone?: 'neutral' | 'accent' | 'success' | 'warn';
+  createdAt: string;
+}
+
 /** 单个画布的快照(节点 + 连线);持久化在 canvases-${projectId}.json 中 */
 export interface CanvasSnapshot {
   /** 画布 id,全局唯一;通过 projectId 字段归属项目 */
@@ -520,6 +673,11 @@ export interface CanvasSnapshot {
   name: string;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
+  /**
+   * 节点分组(旧项目文件缺省 = 空数组;读入时剔除脏成员 id 与空组)。
+   * 可选字段,老渲染层忽略它也能正常打开画布。
+   */
+  groups?: CanvasNodeGroup[];
   version: number;
   /** 画布视口(旧项目文件缺省;读入时做有限性 + 范围校验,非法值回退默认视图) */
   viewport?: CanvasViewport;

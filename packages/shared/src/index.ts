@@ -122,10 +122,16 @@ export interface BigBotArtApi {
   // 时间线导出(FFmpeg)
   exportTimeline(req: import('./domain').TimelineExportRequest): Promise<{ ok: boolean; taskId?: string; error?: string }>;
   exportStatus(taskId: string): Promise<import('./domain').ExportTask>;
-  /** 视频取帧:抽首/尾帧 PNG(镜头接续尾帧归档 / shot→image-edit 取帧源) */
+  /**
+   * 视频取帧:抽首/尾帧/**指定时间点**帧 PNG。
+   * mode='at' 时必须给 seconds(非负秒数);产物落 outputs/frames/。
+   * (镜头接续尾帧归档 / shot→image-edit 取帧源 / Agent frames.extract 中间帧)
+   */
   extractFrame(
     videoPath: string,
-    mode: 'first' | 'last',
+    mode: 'first' | 'last' | 'at',
+    /** mode='at' 时的取帧时间点(秒,非负) */
+    seconds?: number,
   ): Promise<{ ok: boolean; path?: string; error?: string }>;
   /** 图片裁切:按目标画幅(A:B)ffmpeg 裁剪原图(image-crop 节点用;产物落 outputs/crops/) */
   cropImage(input: {
@@ -159,6 +165,21 @@ export interface BigBotArtApi {
     gridCols?: number;
     gridRows?: number;
   }): Promise<{ ok: boolean; paths?: string[]; error?: string }>;
+  /** 🆕 视频增强(超分 + 合修脸):Real-ESRGAN 超分 + GFPGAN/CodeFormer 修脸(+ 可选 ffmpeg 去块)。
+   *  video-upscale 节点用;长任务(每帧 1.2-1.5s),产物落 outputs/video-post/。
+   *  ⚠️ 这是**阻塞式**长任务:要显示进度必须同时订阅 onVideoPostProgress(否则 10+ 分钟内 UI 无反馈)。 */
+  videoUpscale(input: import('./domain').VideoUpscaleRequest): Promise<import('./domain').VideoUpscaleResult>;
+  /** 视频增强工具链探测:realesrgan / face_fix_video.py / venv / 权重是否就绪(检查器防呆提示) */
+  videoPostProbe(): Promise<import('./domain').VideoPostTooling>;
+  /** 🆕 视频增强阶段进度推送(主进程 push;长任务期间驱动节点 badge / 检查器进度文案)。
+   *  返回退订函数。同一时刻只有一个后处理任务在跑(全局串行链),故无需 jobId。 */
+  onVideoPostProgress(cb: (p: import('./domain').VideoPostProgressEvent) => void): () => void;
+  /** 🆕 当前正在跑的视频增强任务(主进程真源)。
+   *  渲染层在**挂载时**调用以恢复运行态 —— 仅靠组件本地 state 的话,
+   *  退出画布再进入会丢失「正在跑」标记,导致可对运行中的节点重复发起。 */
+  videoPostRunning(): Promise<import('./domain').VideoPostRun[]>;
+  /** 最近一次进度(挂载时立即恢复显示,不必等下一个 tick;无任务时 null) */
+  videoPostLastProgress(): Promise<{ nodeId: string; stageLabel: string; detail?: string } | null>;
   // 系统 / 文件
   /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
   revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;

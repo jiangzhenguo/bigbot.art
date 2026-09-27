@@ -57,11 +57,15 @@ export interface ValidateEdgeOptions {
 /** 图片产物类节点(静帧直通;与渲染层 IMAGE_KINDS 同口径) */
 export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
 
+/** 视频产物类节点(视频直通:video-upscale 的产物是 mp4,不是静帧) */
+export const VIDEO_KINDS = ['video-upscale'];
+
 /** 非 asset 节点的输出媒体(asset 按资产元数据动态判定) */
 export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'text'> = {
   shot: 'video',
   director: 'video', // 运镜小样
   timeline: 'video',
+  'video-upscale': 'video', // 超分/修脸产物是视频
   'audio-ref': 'audio',
   'image-gen': 'image',
   'image-edit': 'image',
@@ -81,7 +85,7 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
   'ref-video': 'video',
   'ref-audio': 'audio',
   'audio-track': 'audio',
-  input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可
+  input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可;video-upscale 输入:视频
   piece: 'image', // stitch 拼接件:仅图片
   'piece-N': 'image', // split 产物按序号取片(piece-1/piece-2/…;替代 input/piece 端口)
   clip: undefined, // 静帧/视频皆可入轨
@@ -110,7 +114,7 @@ const TARGET_KIND_ALIAS: Record<string, string> = {
 };
 
 /** 可收口到 workflow-output 的源 kind(与渲染层 COLLECTABLE_KINDS 同口径) */
-export const OUTPUT_COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS];
+export const OUTPUT_COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS, ...VIDEO_KINDS];
 
 /** (CONNECTOR_MAP 里 asset 一行的)组合端口串 → 候选 label 列表 */
 function splitPorts(v: string): string[] {
