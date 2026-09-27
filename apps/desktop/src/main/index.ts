@@ -2,7 +2,7 @@
  * Electron 主进程 — 窗口 + IPC + 服务编排
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
-import { app, BrowserWindow, ipcMain, protocol, net, shell, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage } from 'electron';
 import { join, resolve } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -11,11 +11,12 @@ import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
 import { AccelStore } from './lora';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots } from './assets';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
 import { extractFrame, cropImage } from './frames';
 import { stitchImages, splitImage } from './stitch';
+import { videoUpscale, probeVideoPostTooling, cancelAllVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
 import { RenderQueue } from './render-queue';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
@@ -37,7 +38,7 @@ import {
   resolveLlmEndpoint,
   testConnection,
 } from './llm';
-import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge } from '@bigbotart/shared';
+import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent } from '@bigbotart/shared';
 import { referenceMediaIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
@@ -269,9 +270,14 @@ queue.onJobFinish = (job) => {
   });
 };
 
-/** 队列变更 → 渲染层实时推送(精简视图,已剔除 req 大对象;窗口未建/已销毁时跳过) */
+/** 队列变更 → 渲染层实时推送(精简视图,已剔除 req 大对象)。
+ *  ⚠️ 必须广播到**所有窗口**:模块级 win 只指向 createWindow 建的那个窗口,
+ *  画布若在另一个窗口打开,队列事件就永远到不了它的 CanvasPage →
+ *  节点上的「排队中/生成中」不刷新,只能等 8s 兜底轮询(实测:dur 里半天没状态)。 */
 queue.onChange = (jobs) => {
-  if (win && !win.isDestroyed()) win.webContents.send('render-queue-changed', jobs);
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('render-queue-changed', jobs);
+  }
 };
 
 /** 当前活跃 chat 的工具上下文(按 chatKey 隔离,避免并发串写) */
@@ -279,17 +285,82 @@ const activeToolCtx = new Map<string, { projectId: string; canvasId: string }>()
 /** 最近一次 chat 上下文(事件兜底;工具 RPC 已自带 projectId/canvasId) */
 let currentToolCtx: { projectId: string; canvasId: string } | null = null;
 
-/** 渲染层 console/报错转发到主进程 stdout(白屏排查用;dev 直连窗口难开 CDP) */
+/**
+ * 安全写 stderr —— 防「管道断裂把主进程写崩」(真实事故 2026-09)。
+ *
+ * 场景:`pnpm dev 2>&1 | head -N`、`| tee`、终端被关、日志被 CI/Harness 管道回收时,
+ * 下游读端先退出 → 管道关闭 → 下一条 console.error 抛 `Error: write EPIPE`
+ * (栈顶在 node:internal/stream_base_commons,表现为 Electron 的 Uncaught Exception 弹窗,
+ *  整个 App 挂掉)。渲染层每条 console 都会经 wireConsole 转发到这里,属于高频路径,
+ * 一旦管道断开必然命中,所以必须有兜底。
+ *
+ * 兜底策略:EPIPE/ERR_STREAM_DESTROYED 时把 stderr 标记为不可用并静默后续写入
+ * (不是吞错:首条失败会尝试走 logger 总线留痕,且日志本身已经写不到任何地方了)。
+ */
+let stderrBroken = false;
+
+/** 标记 stderr 不可用并留痕(只记一次,避免刷屏) */
+function markStderrBroken(code: string): void {
+  if (stderrBroken) return;
+  stderrBroken = true;
+  try {
+    logger.log('warn', `stderr 管道已关闭(${code}),后续主进程日志仅走日志总线(不再写终端)`);
+  } catch {
+    /* 日志总线也写不进去时无处可记,按不可用处理 */
+  }
+}
+
+/**
+ * 管道断裂的两条路径都要堵:
+ *  1. 同步抛出(EPIPE 在 write 返回 false / 已 destroy 时可能同步抛)→ try/catch
+ *  2. 异步 'error' 事件(内核 EPIPE 回执晚于 write 返回,Node 在 stream 上 emit 'error')
+ *     → 必须挂监听,否则同样是 Uncaught Exception
+ * 这是真实事故的完整成因:只 try/catch 挡不住第 2 条。
+ */
+function installStderrGuard(): void {
+  const onErr = (e: NodeJS.ErrnoException): void => {
+    if (e?.code === 'EPIPE' || e?.code === 'ERR_STREAM_DESTROYED') markStderrBroken(String(e.code));
+    else {
+      try {
+        logger.log('error', `stderr 流错误: ${e?.message ?? String(e)}`);
+      } catch {
+        /* 无处可记 */
+      }
+    }
+  };
+  process.stderr.on('error', onErr);
+}
+
+function safeErr(line: string): void {
+  if (stderrBroken) return;
+  try {
+    process.stderr.write(line + '\n');
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') {
+      markStderrBroken(String(code));
+      return;
+    }
+    // 其他错误不静默:走日志总线(但这里不能再抛,否则又是未捕获异常)
+    try {
+      logger.log('error', `写 stderr 失败: ${(e as Error).message}`);
+    } catch {
+      /* 同上 */
+    }
+  }
+}
+
+/** 渲染层 console/报错转发到主进程 stderr(白屏排查用;dev 直连窗口难开 CDP) */
 function wireConsole(win: BrowserWindow) {
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     const tag = level >= 3 ? 'ERROR' : level === 2 ? 'WARN' : 'INFO';
-    console.error(`[renderer:${tag}] ${message} (${sourceId}:${line})`);
+    safeErr(`[renderer:${tag}] ${message} (${sourceId}:${line})`);
   });
   win.webContents.on('render-process-gone', (_e, details) => {
-    console.error(`[renderer-gone] ${details.reason} exitCode=${details.exitCode}`);
+    safeErr(`[renderer-gone] ${details.reason} exitCode=${details.exitCode}`);
   });
   win.webContents.on('preload-error', (_e, path, error) => {
-    console.error(`[preload-error] ${path}: ${error.message}`);
+    safeErr(`[preload-error] ${path}: ${error.message}`);
   });
 }
 
@@ -593,8 +664,9 @@ ipcMain.handle('export-timeline', (_e, req) => {
 });
 ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId));
 
-// ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑) ----------
-ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last') => extractFrame(videoPath, mode));
+// ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑 / Agent 指定时间点取帧) ----------
+ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last' | 'at', seconds?: number) =>
+  extractFrame(videoPath, mode, seconds));
 // 图片裁切(image-crop 节点):按目标画幅裁剪原图
 ipcMain.handle('crop-image', (_e, input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
   cropImage(input.path, input.aspect, input.focus));
@@ -610,6 +682,24 @@ ipcMain.handle(
   (_e, input: { path: string; mode: 'rows' | 'cols' | 'grid'; count?: number; gridCols?: number; gridRows?: number }) =>
     splitImage(input.path, { mode: input.mode, count: input.count, gridCols: input.gridCols, gridRows: input.gridRows }),
 );
+// 视频增强(video-upscale 节点):去块 → Real-ESRGAN 超分 → GFPGAN/CodeFormer 合修脸(分钟级长任务)
+ipcMain.handle('video-upscale', (_e, input: VideoUpscaleRequest) =>
+  // 长任务(分钟级):把主进程阶段回调实时推给渲染层,否则 invoke 期间的 UI 完全没有反馈
+  videoUpscale(input, {
+    onProgress: (p) => {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('video-post-progress', {
+          ...p,
+          nodeId: input?.nodeId ?? '',
+        } satisfies VideoPostProgressEvent);
+      }
+    },
+  }));
+// 视频增强工具链探测(检查器防呆:realesrgan / 修脸脚本 / venv / 权重是否就绪)
+ipcMain.handle('video-post-probe', () => probeVideoPostTooling());
+// 运行中的后处理任务(渲染层挂载时恢复运行态用 —— 只靠组件 state 会因退出画布而丢失)
+ipcMain.handle('video-post-running', () => listRunningVideoPost());
+ipcMain.handle('video-post-last-progress', () => lastVideoPostProgress());
 
 // ---------- IPC:在系统文件管理器中显示(Finder) ----------
 // 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;
@@ -840,6 +930,12 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     }
     // 工具调用记入 recall(role=tool,留痕回看)+ 成功动作记入 recall(role=system,注入下一轮上下文)
     for (const tc of result.toolCalls) {
+      /* ask.user 是 worker 侧拦截的「结构化提问」,正常路径下不会出现在 result.toolCalls 里
+         (拦截即 return,见 pi-chat.ts)。一旦出现,说明这次调用没被拦截、落到了工具桥报
+         「未知工具:ask.user」——这是旧版本 / 异常分支的脏记录,写进 recall 后渲染层会
+         留一条 `ask.user({...` 的裸文本气泡,看着像调用失败。真正的提问卡由下方 result.ask
+         分支负责记录,这里直接跳过。 */
+      if (tc.name === 'ask.user') continue;
       memory.addRecall(req.projectId, {
         canvasId: req.canvasId, role: 'tool',
         content: `${tc.name}(${JSON.stringify(tc.args).slice(0, 120)})`,
@@ -926,7 +1022,9 @@ ipcMain.handle('memory-compact', async (_e, projectId: string, canvasId: string)
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
     llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
-  } catch {
+  } catch (e) {
+    // 不静默吞错(R6):压缩摘要回退确定性兜底,但把真实原因写进日志总线
+    console.warn(`[compact] LLM 来源解析失败,回退确定性摘要: ${(e as Error).message}`);
     llm = undefined;
   }
 
@@ -978,6 +1076,9 @@ async function probeSimple(
 }
 
 app.whenReady().then(async () => {
+  // 尽早挂 stderr 管道保护:dev 下 `pnpm dev | head/tee`、终端关闭都会断开管道,
+  // 渲染层 console 又高频转发到 stderr,不挡会以 Uncaught Exception 崩掉整个 App
+  installStderrGuard();
   // macOS Dock 图标(dev 下默认是 Electron 图标,这里换成项目图标)
   const dockIcon = join(__dirname, '../../resources/icon.png');
   if (existsSync(dockIcon)) {
@@ -993,6 +1094,7 @@ app.whenReady().then(async () => {
   }
   // 注册 bba-asset:// 协议:仅允许读取 ~/.bigbotart/assets/ 下的 asset-<id>.<ext> 文件
   // (renderer 用 <img src="bba-asset://<filename>"> 显示资产缩略图,无需 webSecurity:false)
+  // 走 rangeFileResponse:资产里可能有 100MB+ 的视频,必须支持 Range 才能拖动进度条
   protocol.handle('bba-asset', async (req) => {
     try {
       const url = new URL(req.url);
@@ -1008,13 +1110,14 @@ app.whenReady().then(async () => {
       if (!real.startsWith(resolve(ASSETS_DIR) + '/')) {
         return new Response('forbidden', { status: 403 });
       }
-      return net.fetch(`file://${real}`);
+      return rangeFileResponse(real, req.headers.get('range'));
     } catch (e) {
       return new Response(`error: ${(e as Error).message}`, { status: 500 });
     }
   });
 
   // 注册 bba-output:// 协议:读生成产物目录(含 mock/、images/ 子目录;多根目录兼容旧路径)
+  // 同样支持 Range:产物多为视频,检查器/预览器需要能 seek
   protocol.handle('bba-output', async (req) => {
     try {
       const url = new URL(req.url);
@@ -1027,7 +1130,7 @@ app.whenReady().then(async () => {
       for (const outRoot of outputSearchRoots()) {
         const real = resolve(join(outRoot, name));
         if (real !== outRoot && !real.startsWith(outRoot + '/')) continue;
-        if (existsSync(real)) return net.fetch(`file://${real}`);
+        if (existsSync(real)) return rangeFileResponse(real, req.headers.get('range'));
       }
       return new Response(`not found: ${name}`, { status: 404 });
     } catch (e) {
