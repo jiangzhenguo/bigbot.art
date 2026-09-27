@@ -23,18 +23,90 @@ export interface MlxModelInfo {
   repoId: string;
   /** 通过 HF 缓存完整性校验 = 已下载(见 isCacheComplete) */
   downloaded: boolean;
+  /** 本地目录直用路径(命中时优先于 repoId:mlxgen 支持 `--model <本地目录>`,免重复下载) */
+  localPath?: string;
 }
 
 /** 已知图片模型清单(与设置页「模型下载」分组同口径;下载白名单)
  *  msRepoId 存在 = 走 ModelScope 直连通道(实测 sha256 与 HF LFS oid 一致) */
-const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?: string }> = [
+const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?: string; localDir?: string }> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', repoId: 'AbstractFramework/z-image-turbo-8bit' },
+  // Qwen-Image-2.1 MLX 8bit（JoyFusionAI 自建导出，24GB / 本地 22GB）：
+  // MS 仓库名与 HF repo 不同名，故 msRepoId 必须显式给出（其余条目同名可省略）；
+  // 需要 mlx-gen ≥ 0.38.0（feat/qwen-image-2.1）才认这个模型族，老版本会静默路由到旧 Qwen Image
+  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', repoId: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', msRepoId: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', localDir: 'qwen-image-2.1-mlx-8bit' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', msRepoId: 'mlx-community/Qwen-Image-Edit-8bit' },
-  // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需;MS 无此仓库,走 HF 通道)
-  { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', repoId: 'AbstractFramework/flux.2-klein-9b-8bit' },
+  // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需)。
+  // 官方 AbstractFramework 仓库在 HF 上是 gated(需登录授权),且国内直连常不通;
+  // mlx-community/flux2-klein-9b-8bit 与其同源(同 base model / 同 MLX 8bit 量化 / 同文件清单,
+  // 实测 tokenizer.json 与 vae/0.safetensors 的 sha256 与 HF 官方 LFS oid 逐字节一致),
+  // ModelScope 有直连镜像(msRepoId),故下载走 MS 通道,无需 HF token。
+  // localDir:用户从 MS 下到 ~/ai/models 的散装目录,命中即免下载(与 qwen-image-2.1 同机制)
+  {
+    id: 'flux2-klein-9b',
+    name: 'FLUX.2 Klein 9B',
+    repoId: 'AbstractFramework/flux.2-klein-9b-8bit',
+    msRepoId: 'mlx-community/flux2-klein-9b-8bit',
+    localDir: 'flux2-klein-9b-8bit',
+  },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit' },
   { id: 'qwen2.5-vl', name: 'Qwen2.5-VL', repoId: 'Qwen/Qwen2.5-VL-7B-Instruct', msRepoId: 'Qwen/Qwen2.5-VL-7B-Instruct' },
 ];
+
+/**
+ * 本地模型目录根(用户已自行下载/导出的模型,免重复下载 20GB+)。
+ * `BIGBOTART_MODELS_DIR` 可覆盖;默认 `~/ai/models`(本机既有约定)
+ */
+export function localModelsRoot(): string {
+  return process.env.BIGBOTART_MODELS_DIR ?? join(homedir(), 'ai', 'models');
+}
+
+/**
+ * 本地直用目录判定:目录里必须同时有 transformer/ + 至少一个权重分片才算就绪。
+ * 比 isCacheComplete 宽松——本地导出是「散装 HF 布局」,没有 blobs/snapshots 结构,
+ * 但同样要防「只下了一半」:优先信任 index.json 的分片清单,缺分片即判未就绪。
+ */
+export function isLocalModelDir(dir: string): boolean {
+  if (!existsSync(join(dir, 'transformer'))) return false;
+  for (const commit of readdirSafe(dir)) {
+    if (commit.startsWith('transformer')) {
+      const sub = join(dir, commit);
+      if (statSyncSafe(sub)?.isDirectory()) {
+        const files = readdirSafe(sub);
+        if (!files.some((f) => /\.(safetensors|gguf|bin)$/i.test(f))) return false;
+        const idx = files.find((f) => f.endsWith('.safetensors.index.json'));
+        if (idx) {
+          try {
+            const parsed = JSON.parse(readFileSync(join(sub, idx), 'utf-8')) as { weight_map?: Record<string, string> };
+            for (const shard of new Set(Object.values(parsed.weight_map ?? {}))) {
+              if (!statSyncSafe(join(sub, shard))?.size) return false;
+            }
+          } catch {
+            return false; // 索引损坏/不可读 → 判未就绪(宁可让用户重下,也不给残模型)
+          }
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+const readdirSafe = (p: string): string[] => {
+  try {
+    return readdirSync(p);
+  } catch {
+    return [];
+  }
+};
+
+const statSyncSafe = (p: string) => {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+};
 
 function hfHubDir(): string {
   return process.env.HF_HOME
@@ -142,6 +214,17 @@ function indexShardsPresent(indexPath: string): boolean {
 export function mlxgenModelInfo(logger?: DebugLogger): MlxModelInfo[] {
   return KNOWN_MODELS.map((m) => {
     let downloaded = false;
+    // 本地直用目录优先:用户已自行下载/导出的散装模型(如 ~/ai/models/qwen-image-2.1-mlx-8bit),
+    // 命中即可直接选,不必再拉一份 20GB+ 到 HF 缓存
+    let localPath: string | undefined;
+    try {
+      if (m.localDir) {
+        const cand = join(localModelsRoot(), m.localDir);
+        if (isLocalModelDir(cand)) localPath = cand;
+      }
+    } catch (e) {
+      logger?.log('warn', `mlxgen 本地模型目录探测失败 ${m.id}: ${(e as Error).message}`);
+    }
     try {
       const dir = cacheDirFor(m.repoId);
       downloaded = existsSync(dir) && isCacheComplete(dir);
@@ -154,7 +237,8 @@ export function mlxgenModelInfo(logger?: DebugLogger): MlxModelInfo[] {
       id: m.id,
       name: m.name,
       repoId: m.repoId,
-      downloaded,
+      downloaded: downloaded || Boolean(localPath),
+      localPath,
     };
   });
 }

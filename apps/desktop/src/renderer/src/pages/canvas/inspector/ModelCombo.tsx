@@ -19,6 +19,7 @@ export interface ModelItem {
 /** 与 packages/providers capabilities().models 同口径的已知图片模型(大小 = HF 官方清单实测 2026-09) */
 export const IMAGE_MODELS: ModelItem[] = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', repoId: 'AbstractFramework/z-image-turbo-8bit', desc: '文生图 · ~11 GB', ico: 'Z-T' },
+  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', repoId: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', alias: 'qwen-image-2.1', desc: '文生图 · 新一代 7.1B · ~24 GB', ico: 'Q-2' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', alias: 'qwen-image-edit', desc: '指令编辑 / mask · 8bit ~37.5 GB', ico: 'Q-E' },
   { id: 'flux2-klein-9b', name: 'Flux.2 Klein 9B', repoId: 'AbstractFramework/flux.2-klein-9b-8bit', desc: '多参考编辑 / outpaint · ~18 GB', ico: 'F-K' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit', desc: '超分修复 · ~4.7 GB', ico: 'S-V' },

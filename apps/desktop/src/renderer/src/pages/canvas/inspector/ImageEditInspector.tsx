@@ -57,6 +57,10 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   const inputAssetId = String(d.inputAssetId ?? '');
   const maskAssetId = String(d.maskAssetId ?? '');
   const imageStrength = Number(d.imageStrength ?? 0.5);
+  // 编辑步数:未显式设置时显示模型默认值(实测 flux.2-klein / z-image 均为 4 步)。
+  // 仅作滑块初始值展示——不写回 data,提交侧据「data 里有没有 steps」决定是否传 --steps
+  const DEFAULT_EDIT_STEPS = 4;
+  const steps = Number(d.steps ?? DEFAULT_EDIT_STEPS);
   const outpaintSides = (d.outpaintSides as { top: number; right: number; bottom: number; left: number } | undefined)
     ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
@@ -274,6 +278,31 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         <div className="f-sec">
           <div className="f-sec-h"><span className="lbl">模型</span></div>
           <ModelCombo value={model} onChange={(v) => setData({ model: v })} disabled={running} />
+        </div>
+
+        {/* 采样步数:编辑原本没有该控件,导致编辑质量被静默固定在模型自身默认步数
+            (实测 2026-09:flux.2-klein / z-image 不传 --steps 时都是 4 步,对去水印、改动作
+            这类细活明显不够)。未设置时不写 data,提交侧同样"未设置就不传 --steps",
+            既有节点行为不变;显式拖动后才覆盖 */}
+        <div className="f-sec">
+          <div className="f-sec-h">
+            <span className="lbl">采样</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>不调则用模型默认</span>
+          </div>
+          <div className="f-row">
+            <span className="f-lbl">steps</span>
+            <div className="range" style={{ flex: 1, minWidth: 120 }}>
+              <input
+                type="range"
+                min={4}
+                max={50}
+                value={steps}
+                disabled={running}
+                onChange={(e) => setData({ steps: Number(e.target.value) })}
+              />
+              <span className="val mono">{steps}</span>
+            </div>
+          </div>
         </div>
       </div>
 

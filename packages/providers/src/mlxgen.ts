@@ -8,7 +8,7 @@
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -89,6 +89,7 @@ export class MlXGenProvider implements Provider {
       aspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3'],
       models: [
         'AbstractFramework/z-image-turbo-8bit (Z-Image Turbo, 文生图, ~11GB)',
+        'JoyFusionAI/Qwen-Image-2.1-MLX-8bit (Qwen-Image-2.1, 文生图, ~24GB, 需 mlx-gen ≥ 0.38.0)',
         'qwen-image (Qwen Image, 文生图)',
         'mlx-community/Qwen-Image-Edit-8bit (Qwen Image Edit 8bit, 指令编辑/mask, ~37.5GB)',
         'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint, ~18GB)',
@@ -101,16 +102,101 @@ export class MlXGenProvider implements Provider {
   /** 自定义量化仓库 → 基座模型提示(CLI `--base-model`;不给会被误路由成文生图 handler) */
   private static readonly BASE_MODEL_HINTS: Record<string, string> = {
     'mlx-community/Qwen-Image-Edit-8bit': 'Qwen/Qwen-Image-Edit',
+    // Qwen-Image-2.1(JoyFusionAI 自建 8bit 导出,24GB):仓库全名不在 mlxgen 的 catalog 里,
+    // ConfigResolution 解析失败 → aliases 为空 → 落到家族兜底 `qwen.generate`(旧 Qwen Image,
+    // 完全不同的 transformer/text encoder/VAE,加载必然失败)。实测(2026-09 mlx-gen 0.38.0):
+    // 补 `--base-model qwen-image-2.1` 后正确路由到 `qwen21.generate`
+    'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'qwen-image-2.1',
   };
 
   /**
    * mlxgen 短别名 → 本机可用量化仓库(实测 2026-09:短别名 `qwen-image-edit` 被 CLI 解析为
    * 全量 `Qwen/Qwen-Image-Edit` 57.7GB,64GB 内存跑不动且未下载 → exit 1 DownloadRequiredError;
    * 归一化到 8bit 社区仓库,BASE_MODEL_HINTS 再补路由提示)
+   *
+   * `qwen-image-2.1`:短别名本身能路由到 qwen21,但 CLI 会去找 `Qwen/Qwen-Image-2.1`
+   * (~33GB bf16,未下载 → DownloadRequiredError);归一化到本机可下的 24GB 8bit 社区导出
    */
   private static readonly MODEL_ALIASES: Record<string, string> = {
     'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
+    'qwen-image-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+    'qwen-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+    'qwen-image-21': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
   };
+
+  /**
+   * repoId → 本地直用目录(用户已自行下载/导出的散装模型;命中则免下载、直接当 `--model` 传)。
+   * 实测 2026-09:mlxgen 接受本地目录路径,但同样要配 `--base-model` 提示
+   * (不带提示时本地路径也会被家族兜底误路由;见 BASE_MODEL_HINTS)
+   */
+  private static readonly LOCAL_MODEL_DIRS: Record<string, string> = {
+    'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'qwen-image-2.1-mlx-8bit',
+    // FLUX.2 Klein 9B:官方 AbstractFramework 仓库在 HF 上是 gated,国内直连常不通;
+    // 实际来源是 ModelScope 的 mlx-community/flux2-klein-9b-8bit(与之同源),
+    // 下到本地模型根后即以散装目录直用,免下载、免 HF 授权。
+    // 该仓库能被 mlxgen catalog 的 flux2-klein-9b 别名命中(实测 capabilities 正确路由
+    // 到 flux2.generate / flux2.edit),故 BASE_MODEL_HINTS 无需补提示
+    'AbstractFramework/flux.2-klein-9b-8bit': 'flux2-klein-9b-8bit',
+  };
+
+  /** 本地模型根(与主进程 mlxgen-models.ts 的 localModelsRoot() 同口径) */
+  private static localModelsRoot(): string {
+    return process.env.BIGBOTART_MODELS_DIR ?? join(homedir(), 'ai', 'models');
+  }
+
+  /** statSync 兜底(文件缺失/权限 → null,不抛) */
+  private static statSafe(p: string): { size: number } | null {
+    try {
+      return statSync(p);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 是否「只有 latent img2img、没有 reference edit 能力」的模型(纯文生图族)。
+   * 判定依据 = mlxgen capabilities 的 handler(实测 2026-09):
+   *  - z-image-turbo / qwen-image-2.1 → handler `z-image.generate` / `qwen21.generate`,
+   *    能力集只有 text-only 与 latent-img2img,**没有** edit-reference/inpaint/outpaint
+   *  - Qwen-Image-Edit → `qwen.edit`(edit-reference);flux.2-klein → `flux2.edit`(含 outpaint)
+   * 传给前者的输入图会被 auto 路由成 latent i2i,进而要求 --image-strength(缺则 exit 2)
+   */
+  private static latentOnly(model: string): boolean {
+    if (/qwen.*image.*edit/i.test(model) || /flux.?2.*klein/i.test(model)) return false;
+    return /z-image/i.test(model) || /qwen-image-2\.1/i.test(model) || /qwen.*2\.1/i.test(model);
+  }
+
+  /**
+   * 若该 repo 在本地模型根下有就绪目录,返回该目录路径(优先于 repoId)。
+   * 校验与主进程 isLocalModelDir 同口径(缺一不可,否则会拿半截模型去推理):
+   *  1. transformer/ 下有权重分片
+   *  2. 存在 *.safetensors.index.json 时,其 weight_map 引用的每个分片都必须真实存在
+   *     (实测:索引小文件先下完、权重没下完是常见中断形态;只看「有权重文件」会误判就绪)
+   * 返回 undefined 即回退 repoId(走 HF 缓存 / mlxgen 自动下载)
+   */
+  private static localDirFor(repoId: string): string | undefined {
+    const name = MlXGenProvider.LOCAL_MODEL_DIRS[repoId];
+    if (!name) return undefined;
+    const tf = join(MlXGenProvider.localModelsRoot(), name, 'transformer');
+    try {
+      if (!existsSync(tf)) return undefined;
+      const files = readdirSync(tf);
+      if (!files.some((f) => /\.(safetensors|gguf|bin)$/i.test(f))) return undefined;
+      const idx = files.find((f) => f.endsWith('.safetensors.index.json'));
+      if (idx) {
+        const parsed = JSON.parse(readFileSync(join(tf, idx), 'utf-8')) as {
+          weight_map?: Record<string, string>;
+        };
+        for (const shard of new Set(Object.values(parsed.weight_map ?? {}))) {
+          const st = MlXGenProvider.statSafe(join(tf, shard));
+          if (!st || st.size === 0) return undefined; // 分片缺失/空 → 半截模型,不用
+        }
+      }
+      return join(MlXGenProvider.localModelsRoot(), name);
+    } catch {
+      return undefined; // 索引损坏/不可读 → 宁可回退下载,也不给残模型
+    }
+  }
 
   async submit(req: RenderRequest): Promise<RenderJobHandle> {
     if (req.slot !== 'image') throw new Error('mlxgen 仅支持图片任务');
@@ -128,7 +214,11 @@ export class MlXGenProvider implements Provider {
       upscale: 'AbstractFramework/seedvr2-3b-8bit',
     };
     const rawModel = String(p.model ?? DEFAULT_MODEL_BY_KIND[kind] ?? 'AbstractFramework/z-image-turbo-8bit');
-    const model = MlXGenProvider.MODEL_ALIASES[rawModel] ?? rawModel;
+    const repoModel = MlXGenProvider.MODEL_ALIASES[rawModel] ?? rawModel;
+    // 本地直用目录优先(免下载):repoId 在本地模型根下有就绪目录时改用该路径;
+    // BASE_MODEL_HINTS 仍按 repoId 查——路由提示与「模型在哪」无关,二者必须一起生效
+    const localDir = MlXGenProvider.localDirFor(repoModel);
+    const model = localDir ?? repoModel;
     const taskId = `mlxgen-${kind}-${Date.now()}`;
     const outBase = `${this.outDir}/${req.nodeId}_${taskId}`;
 
@@ -140,16 +230,42 @@ export class MlXGenProvider implements Provider {
     // - 自定义量化仓库需 `--base-model` 提示(实测:mlx-community/Qwen-Image-Edit-8bit 不给提示会被
     //   误路由成 qwen.generate 文生图,给了才走 qwen.edit 编辑 handler)
     const cmd = ['generate', '--model', model, '--prompt', String(p.prompt ?? ''), '--json-events'];
-    const baseHint = MlXGenProvider.BASE_MODEL_HINTS[model];
+    // 路由提示按 repoId 查(不能用 model:走本地路径时 model 是目录,查不到提示 → 会被
+    // 家族兜底误路由)。实测:本地目录同样需要 `--base-model qwen-image-2.1`
+    const baseHint = MlXGenProvider.BASE_MODEL_HINTS[repoModel];
     if (baseHint) cmd.push('--base-model', baseHint);
     const seeds = normalizeSeeds(p.seeds);
     let outPath = `${outBase}.png`;
     if (kind === 'generate') {
       cmd.push('--width', String(p.width ?? 768), '--height', String(p.height ?? 768));
-      cmd.push('--steps', String(p.steps ?? 24), '--guidance', String(p.guidance ?? 1.0));
+      // Qwen-Image-2.1 官方推荐 40 步且无 guidance(guidance 1.0 时负向 pass 整体跳过);
+      // 其余模型维持 24 步 + guidance 1.0 的既有默认(见 mlxgen 各模型 README)
+      // 同样按 repoId 判(本地路径时 model 是目录,否则 40 步默认会失效回落到 24)
+      const isQwen21 = repoModel === 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit';
+      const defSteps = isQwen21 ? 40 : 24;
+      // ⚠️ 根因记录(2026-09,真实事故:klein exit 2 且表现为「同参数一次成一次败」):
+      // FLUX.2 Klein 是**蒸馏**模型,裸 `mflux-generate-flux2` 只对 FLUX.2 **base** 模型接受
+      // `--guidance`;给 klein 传会被 argparse 直接拒绝并退出:
+      //   "mflux-generate-flux2: error: --guidance is only supported for FLUX.2 base models" → exit 2
+      // 故按模型族判定, klein 族一律不推 --guidance(缺省走模型自带默认).
+      // 注意判定用 repoModel(本地目录路径时 model 是目录,正则匹配不到 → 会误推参数).
+      const isFlux2Klein = /flux.?2.*klein/i.test(repoModel);
+      cmd.push('--steps', String(p.steps ?? defSteps));
+      if (!isFlux2Klein) cmd.push('--guidance', String(p.guidance ?? 1.0));
       if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
       // 参考图(ref-image 连线):多参考生成路由 —— 实测(2026-09)CLI 接受 `--i2i-mode multi-reference`
       // + 重复 `--image`(仅多参考 i2i 可重复);z-image-turbo 是纯文生图,带参考图时给明确指引报错
+      //
+      // ⚠️ 根因记录(2026-09,真实事故:klein 多参考 exit 2):
+      // `--image` 是 mlx-gen **路由器入口**参数(router_options.py),后端不认识它。
+      // 路由器按 handler 把 `--image` 改写成后端真实参数名:
+      //   handler `flux2.generate`(能力行 flux2.latent,max_images=1)→ `--image-path`(单张,不支持多图)
+      //   handler `flux2.edit`(能力行 flux2.multi-reference,max_images=None)→ `--image-paths`(复数,多图)
+      // `--i2i-mode multi-reference` 是路由器判定到 multi-reference 能力行的**唯一开关**;
+      // 一旦它与图片数量不匹配(如 2 张图却落到单图 handler),改写链断裂,`--image` 被原样透传
+      // 给裸 `mflux-generate-flux2`,argparse 直接报歧义退出:
+      //   "ambiguous option: --image could match --image-path, --image-strength" → exit 2
+      // 故此处**按图片数量显式选择 i2i-mode**,绝不依赖 CLI 的 auto 推断。
       const refPaths = (req.references ?? [])
         .filter((r) => r.role === 'ref-image' && r.localPath)
         .map((r) => String(r.localPath));
@@ -161,7 +277,11 @@ export class MlXGenProvider implements Provider {
               '或断开参考图连线再提交',
           );
         }
-        cmd.push('--i2i-mode', 'multi-reference');
+        // 单图 → edit(flux2.edit 能力行,单图 max_images=1);多图 → multi-reference(复数参数)
+        // 合法取值归一化后为 auto / latent-img2img / edit-reference / multi-reference,
+        // 别名 `edit` ≡ `edit-reference`(task_inference.py I2I_MODE_ALIASES);
+        // 两者都显式声明,避免 auto 推断把 2 张图塞进单图 handler
+        cmd.push('--i2i-mode', refPaths.length > 1 ? 'multi-reference' : 'edit');
         for (const rp of refPaths) cmd.push('--image', rp);
       }
       if (seeds.length > 0) {
@@ -182,6 +302,31 @@ export class MlXGenProvider implements Provider {
     } else {
       // edit:instruction / img2img / inpaint / outpaint(统一走 mlxgen generate 路由)
       if (p.inputPath) cmd.push('--image-path', String(p.inputPath));
+      // 采样步数:仅在用户显式设置时传(检查器未设置 → data 无 steps → 不传,
+      // 交给 mlxgen 用模型自身默认值,既有节点行为完全不变)。
+      // 背景:编辑原本既无检查器控件、provider 也不传 --steps,质量被静默固定在模型默认步数
+      // (实测 2026-09:flux.2-klein / z-image-turbo 不传时均为 4 步,对去水印、改动作偏少)。
+      // 与 generate 分支不同,这里**不给兜底默认值**——给了就等于改变所有存量节点的生成结果
+      if (p.steps != null && Number.isFinite(Number(p.steps))) {
+        cmd.push('--steps', String(Number(p.steps)));
+      }
+      // 防呆(真实事故 2026-09):给「纯文生图族」模型(z-image-turbo / qwen-image-2.1)
+      // 传了输入图、却不带 mask、也不带 --i2i-mode/--image-strength 时,CLI 的 auto 路由
+      // 会把「有输入图」判成 latent i2i,然后 exit 2:
+      //   "--image-strength is required for latent image-to-image mode."
+      // 该报错出现在 instruction/outpaint 模式下,用户看不懂。
+      // ⚠️ 边界(实测 2026-09):z-image **能**做 inpaint(有 z-image.inpaint = edit-reference + mask),
+      //    带 --mask-path 时 CLI 走编辑路由,不会报错 —— 所以必须放行有 mask 的提交,否则误伤。
+      //    Flux.2 Klein / Qwen Image Edit 不受影响(有 edit-reference 能力,交给 CLI 正常路由)。
+      const hasMask = Boolean(p.maskPath);
+      if (kind !== 'img2img' && p.inputPath && !hasMask && MlXGenProvider.latentOnly(model)) {
+        throw new Error(
+          `模型 ${model} 不支持「指令编辑」(它没有 reference-edit 能力,只有文生图 + 图生图);` +
+            '请在检查器把模型改为 mlx-community/Qwen-Image-Edit-8bit(指令编辑)或 ' +
+            'AbstractFramework/flux.2-klein-9b-8bit(多参考/扩图);' +
+            '若想保留当前模型,可改用「图生图」(带图像强度),或改用「Inpaint」(带遮罩)',
+        );
+      }
       if (kind === 'img2img') {
         // 实测防呆(2026-09 真实跑):Qwen Image Edit 无 latent I2I 能力,
         // mlxgen 直接 exit 2("Qwen Image Edit does not support latent image-to-image generation");
