@@ -324,6 +324,66 @@ describe('probeVideoPostTooling / checkToolingFor — 工具链探测与防呆',
   });
 });
 
+describe('ProgressTracker(进度换算单一真源)', () => {
+  /** 造一个三段计划(去块/超分/修脸),权重与真实口径同形状 */
+  const plan = [
+    { kind: 'deblock' as const, label: '去块', weight: 10 },
+    { kind: 'superres' as const, label: '超分', weight: 45 },
+    { kind: 'facefix' as const, label: '修脸', weight: 45 },
+  ];
+  const total = plan.reduce((a, x) => a + x.weight, 0);
+  const mk = () => {
+    const seen: number[] = [];
+    const t = new VP.ProgressTracker(plan, (p) => seen.push(p.overall), total);
+    return { t, seen };
+  };
+
+  it('单调下界:任何来源都不能把 overall 往回拽', () => {
+    const { t, seen } = mk();
+    t.report({ stageLabel: '超分', overallHint: t.overallAt(1, 0.42) });
+    t.report({ stageLabel: '超分', overallHint: t.overallAt(1, 0.1) }); // 阶段回环
+    t.report({ stageLabel: '超分', overallHint: 0 }); // 心跳误算成 0
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]!);
+    expect(seen.at(-1)).toBeCloseTo(t.overallAt(1, 0.42), 6);
+  });
+
+  it('⚠️ 回归:心跳插进超分阶段中途不得回退到阶段前缀值(42% → 0% 事故)', () => {
+    const { t, seen } = mk();
+    const log: string[] = [];
+    const push = (label: string, hint: number) => {
+      t.report({ stageLabel: label, overallHint: hint });
+      log.push(`${label} ${(seen.at(-1)! * 100).toFixed(0)}%`);
+    };
+    // 脚本报超分 42%
+    push('超分 ×2', t.overallAt(1, 0.42));
+    const afterScript = seen.at(-1)!;
+    // 心跳(每 10s)只更新文案:按旧实现会用陈旧 stageIndex + 归零峰值重算 → 掉回前缀值
+    t.report({ stageLabel: '超分 ×2', detail: '已 12s' });
+    expect(seen.at(-1), `心跳把进度拽回: ${log.at(-1)} → ${(seen.at(-1)! * 100).toFixed(0)}%`).toBe(afterScript);
+    // merge 这类无权重阶段同样不得倒退
+    t.report({ stageLabel: '拼回', detail: '10/10' });
+    expect(seen.at(-1)).toBe(afterScript);
+    for (let i = 1; i < seen.length; i++) expect(seen[i], `回退: ${log[i - 1]} → ${log[i]}`).toBeGreaterThanOrEqual(seen[i - 1]!);
+  });
+
+  it('completeStage 推进索引后,新阶段从更高前缀起步(跨阶段不回退)', () => {
+    const { t, seen } = mk();
+    t.report({ stageLabel: '去块', overallHint: t.overallAt(0, 1) });
+    const afterDeblock = seen.at(-1)!;
+    t.completeStage();
+    t.report({ stageLabel: '超分', overallHint: t.overallAt(t.currentStage, 0) });
+    expect(seen.at(-1)).toBeGreaterThanOrEqual(afterDeblock);
+  });
+
+  it('finish 推到 1,且此前所有上报都压在 0.999', () => {
+    const { t, seen } = mk();
+    t.report({ stageLabel: '修脸', overallHint: t.overallAt(2, 1) });
+    expect(seen.at(-1)!).toBeLessThanOrEqual(0.999);
+    t.finish('完成', '收尾中…');
+    expect(seen.at(-1)).toBe(1);
+  });
+});
+
 describe('整体进度(回归:跨阶段必须单调不减)', () => {
   it('buildStagePlan:权重按耗时占比,修脸最重、去块最轻', () => {
     const n = VP.normalizeVideoPost({ inputPath: '/x.mp4', scale: 2, faceModel: 'gfpgan', deblock: true });

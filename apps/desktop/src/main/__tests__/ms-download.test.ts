@@ -133,7 +133,9 @@ describe('runMsDownload 全流程(mock fetch,离线)', () => {
     expect(readFileSync(join(cacheDir, 'refs', 'main'), 'utf-8')).toBe(COMMIT);
     expect(job.status).toBe('done');
     expect(job.pct).toBe(100);
-  });
+    // 显式放宽超时:本用例要做真实文件写入 + sha256 计算 + 多处 readFileSync 校验,
+    // 默认 5s 在机器高负载(并行真实推理)时会假失败 —— 实测同一份代码 445ms~9.9s 波动
+  }, 30_000);
 
   it('断点续传:已有 .part 时带 Range 头,拼成完整 blob', async () => {
     const cacheDir = join(tmpRoot, 'case2');

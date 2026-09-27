@@ -446,6 +446,123 @@ export interface VideoPostOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * 整体进度换算器 —— 跨阶段单调递增的**单一真源**。
+ *
+ * 为什么必须收敛到一个类(真实回归,2026-09 由单调性测试抓到):
+ * 打底后处理是「去块 → 超分 → 修脸」三段,但子脚本一条命令里跑完超分+修脸,
+ * 期间还会穿插 split/merge 这类**无独立权重**的纯 I/O 阶段。此前进度有**两个**
+ * 各自记账的来源:
+ *   - 子脚本进度行(PROGRESS superres …):按 stageIdxOf 查真实阶段索引算 overall
+ *   - 心跳(每 10s 一次,让 UI 知道还活着):却按一个只在 completeStage() 里自增的
+ *     stageIndex 算,且读的是另一个从没被进度行写过的 stagePeak
+ * 两者状态不共享,于是心跳一旦插进超分阶段的中途,就会用陈旧索引 + 归零的峰值
+ * 重算,把已经涨到 42% 的进度打回该阶段前缀值 —— 表现就是同一阶段内「42% → 0%」。
+ * 负载越高心跳插入越频繁,越容易复现(第一次全量跑碰巧没暴露)。
+ *
+ * 现在所有上报都经 `report()`,内部维护 `peak`(全局单调下界)与 `stagePeak`
+ * (当前阶段内峰值),任何来源都不可能把 overall 往回拽。
+ */
+export class ProgressTracker {
+  /** 全局单调下界:任何一次上报的 overall 都不会低于它 */
+  private peak = 0;
+  /** 已完成阶段累计权重 */
+  private finished = 0;
+  private stageIndex = 0;
+
+  constructor(
+    private readonly plan: VideoPostStagePlanItem[],
+    private readonly push: (p: VideoPostProgress) => void,
+    private readonly totalWeight: number,
+  ) {}
+
+  /** 当前阶段在整体里的权重前缀(之前所有阶段权重之和) */
+  private prefixOf(index: number): number {
+    return this.plan.slice(0, index).reduce((a, x) => a + x.weight, 0);
+  }
+
+  private clamp(overall: number): number {
+    // 卡在 1 之前:最后阶段完成前不给 100%,避免「到了 100% 却还在跑」
+    const bounded = Math.max(0, Math.min(0.999, overall));
+    this.peak = Math.max(this.peak, bounded);
+    return this.peak;
+  }
+
+  /**
+   * 上报一次进度。
+   * @param stageLabel 展示用阶段名
+   * @param detail     阶段内明细(如「超分 ×2 12/124 帧」)
+   * @param weightsDone 已完成阶段的累计权重;不传则用内部计数(completeStage 维护)
+   * @param stageFirst 该阶段在 plan 里的索引起点;不传则用内部 stageIndex
+   * @param within     阶段内进度 0-1;**undefined 表示「只更新文案,推进度按当前下界」**
+   */
+  report(opts: {
+    stageLabel: string;
+    detail?: string;
+    overallHint?: number;
+    stageProgress?: number;
+    stagesDone?: number;
+    stagesTotal?: number;
+  }): void {
+    this.push({
+      stageLabel: opts.stageLabel,
+      detail: opts.detail,
+      overall: this.clamp(opts.overallHint ?? this.peak),
+      stageProgress: opts.stageProgress,
+      stagesDone: opts.stagesDone ?? this.stageIndex,
+      stagesTotal: opts.stagesTotal ?? this.plan.length,
+    });
+  }
+
+  /** 按「第 index 阶段完成了 within 比例」换算整体进度(超分/修脸这种有权重阶段用)。
+   *  返回值恒为 0-1 的比例（权重和要除以总权重；调用方直接交给 report 即可）。 */
+  overallAt(index: number, within: number): number {
+    const w = this.plan[index]?.weight ?? 0;
+    const ratio = this.clamp01(within);
+    return (this.prefixOf(index) + w * ratio) / this.totalWeight;
+  }
+
+  /** 不经过外部换算,直接给一个不低于当前下界的 overall(纯文案更新 / 无权重阶段用) */
+  currentOverall(): number {
+    return this.peak;
+  }
+
+  /** 标记当前阶段完成:累计权重、推进索引(后续阶段自然拿到更高前缀) */
+  completeStage(): void {
+    this.finished += this.plan[this.stageIndex]?.weight ?? 0;
+    this.stageIndex += 1;
+  }
+
+  get doneWeight(): number {
+    return this.finished;
+  }
+
+  get currentStage(): number {
+    return this.stageIndex;
+  }
+
+  get total(): number {
+    return this.totalWeight;
+  }
+
+  private clamp01(v: number): number {
+    return Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+  }
+
+  /** 推到 100%(全流程结束;前面的上报都压在 0.999) */
+  finish(stageLabel: string, detail?: string): void {
+    this.peak = 1;
+    this.push({
+      stageLabel,
+      detail,
+      overall: 1,
+      stageProgress: 1,
+      stagesDone: this.plan.length,
+      stagesTotal: this.plan.length,
+    });
+  }
+}
+
 /** 全局串行链:视频后处理同在一条链上排队(单个任务已吃满 GPU/CPU,并行只会互相拖垮) */
 let postChain: Promise<unknown> = Promise.resolve();
 
@@ -567,33 +684,22 @@ async function doVideoUpscale(
     }
     opts.onProgress?.(ev);
   };
-  const finishedWeight = { v: 0 };
-  let stageIndex = 0;
-  /** 阶段内峰值:防「拆帧→逐帧→拼回」这类多子步骤把进度从 96% 退回 27%(用户实测反馈的回退) */
-  let stagePeak = 0;
-  /** 阶段内 detail 变化时上报整体进度 */
+  /* 进度统一走 ProgressTracker(单一真源,全局单调不减)。
+     ⚠️ 不要再另起一套 stageIndex/stagePeak 记账:心跳与进度行状态不共享时,
+     心跳会按陈旧索引重算并把进度往回拽(真实回归,见 ProgressTracker 类注释)。 */
+  const tracker = new ProgressTracker(plan, emitProgress, totalWeight);
   const emit = (stageLabel: string, detail: string | undefined, stageProgress: number | undefined): void => {
-    const cur0 = plan[stageIndex];
-    const w = cur0?.weight ?? 0;
-    // 阶段内单调不减:比峰值低的一律按峰值算(否则「拼回」会把进度条拽回去)
-    if (stageProgress !== undefined) stagePeak = Math.max(stagePeak, Math.max(0, Math.min(1, stageProgress)));
-    const within = stageProgress === undefined ? stagePeak : stagePeak;
-    const overall = (finishedWeight.v + w * within) / totalWeight;
-    emitProgress({
+    tracker.report({
       stageLabel,
       detail,
-      // 卡在 1 之前:最后阶段完成前不给 100%,避免「到了 100% 却还在跑」
-      overall: Math.min(0.999, overall),
+      overallHint:
+        stageProgress === undefined
+          ? tracker.currentOverall()
+          : tracker.overallAt(tracker.currentStage, stageProgress),
       stageProgress,
-      stagesDone: stageIndex,
-      stagesTotal: plan.length,
     });
   };
-  const completeStage = (): void => {
-    finishedWeight.v += plan[stageIndex]?.weight ?? 0;
-    stageIndex += 1;
-    stagePeak = 0; // 新阶段重新计峰值(finishedWeight 已含上一阶段,整体仍单调不减)
-  };
+  const completeStage = (): void => tracker.completeStage();
 
   /* ① 去块(可选):ffmpeg deblock + 高码率重编码。
      必须在超分前 —— 先去掉 h264 压缩块,否则会被超分放大成方格。 */
@@ -630,22 +736,17 @@ async function doVideoUpscale(
       if (it.kind === 'facefix') stageIdxOf.facefix = i;
     });
     let lastLine = '';
-    /** 已观测到的最大整体进度:供 split/merge 这类无权重阶段复用作下界(保证单调不减) */
-    let observedMax = 0;
     const onLine = (line: string): void => {
       const pr = parsePostProgress(line);
       if (!pr) return;
       const kind = pr.stage === 'superres' ? 'superres' : pr.stage === 'facefix' ? 'facefix' : null;
       const label0 = POST_STAGE_LABEL[pr.stage] ?? pr.stage;
       if (kind) {
-        const idx = stageIdxOf[kind] ?? stageIndex;
+        // 真实阶段索引(不能用 tracker.currentStage:合并管线里超分/修脸是**同一条命令**
+        // 跑完的,completeStage 未必在此刻已推进)
+        const idx = stageIdxOf[kind] ?? tracker.currentStage;
         const label = kind === 'superres' ? `超分 ×${n.scale}` : n.faceModel === 'gfpgan' ? '修脸 GFPGAN' : '修脸 CodeFormer';
-        // 该阶段在整体里的权重前缀:之前所有阶段 + 本阶段之前的权重
-        const before = plan.slice(0, idx).reduce((a, x) => a + x.weight, 0);
-        const w = plan[idx]?.weight ?? 0;
         const within = pr.total > 0 ? pr.done / pr.total : 0;
-        const overall = Math.min(0.999, (before + w * within) / totalWeight);
-        observedMax = Math.max(observedMax, overall); // 单调基准(split/merge 用)
         const elapsed = Math.round((Date.now() - runStart) / 1000);
         const doneFrames = pr.done;
         const eta = doneFrames > 0 ? Math.round((elapsed / doneFrames) * (pr.total - doneFrames)) : 0;
@@ -654,43 +755,27 @@ async function doVideoUpscale(
             ? `拆帧 ${pr.done}/${pr.total}`
             : `${label0} ${pr.done}/${pr.total} 帧 · 已 ${fmtDur(elapsed)}${eta > 0 ? ` / 剩 ${fmtDur(eta)}` : ''}`;
         lastLine = text;
-        emitProgress({
+        // overallAt 内部按全局下界钳制 → 阶段回环(超分→修脸→再超分)也不会回退
+        tracker.report({
           stageLabel: label,
           detail: text,
-          overall,
+          overallHint: tracker.overallAt(idx, within),
           stageProgress: within,
           stagesDone: idx,
-          stagesTotal: plan.length,
         });
       } else {
-        // split / merge:自身无独立权重(纯 I/O)。
-        // ⚠️ 直接复用「已观测到的最大整体进度」——不能按 stageIndex 重算:
-        //    合并管线里超分/修脸的 completeStage 未必在 merge 之前被调用,
-        //    重算会把进度从 100% 拽回 0(真实回归,由单调性测试抓到)。
-        emitProgress({
-          stageLabel: label0,
-          detail: `${pr.done}/${pr.total}`,
-          overall: Math.min(0.999, observedMax),
-          stageProgress: undefined,
-          stagesDone: stageIndex,
-          stagesTotal: plan.length,
-        });
+        // split / merge:自身无独立权重(纯 I/O),沿用当前下界,绝不重算
+        tracker.report({ stageLabel: label0, detail: `${pr.done}/${pr.total}` });
       }
     };
-    const stopBeat = startHeartbeat('处理中', opts.onProgress, (s2) =>
-      emitProgress({
-        stageLabel: plan[stageIndex]?.label ?? '处理中',
+    // 心跳只更新文案:进度取当前下界,不再按 stageIndex/stagePeak 重算
+    // (真实回归:重算会用陈旧索引把超分阶段的 42% 打回 0%)
+    const stopBeat = startHeartbeat('处理中', opts.onProgress, (s2) => {
+      tracker.report({
+        stageLabel: lastLine ? lastLine.split(' ')[0]! : plan[tracker.currentStage]?.label ?? '处理中',
         detail: `${lastLine ? `${lastLine} · ` : ''}${s2}`,
-        overall: Math.min(
-          0.999,
-          (plan.slice(0, stageIndex).reduce((a, x) => a + x.weight, 0) + (plan[stageIndex]?.weight ?? 0) * stagePeak) /
-            totalWeight,
-        ),
-        stageProgress: undefined,
-        stagesDone: stageIndex,
-        stagesTotal: plan.length,
-      }),
-    );
+      });
+    });
     const r = await runChild(spawnInfo.cmd, spawnInfo.args, opts.signal, undefined, spawnInfo.cwd, onLine);
     stopBeat();
     if (!r.ok) return { ok: false, error: `超分/修脸失败:${r.error}` };
@@ -703,18 +788,12 @@ async function doVideoUpscale(
     }
     cur = finalPath;
     // 合并阶段:一次跨过剩余所有权重
-    while (stageIndex < plan.length) completeStage();
+    // 合并阶段:一次跨过剩余所有权重
+    while (tracker.currentStage < plan.length) tracker.completeStage();
   }
 
-  // 全部阶段跑完 → 明确推一次 100%(前面的 emit 都压在 0.999)
-  emitProgress({
-    stageLabel: '完成',
-    detail: '收尾中…',
-    overall: 1,
-    stageProgress: 1,
-    stagesDone: plan.length,
-    stagesTotal: plan.length,
-  });
+  // 全部阶段跑完 → 明确推一次 100%(前面的上报都压在 0.999)
+  tracker.finish('完成', '收尾中…');
 
   // 既没超分也没修脸(理论上仅去块)→ 去块产物即最终产物:搬到 finalPath
   if (cur !== finalPath) {
