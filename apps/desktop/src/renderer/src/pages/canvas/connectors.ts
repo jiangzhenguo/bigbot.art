@@ -44,6 +44,7 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
   shot: {
     shot: ['first-frame', '首帧 · 上游尾帧自动取帧'],
     edit: ['input', '输入帧 · 首/尾帧可取'],
+    vupscale: ['input', '输入视频 · 镜头成片增强(超分/修脸)'],
     timeline: ['clip', '视频片段 · 整段入轨'],
   },
   'image-gen': {
@@ -82,6 +83,15 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     split: ['input', '输入图 · 拆分源'],
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
+  },
+  // 🆕 视频增强(超分 + 合修脸):产物是视频 → 首帧/参考视频/入轨/链式再增强
+  'video-upscale': {
+    shot: [
+      ['first-frame', '首帧 · 增强成片首帧直通'],
+      ['ref-video', '参考视频 · 风格/动作参考'],
+    ],
+    vupscale: ['input', '输入视频 · 链式二次增强'],
+    timeline: ['clip', '增强成片 · 整段入轨'],
   },
   'image-crop': {
     shot: [
@@ -157,8 +167,11 @@ const BY_TARGET: Record<string, PortRow> = {
 /** 图片产物类节点(静帧直通) */
 export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
 
+/** 视频产物类节点(视频直通:video-upscale 产物是 mp4,不能当静帧用) */
+export const VIDEO_KINDS = ['video-upscale'];
+
 /** 能收口到 workflow-output 的源(必须与 dispatch 的收集逻辑一致,否则弹窗会承诺不存在的边) */
-const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS];
+const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS, ...VIDEO_KINDS];
 
 /**
  * 镜头**画面规格**:shot → shot 接续时整组从上游继承(比例 + 档位三件套)。
@@ -199,6 +212,8 @@ export const PORT_LABEL: Record<string, string> = {
   'ref-video': '参考视频',
   prompt: '提示词',
   input: '输入图',
+  /** 视频增强的输入端口:语义是「待增强的视频」,与图片节点的「输入图」区分 */
+  'input-video': '输入视频',
   piece: '拼接件',
   clip: '入轨',
 };
@@ -212,6 +227,7 @@ export const KIND_TO_TAGID: Record<string, string> = {
   'image-gen': 'image',
   'image-edit': 'edit',
   'image-upscale': 'upscale',
+  'video-upscale': 'vupscale',
   'image-crop': 'crop',
   'image-stitch': 'stitch',
   'image-split': 'split',
@@ -267,6 +283,7 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
       video: {
         shot: ['ref-video', '参考视频 · 风格/动作参考'],
         edit: ['input', '取帧源 · 首/尾帧'],
+        vupscale: ['input', '输入视频 · 超分/修脸源'],
         timeline: ['clip', '视频素材 · 入轨'],
       },
       audio: {
