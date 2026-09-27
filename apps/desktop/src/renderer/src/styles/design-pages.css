@@ -293,7 +293,23 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .pal-it .p1{margin-left:auto;font-size:10px;color:var(--meta);font-family:var(--font-mono)}
 .pg-canvas .stage{flex:1;position:relative;overflow:hidden;background:var(--bg);background-image:radial-gradient(color-mix(in oklab,var(--fg) 12%,transparent) 1px,transparent 1px);background-size:24px 24px;cursor:grab}
 .pg-canvas .stage.panning{cursor:grabbing}
+/* 框选模式:光标变十字(拖空白处框选);平移保底通道(中键/空格)仍是抓手 */
+.pg-canvas .stage.marquee{cursor:crosshair}
+.pg-canvas .stage.marquee.panning{cursor:grabbing}
 .pg-canvas .world{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0}
+/* 框选矩形:world 坐标系内绘制(随缩放/平移自然跟手),不参与指针命中 */
+.pg-canvas .sel-rect{position:absolute;pointer-events:none;z-index:20;border:1px solid var(--accent);border-radius:2px;background:color-mix(in oklab,var(--accent),transparent 88%)}
+/* 组框:节点下方的命名容器(只有标题条可点,不挡节点拖动) */
+.pg-canvas .group-box{position:absolute;z-index:0;pointer-events:none;border:1px dashed var(--border);border-radius:var(--radius-md);background:color-mix(in oklab,var(--fg) 3%,transparent)}
+.pg-canvas .group-box .gname{position:absolute;left:8px;top:-9px;pointer-events:auto;cursor:pointer;padding:1px 7px;border-radius:999px;font-size:10px;line-height:16px;background:var(--bg);border:1px solid var(--border-soft);color:var(--muted);white-space:nowrap;user-select:none}
+.pg-canvas .group-box .gname:hover{color:var(--accent);border-color:var(--accent)}
+.pg-canvas .group-box.tone-accent{border-color:color-mix(in oklab,var(--accent),transparent 55%)}
+.pg-canvas .group-box.tone-success{border-color:color-mix(in oklab,var(--success),transparent 55%)}
+.pg-canvas .group-box.tone-warn{border-color:color-mix(in oklab,var(--warn),transparent 50%)}
+/* 节点上的组徽标 */
+.pg-canvas .node .st.group-tag{background:color-mix(in oklab,var(--accent),transparent 88%);color:var(--accent);border-radius:999px;padding:0 6px;font-size:10px;white-space:nowrap;max-width:96px;overflow:hidden;text-overflow:ellipsis}
+/* 组内节点:左侧一道组色竖线,与未分组节点区分 */
+.pg-canvas .node.grouped{box-shadow:inset 3px 0 0 color-mix(in oklab,var(--accent),transparent 70%)}
 .pg-canvas .edges{position:absolute;left:0;top:0;width:1600px;height:1000px;overflow:visible;pointer-events:none}
 .pg-canvas .edges path{fill:none;stroke:color-mix(in oklab,var(--fg) 28%,transparent);stroke-width:1.6}
 .pg-canvas .edges path.stale{stroke-dasharray:6 5}
@@ -336,6 +352,32 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .node-add:hover{border-color:var(--accent);color:var(--accent);transform:scale(1.12)}
 .pg-canvas .node.ghost .node-add{border-style:dashed}
 .pg-canvas .node-badge{position:absolute;top:-12px;right:12px;display:inline-flex;align-items:center;gap:5px;background:var(--accent);color:var(--accent-on);font-size:10.5px;font-weight:600;padding:3px 9px;border-radius:var(--radius-pill);white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.18);z-index:4}
+/* 排队中(还没轮到执行):黄底,与「生成中」的强调色区分 —— 多任务 FIFO 时用户要能一眼看出「在排队」而不是「卡住了」 */
+.pg-canvas .node-badge.node-queued{background:var(--warn);color:var(--accent-on)}
+.pg-canvas .node-badge.node-queued .spin{border-color:color-mix(in oklab,var(--accent-on) 55%,transparent);border-top-color:var(--accent-on)}
+/* 失败态:红底,避免与生成中的强调色混淆 */
+.pg-canvas .node-badge.node-failed{background:var(--danger);color:var(--accent-on)}
+.pg-canvas .node-badge.node-failed .spin{display:none}
+/* 长任务进度(视频增强):胶囊内两行 —— 上行「阶段 N/M · 文案 · NN%」,下行整体进度条 */
+.pg-canvas .node-badge.node-progress{flex-direction:column;align-items:stretch;gap:4px;padding:5px 9px 6px;max-width:250px}
+.pg-canvas .node-progress .np-text{display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden;font-size:10.5px}
+.pg-canvas .node-progress .np-stage{flex:none;font-weight:700;opacity:.85;font-variant-numeric:tabular-nums}
+.pg-canvas .node-progress .np-label{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pg-canvas .node-progress .np-pct{flex:none;margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+.pg-canvas .node-progress .np-bar{position:relative;display:block;height:4px;border-radius:2px;background:color-mix(in oklab,var(--accent-on) 28%,transparent);overflow:hidden}
+.pg-canvas .node-progress .np-bar i{display:block;height:100%;border-radius:2px;background:var(--accent-on)}
+.pg-canvas .node-progress .np-bar i.fill{transition:width .45s var(--ease-standard)}
+/* 不确定态:当前阶段没有细分进度 → 来回滚动,表示"在跑但这一阶段无法估算" */
+.pg-canvas .node-progress .np-bar.indet i{width:34%;animation:bba-indet 1.4s var(--ease-standard) infinite}
+@keyframes bba-indet{0%{transform:translateX(-100%)}100%{transform:translateX(320%)}}
+/* 检查器里的长任务进度块 */
+.pg-canvas .insp .vpost-progress{border:1px solid var(--border-soft);border-radius:var(--radius-md);padding:8px 10px;background:var(--surface-warm)}
+.pg-canvas .insp .vpost-progress .row1{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--fg)}
+.pg-canvas .insp .vpost-progress .pbar{margin-top:6px;height:6px;border-radius:3px;background:color-mix(in oklab,var(--fg) 10%,transparent);overflow:hidden;display:block}
+.pg-canvas .insp .vpost-progress .pbar i{display:block;height:100%;border-radius:3px;background:var(--accent);transition:width .4s var(--ease-standard)}
+.pg-canvas .insp .vpost-progress .pbar.indet i{width:35%;animation:bba-indet 1.4s var(--ease-standard) infinite}
+.pg-canvas .insp .vpost-progress .vp-stage{flex:none;font-weight:700;color:var(--fg);font-variant-numeric:tabular-nums}
+.pg-canvas .insp .vpost-progress .vp-pct{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
 .pg-canvas .md-preview{padding:2px 0 0}
 .pg-canvas .md-preview b{font-size:12.5px}
 .pg-canvas .md-preview p{margin:4px 0 0;color:var(--muted);font-size:11px;line-height:1.5}

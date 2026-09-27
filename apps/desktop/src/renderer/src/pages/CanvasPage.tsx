@@ -24,6 +24,7 @@ import {
   toSharedEdges,
   dedupeNodeIds,
   seedIdCounter,
+  contentKey,
 } from './canvas/node-mapping';
 import { resolvePort, resolvePortOptions, type PortResolution } from './canvas/connectors';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
@@ -31,6 +32,20 @@ import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './c
 import { basenameOf, thumbSrc } from './canvas/media';
 import { nodesReducer } from './canvas/edge-dispatch';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
+import {
+  UNMEASURED_NODE_H as SEL_UNMEASURED_H,
+  rectFromPoints,
+  nodesInRect,
+  nodeRect,
+  createGroup,
+  dissolveGroups,
+  pruneGroups,
+  expandSelectionToGroups,
+  selectionIsWholeGroup,
+  normalizeGroups,
+  type NodeGroup,
+  type Rect,
+} from './canvas/selection';
 import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
@@ -75,6 +90,22 @@ function upstreamImagePath(
   return String(upData.resultPath ?? '') || undefined;
 }
 
+/**
+ * 解析上游节点的**视频**产物路径(video-upscale 运行时入口):
+ * - asset 节点 → 资产缓存本地路径
+ * - shot / video-upscale 等视频产物节点 → data.resultPath
+ * 与 upstreamImagePath 同形状,但语义上是视频(不处理 piece-N)。
+ */
+function upstreamVideoPath(
+  up: CanvasNode | undefined,
+  assetCache: Record<string, string>,
+): string | undefined {
+  if (!up) return undefined;
+  const upData = (up.data ?? {}) as Record<string, unknown>;
+  if (up.kind === 'asset') return assetCache[String(upData.assetId ?? '')] || undefined;
+  return String(upData.resultPath ?? '') || undefined;
+}
+
 /** 默认视图(无持久化 viewport 的画布:新画布 / 旧项目文件) */
 const DEFAULT_VIEW = { x: 20, y: 10, z: 0.86 };
 
@@ -111,6 +142,8 @@ export default function CanvasPage({
   const minimapRef = useRef<HTMLDivElement | null>(null);
   const toastTimer = useRef<number | null>(null);
   const queueTimer = useRef<number | null>(null);
+  /** 队列状态补种入口(挂载/重载画布后把「正在生成」重新标回节点;订阅 effect 里赋值) */
+  const queueReseedRef = useRef<(() => Promise<void>) | null>(null);
   const saveTimer = useRef<number | null>(null);
   /** 视口(平移/缩放)落盘防抖计时器 */
   const viewTimer = useRef<number | null>(null);
@@ -162,7 +195,27 @@ export default function CanvasPage({
   const [knownVersion, setKnownVersion] = useState(0);
   const knownVersionRef = useRef(0);
   knownVersionRef.current = knownVersion;
-  const [selected, setSelected] = useState<string | null>(null);
+  /**
+   * 选中节点 id 集合(框选/多选的核心状态)。
+   *
+   * 顺序语义:末位 = 「主选中」—— 检查器/Agent 关注节点取它;
+   * 空数组 = 未选中。单选用 `selectNode(id)` 写 `[id]`。
+   * 之所以用数组而非 Set:插入顺序要稳定(主选中 = 最后点的那个),且可直接序列化比对。
+   */
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  /** 派生:单选时为主选中 id,多选/空选为 null(下游检查器/Agent 契约不变) */
+  const selected = selectedIds.length === 1 ? selectedIds[0]! : null;
+  const selectedIdsRef = useRef<string[]>([]);
+  selectedIdsRef.current = selectedIds;
+  /** 「框选」模式开关:开 = 拖空白框选;关 = 拖空白平移(方案 A + 开关模式) */
+  const [marqueeMode, setMarqueeMode] = useState(false);
+  /** 正在拖拽的框选矩形(world 坐标;ref 供每帧读取,state 供渲染) */
+  const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
+  const selRectRef = useRef<{ ax: number; ay: number; bx: number; by: number; additive: boolean } | null>(null);
+  /** 节点分组(随快照持久化;组内节点整体拖动/删除/复制) */
+  const [groups, setGroups] = useState<NodeGroup[]>([]);
+  const groupsRef = useRef<NodeGroup[]>([]);
+  groupsRef.current = groups;
   const [flashId, setFlashId] = useState<string | null>(null);
   const [infoMap, setInfoMap] = useState<Record<string, NodeInfo>>(() => ({
     ...NODE_INFO_BASE,
@@ -197,6 +250,13 @@ export default function CanvasPage({
   }, []);
   /* ── M1:渲染队列(真实任务) + 画布持久化 ── */
   const [jobs, setJobs] = useState<RenderJob[]>([]);
+  /** 最近一次发起视频增强的节点 id(null = 无):主进程进度事件据此定位到节点。
+   *  用 ref 而非 state —— 进度回调在 effect 闭包里读,state 会拿到过期值。 */
+  const videoPostRef = useRef<string | null>(null);
+  /** 正在跑视频增强的节点集合(防重入闩;全局后处理串行,通常至多 1 个) */
+  const videoPostRunningRef = useRef<Set<string>>(new Set());
+  /** 运行标记走 state 同步一份,供按钮置灰(仅 ref 改动不会触发重渲染) */
+  const [videoPostRunning, setVideoPostRunning] = useState<string[]>([]);
   const bootRef = useRef(true); // 挂载期跳过首轮保存(等加载/规划落地)
   const prevJobState = useRef<Record<string, string>>({});
   /** 接力轮次中已提交、仍存活的任务(去重防重复入队;终态后移除) */
@@ -277,7 +337,11 @@ export default function CanvasPage({
   const [histVer, setHistVer] = useState(0);
   /** 取当前内容(节点 + 连线)的引用快照:数组本身不可变(每次写入都是新数组),故浅拷贝即快照 */
   const contentSnapshot = useCallback(
-    (): HistoryContent => ({ nodes: nodesRef.current, edges: edgesRef.current }),
+    (): HistoryContent => ({
+      nodes: nodesRef.current,
+      edges: edgesRef.current,
+      groups: groupsRef.current,
+    }),
     [],
   );
   /** 记录一次编辑:label 是动作名(撤销提示与按钮 tooltip 用)。
@@ -300,14 +364,20 @@ export default function CanvasPage({
       historyRef.current.beginReplay();
       setNodes(content.nodes as CanvasNode[]);
       setEdges(content.edges as Edge[]);
+      // 分组一并回放(否则「撤销建组」后组框还留在画布上)
+      if (content.groups) setGroups(content.groups as NodeGroup[]);
       const settle = () => {
-        historyRef.current.endReplay({ nodes: nodesRef.current, edges: edgesRef.current });
+        historyRef.current.endReplay({
+          nodes: nodesRef.current,
+          edges: edgesRef.current,
+          groups: groupsRef.current,
+        });
         setHistVer((v) => v + 1);
       };
       // 等两个渲染帧:连线派生 effect(derive-from-edges)可能再写一次 state,之后才建立基线
       requestAnimationFrame(() => requestAnimationFrame(settle));
     },
-    [setNodes],
+    [setNodes, setEdges, setGroups],
   );
 
   const undo = useCallback(() => {
@@ -357,13 +427,16 @@ export default function CanvasPage({
     }));
   }, []);
 
-  /* ── 节点定位 + 拖拽(scale 校正,和 canvas.js 一致) ── */
+  /* ── 节点定位 + 拖拽(scale 校正,和 canvas.js 一致) ──
+   * 多选/整组拖动:按下时冻结**每个被拖节点各自的起点坐标**(origins),
+   * 移动时统一加同一个位移 —— 绝不在 setState updater 里读前一帧或算增量:
+   * StrictMode 下 updater 会双跑,累加式增量会翻倍(AGENTS.md §5.1 的真实事故类型)。 */
   const dragRef = useRef<{
-    id: string;
+    ids: string[];
     sx: number;
     sy: number;
-    ox: number;
-    oy: number;
+    /** 拖动前各节点的原始坐标(按下时冻结;缺席的节点不动) */
+    origins: Map<string, { x: number; y: number }>;
     moved: boolean;
   } | null>(null);
   /** 拖动开始时的内容(撤销要回到的位置):拖拽过程中每帧 setState 只写状态,不动历史 */
@@ -375,12 +448,16 @@ export default function CanvasPage({
       if (!d) return;
       const z = viewRef.current.z;
       if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      const dx = (e.clientX - d.sx) / z;
+      const dy = (e.clientY - d.sy) / z;
+      const ids = new Set(d.ids);
       setNodes((ns) =>
-        ns.map((n) =>
-          n.id === d.id
-            ? { ...n, x: d.ox + (e.clientX - d.sx) / z, y: d.oy + (e.clientY - d.sy) / z }
-            : n,
-        ),
+        ns.map((n) => {
+          if (!ids.has(n.id)) return n;
+          const o = d.origins.get(n.id);
+          if (!o) return n;
+          return { ...n, x: o.x + dx, y: o.y + dy };
+        }),
       );
     };
     const onUp = () => {
@@ -390,7 +467,12 @@ export default function CanvasPage({
       // 拖动结束 = 一次离散编辑 ✓ 提交历史(未真正移动过则不记)
       if (d.moved && dragPrevRef.current) {
         // 拖动是唯一「跨越很长时间、起点状态必须显式记下」的编辑:直接把拖动前内容当撤销目标
-        historyRef.current.commitFrom(dragPrevRef.current, { nodes: nodesRef.current, edges: edgesRef.current }, '移动节点');
+        const label = d.ids.length > 1 ? `移动 ${d.ids.length} 个节点` : '移动节点';
+        historyRef.current.commitFrom(
+          dragPrevRef.current,
+          { nodes: nodesRef.current, edges: edgesRef.current, groups: groupsRef.current },
+          label,
+        );
         setHistVer((v) => v + 1);
       }
       dragPrevRef.current = null;
@@ -560,8 +642,12 @@ export default function CanvasPage({
     };
   }, [hitTestNode, commitConnectEdge]);
 
-  /* ── 空白处拖拽平移 ── */
+  /* ── 空白处拖拽:框选(marqueeMode)或平移 ──
+   * 方案 A + 开关模式:开关开启 → 拖空白框选;关闭 → 拖空白平移(原行为)。
+   * 平移另有保底通道:中键拖动 / 空格+拖动(见下方 onStagePointerDown),开关关着也不憋屈。 */
   const panStartRef = useRef({ sx: 0, sy: 0, vx: 0, vy: 0 });
+  /** 空格按下中(临时切换为平移:与 Photoshop/Figma 一致,空格是通用抓手) */
+  const spaceDownRef = useRef(false);
   const beginPan = (e: React.PointerEvent) => {
     panStartRef.current = {
       sx: e.clientX,
@@ -585,6 +671,80 @@ export default function CanvasPage({
       window.removeEventListener('pointerup', onUp);
     };
   }, [panning]);
+
+  /* ── 框选(marquee)── */
+  /** 每帧重算命中:与矩形相交的节点(**含组的整体扩张**) */
+  const applyMarquee = useCallback((rect: Rect, additive: boolean) => {
+    const hit = nodesInRect(nodesRef.current, rect);
+    // 命中组内任一节点 → 整组一起选中(组概念的核心手感)
+    const expanded = expandSelectionToGroups(groupsRef.current, hit);
+    if (additive) {
+      const cur = new Set(selectedIdsRef.current);
+      for (const id of expanded) cur.add(id);
+      setSelectedIds([...cur]);
+    } else {
+      setSelectedIds(expanded);
+    }
+  }, []);
+
+  const beginMarquee = useCallback((e: React.PointerEvent) => {
+    const w = screenToWorld(e.clientX, e.clientY);
+    selRectRef.current = {
+      ax: w.x,
+      ay: w.y,
+      bx: w.x,
+      by: w.y,
+      // Shift = 并入现有选区(不清空),与 Figma 一致
+      additive: e.shiftKey,
+    };
+    if (!e.shiftKey) setSelectedIds([]);
+    setSelectionRect({ x: w.x, y: w.y, w: 0, h: 0 });
+  }, []);
+
+  useEffect(() => {
+    if (!selectionRect) return;
+    const onMove = (e: PointerEvent) => {
+      const s = selRectRef.current;
+      if (!s) return;
+      const w = screenToWorld(e.clientX, e.clientY);
+      s.bx = w.x;
+      s.by = w.y;
+      const r = rectFromPoints(s.ax, s.ay, s.bx, s.by);
+      setSelectionRect(r);
+      applyMarquee(r, s.additive);
+    };
+    const onUp = () => {
+      selRectRef.current = null;
+      setSelectionRect(null);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [selectionRect, applyMarquee]);
+
+  /** 空白处按下:决定走框选还是平移(中键/空格永远是平移,保底通道) */
+  const onStagePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      const spacePan = spaceDownRef.current;
+      if (e.button === 1 || spacePan) {
+        e.preventDefault();
+        beginPan(e);
+        return;
+      }
+      if (e.button !== 0) return;
+      if (marqueeMode) {
+        // 框选期间禁止拖出文本选择,否则会框出一片蓝色高亮
+        e.preventDefault();
+        beginMarquee(e);
+        return;
+      }
+      beginPan(e);
+    },
+    [marqueeMode, beginMarquee],
+  );
 
   /* ── 滚轮:以指针为中心缩放 ── */
   useEffect(() => {
@@ -680,8 +840,15 @@ export default function CanvasPage({
   }, []);
 
   /* ══ 选择节点 → 检查器 ══ */
+  /**
+   * 单选(点节点 / 程序化定位):写单选选区。
+   *
+   * 注意**不做组扩张** —— 点节点只选中它自己(检查器要能看单个节点的参数),
+   * 组的整体性体现在拖动/删除/复制这些「批量动作」上(见 beginNodeDrag / deleteSelection)。
+   * 想选整组:双击组框或点节点上的组徽标 → selectGroup()。
+   */
   const selectNode = useCallback((id: string | null) => {
-    setSelected(id);
+    setSelectedIds(id ? [id] : []);
     if (!id) {
       // 未选任何节点:检查器不应残留上一节点的标题
       setInspectTitle('未选择节点');
@@ -698,11 +865,95 @@ export default function CanvasPage({
     setTab('insp');
   }, []);
 
+  /** 选中整组(点组徽标 / 双击组框 / 右键组操作) */
+  const selectGroup = useCallback(
+    (groupId: string) => {
+      const g = groupsRef.current.find((x) => x.id === groupId);
+      if (!g) return;
+      setSelectedIds([...g.members]);
+      setInspectTitle(`已选「${g.name}」· ${g.members.length} 个节点`);
+      setTab('insp');
+    },
+    [],
+  );
+
+  /**
+   * 节点主体按下:启动「拖动整块选区」预备态。
+   *
+   * 语义(与 Figma 一致):
+   *  - 按在**已选中**的节点上 → 拖动整个选区(多选/整组一起走);
+   *  - 按在**未选中**的节点上 → 先选中它(Shift = 并入选区,否则替换),再拖动;
+   *  - 组内节点:自动扩张为整个组一起拖动。
+   */
+  const beginNodeDrag = useCallback(
+    (node: CanvasNode, e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      const additive = e.shiftKey;
+      let nextSel: string[];
+      if (additive) {
+        const cur = selectedIdsRef.current;
+        nextSel = cur.includes(node.id) ? cur.filter((x) => x !== node.id) : [...cur, node.id];
+        setSelectedIds(nextSel);
+      } else if (selectedIdsRef.current.includes(node.id)) {
+        // 已选中:保持选区不变,准备整体拖动
+        nextSel = selectedIdsRef.current;
+      } else {
+        nextSel = [node.id];
+        setSelectedIds(nextSel);
+      }
+      // 拖动前把选区扩张到整组(组内任一成员参与拖动 = 整组动)
+      const dragIds = expandSelectionToGroups(groupsRef.current, nextSel);
+      if (additive) {
+        // Shift 加选/减选时不启动拖动,避免「想多选却把节点拖走」
+        return;
+      }
+      const origins = new Map<string, { x: number; y: number }>();
+      for (const n of nodesRef.current) {
+        if (dragIds.includes(n.id)) origins.set(n.id, { x: n.x, y: n.y });
+      }
+      dragRef.current = { ids: dragIds, sx: e.clientX, sy: e.clientY, origins, moved: false };
+      dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
+      e.stopPropagation();
+    },
+    [],
+  );
+
+  /** 组操作:建组(把当前选区收成一个组) */
+  const groupSelection = useCallback(() => {
+    const members = selectedIdsRef.current;
+    if (members.length < 2) {
+      toastMsg('至少选中 2 个节点才能建组');
+      return;
+    }
+    const { groups: next, group } = createGroup(groupsRef.current, members);
+    setGroups(next);
+    commitEdit('建组');
+    toastMsg(`已建「${group.name}」· ${members.length} 个节点`);
+  }, [commitEdit, toastMsg]);
+
+  /** 组操作:解组(选中恰好等于整组时可用) */
+  const ungroupSelection = useCallback(() => {
+    const g = selectionIsWholeGroup(groupsRef.current, selectedIdsRef.current);
+    if (!g) {
+      toastMsg('请先选中整个组');
+      return;
+    }
+    setGroups(dissolveGroups(groupsRef.current, [g.id]));
+    commitEdit('解组');
+    toastMsg(`已解组「${g.name}」· 节点保留`);
+  }, [commitEdit, toastMsg]);
+
+  /** 当前选区是否恰好是一个完整组(工具栏「解组」可用态) */
+  const wholeGroupOfSelection = useMemo(
+    () => selectionIsWholeGroup(groups, selectedIds),
+    [groups, selectedIds],
+  );
+
   /* 当前活动画布 id(派生自 props) */
   const activeCanvasId = projectCanvases?.activeCanvasId ?? '';
   const activeCanvas = projectCanvases?.canvases.find((c) => c.id === activeCanvasId);
 
-  /** 构建当前画布快照(节点+边+视口)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
+  /** 构建当前画布快照(节点+边+视口+分组)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
   const buildActiveSnapshot = useCallback(
     (ns?: CanvasNode[], es?: Edge[]): CanvasSnapshot | null => {
       if (!activeCanvas) return null;
@@ -712,6 +963,8 @@ export default function CanvasPage({
         name: activeCanvas.name,
         nodes: toSharedNodes(ns ?? nodes) as never,
         edges: toSharedEdges(es ?? edges) as never,
+        // 分组:随快照持久化(取 ref,保证建组/解组后立刻写盘,不等下一次渲染)
+        groups: groupsRef.current.map((g) => ({ ...g, members: [...g.members] })),
         // 用已知版本(随推送/刷新前进),保证不落后于 store —— 落后会导致 saveCanvasSnapshot 版本防护拒绝覆盖
         version: knownVersion || activeCanvas.version,
         // 画布视口:退出/重进恢复上次看到的位置与缩放(取 ref,保证拖拽/滚轮进行中也写最新值)
@@ -728,17 +981,23 @@ export default function CanvasPage({
   const lastSavedRef = useRef('');
   /** 最近一次落盘的视口(内容没变但视口变了也要写盘,见 maybePersist) */
   const lastViewRef = useRef<{ x: number; y: number; z: number } | null>(null);
-  /** 标记内容基线为「与 store 一致」(加载/推送/保存成功后调用) */
-  const markBaseline = useCallback((ns: CanvasNode[], es: Edge[]) => {
-    lastSavedRef.current = JSON.stringify([ns, es]);
-  }, []);
+  /** 标记内容基线为「与 store 一致」(加载/推送/保存成功后调用)。
+   *  含 groups —— 只比对 nodes/edges 的话,「仅改分组」会被判成无变化而不写盘。
+   *  用 contentKey 归一化瞬态 UI 字段(badge/running/progress…),否则「生成中文案变化」
+   *  会被当成内容改动而反复写盘,写盘广播又把 store 的旧节点推回来抹掉标签。 */
+  const markBaseline = useCallback(
+    (ns: CanvasNode[], es: Edge[], gs?: NodeGroup[]) => {
+      lastSavedRef.current = contentKey(ns, es, gs ?? groupsRef.current);
+    },
+    [],
+  );
   /** 保存当前快照:内容相对基线有真实变化才写盘;写盘后把基线推进到已保存内容。
    *  opts.allowEmpty = true 仅 auto-save 使用(用户清空画布是合法编辑);
    *  卸载/切画布 flush 默认禁止空快照覆盖 —— 崩溃时内存 state 可能为空,不得覆盖 store 有内容的画布。 */
   const maybePersist = useCallback(
     (snap: CanvasSnapshot | null, opts?: { allowEmpty?: boolean }) => {
       if (!snap) return;
-      const local = JSON.stringify([snap.nodes, snap.edges]);
+      const local = contentKey(snap.nodes as unknown as CanvasNode[], snap.edges as unknown as Edge[], snap.groups ?? []);
       // 🛡️ 防「空快照覆盖有内容画布」:本地内存为空,但 store 里这份画布有节点时一律不写盘。
       // 事故背景(2026-09-22):启动瞬间/切画布时若 nodes 尚未装填,一次 flush 就会把有内容的画布写成空,
       // 而基线比对只看「本地内容是否变过」,挡不住「本地是空、基线也是空」的首次写盘。
@@ -817,7 +1076,10 @@ export default function CanvasPage({
     const selfHeal = dedupeNodeIds(loaded, toLocalEdges(activeCanvas.edges as never));
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
-    markBaseline(selfHeal.nodes, selfHeal.edges);
+    // 分组:旧项目文件无 groups → 空数组;脏 id/空组在这里一次性规整
+    const loadedGroups = normalizeGroups(activeCanvas.groups, selfHeal.nodes.map((n) => n.id));
+    setGroups(loadedGroups);
+    markBaseline(selfHeal.nodes, selfHeal.edges, loadedGroups);
     // 画布视口:恢复上次退出时的平移/缩放(旧项目文件无 viewport → 默认视图)
     const restored = normalizeView(activeCanvas.viewport);
     viewRef.current = restored;
@@ -825,14 +1087,14 @@ export default function CanvasPage({
     lastViewRef.current = { ...restored };
     // 换画布 = 换编辑对象:清空撤销/重做历史并重建基线
     historyRef.current.clear();
-    historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+    historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges, groups: loadedGroups });
     setHistVer((v) => v + 1);
     if (selfHeal.changed) {
       const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
       if (repaired) void onSaveCanvas(repaired);
     }
     nextId.current = seedIdCounter(selfHeal.nodes);
-    setSelected(null);
+    setSelectedIds([]);
     setFlashId(null);
     requestAnimationFrame(() => {
       bootRef.current = false;
@@ -863,7 +1125,7 @@ export default function CanvasPage({
           const imgNodes = (plan.images ?? []).map((s) => fromSharedNode(s as never));
           setNodes([sbNode, ...imgNodes, ...shotNodes]);
           setEdges(toLocalEdges(plan.edges ?? []));
-          setSelected(shotNodes[0]?.id ?? sbNode.id);
+          setSelectedIds([shotNodes[0]?.id ?? sbNode.id]);
           chat.pushMsg({
             kind: 'sys',
             text: `Agent 已生成分镜表 · ${plan.report ?? ''} · 选中分镜表可在检查器改表后一键铺节点`,
@@ -874,7 +1136,7 @@ export default function CanvasPage({
           const shotNodes = (plan.shots ?? []).map((s) => fromSharedNode(s as never));
           setNodes([docNode, ...shotNodes]);
           setEdges(toLocalEdges(plan.edges ?? []));
-          setSelected(shotNodes[0]?.id ?? docNode.id);
+          setSelectedIds([shotNodes[0]?.id ?? docNode.id]);
           chat.pushMsg({ kind: 'agent', odId: 'agent-plan', plan: plan as never });
         }
       } catch (e) {
@@ -988,10 +1250,12 @@ export default function CanvasPage({
       const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
       setNodes(selfHeal.nodes);
       setEdges(selfHeal.edges);
-      markBaseline(selfHeal.nodes, selfHeal.edges);
+      const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
+      setGroups(nextGroups);
+      markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
       // Agent 工具改了画布:换基线并清空历史(历史坐标已不可用,撤销会与 Agent 改动打架)
       historyRef.current.clear();
-      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges, groups: nextGroups });
       setHistVer((v) => v + 1);
       if (selfHeal.changed) {
         const repaired = buildActiveSnapshot(selfHeal.nodes, selfHeal.edges);
@@ -1006,13 +1270,16 @@ export default function CanvasPage({
   /** 画布内容同步(推送的快照或 store 拉取结果)→ 本地 nodes/edges + knownVersion。
    *  内容与版本都没变化时跳过 setState——推送可能来自渲染层自身的保存,重设会触发
    *  auto-save 依赖的 effect 再保存,造成 version 无限增长的写盘循环。 */
-  const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'> & { viewport?: CanvasSnapshot['viewport'] }) => {
+  const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'> & { viewport?: CanvasSnapshot['viewport']; groups?: CanvasSnapshot['groups'] }) => {
     const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
     const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
     const version = cur.version ?? 0;
+    // 分组:按**自愈后的**节点 id 规整(剔除已删节点/空组/重复归属)
+    const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
     const sameContent =
       JSON.stringify(selfHeal.nodes) === JSON.stringify(nodesRef.current) &&
-      JSON.stringify(selfHeal.edges) === JSON.stringify(edgesRef.current);
+      JSON.stringify(selfHeal.edges) === JSON.stringify(edgesRef.current) &&
+      JSON.stringify(nextGroups) === JSON.stringify(groupsRef.current);
     // 内容确实变了(外部写入:Agent 工具 / 另一个窗口):连视口一起同步,
     // 并换历史基线 —— 历史里的节点引用已失效,撤销会回到与 store 不一致的旧内容
     if (!sameContent && cur.viewport) {
@@ -1025,24 +1292,36 @@ export default function CanvasPage({
       // 内容没变:只前进 knownVersion(不 setNodes → 不触发 auto-save 再保存 → 避免 version 循环写盘)
       knownVersionRef.current = version;
       setKnownVersion(version);
-      markBaseline(selfHeal.nodes, selfHeal.edges);
+      markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
       return selfHeal;
     }
+    // 选区:剔除已不存在的节点(Agent 删了节点后本地选区不能残留脏 id)
+    setSelectedIds((sel) => {
+      const live = new Set(selfHeal.nodes.map((n) => n.id));
+      const next = sel.filter((id) => live.has(id));
+      return next.length === sel.length ? sel : next;
+    });
     setKnownVersion(version);
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
+    setGroups(nextGroups);
     // 快照推送分两种:
     // ① 我方 auto-save 的回推(内容 == 刚保存的 lastSavedRef)→ 不能清历史!
     //    否则「新建节点 → 800ms 后自动保存 → 回推清空历史 → 撤销永远置灰」(2026-09-22 实测事故)
     // ② 外部写入(Agent 工具 / 另一窗口)→ 历史里的节点引用已失效,换基线清历史,
     //    避免撤销回到与 store 不一致的旧内容
-    const isOwnSave = JSON.stringify([toSharedNodes(selfHeal.nodes), toSharedEdges(selfHeal.edges)]) === lastSavedRef.current;
+    const isOwnSave =
+      contentKey(
+        selfHeal.nodes as unknown as CanvasNode[],
+        selfHeal.edges as unknown as Edge[],
+        nextGroups,
+      ) === lastSavedRef.current;
     if (!isOwnSave) {
       historyRef.current.clear();
-      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges });
+      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges, groups: nextGroups });
       setHistVer((v) => v + 1);
     }
-    markBaseline(selfHeal.nodes, selfHeal.edges);
+    markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
     nextId.current = seedIdCounter(selfHeal.nodes);
     return selfHeal;
   }, []);
@@ -1133,12 +1412,120 @@ export default function CanvasPage({
     void refreshTakeResults();
   }, [refreshTakeResults]);
 
+  /* 视频增强进度订阅:分钟级长任务(video-upscale)期间把主进程阶段/帧号写进节点 badge。
+     没有这个订阅时,`videoUpscale` 的 invoke 会一直阻塞且界面毫无反馈 —— 看起来像「瞬间完成/没启动」。 */
+  useEffect(() => {
+    // ⚠️ 挂载时先从**主进程**恢复运行态:本地 state 会在退出画布时丢失,
+    //    若只靠本地标记,重进画布后就能对**正在跑**的节点重复发起(真实反馈)。
+    //    (长任务分钟级,用户极易在跑的时候切走再切回)
+    void (async () => {
+      try {
+        const runs = await window.bigbotart.videoPostRunning();
+        if (runs.length > 0) {
+          videoPostRunningRef.current = new Set(runs.map((r) => r.nodeId));
+          setVideoPostRunning(runs.map((r) => r.nodeId));
+          videoPostRef.current = runs[runs.length - 1]!.nodeId;
+          // 进度文案也一并恢复(否则重进时进度条是空的,只有个灰按钮)
+          const last = await window.bigbotart.videoPostLastProgress();
+          if (last?.nodeId) {
+            setNodes((ns) =>
+              ns.map((n) =>
+                n.id === last.nodeId
+                  ? {
+                      ...n,
+                      badge: undefined,
+                      progress: {
+                        pct: undefined,
+                        text: last.detail ? `${last.stageLabel} · ${last.detail}` : last.stageLabel,
+                        indet: true,
+                      },
+                      ghost: false,
+                    }
+                  : n,
+              ),
+            );
+          }
+        }
+      } catch {
+        /* 主进程不可用/未实现:退回本地态(不影响正常流程) */
+      }
+    })();
+    const unsub = window.bigbotart.onVideoPostProgress((p) => {
+      // 只处理当前正在跑的那个节点(全局后处理任务串行,同一时刻至多一个)
+      if (!p?.stageLabel) return;
+      const target = p.nodeId || videoPostRef.current;
+      if (!target) return;
+      // 进度条用**整体百分比**(跨阶段单调递增);阶段内部无细分时 pct 用小节标表示
+      const text = p.detail ? `${p.stageLabel} · ${p.detail}` : p.stageLabel;
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === target
+            ? {
+                ...n,
+                badge: undefined,
+                progress: {
+                  pct: p.overall,
+                  text,
+                  stage: `${p.stagesDone + 1}/${p.stagesTotal}`,
+                  indet: p.stageProgress === undefined,
+                },
+                ghost: false,
+              }
+            : n,
+        ),
+      );
+    });
+    return unsub;
+  }, [setNodes]);
+
   /* 渲染队列订阅:主进程变更推送(节流合并)+ 8s 兜底轮询(事件丢包/窗口重载恢复);
-     无实质变化(签名相同)时跳过 setJobs,避免 1.2s 全量轮询带来的无谓整树重渲染 */
+     无实质变化(签名相同)时跳过 setJobs,避免 1.2s 全量轮询带来的无谓整树重渲染。
+     ⚠️ 队列是「进行中」状态的唯一真源:节点的排队/生成中标签**必须**在这里按队列回填,
+     否则下方快照写盘推送(store 里没有 badge 这种 UI 瞬态字段)会把标签整体抹掉 →
+     用户看到「明明在生成,节点上没状态」。 */
   useEffect(() => {
     let alive = true;
     let lastSig = '';
     const apply = async (list: RenderJob[]) => {
+      /* 进行中标签回填(先于签名去重):queued/running 的节点一定带队列文案。
+         - queued:文案含队列位次(多任务 FIFO 时要让用户看见「还没轮到我」)
+         - running:优先用引擎上报的 stage,否则回退默认文案
+         仅当文案真的变了才写 nodes,避免每轮 setNodes 触发整树重渲染。 */
+      const busyLabel = (j: RenderJob): string | null => {
+        if (j.status === 'queued') {
+          const queued = list
+            .filter((x) => x.status === 'queued')
+            .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+          const pos = queued.findIndex((x) => x.id === j.id) + 1;
+          return pos > 0 && queued.length > 1 ? `排队中 · 第 ${pos} 位` : '已入队 · 等待槽位…';
+        }
+        if (j.status === 'running') return j.stage ?? (j.slot === 'video' ? '生成中…' : '采样中…');
+        return null;
+      };
+      const busyById = new Map<string, string>();
+      for (const j of list) {
+        const label = busyLabel(j);
+        if (j.nodeId && label) busyById.set(j.nodeId, label);
+      }
+      setNodes((ns) => {
+        let changed = false;
+        const next = ns.map((n) => {
+          const want = busyById.get(n.id);
+          if (want === undefined) {
+            // 队列里查不到 = 任务已结束(终态由下面的状态迁移分支处理);清掉运行期标签,
+            // 但保留提交/裁切等失败文案(不由队列派生,只在下次提交时覆盖)
+            if (n.badge && (n.running || n.badge.startsWith('已入队') || n.badge.startsWith('排队中'))) {
+              changed = true;
+              return { ...n, badge: undefined, running: false };
+            }
+            return n;
+          }
+          if (n.badge === want && n.running) return n;
+          changed = true;
+          return { ...n, badge: want, running: true };
+        });
+        return changed ? next : ns;
+      });
       const sig = list.map((j) => `${j.id}:${j.status}:${j.progress ?? ''}:${j.stage ?? ''}:${j.resultPath ?? ''}`).join('|');
       if (sig === lastSig) return;
       lastSig = sig;
@@ -1161,6 +1548,7 @@ export default function CanvasPage({
                     ghost: false,
                     stale: false,
                     badge: undefined,
+                    running: false,
                     extra: j.resultPath ? `✓ ${basenameOf(j.resultPath)}` : '✓ 生成完成',
                     // 产物路径存进节点 data(节点卡/检查器渲染视频用)
                     data: { ...(n.data ?? {}), resultPath: j.resultPath ?? (n.data as Record<string, unknown>)?.resultPath },
@@ -1194,9 +1582,9 @@ export default function CanvasPage({
           // 接力:上游成功后,直接下游生成节点(无产物/已 stale)依次送入队列,整条链递归跑到尾
           cascadeKickRef.current?.(j.nodeId, list, freshTail);
         } else if (j.status === 'failed') {
-          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}` } : n)));
+          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}`, running: false } : n)));
         } else if (j.status === 'running') {
-          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: j.stage ?? '生成中…' } : n)));
+          setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: j.stage ?? '生成中…', running: true } : n)));
         }
       }
       // 任务状态变化后刷新镜头产物回填(完成后立即在节点卡显示视频)
@@ -1215,12 +1603,23 @@ export default function CanvasPage({
     });
     void poll();
     queueTimer.current = window.setInterval(poll, 8000);
+    /* 补种:队列推送只在主进程的窗口引用上发,重载/多窗口场景可能收不到 ——
+       监听器注册后立刻取一次快照并注册完成后再取一次,保证挂载瞬间就能看到进行中的任务。
+       (主进程侧同样把推送改为广播到所有窗口,这里是对「事件丢失」的兜底) */
+    queueReseedRef.current = poll;
     return () => {
       alive = false;
       unsub();
+      queueReseedRef.current = null;
       if (queueTimer.current) window.clearInterval(queueTimer.current);
     };
   }, [refreshTakeResults]);
+
+  /* 画布从 store 重新加载(切画布 / Agent 写盘后刷新)时补种一次队列状态:
+     新挂载的节点没有运行期标签,靠这次补种把「正在生成」重新标上 */
+  useEffect(() => {
+    void queueReseedRef.current?.();
+  }, [activeCanvasId, knownVersion]);
 
   /* ══ 统一边分派(P0 · docs/视频节点下游连接规划.md §3)══
      === 计算移入 canvas/edge-dispatch.ts(computeEdgeDerivations 纯函数,可单测) ===
@@ -1444,14 +1843,25 @@ export default function CanvasPage({
   );
 
   /* ══ 右键菜单 ══ */
-  const duplicateNode = useCallback(
-    (id: string) => {
-      const src = nodesRef.current.find((n) => n.id === id);
-      if (!src) return;
-      const nid = makeNodeId('dup');
-      setNodes((ns) => [
-        ...ns,
-        {
+  /**
+   * 复制节点(单个或整块选区)。
+   *
+   * 选区复制要点:
+   *  - **组内复制**:若选区恰好等于某个组,副本会重新组成一个同名新组(带上「· 副本」后缀),
+   *    否则副本之间会丢掉分组关系,用户还得手动重建;
+   *  - 偏移量固定 (+30,+30),与单击复制一致 —— 不做「自动找空位」,避免副本散落到远处;
+   *  - 副本不带连线(与单击复制语义一致),运行状态一律清空。
+   */
+  const duplicateNodes = useCallback(
+    (ids: string[]) => {
+      const set = new Set(ids);
+      const srcs = nodesRef.current.filter((n) => set.has(n.id));
+      if (srcs.length === 0) return;
+      const idMap = new Map<string, string>();
+      const copies = srcs.map((src) => {
+        const nid = makeNodeId('dup');
+        idMap.set(src.id, nid);
+        return {
           ...src,
           id: nid,
           title: `${src.title} · 副本`,
@@ -1462,28 +1872,28 @@ export default function CanvasPage({
           agentOn: false,
           badge: undefined,
           flash: false,
-        } as CanvasNode,
-      ]);
-      commitEdit('复制节点');
-      const info = NODE_INFO_BASE[id];
-      if (info) {
-        setInfoMap((m) => {
-          const meta: Array<[string, string]> = [
-            ['来源', `复制自「${info.t}」`],
-            ['状态', '未运行 · 修改参数后可入队'],
-            ...info.meta.slice(0, 1),
-          ];
-          return {
-            ...m,
-            [nid]: { t: `${info.t} · 副本`, img: info.img, meta },
-          };
-        });
+        } as CanvasNode;
+      });
+      setNodes((ns) => [...ns, ...copies]);
+      // 选区恰好是整组 → 副本同样成组(组 id 重映射到新节点)
+      const srcGroup = selectionIsWholeGroup(groupsRef.current, srcs.map((s) => s.id));
+      if (srcGroup) {
+        const newMembers = srcGroup.members.map((m) => idMap.get(m)).filter((x): x is string => !!x);
+        setGroups((gs) => createGroup(gs, newMembers, { name: `${srcGroup.name} · 副本` }).groups);
       }
-      selectNode(nid);
-      toastMsg('已复制节点 · 副本不携带连线与运行状态');
+      commitEdit(copies.length > 1 ? `复制 ${copies.length} 个节点` : '复制节点');
+      setSelectedIds(copies.map((c) => c.id));
+      toastMsg(
+        copies.length > 1
+          ? `已复制 ${copies.length} 个节点 · 副本不携带连线与运行状态`
+          : '已复制节点 · 副本不携带连线与运行状态',
+      );
     },
-    [selectNode, toastMsg, commitEdit],
+    [makeNodeId, setNodes, commitEdit, toastMsg],
   );
+
+  /** 保留原单击签名(右键菜单/快捷键用) */
+  const duplicateNode = useCallback((id: string) => duplicateNodes([id]), [duplicateNodes]);
 
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
 
@@ -1539,21 +1949,38 @@ export default function CanvasPage({
     [takeResults, toastMsg],
   );
 
-  const deleteNode = useCallback(
-    (id: string) => {
-      setNodes((ns) => ns.filter((n) => n.id !== id));
-      setEdges((es) => es.filter((e) => e.from !== id && e.to !== id));
-      commitEdit('删除节点');
+  /**
+   * 删除节点(单个或整块选区)。
+   *
+   * 组清理:删掉的节点若属于某组,必须从 members 剔除 —— 否则残留脏 id
+   * 会让组框按不存在的节点算包围盒(画到错误位置),或点组框时找不到节点。
+   * `pruneGroups` 顺带丢弃变空的组。
+   */
+  const deleteNodes = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
+      const set = new Set(ids);
+      setNodes((ns) => ns.filter((n) => !set.has(n.id)));
+      setEdges((es) => es.filter((e) => !set.has(e.from) && !set.has(e.to)));
+      commitEdit(ids.length > 1 ? `删除 ${ids.length} 个节点` : '删除节点');
       setInfoMap((m) => {
         const next = { ...m };
-        delete next[id];
+        for (const id of ids) delete next[id];
         return next;
       });
-      setSelected((s) => (s === id ? null : s));
-      toastMsg('已删除节点 · 相关连线已一并移除');
+      setGroups((gs) => pruneGroups(gs, nodesRef.current.filter((n) => !set.has(n.id)).map((n) => n.id)));
+      setSelectedIds((cur) => cur.filter((s) => !set.has(s)));
+      toastMsg(
+        ids.length > 1
+          ? `已删除 ${ids.length} 个节点 · 相关连线已一并移除`
+          : '已删除节点 · 相关连线已一并移除',
+      );
     },
-    [toastMsg, commitEdit],
+    [toastMsg, commitEdit, setNodes, setEdges],
   );
+
+  /** 保留原单击签名(右键菜单/其他调用点用) */
+  const deleteNode = useCallback((id: string) => deleteNodes([id]), [deleteNodes]);
 
   /* ── 全局点按:关闭工具行弹层(模型/技能/分支) ── */
   useEffect(() => {
@@ -1566,16 +1993,41 @@ export default function CanvasPage({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const active = document.activeElement as HTMLElement | null;
-      const typing = !!active && /^(INPUT|TEXTAREA)$/.test(active.tagName);
+      const typing =
+        !!active && (/^(INPUT|TEXTAREA)$/.test(active.tagName) || active.isContentEditable);
+      // 空格按下 = 临时抓手(平移);输入框内不抢(空格要打出来)
+      if (e.code === 'Space' && !typing && !e.metaKey && !e.ctrlKey) {
+        spaceDownRef.current = true;
+        e.preventDefault();
+        return;
+      }
       if (e.key === 'Escape') {
         closeAddPop();
         setOpenPop(null);
         setCtx(null);
+        // 框选进行中:取消本次框选(不清已有选区)
+        if (selRectRef.current) {
+          selRectRef.current = null;
+          setSelectionRect(null);
+        }
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && selected) {
+      // ⌘A 全选画布节点
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' && !typing) {
         e.preventDefault();
-        duplicateNode(selected);
+        setSelectedIds(nodesRef.current.map((n) => n.id));
+        return;
+      }
+      // ⌘G 建组 / ⌘⇧G 解组(与设计工具一致)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g' && !typing) {
+        e.preventDefault();
+        if (e.shiftKey) ungroupSelection();
+        else groupSelection();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && selectedIds.length > 0) {
+        e.preventDefault();
+        duplicateNodes(selectedIdsRef.current);
         return;
       }
       // ⌘Z 撤销 / ⌘⇧Z(或 ⌘Y)重做:输入框内保留系统文本撤销,不抢
@@ -1593,14 +2045,36 @@ export default function CanvasPage({
           return;
         }
       }
-      if ((e.key === 'Backspace' || e.key === 'Delete') && selected && !typing) {
+      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedIds.length > 0 && !typing) {
         e.preventDefault();
-        deleteNode(selected);
+        deleteNodes(selectedIdsRef.current);
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceDownRef.current = false;
+    };
+    // 失焦时清空格状态(否则切窗口回来以为自己还按着空格 → 拖拽全变平移)
+    const onBlur = () => {
+      spaceDownRef.current = false;
+    };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [closeAddPop, deleteNode, duplicateNode, selected, undo, redo]);
+    document.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [
+    closeAddPop,
+    deleteNodes,
+    duplicateNodes,
+    groupSelection,
+    ungroupSelection,
+    selectedIds,
+    undo,
+    redo,
+  ]);
 
   /* ══ 真实渲染:提交节点到主进程队列(槽位互斥) ══ */
   const runNode = useCallback(
@@ -1781,6 +2255,114 @@ export default function CanvasPage({
         );
         setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
         toastMsg(`已拆分 ${pieces.length} 片 · ${n.title}`);
+        return;
+      }
+      // 视频增强节点(video-upscale):本地后处理(去块 → Real-ESRGAN 超分 → GFPGAN/CodeFormer 合修脸),
+      // 不走推理队列;分钟级长任务(每帧 1.2-1.5s),运行中给阶段 badge,完成记一条 Take
+      if (n.kind === 'video-upscale') {
+        // 防重入:本节点已在跑时直接拒绝(否则重复点「仅重跑该节点」会并行起多个后处理,
+        // 抢 CPU/GPU 且互相覆盖产物 —— 用户实测反馈"过程还能继续触发")。
+        if (videoPostRunningRef.current.has(nodeId)) {
+          toastMsg('该节点正在增强中,请等待当前任务完成');
+          return;
+        }
+        let srcPath: string | undefined;
+        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        const vidFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
+        if (!srcPath && vidFrom?.nodeId) {
+          const up = nodesRef.current.find((x) => x.id === vidFrom.nodeId);
+          srcPath = upstreamVideoPath(up, assetCache.current);
+        }
+        if (!srcPath) {
+          // 兜底:直接找 input 入边(旧数据可能缺派生态)
+          const inEdge = edgesRef.current.find((e) => e.to === nodeId && (e.label ?? '') === 'input');
+          if (inEdge) {
+            const up = nodesRef.current.find((x) => x.id === inEdge.from);
+            srcPath = upstreamVideoPath(up, assetCache.current);
+          }
+        }
+        if (!srcPath) {
+          toastMsg('视频增强需要输入视频:连一个 镜头(shot) 或 视频 asset 到本节点(input 端口),或在检查器填 Asset ID');
+          return;
+        }
+        const cfg = {
+          scale: Number(d.scale ?? 2),
+          superRes: (d.superRes as 'realesrgan' | 'none' | undefined) ?? 'realesrgan',
+          srModel: d.srModel as never,
+          faceModel: d.faceModel as never,
+          faceWeight: d.faceWeight === undefined ? undefined : Number(d.faceWeight),
+          fidelityWeight: d.fidelityWeight === undefined ? undefined : Number(d.fidelityWeight),
+          deblock: d.deblock === true,
+          deblockCrf: d.deblockCrf === undefined ? undefined : Number(d.deblockCrf),
+          crf: d.crf === undefined ? undefined : Number(d.crf),
+          device: (d.device as 'mps' | 'cpu' | undefined) ?? 'mps',
+        };
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? { ...x, badge: undefined, progress: { text: '准备中…', pct: 0, indet: true }, ghost: false }
+              : x,
+          ),
+        );
+        // 进度:主进程按阶段/帧号 push(见 video-post.ts),这里仅更新 badge。
+        // 没有它的话,分钟级任务期间 UI 毫无反馈 → 看起来像「瞬间完成/没启动」(真实反馈)。
+        videoPostRef.current = nodeId;
+        videoPostRunningRef.current.add(nodeId);
+        setVideoPostRunning([...videoPostRunningRef.current]);
+        toastMsg('视频增强已开始(分钟级长任务,进度显示在节点与检查器上)');
+        let res: Awaited<ReturnType<typeof window.bigbotart.videoUpscale>>;
+        try {
+          res = await window.bigbotart.videoUpscale({ inputPath: srcPath, nodeId, ...cfg });
+        } finally {
+          videoPostRef.current = null;
+          videoPostRunningRef.current.delete(nodeId);
+          setVideoPostRunning([...videoPostRunningRef.current]);
+        }
+        if (!res.ok || !res.path) {
+          setNodes((ns) =>
+            ns.map((x) => (x.id === nodeId ? { ...x, progress: undefined, badge: `增强失败 · ${res.error ?? '未知错误'}` } : x)),
+          );
+          toastMsg(`视频增强失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        const applied = res.stages ?? [];
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: res.path,
+            params: { kind: 'video-upscale', ...cfg, inputPath: srcPath, stages: applied },
+            durationSec: res.durationSec,
+            elapsedSec: res.elapsedSec,
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  progress: undefined,
+                  extra: `✓ ${basenameOf(res.path as string)}`,
+                  data: {
+                    ...(x.data ?? {}),
+                    resultPath: res.path,
+                    appliedStages: applied,
+                    durationSec: res.durationSec,
+                    width: res.width,
+                    height: res.height,
+                    currentTakeId: takeId,
+                  },
+                }
+              : x,
+          ),
+        );
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(`视频增强完成(${res.elapsedSec ?? '?'}s) · ${n.title}`);
         return;
       }
       const isImage = n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale';
@@ -1996,7 +2578,7 @@ export default function CanvasPage({
             accel: d.accel,
           };
 
-      setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', ghost: false } : x)));
+      setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', running: true, ghost: false } : x)));
       try {
         // 先建 Take(queued),再提交任务带 takeId(主进程完成时自动写终态)· shot 与图片类节点(image-gen/edit/upscale)统一记录历史
         let takeId: string | undefined;
@@ -2021,7 +2603,7 @@ export default function CanvasPage({
         toastMsg(`已提交 ${engine} 任务 · ${n.title}${inheritedFrom ? ` · 已继承「${inheritedFrom}」尾帧作首帧` : ''}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `提交失败 · ${msg}` } : x)));
+        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `提交失败 · ${msg}`, running: false } : x)));
         toastMsg(`提交失败:${msg}`);
       }
     },
@@ -2165,10 +2747,10 @@ export default function CanvasPage({
       ]);
       setEdges((es) => [...es, ...newEdges]);
       commitEdit('分镜表铺节点');
-      if (ids[0]) setSelected(ids[0]);
+      if (ids[0]) setSelectedIds([ids[0]]);
       toastMsg(`已铺 ${pending.length} shot${imgs ? ` + ${imgs} image-gen` : ''} · ${pending.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`);
     },
-    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelected, toastMsg, commitEdit],
+    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelectedIds, toastMsg, commitEdit],
   );
 
   /** 整体撤销铺节点:移除该分镜表铺出的全部节点与对应边 */
@@ -2262,7 +2844,7 @@ export default function CanvasPage({
         setNodes((ns) => [...ns, sb]);
         setEdges((es) => [...es, { from: docNode.id, to: sb.id, cls: '', label: 'prompt' }]);
         commitEdit('生成分镜表节点');
-        setSelected(sb.id);
+        setSelectedIds([sb.id]);
         chat.pushMsg({ kind: 'sys', text: `Agent 已生成分镜表 · ${plan.report}` });
         toastMsg(`已生成分镜表 · ${plan.report}`);
       } catch (e) {
@@ -2270,7 +2852,7 @@ export default function CanvasPage({
         toastMsg(`生成分镜表失败:${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [projectId, setNodes, setEdges, setSelected, chat, toastMsg],
+    [projectId, setNodes, setEdges, setSelectedIds, chat, toastMsg],
   );
 
   /* 调试面板:主进程日志总线(拉历史 + 订阅实时) */
@@ -2354,6 +2936,18 @@ export default function CanvasPage({
           canRedo={canRedo}
           onUndo={undo}
           onRedo={redo}
+          marqueeMode={marqueeMode}
+          onToggleMarquee={() => {
+            setMarqueeMode((v) => {
+              toastMsg(v ? '已关闭框选 · 拖空白处恢复为平移画布' : '框选模式已开启 · 在空白处拖拽即可框选节点');
+              return !v;
+            });
+          }}
+          selectedCount={selectedIds.length}
+          wholeGroup={wholeGroupOfSelection}
+          groupCount={groups.length}
+          onGroupSelection={groupSelection}
+          onUngroupSelection={ungroupSelection}
           rerunDone={rerunDone}
           staleCount={nodesRef.current.filter((n) => n.stale || n.agentOn).length}
           assetCount={assetCount}
@@ -2378,7 +2972,10 @@ export default function CanvasPage({
             panning={panning}
             nodes={nodes}
             edgePaths={edgePaths}
-            selected={selected}
+            selectedIds={selectedIds}
+            selectionRect={selectionRect}
+            groups={groups}
+            marqueeMode={marqueeMode}
             flashId={flashId}
             connectDrag={connectDrag}
             takeResults={takeResults}
@@ -2395,14 +2992,17 @@ export default function CanvasPage({
             edgesSvgRef={edgesSvgRef}
             minimapRef={minimapRef}
             worldRef={worldRef}
-            onStagePointerDown={() => undefined}
+            onStagePointerDown={onStagePointerDown}
             onStageClick={() => {
-              setSelected(null);
+              // 框选模式下拖拽结束会触发 click:此时不能清空刚框出的选区
+              if (selRectRef.current) return;
+              setSelectedIds([]);
               closeAddPop();
               setCtx(null);
             }}
             onWorldClick={() => {
-              setSelected(null);
+              if (selRectRef.current) return;
+              setSelectedIds([]);
               closeAddPop();
             }}
             onDragOver={(e) => {
@@ -2418,20 +3018,19 @@ export default function CanvasPage({
               dropFromPalette(typeId, e.clientX, e.clientY);
             }}
             onBeginPan={beginPan}
-            onNodeSelect={(n) => selectNode(n.id)}
+            onNodeSelect={(n, e) => beginNodeDrag(n, e)}
             onNodeContextMenu={(e, n) => {
               e.preventDefault();
               e.stopPropagation();
               closeAddPop();
               setOpenPop(null);
-              selectNode(n.id);
+              // 右键未选中的节点 → 先选中它;已在选区内的 → 保留整块选区(右键可对多选操作)
+              if (!selectedIdsRef.current.includes(n.id)) selectNode(n.id);
               setCtx({ x: e.clientX, y: e.clientY, id: n.id });
             }}
             onNodeHeaderPointerDown={(e, n) => {
-              if (e.button !== 0) return;
-              dragRef.current = { id: n.id, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y, moved: false };
-              dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
-              e.stopPropagation();
+              // 头部拖动与主体一致:都走「拖动整块选区」
+              beginNodeDrag(n, e);
             }}
             onNodeAddPointerDown={(e, n) => {
               if (e.button !== 0) return;
@@ -2449,6 +3048,7 @@ export default function CanvasPage({
               connectDragRef.current = null;
               setConnectDrag(null);
             }}
+            onSelectGroup={selectGroup}
             registerNodeRef={(id, el) => {
               if (el) {
                 nodeRefs.current.set(id, el);
@@ -2537,10 +3137,18 @@ export default function CanvasPage({
                   setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
                   commitEdit('移除连线');
                 }}
+                running={!!selected && videoPostRunning.includes(selected)}
                 onRerunSelected={() => {
                   if (!selected) return;
+                  if (videoPostRunningRef.current.has(selected)) {
+                    toastMsg('该节点正在增强中,请等待当前任务完成');
+                    return;
+                  }
+                  // 长任务(视频增强)自带「已开始 + 节点进度」提示,这里不再抢着报「已提交重跑」
+                  const selKind = nodes.find((x) => x.id === selected)?.kind;
+                  const isLongTask = selKind === 'video-upscale';
                   void runNode(selected);
-                  toastMsg(`已提交重跑 · ${inspectTitle}`);
+                  if (!isLongTask) toastMsg(`已提交重跑 · ${inspectTitle}`);
                 }}
                 onOpenAssetPicker={openAssetPicker}
               />

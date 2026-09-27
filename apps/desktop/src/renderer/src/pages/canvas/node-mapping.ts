@@ -60,6 +60,16 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
       return { engine: 'mlxgen', model: 'mlx-community/Qwen-Image-Edit-8bit', prompt: '', mode: 'instruction' };
     case 'image-upscale':
       return { model: 'AbstractFramework/seedvr2-3b-8bit', scale: 2 };
+    case 'video-upscale':
+      // 默认 = POST_PROCESSING.md §9.1 标准配方(Real-ESRGAN ×2 真人模型 + GFPGAN 修脸强度 0.5)
+      return {
+        scale: 2,
+        superRes: 'realesrgan',
+        srModel: 'realesrgan-x4plus',
+        faceModel: 'gfpgan',
+        faceWeight: 0.5,
+        device: 'mps',
+      };
     case 'image-crop':
       return { aspect: '9:16', focus: 'center' };
     case 'image-stitch':
@@ -119,6 +129,28 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
     width: n.w,
     data: n.data ?? defaultDataFor(n.kind ?? 'document'),
   }));
+}
+
+/**
+ * 归一化「瞬态 UI 标记」用于**内容比对**(保存基线 / 自身回推识别)。
+ *
+ * UI 瞬态字段(badge / running / progress / ghost / stale / agentOn / extra)不进快照,
+ * 若直接参与比对,会出现两个方向的错判(2026-09 实测):
+ *  - 正方向:「生成中文案变了」被当作内容改动 → 每 800ms 写盘一次,主进程写盘广播又把
+ *    store 里的旧节点(没有 badge)整体推回来 → **节点上的「生成中」标签被抹掉**
+ *  - 反方向:写盘推送回推后,内容与基线("含 badge"的旧串)不等 → 每次都 setNodes,
+ *    自建节点的整棵子树反复重挂
+ *
+ * 归一化 = 剔除上述瞬态键后做 JSON 串,语义仍是「用户内容一致」。
+ */
+export function contentKey(nodes: CanvasNode[], edges: Edge[], groups: unknown): string {
+  const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn'] as const;
+  const norm = nodes.map((n) => {
+    const clean: Record<string, unknown> = { ...n };
+    for (const k of TRANSIENT) delete clean[k];
+    return clean;
+  });
+  return JSON.stringify([norm, edges, groups]);
 }
 
 export function toLocalEdges(ces: Array<{ id?: string; source: string; target: string; label?: string }>): Edge[] {

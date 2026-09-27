@@ -191,13 +191,49 @@ export function InspectorBody({
               绑定最新 {mediaType} 资产
             </button>
           </div>
-          {mediaType === 'image' ? (
-            assetId && assetCache[assetId] ? (
-              <ImagePreview src={previewUrlOf(assetCache[assetId])} label="素材预览" />
-            ) : (
-              <ImagePreview src={null} label="素材预览" emptyHint="未绑定资产 · 绑定后显示完整图片" />
-            )
-          ) : null}
+          {/* 素材预览:按媒体类型给对应播放器(此前只支持图片,视频/音频节点看不到预览) */}
+          {(() => {
+            const src = assetId ? assetCache[assetId] : undefined;
+            const url = src ? previewUrlOf(src) : null;
+            if (mediaType === 'image') {
+              return <ImagePreview src={url} label="素材预览" emptyHint="未绑定资产 · 绑定后显示完整图片" />;
+            }
+            if (!url) {
+              return (
+                <div className="mut" style={{ fontSize: 11 }}>
+                  {assetId ? `资产未加载 · ${assetId.slice(0, 16)}…` : '未绑定资产 · 绑定后显示预览'}
+                </div>
+              );
+            }
+            if (mediaType === 'video') {
+              return (
+                <div>
+                  <Lbl>素材预览</Lbl>
+                  <video
+                    key={url}
+                    src={url}
+                    controls
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                    style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000', display: 'block' }}
+                  />
+                </div>
+              );
+            }
+            if (mediaType === 'audio') {
+              return (
+                <div>
+                  <Lbl>素材预览</Lbl>
+                  <audio key={url} src={url} controls preload="metadata" style={{ width: '100%' }} />
+                </div>
+              );
+            }
+            return (
+              <div className="mut" style={{ fontSize: 11 }}>文档类资产无内联预览 · 双击资源节点或「在资源中心打开」查看</div>
+            );
+          })()}
           {info?.meta ? <KVSection rows={info.meta} /> : null}
         </div>
       );
@@ -250,6 +286,237 @@ export function InspectorBody({
             <input className="input-w mono" value={model} onChange={(e) => setData({ model: e.target.value })} style={{ width: '100%' }} />
           </div>
           <KVSection rows={[['引擎', 'mlxgen · SeedVR2'], ['输入', '来自上游节点产物或 asset']]} />
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
+        </div>
+      );
+    }
+    case 'video-upscale': {
+      const scale = Number(d.scale ?? 2);
+      const superRes = String(d.superRes ?? 'realesrgan');
+      const srModel = String(d.srModel ?? 'realesrgan-x4plus');
+      const faceModel = String(d.faceModel ?? 'gfpgan');
+      const faceWeight = Number(d.faceWeight ?? 0.5);
+      const fidelityWeight = Number(d.fidelityWeight ?? 0.7);
+      const deblock = d.deblock === true;
+      const device = String(d.device ?? 'mps');
+      const inputAssetId = String(d.inputAssetId ?? '');
+      const vidFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
+      const outPath = String(d.resultPath ?? '');
+      const applied = (d.appliedStages as string[] | undefined) ?? [];
+      // 输入视频路径:Asset ID 直绑 → 连线上游(asset 取资产,其余取产物)
+      const srcPath = (() => {
+        if (inputAssetId && assetCache[inputAssetId]) return assetCache[inputAssetId];
+        if (vidFrom?.nodeId) {
+          const up = (nodes ?? []).find((x) => x.id === vidFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          if (up?.kind === 'asset') {
+            const aid = String(upData.assetId ?? '');
+            if (aid && assetCache[aid]) return assetCache[aid];
+          }
+          return String(upData.resultPath ?? '') || null;
+        }
+        return null;
+      })();
+      const noSuperRes = superRes === 'none' || scale <= 1;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 长任务进行中:检查器里给一块显眼的整体进度(节点卡可能不在视野内) */}
+          {node.progress ? (
+            <div className="vpost-progress" data-od-id="vpost-progress">
+              <div className="row1">
+                <span className="spin"></span>
+                {node.progress.stage ? <span className="vp-stage">{node.progress.stage}</span> : null}
+                <span>{node.progress.text}</span>
+                {node.progress.pct !== undefined ? (
+                  <span className="vp-pct">{Math.round(node.progress.pct * 100)}%</span>
+                ) : null}
+              </div>
+              <span className={`pbar${node.progress.indet ? ' indet' : ''}`}>
+                {node.progress.indet ? (
+                  <i></i>
+                ) : (
+                  <i className="fill" style={{ width: `${Math.round((node.progress.pct ?? 0) * 100)}%` }}></i>
+                )}
+              </span>
+            </div>
+          ) : null}
+          <div>
+            <Lbl>放大倍数</Lbl>
+            <div className="row g6">
+              {[1, 2, 3, 4].map((s) => (
+                <span key={s} className={`chip${scale === s ? ' on' : ''}`} onClick={() => setData({ scale: s })}>
+                  {s === 1 ? '×1 · 仅修脸' : `×${s}`}
+                </span>
+              ))}
+            </div>
+            <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
+              ×1(仅修脸不超分)可完全避免超分引起的运动方格(POST_PROCESSING.md §5.4 方案 C)
+            </div>
+          </div>
+          <div>
+            <Lbl>超分引擎</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['realesrgan', 'Real-ESRGAN'],
+                ['none', '不超分'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${superRes === v ? ' on' : ''}`} onClick={() => setData({ superRes: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          {!noSuperRes && (
+            <div>
+              <Lbl>超分模型</Lbl>
+              <div className="row g6" style={{ flexWrap: 'wrap' }}>
+                {([
+                  ['realesrgan-x4plus', '真人 / 照片'],
+                  ['realesr-animevideov3', '动漫 / 插画'],
+                  ['realesrgan-x4plus-anime', '动漫插画 · 锐边'],
+                ] as const).map(([v, label]) => (
+                  <span key={v} className={`chip${srModel === v ? ' on' : ''}`} onClick={() => setData({ srModel: v })}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
+                真人视频务必用 realesrgan-x4plus:动漫模型(animevideov3)对真人会产生方格
+              </div>
+            </div>
+          )}
+          <div>
+            <Lbl>修脸模型</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['gfpgan', 'GFPGAN'],
+                ['codeformer', 'CodeFormer'],
+                ['none', '不修脸'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${faceModel === v ? ' on' : ''}`} onClick={() => setData({ faceModel: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+            <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
+              GFPGAN 质量优先;CodeFormer 更保留原始身份(保真度可调),慢约 30%
+            </div>
+          </div>
+          {faceModel === 'gfpgan' && (
+            <div>
+              <Lbl>修脸强度 {faceWeight.toFixed(2)}</Lbl>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.1}
+                value={faceWeight}
+                onChange={(e) => setData({ faceWeight: Number(e.target.value) })}
+                style={{ width: '100%' }}
+              />
+              <div className="mut" style={{ fontSize: 11 }}>0.3 轻修保留特征 · 0.5 默认 · 0.7+ 强修(偏「网红脸」)</div>
+            </div>
+          )}
+          {faceModel === 'codeformer' && (
+            <div>
+              <Lbl>保真度 {fidelityWeight.toFixed(2)}</Lbl>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.1}
+                value={fidelityWeight}
+                onChange={(e) => setData({ fidelityWeight: Number(e.target.value) })}
+                style={{ width: '100%' }}
+              />
+              <div className="mut" style={{ fontSize: 11 }}>0.5 偏修复(更平滑)· 0.7 默认 · 0.9 偏保真(保留原始脸)</div>
+            </div>
+          )}
+          <div className="row g6">
+            <div style={{ flex: 1 }}>
+              <Lbl>计算设备</Lbl>
+              <div className="row g6">
+                {([
+                  ['mps', 'MPS'],
+                  ['cpu', 'CPU'],
+                ] as const).map(([v, label]) => (
+                  <span key={v} className={`chip${device === v ? ' on' : ''}`} onClick={() => setData({ device: v })}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Lbl>压缩块修复</Lbl>
+              <div className="row g6">
+                <span className={`chip${deblock ? ' on' : ''}`} onClick={() => setData({ deblock: !deblock })}>
+                  {deblock ? '✓ 去块已开' : '去块'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="mut" style={{ fontSize: 11 }}>
+            运动区有 8×8 方格时开去块:ffmpeg deblock + 高码率重编码,放在超分之前(否则块会被放大成方格)
+          </div>
+          <TextAreaField
+            label="输入视频 Asset ID(与连线二选一)"
+            value={inputAssetId}
+            rows={1}
+            placeholder="asset-…"
+            onChange={(v) => setData({ inputAssetId: v })}
+          />
+          {vidFrom?.nodeId ? (
+            <div>
+              <Lbl>输入视频源(由连线直通)</Lbl>
+              <div className="mono mut" style={{ fontSize: 11 }}>
+                节点 {vidFrom.nodeId.slice(0, 10)} · 上游成片/素材直接作为增强源
+              </div>
+            </div>
+          ) : (
+            <div className="mut" style={{ fontSize: 11 }}>连一个 镜头(shot) 或 视频 asset 可自动作为增强源</div>
+          )}
+          <KVSection
+            rows={[
+              ['引擎', 'Real-ESRGAN + GFPGAN/CodeFormer · 本地后处理'],
+              ['CPU', device === 'mps' ? 'Apple Silicon GPU(Metal)' : 'CPU(慢)'],
+              ['耗时', '每帧 1.2-1.5s:5s 片约 3-4 分钟 · 20s 片 10-12 分钟'],
+            ]}
+          />
+          {applied.length > 0 ? (
+            <div>
+              <Lbl>上次执行阶段</Lbl>
+              <div className="mono mut" style={{ fontSize: 11 }}>
+                {applied.map((s, i) => <div key={i}>{i + 1}. {s}</div>)}
+              </div>
+            </div>
+          ) : null}
+          {outPath ? (
+            <div>
+              <Lbl>增强结果</Lbl>
+              <video
+                src={previewUrlOf(outPath) ?? ''}
+                controls
+                muted
+                preload="metadata"
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+              />
+              <div className="mono mut" style={{ fontSize: 11, marginTop: 4 }}>
+                {d.width && d.height ? `${d.width}×${d.height}` : ''}
+                {d.durationSec ? ` · ${d.durationSec}s` : ''}
+              </div>
+            </div>
+          ) : srcPath ? (
+            <div>
+              <Lbl>源视频预览</Lbl>
+              <video
+                src={previewUrlOf(srcPath) ?? ''}
+                controls
+                muted
+                preload="metadata"
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+              />
+            </div>
+          ) : null}
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );

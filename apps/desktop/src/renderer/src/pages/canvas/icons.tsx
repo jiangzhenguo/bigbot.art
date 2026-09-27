@@ -26,6 +26,14 @@ export const ICON_EDIT = (
   </>
 );
 export const ICON_UPSCALE = <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />;
+/** 视频增强(超分 + 合修脸):播放框 + 放大箭头(与图片增强的纯箭头区分) */
+export const ICON_VIDEO_UPSCALE = (
+  <>
+    <rect x="2.5" y="4" width="19" height="16" rx="2" />
+    <path d="m9 8.5 3.5 1.8-3.5 1.8Z" />
+    <path d="M14 18.5l3-3 3 3M17 15.5V19" />
+  </>
+);
 export const ICON_CROP = (
   <>
     <path d="M6 2v16h16" />
@@ -100,6 +108,7 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   image: ICON_IMAGE,
   edit: ICON_EDIT,
   upscale: ICON_UPSCALE,
+  vupscale: ICON_VIDEO_UPSCALE,
   crop: ICON_CROP,
   stitch: ICON_STITCH,
   split: ICON_SPLIT,
@@ -118,6 +127,7 @@ export const TYPE_ICON: Record<string, React.ReactNode> = {
   'image-gen': ICON_IMAGE,
   'image-edit': ICON_EDIT,
   'image-upscale': ICON_UPSCALE,
+  'video-upscale': ICON_VIDEO_UPSCALE,
   'image-crop': ICON_CROP,
   'image-stitch': ICON_STITCH,
   'image-split': ICON_SPLIT,

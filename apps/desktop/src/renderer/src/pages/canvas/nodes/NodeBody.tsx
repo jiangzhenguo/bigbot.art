@@ -362,6 +362,39 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
         </div>
       );
     }
+    case 'video-upscale': {
+      const scale = Number(d.scale ?? 2);
+      const srModel = String(d.srModel ?? 'realesrgan-x4plus');
+      const faceModel = String(d.faceModel ?? 'gfpgan');
+      const deblock = d.deblock === true;
+      const applied = (d.appliedStages as string[] | undefined) ?? [];
+      const outVid = String(d.resultPath ?? '');
+      const inputState = String(d.inputAssetId ?? '')
+        ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+        : (d.inputVideoFrom as { nodeId?: string } | undefined)?.nodeId
+          ? `输入 · 节点 ${String((d.inputVideoFrom as { nodeId: string }).nodeId).slice(0, 8)}`
+          : '输入待绑定';
+      const faceLabel = faceModel === 'none' ? '不修脸' : faceModel === 'gfpgan' ? 'GFPGAN' : 'CodeFormer';
+      const summary = [
+        d.superRes === 'none' || scale <= 1 ? '不超分' : `×${scale}`,
+        faceLabel,
+        ...(deblock ? ['去块'] : []),
+      ].join(' · ');
+      return (
+        <div className="nb">
+          {outVid ? (
+            <VideoThumb src={outputUrlOf(outVid)} badge={applied.length ? applied.join(' → ') : summary} />
+          ) : (
+            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11, textAlign: 'center', padding: 6 }}>
+              {summary}
+              <br />
+              {inputState}
+            </div>
+          )}
+          <div className="nmeta mono">{summary}{applied.length > 1 ? ` · ${applied.length} 阶段` : ''}</div>
+        </div>
+      );
+    }
     case 'shot': {
       const mode = String(d.mode ?? 'text2video');
       // 白名单归一(与 ShotInspector 同规则):老数据/自定义画幅(如 '5:3')不在表内 → 回退 16:9,
