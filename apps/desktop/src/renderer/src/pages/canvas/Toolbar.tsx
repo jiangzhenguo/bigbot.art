@@ -2,12 +2,16 @@
  * Toolbar — 画布顶部工具条(纯展示 + 回调透传)
  *
  * 拆分自 CanvasPage 的 <header className="topbar"> 区块:
- * 导航/撤销重做/框选连线是静态 UI;分支弹层、重跑/运行全部、调试开关由 props 接线。
+ * 「框选」是**模式开关**(开 = 拖空白框选,关 = 拖空白平移,方案 A + 开关模式);
+ * 分支弹层、重跑/运行全部、调试开关由 props 接线。
+ * 注:旧的「连线」按钮已移除 —— 它是从未接线的静态占位,连线一律走节点边缘的「+」连接点
+ * (拖出即拉线,命中多端口组合时由 PortPickPop 选角色),无需额外模式开关。
  */
 import React from 'react';
 import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 import CanvasSwitcher from '../../components/CanvasSwitcher';
 import type { CanvasPageProps } from './types';
+import type { NodeGroup } from './selection';
 
 interface ToolbarProps {
   projectName: string;
@@ -25,6 +29,18 @@ interface ToolbarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  /* 框选 / 分组 */
+  /** 框选模式开关(开 = 拖空白框选) */
+  marqueeMode: boolean;
+  onToggleMarquee: () => void;
+  /** 当前选中节点数(0 = 无选区) */
+  selectedCount: number;
+  /** 选区恰好等于一个完整组时给出该组(决定「解组」可用态) */
+  wholeGroup: NodeGroup | null;
+  /** 画布上的分组总数(「建组」入口的提示) */
+  groupCount: number;
+  onGroupSelection: () => void;
+  onUngroupSelection: () => void;
   rerunDone: boolean;
   /** 当前受影响的节点数(stale / agentOn) */
   staleCount: number;
@@ -50,6 +66,13 @@ export function Toolbar({
   canRedo,
   onUndo,
   onRedo,
+  marqueeMode,
+  onToggleMarquee,
+  selectedCount,
+  wholeGroup,
+  groupCount,
+  onGroupSelection,
+  onUngroupSelection,
   rerunDone,
   staleCount,
   assetCount,
@@ -108,8 +131,55 @@ export function Toolbar({
         </svg>
       </button>
       <span className="sep"></span>
-      <button className="btn btn-g btn-sm">框选</button>
-      <button className="btn btn-g btn-sm">连线</button>
+      {/* 框选模式开关:开 = 拖空白框选;关 = 拖空白平移(中键/空格+drag 永远平移) */}
+      <button
+        className="btn btn-g btn-sm"
+        data-od-id="canvas-marquee-toggle"
+        aria-pressed={marqueeMode}
+        title={
+          marqueeMode
+            ? '框选模式:拖空白处框选节点(点击关闭,恢复拖拽平移)\n平移仍可用:中键拖动 / 空格+拖动'
+            : '框选模式:开启后拖空白处可框选多个节点\n多选后可建组、整体拖动与删除'
+        }
+        style={
+          marqueeMode
+            ? { borderColor: 'var(--accent)', color: 'var(--accent)' }
+            : undefined
+        }
+        onClick={onToggleMarquee}
+      >
+        {marqueeMode ? '◼ 框选中' : '框选'}
+      </button>
+      {/* 分组操作:选中 ≥2 个节点可建组;选区恰好是整组时可解组 */}
+      <button
+        className="btn btn-g btn-sm"
+        data-od-id="canvas-group"
+        disabled={selectedCount < 2}
+        style={selectedCount < 2 ? { opacity: 0.4 } : undefined}
+        title={
+          selectedCount < 2
+            ? '框选或 Shift 点选至少 2 个节点后可建组(⌘G)'
+            : `把选中的 ${selectedCount} 个节点收成一个组(⌘G)`
+        }
+        onClick={onGroupSelection}
+      >
+        建组
+        {groupCount > 0 ? (
+          <span className="n" style={{ color: 'var(--meta)', fontSize: 11, marginLeft: 4 }}>
+            {groupCount}
+          </span>
+        ) : null}
+      </button>
+      <button
+        className={`btn btn-g btn-sm${wholeGroup ? '' : ' dim'}`}
+        data-od-id="canvas-ungroup"
+        disabled={!wholeGroup}
+        style={wholeGroup ? undefined : { opacity: 0.4 }}
+        title={wholeGroup ? `解组「${wholeGroup.name}」(节点保留,⌘⇧G)` : '先选中整个组(点组徽标 / 双击组框)'}
+        onClick={onUngroupSelection}
+      >
+        解组
+      </button>
       <span className="spacer"></span>
       <button
         className="chip"

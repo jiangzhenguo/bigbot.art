@@ -49,6 +49,15 @@ export interface CanvasNode {
   /** 节点头部背景覆盖(设计稿用 inline style 指定 --bg) */
   headBg?: string;
   badge?: string;
+  /** 队列中存在本节点的进行中任务(queued/running)—— 由 CanvasPage 的队列订阅维护。
+   *  有它就说明 badge 是「运行期标签」,快照推送/写盘不得把它当作用户内容覆盖 */
+  running?: boolean;
+  /** 长任务进度(仅视频增强等本地长任务用)
+   *  - pct:整体进度 0-1(按阶段加权,跨阶段单调递增)
+   *  - text:阶段文案(如「修脸 GFPGAN · 40/124 帧」)
+   *  - stage:阶段序号(如「2/3」)
+   *  - indet:当前阶段无细分进度 → 进度条走滚动动画 */
+  progress?: { pct?: number; text: string; stage?: string; indet?: boolean };
   /** 解析「+」时用于定位的实测高度(px,未缩放) */
   h?: number;
   kind?: NodeKind | 'plain';

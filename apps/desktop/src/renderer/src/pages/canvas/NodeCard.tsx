@@ -9,11 +9,22 @@ import React from 'react';
 import type { CanvasNode } from './types';
 import { TYPE_ICON } from './icons';
 import { NodeBody } from './nodes/NodeBody';
+import type { NodeGroup } from './selection';
 
-interface NodeCardProps {
-  node: CanvasNode;
+/** 运行期标签的语义配色:排队中(黄)/ 失败(红)/ 进行中(强调色)。
+ *  运行中(running=true)一律按「进行中」处理,忽略文案关键词。 */
+function badgeTone(badge: string, running?: boolean): 'queued' | 'failed' | 'busy' {
+  if (running) return badge.startsWith('排队') || badge.startsWith('已入队') ? 'queued' : 'busy';
+  if (badge.startsWith('排队') || badge.startsWith('已入队')) return 'queued';
+  if (badge.includes('失败')) return 'failed';
+  return 'busy';
+}
+
+interface NodeCardProps {  node: CanvasNode;
   selected: boolean;
   flash: boolean;
+  /** 所属分组(null = 未分组);有组时头部显示组徽标 */
+  group: NodeGroup | null;
   /** 当前 connectDrag 命中此节点(cur 是拖拽建边的目标) */
   isConnectTarget: boolean;
   connectHitOk: boolean;
@@ -23,7 +34,8 @@ interface NodeCardProps {
   takeResults: Record<string, string>;
   /** assetId → 资产展示元信息(分类/缩略图;asset 节点渲染用) */
   assetMeta: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }>;
-  onSelect: (node: CanvasNode) => void;
+  /** 点选:带 pointerdown 事件,CanvasPage 据此决定「选中」还是「开始拖动整块选区」 */
+  onSelect: (node: CanvasNode, e: React.PointerEvent) => void;
   onContextMenu: (e: React.MouseEvent, node: CanvasNode) => void;
   onHeaderPointerDown: (e: React.PointerEvent, node: CanvasNode) => void;
   onAddPointerDown: (e: React.PointerEvent, node: CanvasNode) => void;
@@ -36,6 +48,7 @@ export function NodeCard({
   node: n,
   selected,
   flash,
+  group,
   isConnectTarget,
   connectHitOk,
   nodes,
@@ -58,6 +71,7 @@ export function NodeCard({
     n.agentOn ? 'agent-on' : '',
     selected ? 'sel' : '',
     flash ? 'flash' : '',
+    group ? `grouped tone-${group.tone ?? 'neutral'}` : '',
     isConnectTarget && connectHitOk ? 'connecting-target-ok' : '',
     isConnectTarget && !connectHitOk ? 'connecting-target-bad' : '',
   ]
@@ -70,15 +84,41 @@ export function NodeCard({
       data-node={n.id}
       ref={(el) => registerRef(n.id, el)}
       style={{ left: n.x, top: n.y, width: n.w }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        onSelect(n);
-        e.stopPropagation();
+      onPointerDown={(e) => {
+        // 节点主体按下:启动「拖动整块选区」预备态(与头部同样走拖动);
+        // 不 stopPropagation —— 让 CanvasPage 统一处理(它自己判断命中节点)
+        onSelect(n, e);
       }}
+      onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => onContextMenu(e, n)}
     >
-      {n.badge ? (
-        <span className="node-badge">
+      {/* 长任务进度条(视频增强:超分 + 合修脸)。
+          确定态(pct)画填充条;不确定态(Real-ESRGAN/ffmpeg 不打印进度)走滚动动画,
+          两者都显示实时文案 —— 分钟级任务必须让用户看见"在动"。 */}
+      {n.progress ? (
+        <span className="node-badge node-progress" data-od-id="node-progress">
+          <span className="np-text">
+            <span className="spin"></span>
+            {n.progress.stage ? <b className="np-stage">{n.progress.stage}</b> : null}
+            <span className="np-label">{n.progress.text}</span>
+            {n.progress.pct !== undefined ? <b className="np-pct">{Math.round(n.progress.pct * 100)}%</b> : null}
+          </span>
+          {/* 整体百分比填充条;无细分进度的阶段用滚动动画表示「在跑」 */}
+          <span className={`np-bar${n.progress.indet ? ' indet' : ''}`}>
+            {n.progress.indet ? (
+              <i></i>
+            ) : (
+              <i className="fill" style={{ width: `${Math.round((n.progress.pct ?? 0) * 100)}%` }}></i>
+            )}
+          </span>
+        </span>
+      ) : n.badge ? (
+        /* 运行期标签配色按语义走(队列是唯一真源,见 CanvasPage 队列订阅):
+           排队中 = 黄(还没轮到执行),失败 = 红,生成中 = 强调色 */
+        <span
+          className={`node-badge${badgeTone(n.badge, n.running) === 'queued' ? ' node-queued' : badgeTone(n.badge, n.running) === 'failed' ? ' node-failed' : ''}`}
+          data-od-id="node-badge"
+        >
           <span className="spin"></span>
           {n.badge}
         </span>
@@ -97,6 +137,12 @@ export function NodeCard({
           {TYPE_ICON[n.kind ?? 'plain']}
         </svg>
         {n.title}
+        {/* 所属分组徽标(点按可选中整组) */}
+        {group ? (
+          <span className="st group-tag" data-od-id="node-group-tag" title={`属于「${group.name}」`}>
+            {group.name}
+          </span>
+        ) : null}
         {/* asset 节点:节点头部显示资产分类 badge(设计稿 st badge) */}
         {ameta?.categoryName ? (
           <span className="st badge" data-od-id="node-asset-cat">{ameta.categoryName}</span>

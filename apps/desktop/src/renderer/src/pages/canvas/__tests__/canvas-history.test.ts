@@ -175,3 +175,76 @@ describe('HistoryStack', () => {
     expect(h.stepUndo(afterDrag)?.content).toEqual(atPress);
   });
 });
+
+/* ══════════ 分组(groups)纳入历史 ══════════ */
+
+describe('groups — 分组编辑可撤销', () => {
+  /** 带分组的画布内容 */
+  const gc = (nodes: unknown[], groups: unknown[], edges: unknown[] = []) => ({
+    nodes,
+    edges,
+    groups,
+  });
+
+  it('structureSig 区分有无分组(只改组也算一次真实编辑)', () => {
+    const withG = gc([n('a')], [{ id: 'g1', name: '组 1', members: ['a'] }]);
+    const without = gc([n('a')], []);
+    expect(structureSig(withG.nodes, withG.edges, withG.groups)).not.toBe(
+      structureSig(without.nodes, without.edges, without.groups),
+    );
+  });
+
+  it('structureSig 区分组成员变化', () => {
+    const a = gc([n('a'), n('b')], [{ id: 'g1', name: '组 1', members: ['a'] }]);
+    const b = gc([n('a'), n('b')], [{ id: 'g1', name: '组 1', members: ['a', 'b'] }]);
+    expect(structureSig(a.nodes, a.edges, a.groups)).not.toBe(
+      structureSig(b.nodes, b.edges, b.groups),
+    );
+  });
+
+  it('structureSig 区分组名', () => {
+    const a = gc([n('a')], [{ id: 'g1', name: '组 1', members: ['a'] }]);
+    const b = gc([n('a')], [{ id: 'g1', name: '镜头组', members: ['a'] }]);
+    expect(structureSig(a.nodes, a.edges, a.groups)).not.toBe(
+      structureSig(b.nodes, b.edges, b.groups),
+    );
+  });
+
+  it('建组可撤销:撤销回到无分组状态', () => {
+    const h = new HistoryStack();
+    const before = gc([n('a'), n('b')], []);
+    const after = gc([n('a'), n('b')], [{ id: 'g1', name: '组 1', members: ['a', 'b'] }]);
+    h.reset(before);
+    h.commit(after, '建组');
+    expect(h.canUndo()).toBe(true);
+    expect(h.stepUndo(after)?.content).toEqual(before);
+  });
+
+  it('解组可撤销:撤销回到有分组状态', () => {
+    const h = new HistoryStack();
+    const grouped = gc([n('a'), n('b')], [{ id: 'g1', name: '组 1', members: ['a', 'b'] }]);
+    const dissolved = gc([n('a'), n('b')], []);
+    h.reset(grouped);
+    h.commit(dissolved, '解组');
+    expect(h.stepUndo(dissolved)?.content).toEqual(grouped);
+  });
+
+  it('不带 groups 的旧调用点仍然工作(向后兼容)', () => {
+    const h = new HistoryStack();
+    const v0 = content([n('a')]);
+    const v1 = content([n('a'), n('b')]);
+    h.reset(v0);
+    h.commit(v1, '添加节点');
+    expect(h.canUndo()).toBe(true);
+    expect(h.stepUndo(v1)?.content).toEqual(v0);
+  });
+
+  it('回放期间的分组提交被闸门忽略', () => {
+    const h = new HistoryStack();
+    const v0 = gc([n('a')], []);
+    h.reset(v0);
+    h.beginReplay();
+    h.commit(gc([n('a')], [{ id: 'g1', name: '组 1', members: ['a'] }]), '回放中建组');
+    expect(h.canUndo()).toBe(false);
+  });
+});

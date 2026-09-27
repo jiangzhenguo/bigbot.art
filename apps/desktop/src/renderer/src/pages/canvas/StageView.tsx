@@ -10,6 +10,7 @@ import React, { useMemo, useRef } from 'react';
 import type { CanvasNode, ConnectDrag, EdgeClass } from './types';
 import { NodeCard } from './NodeCard';
 import { minimapLayout, minimapToWorld } from './minimap';
+import { boundingRect, type NodeGroup, type Rect } from './selection';
 
 export interface EdgePathRender {
   key: string;
@@ -20,12 +21,22 @@ export interface EdgePathRender {
 /** 小地图容器尺寸(px,与 design-pages.css 的 .pg-canvas .minimap 保持同步) */
 const MINIMAP_SIZE = { w: 140, h: 90 };
 
+/** 组框外扩留白(px,world 坐标):让组框包住节点而不贴边 */
+const GROUP_PAD = 14;
+
 interface StageViewProps {
   view: { x: number; y: number; z: number };
   panning: boolean;
   nodes: CanvasNode[];
   edgePaths: EdgePathRender[];
-  selected: string | null;
+  /** 当前选中节点 id 集合(空数组 = 未选中;顺序 = 点选顺序,末位为「主选中」) */
+  selectedIds: string[];
+  /** 正在拖拽的框选矩形(world 坐标;null = 未在框选) */
+  selectionRect: Rect | null;
+  /** 节点分组(绘制组框 + 组徽标) */
+  groups: NodeGroup[];
+  /** 「框选」模式开关开启时,空白处拖拽走框选(否则平移) */
+  marqueeMode: boolean;
   flashId: string | null;
   connectDrag: ConnectDrag | null;
   takeResults: Record<string, string>;
@@ -52,12 +63,15 @@ interface StageViewProps {
   onDragOver: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent) => void;
   onBeginPan: (e: React.PointerEvent) => void;
-  onNodeSelect: (n: CanvasNode) => void;
+  /** 节点主体按下(拖动整块选区;Shift = 切换选中) */
+  onNodeSelect: (n: CanvasNode, e: React.PointerEvent) => void;
   onNodeContextMenu: (e: React.MouseEvent, n: CanvasNode) => void;
   onNodeHeaderPointerDown: (e: React.PointerEvent, n: CanvasNode) => void;
   onNodeAddPointerDown: (e: React.PointerEvent, n: CanvasNode) => void;
   onNodeAddClick: (e: React.MouseEvent, n: CanvasNode) => void;
   registerNodeRef: (id: string, el: HTMLDivElement | null) => void;
+  /** 点组徽标/组框的操作(CanvasPage 实现) */
+  onSelectGroup: (groupId: string) => void;
   /** 「+」弹层(CanvasPage 组合 AddNodePopover 后置入 world 容器) */
   popover: React.ReactNode;
 }
@@ -67,7 +81,10 @@ export function StageView({
   panning,
   nodes,
   edgePaths,
-  selected,
+  selectedIds,
+  selectionRect,
+  groups,
+  marqueeMode,
   flashId,
   connectDrag,
   takeResults,
@@ -94,6 +111,7 @@ export function StageView({
   onNodeAddPointerDown,
   onNodeAddClick,
   registerNodeRef,
+  onSelectGroup,
   popover,
 }: StageViewProps) {
   /* 小地图布局:节点包围盒 + 视口的投影(view/nodes/stageSize 任一变化即重算) */
@@ -112,9 +130,26 @@ export function StageView({
     if (world) onMinimapNavigate(world);
   };
 
+  /** 选中集合(用于 O(1) 判断节点是否高亮) */
+  const selSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  /** 有分组的节点 → 组色(节点卡片显示组徽标) */
+  const groupOfNodeId = useMemo(() => {
+    const m = new Map<string, NodeGroup>();
+    for (const g of groups) for (const id of g.members) m.set(id, g);
+    return m;
+  }, [groups]);
+  /** 每个组的包围盒(组框;与节点同处 world 坐标系,自动跟随缩放/平移) */
+  const groupBoxes = useMemo(
+    () =>
+      groups
+        .map((g) => ({ g, box: boundingRect(nodes, g.members) }))
+        .filter((x): x is { g: NodeGroup; box: Rect } => x.box !== null),
+    [groups, nodes],
+  );
+
   return (
     <section
-      className={`stage${panning ? ' panning' : ''}`}
+      className={`stage${panning ? ' panning' : ''}${marqueeMode ? ' marquee' : ''}`}
       data-od-id="canvas-stage"
       ref={(el) => {
         stageRef.current = el;
@@ -123,7 +158,7 @@ export function StageView({
         const t = e.target as HTMLElement;
         if (t !== e.currentTarget && !t.classList.contains('world') && t.tagName !== 'svg')
           return;
-        onBeginPan(e);
+        onStagePointerDown(e);
       }}
       onDragOver={onDragOver}
       onDrop={onDrop}
@@ -139,6 +174,40 @@ export function StageView({
           if (e.target === e.currentTarget) onWorldClick();
         }}
       >
+        {/* 组框:画在节点下方(z-index 由 CSS 控制);只有标题条可点(避免挡住节点拖动) */}
+        {groupBoxes.map(({ g, box }) => (
+          <div
+            key={g.id}
+            className={`group-box tone-${g.tone ?? 'neutral'}`}
+            data-od-id="canvas-group-box"
+            data-group={g.id}
+            style={{
+              left: box.x - GROUP_PAD,
+              top: box.y - GROUP_PAD,
+              width: box.w + GROUP_PAD * 2,
+              height: box.h + GROUP_PAD * 2,
+            }}
+          >
+            <span
+              className="gname"
+              role="button"
+              tabIndex={-1}
+              title={`选中整组「${g.name}」`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelectGroup(g.id);
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                onSelectGroup(g.id);
+              }}
+            >
+              {g.name}
+            </span>
+          </div>
+        ))}
+
         <svg className="edges" ref={edgesSvgRef}>
           {edgePaths.map((p) => (
             <path key={p.key} className={p.cls} d={p.d} />
@@ -161,8 +230,9 @@ export function StageView({
             key={n.id}
             node={n}
             nodes={nodes}
-            selected={selected === n.id}
+            selected={selSet.has(n.id)}
             flash={flashId === n.id}
+            group={groupOfNodeId.get(n.id) ?? null}
             isConnectTarget={connectDrag?.hitId === n.id}
             connectHitOk={connectDrag?.hitOk === true}
             takeResults={takeResults}
@@ -175,6 +245,20 @@ export function StageView({
             registerRef={registerNodeRef}
           />
         ))}
+
+        {/* 框选矩形:最上层,pointer-events:none 不参与命中 */}
+        {selectionRect && selectionRect.w > 0 && selectionRect.h > 0 ? (
+          <div
+            className="sel-rect"
+            data-od-id="canvas-selection-rect"
+            style={{
+              left: selectionRect.x,
+              top: selectionRect.y,
+              width: selectionRect.w,
+              height: selectionRect.h,
+            }}
+          />
+        ) : null}
 
         {popover}
       </div>

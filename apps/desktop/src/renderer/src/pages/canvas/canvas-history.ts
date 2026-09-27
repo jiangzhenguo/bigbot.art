@@ -15,6 +15,8 @@
 export interface HistoryContent {
   nodes: unknown[];
   edges: unknown[];
+  /** 节点分组(可选:旧调用点不传 = 无变化,兼容既有代码) */
+  groups?: unknown[];
 }
 
 /** 单条历史(undo/redo 共用) */
@@ -37,7 +39,7 @@ interface SigNode {
 }
 
 /** 结构签名:忽略节点尺寸(测量/RS 抖动)、瞬态字段与数组顺序 */
-export function structureSig(nodes: unknown[], edges: unknown[]): string {
+export function structureSig(nodes: unknown[], edges: unknown[], groups?: unknown[]): string {
   const ns: SigNode[] = (nodes as Array<Record<string, unknown>>).map((n) => ({
     id: String(n.id),
     title: String(n.title ?? ''),
@@ -50,7 +52,11 @@ export function structureSig(nodes: unknown[], edges: unknown[]): string {
   const es = (edges as Array<Record<string, unknown>>)
     .map((e) => `${String(e.from)}>${String(e.to)}:${String(e.label ?? '')}`)
     .sort();
-  return JSON.stringify([ns, es]);
+  // 分组也进签名:只改组(不改节点/连线)必须算一次真实编辑,否则撤销不到建组/解组
+  const gs = ((groups ?? []) as Array<Record<string, unknown>>)
+    .map((g) => `${String(g.id)}:${String(g.name)}:${((g.members ?? []) as unknown[]).map(String).join(',')}`)
+    .sort();
+  return JSON.stringify([ns, es, gs]);
 }
 
 export class HistoryStack {
@@ -82,8 +88,8 @@ export class HistoryStack {
 
   /** 换基线(画布加载/回放结束):清空未来并重置去重基线,不写入历史 */
   reset(content: HistoryContent): void {
-    this.baseline = structureSig(content.nodes, content.edges);
-    this.baselineContent = { nodes: content.nodes, edges: content.edges };
+    this.baseline = structureSig(content.nodes, content.edges, content.groups);
+    this.baselineContent = { nodes: content.nodes, edges: content.edges, groups: content.groups };
     this.future = [];
   }
 
@@ -96,17 +102,17 @@ export class HistoryStack {
    */
   commit(content: HistoryContent, label: string): void {
     if (this.suspended) return;
-    const sig = structureSig(content.nodes, content.edges);
+    const sig = structureSig(content.nodes, content.edges, content.groups);
     if (sig === this.baseline) return; // 结构没变 → 不是一次真实编辑
     // 记录「编辑前」内容作为撤销目标(首次 commit 前若还没 reset,则视为空画布起点)
     this.past.push({
-      content: this.baselineContent ?? { nodes: [], edges: [] },
+      content: this.baselineContent ?? { nodes: [], edges: [], groups: [] },
       label,
     });
     if (this.past.length > HISTORY_LIMIT) this.past.shift();
     this.future = [];
     this.baseline = sig;
-    this.baselineContent = { nodes: content.nodes, edges: content.edges };
+    this.baselineContent = { nodes: content.nodes, edges: content.edges, groups: content.groups };
   }
 
   /** 开始回放:此期间所有 commit 被忽略 */
@@ -120,20 +126,20 @@ export class HistoryStack {
    */
   commitFrom(prev: HistoryContent, content: HistoryContent, label: string): void {
     if (this.suspended) return;
-    const sig = structureSig(content.nodes, content.edges);
+    const sig = structureSig(content.nodes, content.edges, content.groups);
     if (sig === this.baseline) return;
     this.past.push({ content: prev, label });
     if (this.past.length > HISTORY_LIMIT) this.past.shift();
     this.future = [];
     this.baseline = sig;
-    this.baselineContent = { nodes: content.nodes, edges: content.edges };
+    this.baselineContent = { nodes: content.nodes, edges: content.edges, groups: content.groups };
   }
 
   /** 结束回放:用回放结果建立新基线(历史栈与未来栈保持 stepUndo/stepRedo 已维护的状态) */
   endReplay(content: HistoryContent): void {
     this.suspended = false;
-    this.baseline = structureSig(content.nodes, content.edges);
-    this.baselineContent = { nodes: content.nodes, edges: content.edges };
+    this.baseline = structureSig(content.nodes, content.edges, content.groups);
+    this.baselineContent = { nodes: content.nodes, edges: content.edges, groups: content.groups };
   }
 
   /** 取一步撤销:返回要恢复的内容与动作名;空则 null(调用方随后 endReplay) */

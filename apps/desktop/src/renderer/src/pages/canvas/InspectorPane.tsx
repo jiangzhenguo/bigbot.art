@@ -6,9 +6,27 @@
  * 所有数据与回调由 CanvasPage 透传,本组件不做任何状态/副作用。
  */
 import React from 'react';
-import type { RenderJob, Asset } from '@bigbotart/shared';
+import type { RenderJob, Asset, NodeKind } from '@bigbotart/shared';
 import type { CanvasNode, NodeInfo } from './types';
 import { InspectorBody } from './inspector/InspectorBody';
+
+/**
+ * 「仅重跑该节点」可见的节点类型 —— 与 CanvasPage `runNode` 里**真有执行分支**的 kind 一一对应。
+ *
+ * 刻意排除 asset(纯引用节点,没有生成/后处理)、document(无可跑任务)、
+ * timeline(点重跑只是跳转到时间线页)、storyboard(靠检查器里的「铺节点」动作而非重跑)、
+ * director / audio-ref / workflow-*(尚无执行分支),否则按钮点了没反应,是个假入口。
+ */
+const RERUNABLE_KINDS = new Set<NodeKind | 'plain'>([
+  'shot',
+  'image-gen',
+  'image-edit',
+  'image-upscale',
+  'image-crop',
+  'image-stitch',
+  'image-split',
+  'video-upscale',
+]);
 
 interface InspectorPaneProps {
   tab: 'chat' | 'insp';
@@ -38,6 +56,8 @@ interface InspectorPaneProps {
   onRemoveEdge: (srcId: string, dstId: string) => void;
   /** 「仅重跑该节点」 */
   onRerunSelected: () => void;
+  /** 当前节点是否正在跑长任务(视频增强);true 时禁用重跑按钮防重复触发 */
+  running?: boolean;
   /** asset 节点:「从资源库选择…」→ 打开资产选择弹层 */
   onOpenAssetPicker?: (nodeId: string) => void;
 }
@@ -68,6 +88,7 @@ export function InspectorPane({
   onRemoveEdge,
   onRerunSelected,
   onOpenAssetPicker,
+  running,
 }: InspectorPaneProps) {
   return (
     <div className={`insp${tab === 'insp' ? ' on' : ''}`} data-od-id="inspector">
@@ -107,12 +128,20 @@ export function InspectorPane({
           onOpenAssetPicker={onOpenAssetPicker}
         />
       ) : null}
-      {selected && (
+      {/* 「仅重跑该节点」只对**有生成任务**的节点有意义。
+          asset(资源)节点是纯引用节点:没有推理/后处理可跑(runNode 里没有对应分支,
+          点了会落到 h3c 视频提交分支);timeline / document 同理 —— 一律不显示按钮,
+          避免给出一个点了没反应(或报错)的假入口。 */}
+      {selected && selNode?.kind && RERUNABLE_KINDS.has(selNode.kind) && (
         <button
           className="btn btn-s rerun-btn"
           onClick={onRerunSelected}
+          // 长任务进行中禁止再次触发(否则并行起多个后处理,互相抢资源并覆盖产物)
+          disabled={running}
+          title={running ? '该节点正在增强中,请等待当前任务完成' : undefined}
+          data-od-id="rerun-btn"
         >
-          仅重跑该节点
+          {running ? '增强中…' : '仅重跑该节点'}
         </button>
       )}
     </div>

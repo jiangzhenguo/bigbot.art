@@ -16,7 +16,7 @@
 import type { PromptSource } from '@bigbotart/shared';
 import { inferPromptSource } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from './types';
-import { pickShotSpec, IMAGE_KINDS } from './connectors';
+import { pickShotSpec, IMAGE_KINDS, VIDEO_KINDS } from './connectors';
 
 type RefEntry = { assetId?: string; path?: string; role: string; auto?: boolean };
 
@@ -38,6 +38,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
   const framePatch = new Map<string, { videoNodeId: string; at: 'first' | 'last' } | null>();
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
+  /** 视频输入端口(video-upscale 的 input):只收视频来源(shot/video-upscale/视频 asset) */
+  const videoFromPatch = new Map<string, { nodeId: string } | null>();
   /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
   const stitchPatch = new Map<string, Array<{ nodeId: string; x: number; y: number }>>();
   const promptFromPatch = new Map<string, { nodeId: string } | null>();
@@ -150,6 +152,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           'image-crop': 'image',
           'image-stitch': 'image',
           'image-split': 'image',
+          'video-upscale': 'video',
           'audio-ref': 'audio',
           asset: String(s.mediaType ?? ''),
         };
@@ -231,6 +234,13 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         // 输入图端口 input(超分源):静帧产物直通 / 素材引用;无条件登记(幂等)
         if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
           imageFromPatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
+      case 'video-upscale': {
+        // 输入**视频**端口 input:镜头成片 / 视频增强产物 / 视频素材;无条件登记(幂等)
+        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+          videoFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
@@ -334,6 +344,12 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       const target = imageFromPatch.get(n.id) ?? null;
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;
+    }
+    // 视频输入端口(video-upscale):与边同步,删除边即撤销
+    if (n.kind === 'video-upscale') {
+      const target = videoFromPatch.get(n.id) ?? null;
+      if (target) data.inputVideoFrom = target;
+      else delete data.inputVideoFrom;
     }
     // 拼接件端口 piece(多值):按目标 mode 排序(row 按 x,column/grid 按 y;同级再按另一轴),边删除即撤销
     if (n.kind === 'image-stitch') {

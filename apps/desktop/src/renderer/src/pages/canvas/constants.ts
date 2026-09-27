@@ -7,6 +7,7 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
   { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分', p1: true },
+  { id: 'vupscale', kind: 'video-upscale', name: '视频增强', sub: '超分 + 合修脸 · Real-ESRGAN/GFPGAN' },
   { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
   { id: 'stitch', kind: 'image-stitch', name: '图片拼接', sub: '多图横排/竖排/网格 · ffmpeg' },
   { id: 'split', kind: 'image-split', name: '图片拆分', sub: '长图切片 · 九宫格切图' },
@@ -38,6 +39,8 @@ export const COMPAT: Record<string, string[]> = {
   split: ['wf-output'],
   shot: ['wf-output'],
   director: ['wf-output'],
+  // 视频增强:产物是视频 → 可作镜头参考/首帧,也可入轨、收口
+  vupscale: ['shot', 'timeline', 'wf-output'],
   // asset 也可直接收口(素材直接当产物,虽然不推荐,但合法)
   asset: ['shot', 'edit', 'upscale', 'timeline', 'wf-input', 'wf-output'],
 };
