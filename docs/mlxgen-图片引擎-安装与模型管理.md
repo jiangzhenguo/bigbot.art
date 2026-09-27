@@ -54,19 +54,63 @@ mlxgen --help          # 应打印帮助与版本号
 | 节点用途 | 模型 id(capabilities 声明) | 体积* | 说明 |
 |---|---|---|---|
 | 文生图(默认) | `AbstractFramework/z-image-turbo-8bit` | ~11GB | Z-Image Turbo,image-gen 默认 |
-| 文生图(备选) | `qwen-image` | 中等 | Qwen Image |
+| 文生图(新一代) | `JoyFusionAI/Qwen-Image-2.1-MLX-8bit` | ~24GB | Qwen-Image-2.1(7.1B 单流 block-causal + Qwen3-VL 文本编码器 + 4 通道因果 VAE)。**需 mlx-gen ≥ 0.38.0**;Provider 自动追加 `--base-model qwen-image-2.1`(仓库全名不在 mlxgen catalog 里,不给提示会被家族兜底误路由成旧 `qwen.generate`,transformer/编码器/VAE 全不同,加载必失败);默认 **40 步**(官方推荐,guidance 1.0 时负向 pass 整体跳过)。**不支持** ControlNet / 指令编辑 / outpaint / reframe |
+| 文生图(备选) | `qwen-image` | 中等 | Qwen Image(初代,与 2.1 不是同一模型族) |
 | 指令编辑 / mask | `mlx-community/Qwen-Image-Edit-8bit` | ~37.5GB | image-edit `instruction` / `inpaint`;8bit 量化版(官方原版 57.7GB,64GB 内存跑不动)。生成时 Provider 自动追加 `--base-model Qwen/Qwen-Image-Edit`(不给会被误路由成文生图 handler) |
 | 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | image-edit 多参考 / 扩图 |
 | 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~4.7GB | image-upscale |
 
-*体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)
+*体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)。Qwen-Image-2.1 为 ModelScope 直连清单实测 24.04GB
 
 ```bash
 # 全部装齐(建议先只装 Z-Image-Turbo 跑通闭环;Qwen 系建议用设置页下载,走 ModelScope 直连)
 mlxgen download --model AbstractFramework/z-image-turbo-8bit
+mlxgen download --model JoyFusionAI/Qwen-Image-2.1-MLX-8bit
 mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwen-Image-Edit
 # ...
 ```
+
+### 3.1 本地目录直用(免重复下载)
+
+若模型已由用户自行下载/导出到本地目录(散装 HF 布局:`transformer/` + `text_encoder/` + `vae/`),
+**不必再拉一份到 HF 缓存**。App 会自动识别并优先使用本地路径:
+
+- 默认根目录 `~/ai/models`(可用 `BIGBOTART_MODELS_DIR` 覆盖)
+- 识别方式:`<root>/<模型名>/transformer/` 下有权重分片,且存在 `model.safetensors.index.json` 时
+  其 `weight_map` 引用的每个分片都真实存在(防「索引先下完、权重没下完」的半截模型被误用)
+- 命中后 `--model` 传本地绝对路径,设置页/检查器显示「已就绪」,不再触发下载
+
+```bash
+# 手动验证本地目录可用(注意 --base-model 提示不能省)
+mlxgen capabilities --model ~/ai/models/qwen-image-2.1-mlx-8bit --base-model qwen-image-2.1
+```
+
+> ⚠️ 本地路径**同样需要** `--base-model` 提示。实测:不带提示时本地目录也会被家族兜底
+> 误路由成旧 `qwen.generate`(2.1 与初代的 transformer / 文本编码器 / VAE 完全不同)。
+> Provider 侧 `BASE_MODEL_HINTS` 按 **repoId**(而非路径)查提示,二者必须同时生效。
+
+实测性能(M5 Max,1024²,40 步):约 **3.5 s/步、全图 2 分 20 秒**;权重约 22GB 常驻(8bit 导出)。
+
+> ⚠️ **Qwen-Image-2.1 需要 mlx-gen ≥ 0.38.0**。0.37.0 及更早版本没有 `qwen21` 模型族:
+> `mlxgen capabilities --model JoyFusionAI/Qwen-Image-2.1-MLX-8bit` 不会报错,但会返回**旧 Qwen Image**
+> 的能力集(`qwen.generate` handler),真跑才会在加载权重时失败。本机源码在 `~/ai/mlx-gen`
+> (分支 `feat/qwen-image-2.1`),用 `uv tool install --force --no-cache ~/ai/mlx-gen` 安装/升级。
+> 该分支 `pyproject.toml` 的 `[project.scripts]` 里两个含裸点号的 key
+> (`mflux-generate-qwen-2.1` / `mlxgen-generate-qwen-2.1`)**必须加引号**,否则 TOML 会把它
+> 解析成嵌套 map,`uv tool install` 直接报 `invalid type: map, expected a string`。
+>
+> ⚠️ **改完源码务必加 `--no-cache`**:`uv tool install --force` 会复用构建缓存,
+> 源码改了但装进去的还是旧文件(实测踩坑:改了 `qwen21_generate.py` 后
+> `grep CliRuntimeEventStream site-packages/.../qwen21_generate.py` 为 0 匹配,
+> 表现为「改了没生效」)。装完**用 grep 复核安装目录**再测。
+>
+> ⚠️ **qwen21 路由曾缺进度事件**(2026-09 修复,`src/mflux/models/qwen21/cli/qwen21_generate.py`):
+> 该 CLI 未接 `CliRuntimeEventStream`,`--json-events` 被静默忽略 → App 里 2.1 全程无进度
+> (模型卡在「推理中」)。已按 z-image/flux2 同构补上 `events.subscribe_model` +
+> `emit_save/emit_complete/emit_failed`。**注意 `image_util` 的 `ctx.in_loop` 调用本身是齐的**,
+> 缺的只是 CLI 层的事件订阅——排查时别往推理循环里找。
+> 验证:`mlxgen generate --json-events ... | head` 应输出 `start/denoise(N/N)/save/complete` JSONL;
+> 若只有 tqdm 进度条(stderr)而 stdout 为空,就是这套事件没接。
 
 > \* 体积为骨架期估算;模型 id、下载命令与落盘目录以 `mlxgen download --help` 与官方仓库(mkdocs/mlx-gen)为准——本应用只把 id 透传给 CLI,不内置下载逻辑。
 > 模型由 mlxgen 自管理缓存,应用不需要也不应该手动指定模型路径。
@@ -76,7 +120,7 @@ mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwe
 ## 4. 应用内「设置管理模型」入口
 
 - 设置页「引擎」分组:`mlxgen(图片主引擎)` 行右侧 **「管理模型」** 按钮(当前跳到「模型」分组——该分组是 **LLM 本地模型**(LM Studio / Ollama / pi-mlx)管理,用于 Agent 规划内核;**mlxgen 图像模型**的下载在设置页「模型下载」分组,也可 CLI `mlxgen download`)。
-- 设置页「模型下载」分组:白名单 4 个模型(Z-Image-Turbo / Qwen Image Edit / SeedVR2 3B / Qwen2.5-VL)。**双通道下载**:Qwen 系(MS 有镜像、sha256 与 HF LFS oid 一致)默认走 **ModelScope 国内 CDN 直连**(`apps/desktop/src/main/ms-download.ts`,主进程按 HF 缓存布局落盘,断点续传 + 4 路并发 + 多轮自愈 + 停滞看门狗,不依赖 HF 可达性;`BIGBOTART_MS_DOWNLOAD=0` 可强制回退 HF);其余模型走 `spawn mlxgen download`(HF),Xet/CAS 报错自动 `HF_HUB_DISABLE_XET=1` 重试,**同一模型去重**(连点复用进行中任务,防多进程互等 hf_hub 锁),**停滞看门狗**(blobs 连续 5 分钟零字节增长判定挂起,杀掉切经典通道重试)。
+- 设置页「模型下载」分组:白名单 5 个模型(Z-Image-Turbo / Qwen-Image-2.1 / Qwen Image Edit / SeedVR2 3B / Qwen2.5-VL)。**双通道下载**:Qwen 系(MS 有镜像、sha256 与 HF LFS oid 一致)默认走 **ModelScope 国内 CDN 直连**(`apps/desktop/src/main/ms-download.ts`,主进程按 HF 缓存布局落盘,断点续传 + 4 路并发 + 多轮自愈 + 停滞看门狗,不依赖 HF 可达性;`BIGBOTART_MS_DOWNLOAD=0` 可强制回退 HF);其余模型走 `spawn mlxgen download`(HF),Xet/CAS 报错自动 `HF_HUB_DISABLE_XET=1` 重试,**同一模型去重**(连点复用进行中任务,防多进程互等 hf_hub 锁),**停滞看门狗**(blobs 连续 5 分钟零字节增长判定挂起,杀掉切经典通道重试)。
 - **「已下载」判定 = HF 缓存完整性校验**(`apps/desktop/src/main/mlxgen-models.ts` 的 `isCacheComplete`):① blobs 无「无主」`*.incomplete` 中断分块;② snapshot 有可解析的非空文件且无悬空链接;③ 至少一个权重文件(只有配置/分词器不算模型);④ 有 `*.safetensors.index.json` 时其引用的分片必须齐全。注意:Xet→经典通道重试成功后旧 `.incomplete` 分块不清理(同名 blob 已完成),属正常残渣,不会误判为未下载;下载中途掐断(空壳 snapshot / 中断分块 / 权重为零 / 分片缺失)会正确显示「未下载」,重下即可断点续传。
 - 节点内选模型:image-gen / image-edit 检查器的「模型」输入框可直接填任意模型 id(与 §3 清单一致);提交时原样传给 `mlxgen`。
 

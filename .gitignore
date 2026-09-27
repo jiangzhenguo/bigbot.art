@@ -38,3 +38,8 @@ Thumbs.db
 
 # Local code intelligence index
 .codegraph/
+
+# Face-restoration weights — GFPGAN / facexlib 按子进程 CWD 解析的相对权重目录,
+# 权威副本在 ~/ai/weights/(BIGBOTART_WEIGHTS_DIR),这里只是运行期兜底与下载残片
+gfpgan/
+CodeFormer/
