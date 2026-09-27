@@ -10,6 +10,7 @@
  */
 import {
   mkdirSync, copyFileSync, unlinkSync, existsSync, readFileSync, writeFileSync, statSync, renameSync,
+  createReadStream,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename, extname, resolve } from 'node:path';
@@ -72,6 +73,72 @@ export function outputSearchRoots(): string[] {
   return [...roots];
 }
 
+function mimeOf(file: string): string {
+  return MIME_BY_EXT[extname(file).slice(1).toLowerCase()] ?? 'application/octet-stream';
+}
+
+/**
+ * 把本地文件作为 HTTP 响应返回,**支持 Range 请求**。
+ *
+ * 为什么不能直接 `net.fetch('file://…')`(2026-09 修复「视频能播但进度条拖不动」):
+ * 那条路径返回的响应**不含 `accept-ranges` / `content-length`,且完全忽略 `Range` 头**
+ * —— 永远回 200 整个文件。浏览器据此判定资源不可定位,`<video>.seekable` 恒为 `[0,0]`,
+ * 原生控件的进度条因此拖不动(能正常顺序播放,但无法任意跳转)。
+ *
+ * 这里自己解析 `Range: bytes=<start>-<end>`,命中就流式返回 206 + `content-range`
+ * (大文件如 126MB 视频绝不整块读进内存),否则回 200 并补上 `accept-ranges: bytes`。
+ */
+export function rangeFileResponse(file: string, rangeHeader: string | null): Response {
+  const type = mimeOf(file);
+  if (!existsSync(file)) return new Response(`not found: ${basename(file)}`, { status: 404 });
+  const size = statSync(file).size;
+  const total = `bytes */${size}`;
+
+  // 解析 Range:仅支持单区间 `bytes=start-end`(浏览器 seek 只用这种形态)
+  const m = rangeHeader ? /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim()) : null;
+  if (rangeHeader && !m) {
+    return new Response('unsupported range', {
+      status: 416,
+      headers: { 'content-range': total, 'accept-ranges': 'bytes' },
+    });
+  }
+
+  let start = 0;
+  let end = size - 1;
+  if (m) {
+    const hasStart = m[1] !== '';
+    const hasEnd = m[2] !== '';
+    if (hasStart) {
+      start = Number(m[1]);
+      if (hasEnd) end = Number(m[2]);
+    } else if (hasEnd) {
+      // 后缀区间 `bytes=-N` = 末尾 N 字节
+      start = Math.max(0, size - Number(m[2]));
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+      return new Response('range not satisfiable', {
+        status: 416,
+        headers: { 'content-range': total, 'accept-ranges': 'bytes' },
+      });
+    }
+    end = Math.min(end, size - 1);
+  }
+
+  const length = end - start + 1;
+  const body = createReadStream(file, { start, end }) as unknown as ReadableStream<Uint8Array>;
+  const headers: Record<string, string> = {
+    'content-type': type,
+    'content-length': String(length),
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-cache',
+  };
+  if (m) {
+    headers['content-range'] = `bytes ${start}-${end}/${size}`;
+    return new Response(body, { status: 206, headers });
+  }
+  return new Response(body, { status: 200, headers });
+}
+
 const KIND_BY_EXT: Record<string, Asset['kind']> = {
   jpg: 'image', jpeg: 'image', png: 'image', webp: 'image', gif: 'image', heic: 'image', tiff: 'image',
   mp4: 'video', mov: 'video', m4v: 'video', webm: 'video', mkv: 'video',
@@ -79,11 +146,14 @@ const KIND_BY_EXT: Record<string, Asset['kind']> = {
   md: 'document', txt: 'document', json: 'document', html: 'document', pdf: 'document', srt: 'document', vtt: 'document',
 };
 
+/** 扩展名 → MIME(自定义协议要显式给 content-type;视频 seek 依赖正确的类型声明) */
 const MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
-  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
-  mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac',
-  md: 'text/markdown', txt: 'text/plain', json: 'application/json', pdf: 'application/pdf', srt: 'text/srt', vtt: 'text/vtt',
+  avif: 'image/avif', heic: 'image/heic', tiff: 'image/tiff', bmp: 'image/bmp',
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg',
+  md: 'text/markdown; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json',
+  html: 'text/html; charset=utf-8', pdf: 'application/pdf', srt: 'text/plain; charset=utf-8', vtt: 'text/vtt; charset=utf-8',
 };
 
 /** 路径是否落在允许根目录之下(resolve 后前缀校验) */
