@@ -26,6 +26,44 @@ import { toolDefinitions } from '@bigbotart/shared';
 const MAX_TOOL_ROUNDS = 20;
 
 /**
+ * 轮询抑制闸(结构兜底,与 system prompt 的「提交即收尾」规则同口径)。
+ *
+ * 真实事故:用户说「连给 image-gen 的 ref-image」,模型建节点+连线+engine.submit 都做对了,
+ * 但提交后开始反复轮询 engine.queue_status / canvas.get_node / canvas.list_nodes
+ * 「看看图好了没有」——生成是分钟级后台任务,同步查询永远查不到结果,
+ * 20 轮 MAX_TOOL_ROUNDS 被空转烧光,最终以「已达到最大工具调用轮数」收场,
+ * 用户看到的是失败,实际任务已成功入队。
+ *
+ * 判定:engine.submit 成功后,本轮若继续调用「只读轮询类」工具(白名单见下)累计达阈值,
+ * 直接判定为无效空转 → 强制结束本轮,并给出诚实的收尾话术(而不是「已达最大轮数」)。
+ */
+const POLL_TOOLS = new Set(['engine.queue_status', 'canvas.get_node', 'canvas.list_nodes']);
+/** 提交成功后允许的只读轮询次数上限(超过即视为空转) */
+const POST_SUBMIT_POLL_LIMIT = 2;
+/** 强制收尾话术(submit 已成功,不能报成失败) */
+const POLL_ABORT_REPLY = '已提交生成,任务正在后台排队渲染。完成后画布会自动刷新,无需等待——你可以先继续别的工作。';
+
+/**
+ * 空转轮询判定(纯函数,便于单测):
+ * 已提交过生成,且本轮**全部**工具调用都是只读轮询类 → 计一次空转。
+ * 只要有任意一个非轮询调用(如 create/connect/update),本轮视为有效工作,不计数。
+ * @param submitted 本轮对话中是否已有成功的 engine.submit
+ * @param callNames 本轮 LLM 请求的工具名
+ */
+export function isPollingRound(submitted: boolean, callNames: string[]): boolean {
+  if (!submitted || callNames.length === 0) return false;
+  return callNames.every((n) => POLL_TOOLS.has(n));
+}
+
+/** 累计空转次数是否已超阈值(超了就该强制收尾,而不是继续让 LLM 空转) */
+export function isPollingExhausted(pollCount: number): boolean {
+  return pollCount > POST_SUBMIT_POLL_LIMIT;
+}
+
+/** 强制收尾话术(导出供测试断言:提交成功的话术不能长成「已失败」) */
+export const POLL_ABORT_MESSAGE = POLL_ABORT_REPLY;
+
+/**
  * 敏感操作强制确认闸(结构兜底,与 memory.ts 的提问规则对应)。
  * 模型不守 prompt、用纯文本提问/直接执行时,由这里拦截:不执行,改发 ask.user 确认卡。
  * 用户点选确认后,授权签名粘滞(approvedSensitive),同操作本会话内不再二次拦截。
@@ -216,6 +254,11 @@ export class PiChatSession {
 
     const tools = toolDefinitions() as never;
 
+    /** 本轮对话里是否已有成功的 engine.submit(提交成功即进入「收尾期」) */
+    let submitted = false;
+    /** 提交成功后的只读轮询累计次数(超过 POST_SUBMIT_POLL_LIMIT 即判定空转) */
+    let postSubmitPolls = 0;
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (signal.aborted) return { reply: '', toolCalls, aborted: true };
       const context: Context = { systemPrompt: params.context.systemPrompt, messages, tools };
@@ -297,7 +340,20 @@ export class PiChatSession {
           // 提问本身也作为一次"用户可见回复",便于渲染层只渲染卡片即可
           return { reply: question, thinking: collectThinking(), toolCalls, ask };
         }
-        // options 不足 2 个 → 不当提问处理,继续当普通回复(防 Agent 滥用)
+        // options 不足 2 个 → 不当提问处理,继续当普通回复(防 Agent 滥用)。
+        // 但必须先把这次调用从 calls 里摘掉:ask.user 不是工具桥上的工具,交给桥只会得到
+        // 「未知工具:ask.user」——旧版本正是这样把一条截断的 options 字符串变成了脏 recall
+        // 记录(渲染层恢复时显示成 `ask.user({...` 的裸文本气泡,看着像调用失败)。
+        // 摘掉后,若本轮只剩它,则走下面的 calls.length===0 分支,以模型自己的文本作为回复。
+        const idx = calls.indexOf(askCall);
+        if (idx >= 0) calls.splice(idx, 1);
+        if (calls.length === 0) {
+          // 模型想提问但没给出可用选项:退回它的文本回复(通常就是那句问句),让用户照常对话
+          const t = splitThink(
+            blocks.filter((c) => c.type === 'text').map((c) => ('text' in c ? c.text : '')).join(''),
+          ).text;
+          return { reply: t || question, thinking: collectThinking(), toolCalls };
+        }
       }
 
       if (calls.length === 0) {
@@ -310,6 +366,18 @@ export class PiChatSession {
             .join(''),
         ).text;
         return { reply, thinking, toolCalls };
+      }
+
+      // 轮询抑制闸:已提交生成后,若本轮全是只读轮询类工具调用 → 判定空转,直接收尾。
+      // 只在「全部调用都是轮询工具」时触发,不误伤正常的「查一下再改」组合操作。
+      if (isPollingRound(submitted, calls.map((c) => c.name))) {
+        postSubmitPolls += 1;
+        if (isPollingExhausted(postSubmitPolls)) {
+          console.error(
+            `[pi-chat] 提交后空转轮询 ${postSubmitPolls} 次(${calls.map((c) => c.name).join(',')}),强制收尾`,
+          );
+          return { reply: POLL_ABORT_REPLY, thinking: collectThinking(), toolCalls };
+        }
       }
 
       // 敏感操作确认闸(结构兜底):未授权时一个都不执行,改发 ask.user 确认卡
@@ -365,6 +433,8 @@ export class PiChatSession {
         }
         const tr = res.result ?? { ok: false, result: res.error?.message ?? '工具调用失败' };
         toolCalls.push({ name: call.name, args, ok: tr.ok, result: tr.result, nodeId: tr.nodeId });
+        // 提交成功 → 进入「收尾期」,后续只读轮询开始计数(见上方轮询抑制闸)
+        if (call.name === 'engine.submit' && tr.ok) submitted = true;
         // toolResult 追加进 messages(OpenAI 协议)
         messages.push({
           role: 'toolResult' as const,

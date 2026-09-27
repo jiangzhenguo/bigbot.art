@@ -436,8 +436,15 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
               odId: 'agent-ask',
               ask: { question: args.question, options: opts as import('@bigbotart/shared').AskOption[], picked },
             });
+          } else if (args.question) {
+            // options 不可解析(被截断/非数组):仍能拿到 question → 降级为纯文本提问,不暴露工具调用原文
+            restored.push({ id: ++msgId.current, kind: 'agent', text: args.question });
           } else {
-            restored.push({ id: ++msgId.current, kind: 'agent', text: r.content });
+            /* 脏记录(旧版本 ask.user 未被 worker 拦截,落到工具桥报「未知工具:ask.user」,
+               options 被 JSON.stringify 截断成非法 JSON):没有 question 可展示,
+               原样 push 会在对话里留一条 `ask.user({...` 的裸文本气泡,看着像调用失败。
+               这类记录是历史噪音,直接丢弃(本轮真正的提问卡由 index.ts 那条 ask 记录负责)。 */
+            continue;
           }
         } else if (r.role === 'tool' && r.toolName) {
           (toolGroup ??= []).push({ name: r.toolName, args: r.toolArgs ?? {}, status: 'success', result: r.toolResult });
