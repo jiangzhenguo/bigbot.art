@@ -1,10 +1,11 @@
 /**
- * FrameTool — 视频取帧(ffmpeg):抽首帧 / 尾帧 PNG
+ * FrameTool — 视频取帧(ffmpeg):抽首帧 / 尾帧 / **指定时间点帧** PNG
  * P0 #1/#3:上游 shot 跑完后抽尾帧 → 归档为下游镜头 first-frame 参考候选;
  * 也是 shot→image-edit「取帧再编辑」的帧来源。
+ * 时间点模式(`mode:'at'` + `seconds`)供 Agent `frames.extract` 从任意视频取中间帧。
  *
  * 产物落 ${OUTPUTS_DIR}/frames/ 下(bba-output 协议可读),文件名
- * <视频基名>-<mode>-<毫秒时间戳>.png,多次抽取互不覆盖。
+ * <视频基名>-<mode>[-<秒数>]-<毫秒时间戳>.png,多次抽取互不覆盖。
  */
 import { spawn } from 'node:child_process';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -19,14 +20,35 @@ export interface FrameExtractResult {
   error?: string;
 }
 
+/** 取帧位置:首帧 / 尾帧 / 指定时间点(秒) */
+export type FrameMode = 'first' | 'last' | 'at';
+
+/**
+ * 时间点参数校验(纯函数):`mode:'at'` 时 seconds 必填且为**有限非负数**。
+ * 返回归一化后的秒数(NaN/负数/非数 → 错误),供 IPC 与单测复用。
+ */
+export function parseAtSeconds(
+  mode: FrameMode,
+  seconds: unknown,
+): { ok: true; seconds?: number } | { ok: false; error: string } {
+  if (mode !== 'at') return { ok: true };
+  const n = typeof seconds === 'number' ? seconds : Number(seconds);
+  if (seconds === undefined || seconds === null || seconds === '' || !Number.isFinite(n)) {
+    return { ok: false, error: "mode='at' 需要 seconds(非负数字,单位秒)" };
+  }
+  if (n < 0) return { ok: false, error: `时间点不能为负数: ${n}s` };
+  return { ok: true, seconds: n };
+}
+
 /** 全局串行链:多个任务同时完成触发抽帧时逐个执行,避免多个 ffmpeg 同时抢 CPU/IO */
 let extractChain: Promise<unknown> = Promise.resolve();
 
 export function extractFrame(
   videoPath: string,
-  mode: 'first' | 'last',
+  mode: FrameMode,
+  seconds?: number,
 ): Promise<FrameExtractResult> {
-  const run = extractChain.then(() => doExtract(videoPath, mode));
+  const run = extractChain.then(() => doExtract(videoPath, mode, seconds));
   // 链上任何一次失败都不影响后续任务继续执行
   extractChain = run.catch(() => undefined);
   return run;
@@ -34,7 +56,8 @@ export function extractFrame(
 
 function doExtract(
   videoPath: string,
-  mode: 'first' | 'last',
+  mode: FrameMode,
+  seconds?: number,
 ): Promise<FrameExtractResult> {
   return new Promise((resolveP) => {
     if (!videoPath) return resolveP({ ok: false, error: '视频路径为空' });
@@ -44,24 +67,35 @@ function doExtract(
     if (!roots.some((r) => isUnderRoot(videoPath, r))) {
       return resolveP({ ok: false, error: '视频不在允许目录,拒绝取帧' });
     }
+    const at = parseAtSeconds(mode, seconds);
+    if (!at.ok) return resolveP({ ok: false, error: at.error });
     try {
       mkdirSync(FRAMES_DIR, { recursive: true });
     } catch {
       /* 目录已存在/不可建则交给 ffmpeg 报错 */
     }
     const name = basename(videoPath).replace(/\.[^.]+$/, '') || 'frame';
-    const out = join(FRAMES_DIR, `${name}-${mode}-${Date.now()}.png`);
+    // 时间点模式文件名带秒数,便于人眼辨认「这一帧是第几秒」
+    const suffix = mode === 'at' ? `at-${(at.seconds ?? 0).toFixed(2).replace(/\.?0+$/, '')}s` : mode;
+    const out = join(FRAMES_DIR, `${name}-${suffix}-${Date.now()}.png`);
     const args =
       mode === 'last'
         // 尾帧:-sseof 从文件末尾回退 0.2s 定位,兼容各封装
         ? ['-y', '-sseof', '-0.2', '-i', videoPath, '-frames:v', '1', out]
-        : ['-y', '-i', videoPath, '-frames:v', '1', out];
+        : mode === 'at'
+          // 时间点:-ss 放在 -i **之前**为输入侧定位(关键帧 seek,秒级定位不重解码全片);
+          // 用 -frames:v 1 取该时刻后第一帧。超出片长时 ffmpeg 输出 0 帧 → 由下方 existsSync 判定失败
+          ? ['-y', '-ss', String(at.seconds), '-i', videoPath, '-frames:v', '1', out]
+          : ['-y', '-i', videoPath, '-frames:v', '1', out];
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let errAcc = '';
     child.stderr.on('data', (d: Buffer) => (errAcc += d.toString()));
     child.on('close', (code) => {
       if (code === 0 && existsSync(out)) resolveP({ ok: true, path: out });
-      else {
+      else if (mode === 'at' && code === 0) {
+        // ffmpeg 对超出片长的时间点可能退 0 退出码但不出文件
+        resolveP({ ok: false, error: `第 ${at.seconds}s 处没有取到帧(可能超出视频时长),请确认时间点在片长内` });
+      } else {
         const tail = errAcc.split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 200);
         resolveP({ ok: false, error: `ffmpeg exit ${code}: ${tail || '未知错误'}` });
       }

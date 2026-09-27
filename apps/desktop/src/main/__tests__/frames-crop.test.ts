@@ -165,3 +165,70 @@ describe.runIf(hasFfmpeg)('集成 · ffmpeg 真实裁剪', () => {
     expect(existsSync(res.path!)).toBe(true);
   });
 });
+
+/* ── 时间点抽帧(mode='at'):Agent frames.extract 的基础能力 ── */
+describe('parseAtSeconds(纯函数)', () => {
+  it("非 at 模式不需要 seconds", () => {
+    expect(F.parseAtSeconds('first', undefined)).toEqual({ ok: true });
+    expect(F.parseAtSeconds('last', undefined)).toEqual({ ok: true });
+  });
+
+  it('at 模式:合法非负数字 → 归一化秒数', async () => {
+    expect(F.parseAtSeconds('at', 0)).toEqual({ ok: true, seconds: 0 });
+    expect(F.parseAtSeconds('at', 3.5)).toEqual({ ok: true, seconds: 3.5 });
+    // 模型常把数字写成字符串
+    expect(F.parseAtSeconds('at', '2.25')).toEqual({ ok: true, seconds: 2.25 });
+  });
+
+  it('at 模式:缺 seconds / 非数字 / 负数 / NaN → 拒绝', () => {
+    for (const bad of [undefined, null, '', 'abc', -1, '-0.5', NaN, Infinity]) {
+      const r = F.parseAtSeconds('at', bad);
+      expect(r.ok, `应拒绝 ${String(bad)}`).toBe(false);
+    }
+    expect(F.parseAtSeconds('at', undefined).ok === false && (F.parseAtSeconds('at', undefined) as { error: string }).error).toContain('seconds');
+  });
+
+  it('at 模式:秒数为 0 是合法的(等价首帧,不误判为缺失)', () => {
+    const r = F.parseAtSeconds('at', 0);
+    expect(r.ok).toBe(true);
+    expect((r as { seconds?: number }).seconds).toBe(0);
+  });
+});
+
+describe.runIf(hasFfmpeg)('集成 · 时间点抽帧(mode=at)', () => {
+  it('在片中间取帧 → 产出 PNG 且落临时目录', async () => {
+    const res = await F.extractFrame(assetVideoPath, 'at', 0.5);
+    expect(res.ok, res.error).toBe(true);
+    expect(res.path!).toContain(tmpHome);
+    expect(existsSync(res.path!)).toBe(true);
+    // 文件名带时间点,便于人眼辨认(回归:曾只有 -at- 不带秒数)
+    expect(res.path!).toContain('0.5s');
+  });
+
+  it('时间点超出片长 → ok:false 且提示时间点(不静默产出空文件)', async () => {
+    // 素材是 1s 视频,取第 30s
+    const res = await F.extractFrame(assetVideoPath, 'at', 30);
+    expect(res.ok).toBe(false);
+    expect(res.error).toBeTruthy();
+  });
+
+  it('负数时间点 → 拒绝且不调用 ffmpeg(参数校验前置)', async () => {
+    const res = await F.extractFrame(assetVideoPath, 'at', -2);
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('不能为负数');
+  });
+
+  it('时间点帧与首帧不同一文件(每次抽取独立产物,互不覆盖)', async () => {
+    const a = await F.extractFrame(assetVideoPath, 'first');
+    const b = await F.extractFrame(assetVideoPath, 'at', 0.2);
+    expect(a.ok, a.error).toBe(true);
+    expect(b.ok, b.error).toBe(true);
+    expect(a.path).not.toBe(b.path);
+  });
+
+  it('允许目录外的视频取帧仍被拒(时间点模式不放宽安全边界)', async () => {
+    const res = await F.extractFrame('/etc/hosts', 'at', 0);
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('允许目录');
+  });
+});

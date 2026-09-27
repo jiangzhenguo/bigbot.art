@@ -34,8 +34,9 @@ import type { RenderQueue } from './render-queue';
 import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
-import { cropImage } from './frames';
+import { cropImage, extractFrame } from './frames';
 import { stitchImages, splitImage } from './stitch';
+import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
 export { toolDefinitions } from '@bigbotart/shared';
 
 export interface ToolContext {
@@ -108,8 +109,46 @@ export function resolveSingleImageInput(
   return assetId ? assetPath(assetId) : undefined;
 }
 
-/** image-gen 的参考图输入:ref-image 入边 → 上游图片路径数组(资产节点取资产路径,产物节点取 resultPath)。
- *  真实事故:Agent 连了两张参考图到 image-gen,提交时 references 只给 shot 推导,
+/**
+ * 上游节点的**视频**产物路径解析(video-upscale 用):与 resolveNodeImagePath 同形状,但只认视频产物。
+ *  - asset 节点 → 资产本地路径(须为视频)
+ *  - shot / video-upscale 等视频产物节点 → data.resultPath
+ */
+export function resolveNodeVideoPath(
+  src: CanvasNode | undefined,
+  assetPath: (assetId: string) => string | undefined,
+): string | undefined {
+  if (!src) return undefined;
+  const sd = (src.data ?? {}) as Record<string, unknown>;
+  const p = src.kind === 'asset' ? assetPath(String(sd.assetId ?? '')) : String(sd.resultPath ?? '');
+  return p || undefined;
+}
+
+/**
+ * video-upscale 的单值视频输入:连线(input 端口)> data.inputVideoFrom(渲染层边派生)> data.inputAssetId(检查器手填)。
+ * 与 resolveSingleImageInput 同口径(单值端口 + 逐级回退)。
+ */
+export function resolveSingleVideoInput(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): string | undefined {
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  for (const e of canvas.edges) {
+    if (e.target !== node.id || e.label !== 'input') continue;
+    const p = resolveNodeVideoPath(canvas.nodes.find((n) => n.id === e.source), assetPath);
+    if (p) return p;
+  }
+  const from = d.inputVideoFrom as { nodeId?: string } | undefined;
+  if (from?.nodeId) {
+    const p = resolveNodeVideoPath(canvas.nodes.find((n) => n.id === from.nodeId), assetPath);
+    if (p) return p;
+  }
+  const assetId = String(d.inputAssetId ?? '');
+  return assetId ? assetPath(assetId) : undefined;
+}
+
+/** image-gen 的参考图输入:ref-image 入边 → 上游图片路径数组(资产节点取资产路径,产物节点取 resultPath)。 *  真实事故:Agent 连了两张参考图到 image-gen,提交时 references 只给 shot 推导,
  *  图片节点的 ref-image 边被静默丢弃,生成了纯文生图。 */
 export function resolveRefImagePaths(
   canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
@@ -451,6 +490,18 @@ export class ToolHandlers {
         data = { engine: 'mlxgen', model: 'AbstractFramework/z-image-turbo-8bit', ...data };
       } else if (kind === 'image-upscale') {
         data = { engine: 'mlxgen', model: 'AbstractFramework/seedvr2-3b-8bit', ...data };
+      } else if (kind === 'video-upscale') {
+        // 本地后处理节点(无 engine/模型),默认走 POST_PROCESSING.md §9.1 标准配方:
+        // Real-ESRGAN ×2(真人模型 realesrgan-x4plus)+ GFPGAN 修脸(强度 0.5),去块默认关
+        data = {
+          scale: 2,
+          superRes: 'realesrgan',
+          srModel: 'realesrgan-x4plus',
+          faceModel: 'gfpgan',
+          faceWeight: 0.5,
+          device: 'mps',
+          ...data,
+        };
       }
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
@@ -577,8 +628,8 @@ export class ToolHandlers {
       const node = cur?.nodes.find((n) => n.id === nodeId);
       if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
       if (!cur) return { ok: false, result: '画布不存在' };
-      if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split') {
-        // ffmpeg 本地节点:不进渲染队列,主进程同步执行(秒级),输入由连线解析,产物回写 + 记 Take
+      if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'video-upscale') {
+        // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
       }
       const isImage = node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale' || node.kind === 'asset';
@@ -736,6 +787,101 @@ export class ToolHandlers {
       return {
         ok: res.failed.length === 0,
         result: summary + (res.failed.length > 0 && res.assets.length > 0 ? '\n(部分失败但有资产已加入)' : ''),
+      };
+    },
+
+    /* ── frames 域:从视频抽一帧存成图片资源节点(ffmpeg 秒级同步) ── */
+    'frames.extract': async (a, ctx) => {
+      const nodeId = String(a.nodeId ?? '');
+      const videoPathArg = String(a.videoPath ?? '');
+      if (!nodeId && !videoPathArg) {
+        return { ok: false, result: '需要给视频来源:nodeId(画布节点)或 videoPath(绝对路径)' };
+      }
+      // at:first(默认)/ last / 数字(秒)。字符串数字也接受(模型常把 3.5 写成 "3.5")
+      const rawAt = a.at ?? 'first';
+      let mode: 'first' | 'last' | 'at' = 'first';
+      let seconds: number | undefined;
+      let atLabel = '首帧';
+      if (typeof rawAt === 'string' && rawAt === 'last') {
+        mode = 'last';
+        atLabel = '尾帧';
+      } else if (typeof rawAt === 'string' && rawAt === 'first') {
+        mode = 'first';
+      } else {
+        const n = typeof rawAt === 'number' ? rawAt : Number(rawAt);
+        if (!Number.isFinite(n) || n < 0) {
+          return { ok: false, result: `取帧位置非法: ${String(rawAt)}(只接受 first / last / 非负秒数)` };
+        }
+        mode = 'at';
+        seconds = n;
+        atLabel = `第 ${n}s 帧`;
+      }
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      // 来源解析:nodeId 优先(走画布产物解析,含 asset 节点);否则用 videoPath(白名单在 frames.ts 内校验)
+      let videoPath = videoPathArg;
+      let srcNode: CanvasNode | undefined;
+      if (nodeId) {
+        srcNode = cur.nodes.find((n) => n.id === nodeId);
+        if (!srcNode) return { ok: false, result: `节点 ${nodeId} 不存在` };
+        const resolved = resolveNodeVideoPath(srcNode, (id) => this.assets.get(id)?.localPath);
+        if (!resolved) {
+          return {
+            ok: false,
+            result: `「${srcNode.label || srcNode.id}」还没有视频产物,无法取帧:先 engine.submit 把它生成出来(或改用 videoPath 指定文件)`,
+          };
+        }
+        videoPath = resolved;
+      }
+      const res = await extractFrame(videoPath, mode, seconds);
+      if (!res.ok || !res.path) return { ok: false, result: `取帧失败:${res.error ?? '未知错误'}` };
+      // 抽出的 PNG → 导入资产库(项目归属,walk 白名单:产物目录在允许范围内)
+      let assetId: string | undefined;
+      try {
+        const imported = await this.assets.importFromPaths([res.path], { projectId: ctx.projectId });
+        if (imported.assets.length > 0) assetId = imported.assets[0]!.id;
+        else if (imported.failed.length > 0) {
+          // 帧已抽出但入资产库失败:不能静默吞(R6),但也不必让整次调用失败——回传路径让 Agent 可继续
+          return {
+            ok: false,
+            result: `已抽出帧但导入资产库失败:${imported.failed[0]!.error}(帧文件:${basenameOf(res.path)})`,
+          };
+        }
+      } catch (e) {
+        return { ok: false, result: `已抽出帧但导入资产库异常:${(e as Error).message}(帧文件:${basenameOf(res.path)})` };
+      }
+      const srcName = srcNode ? srcNode.label || srcNode.id : basenameOf(videoPath);
+      const label = String(a.label ?? '').trim() || `${srcName} · ${atLabel}`;
+      const now = new Date().toISOString();
+      const node: CanvasNode = {
+        id: nid('asset'),
+        kind: 'asset',
+        label,
+        position: {
+          // 默认落在来源节点右侧(无来源则沿用 create_node 的排布规律)
+          x: Number(a.x ?? (srcNode ? srcNode.position.x + 300 : 80 + cur.nodes.length * 60)),
+          y: Number(a.y ?? (srcNode ? srcNode.position.y : 80)),
+        },
+        width: 236,
+        data: {
+          assetId,
+          // 记下取帧来源,便于检查器回看与后续「重新取帧」
+          frameSource: { fromNodeId: srcNode?.id ?? null, videoPath, mode, seconds },
+        } as CanvasNode['data'],
+        createdAt: now,
+        updatedAt: now,
+      };
+      cur.nodes.push(node);
+      cur.updatedAt = now;
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+      return {
+        ok: true,
+        result:
+          `已抽出「${srcName}」的${atLabel}并建为资源节点「${label}」· ${basenameOf(res.path)}\n` +
+          `可用 canvas.connect 把它连给下游(image-edit 的 input 端口 / shot 的 first-frame 等)`,
+        nodeId: node.id,
       };
     },
 
@@ -905,6 +1051,15 @@ export class ToolHandlers {
   private async runLocalImageNode(ctx: ToolContext, cur: CanvasSnapshot, node: CanvasNode): Promise<ToolResult> {
     const d = (node.data ?? {}) as Record<string, unknown>;
     const assetPath = (id: string): string | undefined => (id ? this.assets.get(id)?.localPath : undefined);
+    /* 🧹 兜底:旧版本渲染层把「生成中/排队中」这类瞬态标签写进过节点(它们不属于快照字段,
+       重新加载后渲染层读不出来 → 卡片上永远挂着一个假的「生成中」)。提交前显式清掉。 */
+    const staleUi = node as unknown as { badge?: unknown; running?: unknown };
+    if (staleUi.badge !== undefined || staleUi.running !== undefined) {
+      delete staleUi.badge;
+      delete staleUi.running;
+      cur.version += 1;
+      this.store.saveCanvasSnapshot(cur);
+    }
     /** Take 归档 + 产物回写 + 落盘(saveCanvasSnapshot 自带版本防护与写盘广播) */
     const finish = (resultPath: string, params: Record<string, unknown>, extra?: Record<string, unknown>): void => {
       const takeId = this.takes?.append(ctx.projectId, {
@@ -924,6 +1079,7 @@ export class ToolHandlers {
       this.store.saveCanvasSnapshot(cur);
     };
     try {
+      if (node.kind === 'video-upscale') return await this.runVideoUpscale(ctx, cur, node, assetPath);
       if (node.kind === 'image-crop') {
         const srcPath = resolveSingleImageInput(cur, node, assetPath);
         if (!srcPath) return { ok: false, result: '图片裁切需要输入图:把图片节点/asset 连到本节点(input 端口),或在检查器填输入图 Asset ID' };
@@ -962,6 +1118,80 @@ export class ToolHandlers {
     } catch (e) {
       return { ok: false, result: `本地图像处理异常:${(e as Error).message}`, nodeId: node.id };
     }
+  }
+
+  /**
+   * video-upscale 节点执行路径:去块 → Real-ESRGAN 超分 → GFPGAN/CodeFormer 合修脸。
+   *
+   * ⚠️ 与另外三个本地节点不同,这是**分钟级长任务**(每帧 1.2-1.5s,20s 片约 10-12 分钟),
+   * 工具调用会同步阻塞到出片;失败信息带工具链缺失指引(不让用户白等)。
+   * 与渲染层 runNode 同口径:同样调 video-post.ts 的 videoUpscale(单一实现,无分叉)。
+   */
+  private async runVideoUpscale(
+    ctx: ToolContext,
+    cur: CanvasSnapshot,
+    node: CanvasNode,
+    assetPath: (assetId: string) => string | undefined,
+  ): Promise<ToolResult> {
+    const d = (node.data ?? {}) as Record<string, unknown>;
+    const srcPath = resolveSingleVideoInput(cur, node, assetPath);
+    if (!srcPath) {
+      return {
+        ok: false,
+        result: `视频增强需要输入视频:把镜头(shot)成片或视频 asset 连到「${node.label || node.id}」的 input 端口,或在检查器填输入视频 Asset ID`,
+      };
+    }
+    const req = {
+      inputPath: srcPath,
+      scale: Number(d.scale ?? 2),
+      superRes: (d.superRes as 'realesrgan' | 'none' | undefined) ?? 'realesrgan',
+      srModel: d.srModel as never,
+      faceModel: d.faceModel as never,
+      faceWeight: d.faceWeight === undefined ? undefined : Number(d.faceWeight),
+      fidelityWeight: d.fidelityWeight === undefined ? undefined : Number(d.fidelityWeight),
+      deblock: d.deblock === true,
+      deblockCrf: d.deblockCrf === undefined ? undefined : Number(d.deblockCrf),
+      crf: d.crf === undefined ? undefined : Number(d.crf),
+      device: (d.device as 'mps' | 'cpu' | undefined) ?? 'mps',
+    };
+    const n = normalizeVideoPost(req);
+    const tooling = probeVideoPostTooling();
+    const toolErr = checkToolingFor(n, tooling);
+    if (toolErr) return { ok: false, result: `工具链未就绪:${toolErr}(见 POST_PROCESSING.md)` };
+    const meta = probeVideo(srcPath);
+    const eta = estimateVideoPostSeconds(meta.durationSec ?? 0, meta.fps ?? 24, n);
+    const res = await videoUpscale(req);
+    if (!res.ok || !res.path) return { ok: false, result: `视频增强失败:${res.error ?? '未知错误'}`, nodeId: node.id };
+    const applied = res.stages ?? planVideoPostStages(n);
+    const takeId = this.takes?.append(ctx.projectId, {
+      shotNodeId: node.id,
+      status: 'succeeded',
+      resultPath: res.path,
+      params: { kind: 'video-upscale', ...req, inputPath: srcPath, stages: applied },
+      durationSec: res.durationSec,
+      elapsedSec: res.elapsedSec,
+    }).id;
+    node.data = {
+      ...(node.data as Record<string, unknown>),
+      resultPath: res.path,
+      appliedStages: applied,
+      durationSec: res.durationSec,
+      width: res.width,
+      height: res.height,
+      ...(takeId ? { currentTakeId: takeId } : {}),
+    } as unknown as CanvasNode['data'];
+    cur.updatedAt = new Date().toISOString();
+    cur.version += 1;
+    this.store.saveCanvasSnapshot(cur);
+    const etaNote = eta > 0 ? `(预估 ${Math.round(eta / 60)} 分钟,实际 ${res.elapsedSec ?? '?'}s)` : '';
+    return {
+      ok: true,
+      result:
+        `视频增强完成${etaNote}:${basenameOf(res.path)}\n` +
+        `执行阶段:${applied.join(' → ')}\n` +
+        (res.width && res.height ? `输出 ${res.width}×${res.height} · ${res.durationSec ?? '?'}s` : ''),
+      nodeId: node.id,
+    };
   }
 
 }
