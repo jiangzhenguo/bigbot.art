@@ -56,7 +56,8 @@ import { PortPickPop } from './canvas/PortPickPop';
 import { AgentPane } from './canvas/AgentPane';
 import { InspectorPane } from './canvas/InspectorPane';
 import { ContextMenu } from './canvas/ContextMenu';
-import { DebugPanel } from './canvas/DebugPanel';
+import { DebugPanel, type DebugTab } from './canvas/DebugPanel';
+import { usePerfMonitor } from './canvas/usePerfMonitor';
 import { QueueBar } from './canvas/QueueBar';
 import { AssetPickerPop } from './canvas/AssetPickerPop';
 import { useAgentChat } from './agent/useAgentChat';
@@ -603,6 +604,7 @@ export default function CanvasPage({
       if (!d) return;
       dragRef.current = null;
       setDraggingIds([]);
+      perfMonitor.endPhase();
       // 拖动结束 = 一次离散编辑 ✓ 提交历史(未真正移动过则不记)
       if (d.moved && dragPrevRef.current) {
         // 拖动是唯一「跨越很长时间、起点状态必须显式记下」的编辑:直接把拖动前内容当撤销目标
@@ -796,6 +798,7 @@ export default function CanvasPage({
       vx: viewRef.current.x,
       vy: viewRef.current.y,
     };
+    perfMonitor.beginPhase('pan');
     setPanning(true);
   };
   useEffect(() => {
@@ -809,6 +812,7 @@ export default function CanvasPage({
     };
     const onUp = () => {
       setPanning(false);
+      perfMonitor.endPhase();
       // 松手时把最终视口同步回 state:持久化 effect 依赖 view 分量,
       // 且切画布/快照比对都以 state 为真源(拖动期间只活在 ref/DOM 里)
       commitView({ ...viewRef.current });
@@ -916,6 +920,8 @@ export default function CanvasPage({
 
   /* ── 滚轮:以指针为中心缩放(P3:直写 DOM,不 setState) ── */
   const wheelSyncTimer = useRef<number | null>(null);
+  /** 缩放阶段收尾定时器(性能面板归因用;与 wheelSyncTimer 同节奏) */
+  const zoomPhaseTimer = useRef<number | null>(null);
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -924,6 +930,14 @@ export default function CanvasPage({
       const target = e.target as HTMLElement | null;
       if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
       e.preventDefault();
+      // 缩放阶段:滚轮是离散事件流(没有干净的 end),用幂等占位 + 防抖释放,
+      // 不能跟 beginPhase 混用 —— 那个是压栈语义,每次滚轮都 push 会算错
+      perfMonitor.holdPhase('zoom');
+      if (zoomPhaseTimer.current !== null) window.clearTimeout(zoomPhaseTimer.current);
+      zoomPhaseTimer.current = window.setTimeout(() => {
+        zoomPhaseTimer.current = null;
+        perfMonitor.releasePhase();
+      }, 220);
       const rect = stage.getBoundingClientRect();
       const v = viewRef.current;
       const factor = Math.exp(-e.deltaY * 0.0016);
@@ -1094,6 +1108,7 @@ export default function CanvasPage({
       dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
       // 挂 dragging 类(合成层提升);即使未真正移动也会在 pointerup 清空
       setDraggingIds(dragIds);
+      perfMonitor.beginPhase('drag-node');
       e.stopPropagation();
     },
     [],
@@ -3056,10 +3071,14 @@ export default function CanvasPage({
     [projectId, setNodes, setEdges, setSelectedIds, chat, toastMsg],
   );
 
-  /* 调试面板:主进程日志总线(拉历史 + 订阅实时) */
+  /* 调试面板:主进程日志总线(拉历史 + 订阅实时)+ 渲染性能采集 */
   const [dbgOpen, setDbgOpen] = useState(false);
+  const [dbgTab, setDbgTab] = useState<DebugTab>('perf');
   const [dbgLogs, setDbgLogs] = useState<DebugLogEntry[]>([]);
   const dbgBodyRef = useRef<HTMLDivElement | null>(null);
+  /* 性能采集:只在面板打开且停在「性能」页签时跑 —— 采集本身也有成本,
+     而且没人看的时候采一堆数字没有意义(数据只在看的那一刻才需要新鲜)。 */
+  const perfMonitor = usePerfMonitor(dbgOpen && dbgTab === 'perf');
   useEffect(() => {
     if (!dbgOpen) return;
     let alive = true;
@@ -3434,8 +3453,12 @@ export default function CanvasPage({
       {/* ── 调试面板(右下):主进程日志总线 ── */}
       <DebugPanel
         open={dbgOpen}
+        tab={dbgTab}
+        onTab={setDbgTab}
         logs={dbgLogs}
         bodyRef={dbgBodyRef}
+        perf={perfMonitor.snapshot}
+        onPerfReset={perfMonitor.reset}
         onClear={() => void window.bigbotart.debugClear().catch(() => undefined)}
         onClose={() => setDbgOpen(false)}
       />

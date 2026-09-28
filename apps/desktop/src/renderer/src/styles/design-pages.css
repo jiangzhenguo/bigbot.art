@@ -1176,11 +1176,16 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .refprev img{display:block;width:100%;height:auto;min-height:36px;object-fit:cover}
 .pg-canvas .slot:has(.refprev) .sval{max-width:36%}
 
-/* ═══ 调试日志面板(右下浮动) ═══ */
+/* ═══ 调试面板(右下浮动;性能 + 日志两个页签) ═══ */
 .pg-canvas .dbg-panel{position:fixed;right:16px;bottom:16px;width:560px;max-width:calc(100vw - 32px);height:300px;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--glass-bg-strong,#1f2226);box-shadow:var(--glass-shadow,0 14px 44px rgba(0,0,0,.3));z-index:60;overflow:hidden;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
-.pg-canvas .dbg-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border-soft)}
+.pg-canvas .dbg-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border-soft)}
 .pg-canvas .dbg-head .lbl{margin:0;font-size:10.5px}
 .pg-canvas .dbg-acts{display:flex;gap:5px}
+/* 页签 */
+.pg-canvas .dbg-tabs{display:flex;gap:2px}
+.pg-canvas .dbg-tab{padding:3px 10px;border-radius:var(--radius-sm);font-size:10.5px;color:var(--muted);background:transparent;border:1px solid transparent;cursor:pointer;transition:color var(--motion-fast),background var(--motion-fast)}
+.pg-canvas .dbg-tab:hover{color:var(--fg)}
+.pg-canvas .dbg-tab.on{color:var(--fg);background:var(--surface);border-color:var(--border-soft);font-weight:600}
 .pg-canvas .dbg-body{flex:1;overflow:auto;padding:6px 8px;font-size:10.5px;line-height:1.6;display:flex;flex-direction:column;gap:1px}
 .pg-canvas .dbg-line{display:flex;gap:6px;align-items:baseline}
 .pg-canvas .dbg-line.lv-error .dbg-msg{color:#ff8a80}
@@ -1189,6 +1194,29 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .dbg-ts{flex:none;font-size:9.5px;color:var(--meta)}
 .pg-canvas .dbg-lv{flex:none;width:34px;font-size:9px;color:var(--meta);text-transform:uppercase}
 .pg-canvas .dbg-msg{flex:1;word-break:break-all;white-space:pre-wrap}
+/* ── 性能页签 ── */
+.pg-canvas .dbg-verdict{flex:none;padding:6px 8px;border-radius:var(--radius-sm);background:var(--surface);font-size:11px;font-weight:600;color:var(--fg);margin-bottom:6px}
+.pg-canvas .dbg-verdict.mut{font-weight:500}
+.pg-canvas .dbg-grid{flex:none;display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-bottom:6px}
+.pg-canvas .dbg-stat{display:flex;flex-direction:column;align-items:center;gap:1px;padding:5px 3px;border-radius:var(--radius-sm);background:var(--surface);border:1px solid transparent}
+.pg-canvas .dbg-stat b{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.pg-canvas .dbg-stat span{font-size:9px;color:var(--meta)}
+.pg-canvas .dbg-stat.t-warn b{color:#e0a33a}
+.pg-canvas .dbg-stat.t-bad b{color:#e0644f}
+/* 迷你帧曲线:一根柱子 = 一帧,越高越慢 */
+.pg-canvas .dbg-spark{flex:none;display:flex;align-items:flex-end;gap:1px;height:44px;padding:0 2px 4px;border-bottom:1px solid var(--border-soft);margin-bottom:6px}
+.pg-canvas .dbg-spark i{flex:1 1 0;min-width:1px;border-radius:1px 1px 0 0;background:var(--fg-2)}
+.pg-canvas .dbg-spark i.s-ok{background:color-mix(in oklab,var(--success,#3fa66a) 60%,transparent)}
+.pg-canvas .dbg-spark i.s-warn{background:#e0a33a}
+.pg-canvas .dbg-spark i.s-bad{background:#e0644f}
+/* 按操作归因 */
+.pg-canvas .dbg-phases{flex:none;display:flex;flex-direction:column;gap:2px}
+.pg-canvas .dbg-phase{display:flex;align-items:baseline;gap:8px;font-size:10px;padding:2px 4px;border-radius:3px}
+.pg-canvas .dbg-phase .ph{flex:none;width:70px;font-weight:600;color:var(--fg)}
+.pg-canvas .dbg-phase .fr,.pg-canvas .dbg-phase .wm{flex:none;color:var(--meta);font-variant-numeric:tabular-nums}
+.pg-canvas .dbg-phase .lf{margin-left:auto;color:var(--meta);font-variant-numeric:tabular-nums}
+.pg-canvas .dbg-phase .lf.bad{color:#e0644f;font-weight:600}
+.pg-canvas .dbg-hint{flex:none;margin-top:6px;font-size:9.5px}
 
 /* ────────────────────────────────────────────────────────────────
    文本节点 / 分镜表节点(文档 §4 §5)— 表格渲染、TableEditor、铺节点区
