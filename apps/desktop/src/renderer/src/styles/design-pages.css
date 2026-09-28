@@ -298,8 +298,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .stage.marquee.panning{cursor:grabbing}
 /* 视口容器:.world 自身只做 transform(平移/缩放)。
    合成层提示 —— 把「每帧重排 + 重绘整棵子树(节点 DOM + 连线 SVG)」降级为
-   「合成器直接平移已有纹理」,这是画布拖动/缩放卡顿的第一来源。 */
-.pg-canvas .world{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0;will-change:transform;backface-visibility:hidden;contain:layout style}
+   「合成器直接平移已有纹理」,这是画布拖动/缩放卡顿的第一来源。
+
+   ⚠️ transform 走 CSS 变量(P3):视口更新由渲染层**直接写 DOM 变量**
+   (worldRef.current.style.setProperty('--vx'/'--vy'/'--vz')),不再经
+   React state —— 平移/缩放完全不触发 React 渲染。变量默认值对应默认视图。 */
+.pg-canvas .world{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0;will-change:transform;backface-visibility:hidden;contain:layout style;--vx:20px;--vy:10px;--vz:.86;transform:translate(var(--vx),var(--vy)) scale(var(--vz))}
 /* ⚠️ 禁止给 .world 加 contain:paint —— 连线 SVG(.edges)是 overflow:visible、
    节点也可能超出 1600×1000 的 world 边界,加 paint 会把它们直接裁掉。 */
 /* 框选矩形:world 坐标系内绘制(随缩放/平移自然跟手),不参与指针命中 */

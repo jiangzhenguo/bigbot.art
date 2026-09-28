@@ -6,7 +6,7 @@
  * 全局滚轮缩放 / 拖拽平移由 CanvasPage 通过 refs + 回调接线,本组件不持有画布状态。
  * 小地图是真实实现:节点/视口按 minimapLayout 投影,点击或拖拽经 onMinimapNavigate 跳转视角。
  */
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import type { CanvasNode, ConnectDrag, EdgeClass } from './types';
 import { NodeCard } from './NodeCard';
 import { minimapLayout, minimapToWorld } from './minimap';
@@ -26,7 +26,17 @@ const MINIMAP_SIZE = { w: 140, h: 90 };
 const GROUP_PAD = 14;
 
 interface StageViewProps {
+  /**
+   * 视口初始值(仅用于首帧与切换画布时同步)。
+   *
+   * ⚠️ P3 起**不再是每帧跟随的值** —— 平移/缩放由 CanvasPage 直接写
+   * `.world` 的 CSS 变量(--vx/--vy/--vz),不经过 React 渲染。
+   * 传进来只为了:① 首帧 CSS 变量尚未写入时不闪默认视图;② 切画布/加载
+   * 快照时把变量重设一次。运行期间该 prop 不会随拖动变化。
+   */
   view: { x: number; y: number; z: number };
+  /** 把视口写进 .world 的 CSS 变量(CanvasPage 提供;不触发 React 渲染) */
+  applyView: (v: { x: number; y: number; z: number }) => void;
   panning: boolean;
   nodes: CanvasNode[];
   edgePaths: EdgePathRender[];
@@ -57,6 +67,8 @@ interface StageViewProps {
   onZoomReset: () => void;
   /** 小地图跳转:目标世界坐标 → 视图中心对准该点(CanvasPage 实现) */
   onMinimapNavigate: (world: { x: number; y: number }) => void;
+  /** 小地图拖动结束:通知 CanvasPage 把 DOM 里的视口同步回 state(P3 收尾) */
+  onMinimapCommit: () => void;
   /* refs(CanvasPage 的 effect 依赖这些 DOM 节点:滚轮缩放/连线重绘/面板宽度定位) */
   stageRef: React.MutableRefObject<HTMLElement | null>;
   edgesSvgRef: React.MutableRefObject<SVGSVGElement | null>;
@@ -84,6 +96,7 @@ interface StageViewProps {
 
 export function StageView({
   view,
+  applyView,
   panning,
   nodes,
   edgePaths,
@@ -103,6 +116,7 @@ export function StageView({
   onZoomBy,
   onZoomReset,
   onMinimapNavigate,
+  onMinimapCommit,
   stageRef,
   edgesSvgRef,
   minimapRef,
@@ -127,6 +141,20 @@ export function StageView({
     () => minimapLayout(nodes, view, stageSize, MINIMAP_SIZE),
     [nodes, view, stageSize],
   );
+
+  /* ── 视口写入(P3) ──
+     `view` 这个 prop 现在只在两种时机有意义:**首帧**(CSS 变量的静态默认值
+     可能与真实恢复值不同,比如从快照恢复了 viewport)和**切换画布/加载快照**
+     (需要把变量重设一次)。
+
+     平移/缩放期间 CanvasPage 直接 setProperty 写变量并同步更新自己的
+     viewRef,`setView` 不参与 —— 所以这里的 effect 依赖是 view 的三个分量,
+     拖动时不变化、不会重复触发。 */
+  useEffect(() => {
+    applyView(view);
+    // 刻意只依赖三个分量:对象字面量每次渲染都是新引用,依赖 view 会每帧触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.x, view.y, view.z, applyView]);
 
   /** 取消进行中的框选:返回 true = 确实取消了一次(调用方据此跳过「清空选区」) */
   const cancelMarquee = (): boolean => {
@@ -206,9 +234,10 @@ export function StageView({
       <div
         className="world"
         ref={worldRef}
-        style={{
-          transform: `translate(${view.x}px,${view.y}px) scale(${view.z})`,
-        }}
+        /* 注意:这里**不再**有 style.transform(P3)。
+           视口变换由 .world 的 CSS 变量(--vx/--vy/--vz)驱动,CanvasPage 在
+           平移/缩放时直接 setProperty 写 DOM —— 若在这里绑 React style,
+           每次 setState 都会覆盖掉命令式写入的值,优化即刻失效。 */
         onClick={(e) => {
           if (e.target === e.currentTarget) onWorldClick();
         }}
@@ -340,9 +369,12 @@ export function StageView({
           if (e.currentTarget.hasPointerCapture(e.pointerId)) {
             e.currentTarget.releasePointerCapture(e.pointerId);
           }
+          // 拖动期间视口只写在 DOM 里(P3),松手时通知 CanvasPage 同步回 state
+          onMinimapCommit();
         }}
         onPointerCancel={() => {
           mmDragging.current = false;
+          onMinimapCommit();
         }}
         onClick={(e) => e.stopPropagation()}
       >

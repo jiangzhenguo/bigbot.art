@@ -150,11 +150,29 @@ export default function CanvasPage({
   const viewTimer = useRef<number | null>(null);
 
   /* ── 视图:平移 / 缩放(以指针为中心滚轮缩放) ──
-     初值 = 默认视图;挂载/切画布时由画布快照的 viewport 覆盖(见下方加载 effect) */
+     初值 = 默认视图;挂载/切画布时由画布快照的 viewport 覆盖(见下方加载 effect)。
+
+     ⚠️ P3:视口更新**不再走 React 渲染路径**。
+     平移/缩放只调 applyView(直写 .world 的 CSS 变量)并同步 viewRef,
+     完全不 setState —— 这正是「拖动时整棵树重渲染」的根治。
+     `view` 这个 state 只在**离散时点**更新:挂载/切画布/恢复快照/点小地图跳转,
+     它的作用是让「首帧与快照恢复」这类需要 React 参与的场景有单一真源。 */
   const [view, setView] = useState({ ...DEFAULT_VIEW });
   const viewRef = useRef(view);
   viewRef.current = view;
-  const [panning, setPanning] = useState(false);
+
+  /**
+   * 把视口写进 `.world` 的 CSS 变量(命令式,不触发 React 渲染)。
+   * CSS 侧 `transform: translate(var(--vx),var(--vy)) scale(var(--vz))`。
+   */
+  const applyView = useCallback((v: { x: number; y: number; z: number }) => {
+    const el = worldRef.current;
+    if (!el) return;
+    el.style.setProperty('--vx', `${v.x}px`);
+    el.style.setProperty('--vy', `${v.y}px`);
+    el.style.setProperty('--vz', String(v.z));
+  }, []);
+
   /**
    * 视口动画中(平移/缩放/拖动节点):期间给根容器挂 `animating` 类,
    * CSS 侧据此摘掉毛玻璃(backdrop-filter)并恢复不透明底色。
@@ -180,6 +198,30 @@ export default function CanvasPage({
     },
     [],
   );
+
+  /**
+   * 拖拽/缩放期间的高频视口更新:写 DOM + 同步 ref,并标记动画态。
+   * 不 setState —— 这是 P3 的核心。
+   *
+   * ⚠️ 但缩放百分比(zoomPct)是**显示值**,必须跟着变,否则滚轮缩放时
+   * 底部「86%」会卡住不动(视觉 bug)。所以这里额外维护一个**只含整数百分比**
+   * 的轻量 state:它对同一整数不重复 setState(拖一次滚轮通常只触发几次渲染),
+   * 且因为 StageView 已 memo 化节点、百分比只传给 zoomctl 那一小块,
+   * 代价远小于「每帧重渲染整棵树」。
+   */
+  const [zoomPctLive, setZoomPctLive] = useState(() => Math.round(DEFAULT_VIEW.z * 100));
+  const applyViewLive = useCallback(
+    (v: { x: number; y: number; z: number }) => {
+      viewRef.current = v;
+      applyView(v);
+      markViewportAnimating();
+      const pct = Math.round(v.z * 100);
+      setZoomPctLive((prev) => (prev === pct ? prev : pct)); // 同值不触发渲染
+    },
+    [applyView, markViewportAnimating],
+  );
+
+  const [panning, setPanning] = useState(false);
 
   /* ── 画布数据 ──
    初始为空画布(不播种设计稿演示数据):真实节点一律来自已存盘画布快照。
@@ -477,15 +519,43 @@ export default function CanvasPage({
   }, []);
 
   /** 小地图跳转:把目标世界坐标对准舞台中心(保持当前缩放不变) */
-  const onMinimapNavigate = useCallback((world: { x: number; y: number }) => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    setView((v) => ({
-      ...v,
-      x: stage.clientWidth / 2 - world.x * v.z,
-      y: stage.clientHeight / 2 - world.y * v.z,
-    }));
+  const onMinimapNavigate = useCallback(
+    (world: { x: number; y: number }) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      const v = viewRef.current;
+      /* 小地图可拖拽 → 高频更新,同样走命令式(不 setState)。
+         松手后由 minimap 的 up 事件触发一次 setView 收尾(见 StageView)。 */
+      applyViewLive({
+        ...v,
+        x: stage.clientWidth / 2 - world.x * v.z,
+        y: stage.clientHeight / 2 - world.y * v.z,
+      });
+    },
+    [applyViewLive],
+  );
+
+  /**
+   * 离散时点的视口提交(切画布 / 恢复快照 / 外部推送 / 缩放按钮 / 各拖动收尾)。
+   * 统一在这里做三件事,避免漏掉任何一处导致「state 与显示不一致」:
+   *   ① 写 view state(持久化与快照以它为真源);
+   *   ② 同步 viewRef(命令式路径随后读到的是最新值);
+   *   ③ 同步缩放百分比显示。
+   */
+  const commitView = useCallback((v: { x: number; y: number; z: number }) => {
+    viewRef.current = v;
+    setView(v);
+    setZoomPctLive(Math.round(v.z * 100));
   }, []);
+
+  /**
+   * 小地图拖动结束:把命令式写入的视口同步回 state(P3 收尾)。
+   * 必要性:持久化 effect 依赖 view 分量,若不同步则「用小地图拖过的视角」
+   * 不会落盘,下次进画布会回到拖动前的视角。
+   */
+  const onMinimapCommit = useCallback(() => {
+    commitView({ ...viewRef.current });
+  }, [commitView]);
 
   /* ── 节点定位 + 拖拽(scale 校正,和 canvas.js 一致) ──
    * 多选/整组拖动:按下时冻结**每个被拖节点各自的起点坐标**(origins),
@@ -732,17 +802,24 @@ export default function CanvasPage({
     if (!panning) return;
     const onMove = (e: PointerEvent) => {
       const s = panStartRef.current;
-      markViewportAnimating();
-      setView((v) => ({ ...v, x: s.vx + (e.clientX - s.sx), y: s.vy + (e.clientY - s.sy) }));
+      /* P3:拖动中**不 setState** —— 只写 CSS 变量。
+         原先每次 pointermove 都 setView,导致整棵画布树(含全部节点卡片)
+         每帧重渲染;memo 能挡掉大部分,但根节点与 StageView 仍要 reconcile。 */
+      applyViewLive({ ...viewRef.current, x: s.vx + (e.clientX - s.sx), y: s.vy + (e.clientY - s.sy) });
     };
-    const onUp = () => setPanning(false);
+    const onUp = () => {
+      setPanning(false);
+      // 松手时把最终视口同步回 state:持久化 effect 依赖 view 分量,
+      // 且切画布/快照比对都以 state 为真源(拖动期间只活在 ref/DOM 里)
+      commitView({ ...viewRef.current });
+    };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     return () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [panning, markViewportAnimating]);
+  }, [panning, applyViewLive]);
 
   /* ── 框选(marquee)──
    * ⚠️ 坐标必须在 **pointerdown / pointermove 当场**取出(`clientPointOf`):
@@ -837,7 +914,8 @@ export default function CanvasPage({
     [marqueeMode, beginMarquee],
   );
 
-  /* ── 滚轮:以指针为中心缩放 ── */
+  /* ── 滚轮:以指针为中心缩放(P3:直写 DOM,不 setState) ── */
+  const wheelSyncTimer = useRef<number | null>(null);
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -847,19 +925,28 @@ export default function CanvasPage({
       if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
       e.preventDefault();
       const rect = stage.getBoundingClientRect();
-      markViewportAnimating();
-      setView((v) => {
-        const factor = Math.exp(-e.deltaY * 0.0016);
-        const nz = Math.min(1.3, Math.max(0.4, v.z * factor));
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
-        const k = nz / v.z;
-        return { z: nz, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k };
-      });
+      const v = viewRef.current;
+      const factor = Math.exp(-e.deltaY * 0.0016);
+      const nz = Math.min(1.3, Math.max(0.4, v.z * factor));
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const k = nz / v.z;
+      // 缩放同样只写 DOM —— 滚轮是高频连续事件,setState 会逐帧触发整树 reconcile
+      applyViewLive({ z: nz, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k });
+      /* 停止滚动后才同步回 state。用 ref 上的定时器而非 state:
+         若依赖 viewportAnimating 之类的 state 变化来收尾,又会引入渲染。 */
+      if (wheelSyncTimer.current !== null) window.clearTimeout(wheelSyncTimer.current);
+      wheelSyncTimer.current = window.setTimeout(() => {
+        wheelSyncTimer.current = null;
+        commitView({ ...viewRef.current });
+      }, 200);
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
-    return () => stage.removeEventListener('wheel', onWheel);
-  }, [markViewportAnimating]);
+    return () => {
+      stage.removeEventListener('wheel', onWheel);
+      if (wheelSyncTimer.current !== null) window.clearTimeout(wheelSyncTimer.current);
+    };
+  }, [applyViewLive]);
 
   /* ── Agent 面板宽度 ── */
   const agentMax = useCallback(
@@ -1176,8 +1263,7 @@ export default function CanvasPage({
     markBaseline(selfHeal.nodes, selfHeal.edges, loadedGroups);
     // 画布视口:恢复上次退出时的平移/缩放(旧项目文件无 viewport → 默认视图)
     const restored = normalizeView(activeCanvas.viewport);
-    viewRef.current = restored;
-    setView(restored);
+    commitView(restored);
     lastViewRef.current = { ...restored };
     // 换画布 = 换编辑对象:清空撤销/重做历史并重建基线
     historyRef.current.clear();
@@ -1378,8 +1464,7 @@ export default function CanvasPage({
     // 并换历史基线 —— 历史里的节点引用已失效,撤销会回到与 store 不一致的旧内容
     if (!sameContent && cur.viewport) {
       const v = normalizeView(cur.viewport);
-      viewRef.current = v;
-      setView(v);
+      commitView(v);
       lastViewRef.current = { ...v };
     }
     if (sameContent) {
@@ -3083,7 +3168,10 @@ export default function CanvasPage({
     [closeAddPop, openAddPop],
   );
 
-  const zoomPct = `${Math.round(view.z * 100)}%`;
+  /* 缩放百分比显示(P3):用 applyViewLive 维护的轻量 state,
+     而不是 view.z —— 滚轮缩放期间 view 是**不更新**的(刻意如此),
+     用它会让百分比卡住。 */
+  const zoomPct = `${zoomPctLive}%`;
   return (
     <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}${viewportAnimating ? ' animating' : ''}`}>
       <div className={`app${palCollapsed ? ' palette-collapsed' : ''}`} data-od-id="canvas-app">
@@ -3134,6 +3222,7 @@ export default function CanvasPage({
           {/* 中:画布 */}
           <StageView
             view={view}
+            applyView={applyView}
             panning={panning}
             nodes={nodes}
             edgePaths={edgePaths}
@@ -3156,10 +3245,11 @@ export default function CanvasPage({
             zoomPct={zoomPct}
             stageSize={stageSize}
             onMinimapNavigate={onMinimapNavigate}
+            onMinimapCommit={onMinimapCommit}
             onZoomBy={(d) =>
-              setView((v) => ({ ...v, z: Math.min(1.3, Math.max(0.4, v.z + d)) }))
+              commitView({ ...viewRef.current, z: Math.min(1.3, Math.max(0.4, viewRef.current.z + d)) })
             }
-            onZoomReset={() => setView({ ...DEFAULT_VIEW })}
+            onZoomReset={() => commitView({ ...DEFAULT_VIEW })}
             stageRef={stageRef}
             edgesSvgRef={edgesSvgRef}
             minimapRef={minimapRef}
