@@ -39,7 +39,7 @@ import {
   testConnection,
 } from './llm';
 import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent } from '@bigbotart/shared';
-import { referenceMediaIssues } from '@bigbotart/shared';
+import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
 
@@ -511,6 +511,12 @@ ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
   const mediaIssues = referenceMediaIssues(refs as Array<{ role: string; kind?: string; path?: string }>);
   if (mediaIssues.length > 0) {
     throw new Error(`提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}`);
+  }
+  // h3 互斥:references(--ref-image/--ref-video)不能与 frame anchors(--first-frame/--last-frame)共存。
+  // 入队前拦下,避免 h3 在很久之后才 exit 1 且错误信息看不出画布上的真因(2026-09 真实事故)。
+  const anchorIssues = referenceAnchorConflictIssues(refs as Array<{ role?: string }>);
+  if (anchorIssues.length > 0) {
+    throw new Error(`提交被拒绝:${anchorIssues.map((i) => i.message).join('; ')}`);
   }
   // 🚀 加速 LoRA:开启且 real 模式时把蒸馏模型包解析成实际 modelDir(-d)+ steps(h3.c 不接受 --lora,见手册 §8)
   // demo 模式走 mock 占位,不解析(避免包缺失在演示路径误报)

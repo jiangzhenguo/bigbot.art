@@ -11,7 +11,7 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
   { id: 'stitch', kind: 'image-stitch', name: '图片拼接', sub: '多图横排/竖排/网格 · ffmpeg' },
   { id: 'split', kind: 'image-split', name: '图片拆分', sub: '长图切片 · 九宫格切图' },
-  { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/Ref2VA' },
+  { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/参考图/参考视频' },
   { id: 'director', kind: 'director', name: '导演台', sub: '运镜参考小样', p1: true },
   { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
   { id: 'timeline', kind: 'timeline', name: '时间线 / 剪辑', sub: 'FFmpeg 导出', p1: true },
@@ -109,16 +109,38 @@ export function h3AlignFrames(frames: number): number {
 export function h3FramesForSeconds(seconds: number): number {
   return h3AlignFrames(seconds * 24);
 }
+
+/** h3 输出帧率(与 h3.c 的 H3_FPS 一致) */
+export const H3_FPS = 24;
+
+/**
+ * 带**内嵌音轨**的参考视频要求的最小输出时长(h3 硬规则 h3.c:1146)。
+ * 与 `packages/providers/src/h3c-command.ts` 的 `MIN_SOUNDTRACK_SECONDS` / `MIN_SOUNDTRACK_FRAMES`
+ * 保持同口径 —— renderer 不 import providers(包边界),故这里复制常量;改一处要同步另一处。
+ */
+export const MIN_SOUNDTRACK_SECONDS = 2;
+export const MIN_SOUNDTRACK_FRAMES = 56;
+
+/** 镜头输出时长(秒):seconds 优先,否则 frames / H3_FPS */
+export function h3OutputSeconds(data: Record<string, unknown>): number {
+  const secs = Number(data.seconds ?? 0);
+  if (secs > 0) return secs;
+  return Number(data.frames ?? 0) / H3_FPS;
+}
 export const SHOT_MODE_LABEL: Record<string, string> = {
   text2video: '文生',
   'first-frame': '首帧',
   'last-frame': '尾帧',
   'first-last': '首尾帧',
   'ref-image': 'Ref2VA',
+  'ref-video': '参考视频',
 };
 /** 参考角色(按 mode 可用的)+ 需要的媒体类型 */
 export const SHOT_REF_ROLES: Record<string, Array<{ role: string; label: string; media: 'image' | 'audio' | 'video'; multiple?: boolean }>> = {
-  text2video: [{ role: 'ref-audio', label: '音频参考', media: 'audio' }],
+  text2video: [
+    { role: 'ref-video', label: '参考视频', media: 'video' },
+    { role: 'ref-audio', label: '音频参考', media: 'audio' },
+  ],
   'first-frame': [
     { role: 'first-frame', label: '首帧', media: 'image' },
     { role: 'ref-audio', label: '音频参考', media: 'audio' },
@@ -134,6 +156,10 @@ export const SHOT_REF_ROLES: Record<string, Array<{ role: string; label: string;
   ],
   'ref-image': [
     { role: 'ref-image', label: '参考图(1-9 张)', media: 'image', multiple: true },
+    { role: 'ref-audio', label: '音频参考', media: 'audio' },
+  ],
+  'ref-video': [
+    { role: 'ref-video', label: '参考视频', media: 'video' },
     { role: 'ref-audio', label: '音频参考', media: 'audio' },
   ],
 };

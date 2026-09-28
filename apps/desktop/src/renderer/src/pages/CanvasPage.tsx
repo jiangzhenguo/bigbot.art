@@ -2529,7 +2529,14 @@ export default function CanvasPage({
           }
         }
         const hasFirst = references.some((r) => (r as { role?: string }).role === 'first-frame');
-        if (!hasFirst && (wantsFrameAnchor || !['ref-image', 'last-frame'].includes(shotMode))) {
+        // 自动抽上游尾帧当首帧 —— 但**参考类模式必须豁免**:
+        // h3.c 硬性规定 references(--ref-image/--ref-video)不能与 frame anchors(--first-frame/--last-frame)
+        // 同时给(`full references cannot be combined with frame anchors`,h3.c:591),
+        // 兜底若在参考模式下塞首帧,提交必被 h3 拒绝。
+        // ref-image / last-frame 一直是豁免的;ref-video 是 2026-09 新增模式,漏同步过名单,
+        // 导致「ref-video + ref-image」的镜头被偷偷多注入一个 first-frame → h3 exit 1(真实事故)。
+        const REF_MODES_NO_FRAME_ANCHOR = ['ref-image', 'ref-video', 'last-frame'];
+        if (!hasFirst && (wantsFrameAnchor || !REF_MODES_NO_FRAME_ANCHOR.includes(shotMode))) {
           const upId = upShotId;
           const up = upId ? nodesRef.current.find((x) => x.id === upId) : undefined;
           const upData = (up?.data ?? {}) as Record<string, unknown>;
@@ -2657,6 +2664,8 @@ export default function CanvasPage({
             reuse: Number(d.reuse ?? 1),
             tier: d.tier,
             seed: d.seed,
+            // 参考视频音轨:true → h3 --ref-silent-video(只取画面),否则 --ref-video 连内嵌音轨一起注入
+            refVideoSilent: d.refVideoSilent === true,
             // 🚀 加速 LoRA:传给主进程,提交时解析为 modelDir(-d)+ steps
             accel: d.accel,
           };

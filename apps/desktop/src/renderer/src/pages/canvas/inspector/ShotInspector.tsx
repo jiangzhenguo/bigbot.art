@@ -10,6 +10,9 @@ import {
   SHOT_REF_ROLES,
   h3AlignFrames,
   h3FramesForSeconds,
+  h3OutputSeconds,
+  MIN_SOUNDTRACK_SECONDS,
+  MIN_SOUNDTRACK_FRAMES,
 } from '../constants';
 import { clamp32, thumbSrc, outputUrlOf } from '../media';
 
@@ -69,6 +72,8 @@ export function ShotInspector({
   const setSpec = (patch: Record<string, unknown>) => setData({ ...patch, specOverride: true });
 
   const preset = SHOT_TIER_PRESETS[tier];
+  /** 输出时长(秒):用于「带音轨参考视频 ≥2 秒」的实时预警(与 h3c-command.validateParams 同口径) */
+  const outputSeconds = h3OutputSeconds(d);
   const isCustom = aspect === 'custom';
   // 推导值(比例 × 档位 / 自定义,32 倍数对齐)
   const derived = isCustom
@@ -583,18 +588,22 @@ export function ShotInspector({
       <div className="f-sec">
         <div className="lbl">参考绑定</div>
         {refs.length === 0 ? (
-          <div className="f-hint">绑定首/尾帧、参考图或音频后,生成时自动注入(--ref-* 参数)</div>
+          <div className="f-hint">绑定首/尾帧、参考图、参考视频或音频后,生成时自动注入(--ref-* 参数)</div>
         ) : (
           refs.map((r, i) => {
             const path = r.path ?? assetCache[r.assetId ?? ''];
             const def = roleDefs.find((rd) => rd.role === r.role);
             const isShotSrc = !!r.path;
+            const srcNote =
+              r.role === 'ref-video'
+                ? (isShotSrc ? '视频产物 · 整段成片' : '视频素材')
+                : isShotSrc ? '上游镜头尾帧' : '';
             return (
               <div className="slot" key={`${r.assetId ?? r.path}-${i}`}>
                 {path ? <span className="refprev"><img src={isShotSrc ? outputUrlOf(path) : (thumbSrc(path) ?? '')} alt="" /></span> : <span className="refprev" />}
                 <span className="grow">
                   <div className="sname">{def?.label ?? r.role}{r.auto ? ' · 自动' : ''}</div>
-                  {isShotSrc ? <div className="mut mono" style={{ fontSize: 9 }}>上游镜头尾帧</div> : null}
+                  {srcNote ? <div className="mut mono" style={{ fontSize: 9 }}>{srcNote}</div> : null}
                 </span>
                 <span className="sval">{r.assetId ? r.assetId.slice(0, 10) : '…'}</span>
                 <button className="btn btn-xs" onClick={() => removeRef(i)} title="移除">×</button>
@@ -620,6 +629,36 @@ export function ShotInspector({
             </button>
           );
         })}
+        {/* 参考视频音轨开关:h3 --ref-video 会把源片内嵌音轨一起注入;只想借画面/动作时勾这里 */}
+        {refs.some((r) => r.role === 'ref-video') ? (
+          <>
+            <label
+              className="f-hint"
+              data-od-id="shot-ref-video-silent"
+              style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, cursor: 'pointer' }}
+            >
+              <input
+                type="checkbox"
+                checked={d.refVideoSilent === true}
+                onChange={(e) => setData({ refVideoSilent: e.target.checked })}
+              />
+              忽略参考视频音轨(改走 <code>--ref-silent-video</code>;不勾则连同源片声音一起参考)
+            </label>
+            {/* 时长下限预警(与 h3c-command.ts 的 validateParams 同口径,h3.c:1146):
+                带音轨的参考视频要求输出 ≥2 秒,而 preview 档只有 22 帧(≈0.92s)→ 必然提交失败。
+                提前在这里显示,避免用户提交后才在队列里看到 h3 的英文报错 */}
+            {d.refVideoSilent !== true && outputSeconds < MIN_SOUNDTRACK_SECONDS ? (
+              <div
+                className="f-hint"
+                data-od-id="shot-ref-video-duration-warn"
+                style={{ marginTop: 4, color: 'var(--warn, #d08700)' }}
+              >
+                ⚠️ 参考视频带音轨时 h3 要求输出 ≥2 秒,当前 {outputSeconds.toFixed(2)} 秒:
+                请提高帧数/时长(≥ {MIN_SOUNDTRACK_FRAMES} 帧),或勾选上面的「忽略参考视频音轨」。
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {/* 用户 × 掉的自动绑定:给出恢复入口,避免"连线明明在却不再注入"的困惑 */}
         {suppressed.length > 0 ? (
           <div className="f-hint" style={{ marginTop: 6 }}>

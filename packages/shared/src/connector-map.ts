@@ -11,7 +11,8 @@
 /** 源节点 kind → 目标 kind → 端口(label) */
 export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   shot: {
-    shot: 'first-frame', // 上游尾帧作为下游首帧(镜头接续链)
+    // 镜头成片双端口:first-frame 上游尾帧作首帧(接续链)/ ref-video 整段成片作 Ref2VA 参考(h3 --ref-video)
+    shot: 'first-frame/ref-video',
     edit: 'input', // 取帧作为输入图
     'video-upscale': 'input', // 镜头成片 → 视频增强(超分 + 修脸)
     timeline: 'clip', // 整段入轨
@@ -135,7 +136,7 @@ export const PORT_SEMANTICS: Record<string, string> = {
   'last-frame': '尾帧条件(FL2VA)',
   'ref-image': '参考图(→ shot 是 Ref2VA 身份/场景锁定;→ image-gen 是多参考生成,需多参考模型 flux.2-klein)',
   'ref-audio': '音轨参考(带声直出)',
-  'ref-video': '参考视频(风格/动作参考)',
+  'ref-video': '参考视频(风格/动作参考;→ shot 时走 h3 --ref-video,默认连同源片内嵌音轨一起注入,可在检查器勾「忽略音轨」改走 --ref-silent-video)',
   input: '输入图/输入帧(编辑/超分源;→ video-upscale 时是待增强视频)',
   piece: '拼接件(图片拼接 · 多值端口,按源节点画布位置排序)',
   'piece-N': '取拆分产物第 N 片(piece-1/piece-2/…,替代 input/piece 端口)',
@@ -187,7 +188,7 @@ export const NODE_KIND_GUIDE = [
   ['image-split', '图片拆分(纯 ffmpeg:一张图等分多片,长图切片/九宫格;下游经 piece-N 端口按序号取片)'],
   ['image-upscale', '图片增强(超分)'],
   ['video-upscale', '视频增强(超分 + 合修脸):本地后处理,不走推理队列。三阶段可独立开关——去块(ffmpeg deblock)/ 超分(Real-ESRGAN,真人用 realesrgan-x4plus)/ 修脸(GFPGAN 或 CodeFormer)。输入连 shot 成片或视频 asset(input 端口),产物 mp4 接时间线入轨或作下游镜头参考。参数:data={scale, srModel, faceModel, faceWeight, deblock, device}'],
-  ['shot', '视频镜头(h3.c:文生/首帧/首尾帧/参考图;支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
+  ['shot', '视频镜头(h3.c:文生/首帧/尾帧/首尾帧/参考图/参考视频;参考视频端口 ref-video 可接视频 asset、上游镜头成片、视频增强产物,默认连同源片音轨一起参考(节点 data.refVideoSilent=true 改走 --ref-silent-video 只取画面);支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
   ['director', '导演台(运镜参考小样)'],
   ['timeline', '时间线/剪辑(FFmpeg 导出)'],
   ['audio-ref', '音频参考(--ref-audio)'],

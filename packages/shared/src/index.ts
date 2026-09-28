@@ -13,6 +13,29 @@ export interface RuntimeProbe {
   detail?: string;
 }
 
+/**
+ * 引擎自检项(引导向导第 4 步;主进程真实探测,非 UI 动画)
+ * 每项独立判定:单项失败不影响其余项
+ */
+export interface SelfCheckItem {
+  id: 'h3c' | 'mlxgen' | 'llm' | 'storage';
+  label: string;
+  ok: boolean;
+  /** 真实探测结果摘要(GPU / 版本 / 端点 / 路径等) */
+  detail: string;
+  /** 失败时的可执行修复指引(ok=true 时缺省) */
+  hint?: string;
+  /** 该项实际耗时(ms,真实测量值) */
+  ms: number;
+}
+
+/** 自检汇总报告 */
+export interface SelfCheckReport {
+  items: SelfCheckItem[];
+  passed: number;
+  total: number;
+}
+
 /** pi Agent 子进程健康状态 */
 export interface AgentProcessState {
   running: boolean;
@@ -28,6 +51,8 @@ export interface BigBotArtApi {
   // 引擎引导
   probeRuntimes(): Promise<RuntimeProbe[]>;
   installRuntime(id: string): Promise<{ ok: boolean; message: string }>;
+  /** 引擎自检(引导向导第 4 步):主进程真实探测 h3.c / mlxgen / LLM 工具回环 / 数据目录 */
+  runSelfCheck(): Promise<SelfCheckReport>;
   // 图片引擎模型管理(mlxgen:已下载探测 / 真实下载 / 下载进度轮询)
   mlxgenModels(): Promise<Array<{ id: string; name: string; repoId: string; downloaded: boolean }>>;
   mlxgenDownload(repoId: string): Promise<{ ok: boolean; jobId?: string; error?: string }>;

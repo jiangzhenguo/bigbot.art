@@ -99,6 +99,73 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect((shot.data as { mode: string }).mode).toBe('text2video');
   });
 
+  /* ── 参考视频(h3 --ref-video):三类视频源之前全被静默丢弃,连线可见但不进生成命令 ── */
+
+  it('上游镜头 → shot(ref-video 端口):用整段成片注入 { path, role:ref-video, auto }', () => {
+    const nodes = [
+      node('up', 'shot', { resultPath: '/tmp/out/up.mp4', tailFramePath: '/tmp/out/up-last.png' }),
+      node('s1', 'shot', { mode: 'ref-video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'up', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (nextNodes.find((n) => n.id === 's1')!.data as { refs: Array<{ path?: string; role: string }> }).refs;
+    expect(refs).toContainEqual({ path: '/tmp/out/up.mp4', role: 'ref-video', auto: true });
+    // 参考视频取的是成片,不是尾帧 PNG
+    expect(refs.some((r) => r.path === '/tmp/out/up-last.png')).toBe(false);
+  });
+
+  it('视频增强产物 → shot(ref-video 端口):增强成片注入 ref-video', () => {
+    const nodes = [
+      node('u1', 'video-upscale', { resultPath: '/tmp/out/enhanced.mp4' }),
+      node('s1', 'shot', { mode: 'ref-video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'u1', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (nextNodes.find((n) => n.id === 's1')!.data as { refs: Array<{ path?: string; role: string }> }).refs;
+    expect(refs).toContainEqual({ path: '/tmp/out/enhanced.mp4', role: 'ref-video', auto: true });
+  });
+
+  it('视频 asset → shot(ref-video 端口):注入 assetId 引用', () => {
+    const nodes = [
+      node('a1', 'asset', { assetId: 'asset-vid', mediaType: 'video' }),
+      node('s1', 'shot', { mode: 'ref-video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'a1', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (nextNodes.find((n) => n.id === 's1')!.data as { refs: Array<{ assetId?: string; role: string }> }).refs;
+    expect(refs).toContainEqual({ assetId: 'asset-vid', role: 'ref-video', auto: true });
+  });
+
+  it('ref-video 边不触发 mode 自动切换(参考视频是独立语义,不当作首帧接续)', () => {
+    const nodes = [
+      node('up', 'shot', { resultPath: '/tmp/out/up.mp4' }),
+      node('s1', 'shot', { mode: 'text2video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'up', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect((nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('text2video');
+  });
+
+  it('上游成片未就绪时 ref-video 不注入空路径(不写 path:undefined)', () => {
+    const nodes = [node('up', 'shot', { tailFramePath: '/tmp/out/up-last.png' }), node('s1', 'shot', { mode: 'ref-video', refs: [] })];
+    const edges: Edge[] = [{ from: 'up', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (nextNodes.find((n) => n.id === 's1')!.data as { refs: Array<{ role: string }> }).refs;
+    expect(refs.some((r) => r.role === 'ref-video')).toBe(false);
+  });
+
+  it('删掉 ref-video 入边 ⇒ 自动注入的参考视频被撤销(手动绑定保留)', () => {
+    const nodes = [
+      node('up', 'shot', { resultPath: '/tmp/out/up.mp4' }),
+      node('s1', 'shot', { mode: 'ref-video', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'up', to: 's1', cls: '', label: 'ref-video' }];
+    const once = computeEdgeDerivations(nodes, edges);
+    expect((once.nextNodes.find((n) => n.id === 's1')!.data as { refs: unknown[] }).refs).toHaveLength(1);
+    const twice = computeEdgeDerivations(once.nextNodes, []);
+    expect((twice.nextNodes.find((n) => n.id === 's1')!.data as { refs: unknown[] }).refs).toHaveLength(0);
+  });
+
   it('first-frame 边仍自动切 mode=first-frame(回归);删掉后收回 text2video', () => {
     const nodes = [
       node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),

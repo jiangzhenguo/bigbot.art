@@ -42,7 +42,10 @@ const BY_ID: Record<string, Record<string, PortRow>> = {
 /** 源节点 kind → 目标类型 → 端口(单条或多条;多条时 resolvePortOptions 返回全部,弹窗出「角色」chips) */
 const BY_KIND: Record<string, Record<string, PortEntry>> = {
   shot: {
-    shot: ['first-frame', '首帧 · 上游尾帧自动取帧'],
+    shot: [
+      ['first-frame', '首帧 · 上游尾帧自动取帧'],
+      ['ref-video', '参考视频 · 上游整段成片(风格/动作参考)'],
+    ],
     edit: ['input', '输入帧 · 首/尾帧可取'],
     vupscale: ['input', '输入视频 · 镜头成片增强(超分/修脸)'],
     timeline: ['clip', '视频片段 · 整段入轨'],

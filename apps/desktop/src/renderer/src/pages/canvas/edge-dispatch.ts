@@ -86,11 +86,13 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           SINGLE_ROLES.includes(role) &&
           (suppressedRoles.includes(role) || curRefs.some((r) => !r.auto && r.role === role));
         if (src.kind === 'asset') {
-          // 资产引用注入:按边 label 决定角色 —— 图片资源可作「首帧参考(first-frame)」或「参考图(ref-image)」
+          // 资产引用注入:按边 label 决定角色 —— 图片资源可作「首帧参考(first-frame)」或「参考图(ref-image)」,
+          // 视频资源可作「参考视频(ref-video)」,音频资源作「音轨参考(ref-audio)」
           const role =
             e.label === 'first-frame' ? 'first-frame'
             : e.label === 'ref-image' ? 'ref-image'
             : e.label === 'ref-audio' ? 'ref-audio'
+            : e.label === 'ref-video' ? 'ref-video'
             : undefined;
           const assetId = String(s.assetId ?? '');
           if (role && assetId && !autoBlocked(role)) arr.push({ assetId, role, auto: true });
@@ -100,12 +102,25 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
             const tail = String(s.tailFramePath ?? '');
             if (tail) arr.push({ path: tail, role: 'first-frame', auto: true });
           }
+          // 参考视频(h3 --ref-video):上游**整段成片**作 Ref2VA 参考(风格/动作),
+          // 与「尾帧作首帧」是两个独立语义;产物未就绪时不注入(提交期 W004 兜底)
+          if (e.label === 'ref-video' && !autoBlocked('ref-video')) {
+            const mp4 = String(s.resultPath ?? '');
+            if (mp4) arr.push({ path: mp4, role: 'ref-video', auto: true });
+          }
           // 画面规格继承:比例 + 档位(三件套)整组取自上游;下游手动改过则不再覆盖
           if (d.specOverride !== true) {
             const spec = pickShotSpec(s);
             if (Object.keys(spec).length) specPatch.set(e.to, spec);
           }
           specFromPatch.set(e.to, { nodeId: e.from });
+        } else if (VIDEO_KINDS.includes(src.kind ?? '')) {
+          // 视频产物 → 镜头(如 video-upscale 增强成片):ref-video 参考视频;
+          // first-frame 端口不在此注入 —— 端口载荷是静帧,须先经 frames 取帧
+          if (e.label === 'ref-video' && !autoBlocked('ref-video')) {
+            const mp4 = String(s.resultPath ?? '');
+            if (mp4) arr.push({ path: mp4, role: 'ref-video', auto: true });
+          }
         } else if (fromImage) {
           // 图片产物 → 镜头(图生视频双端口):
           // - first-frame:静帧直通首帧(全链路自动切首帧模式)

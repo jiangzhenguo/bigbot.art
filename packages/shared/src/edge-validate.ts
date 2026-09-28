@@ -323,6 +323,17 @@ export function deriveShotRefsFromEdges(
       if (lbl === 'first-frame') {
         const tail = String(sd.tailFramePath ?? '');
         if (tail) derived.push({ path: tail, role: 'first-frame', auto: true });
+      } else if (lbl === 'ref-video') {
+        // 整段成片作参考视频(h3 --ref-video):与「首帧接续」是两个独立端口,可同时用
+        const mp4 = String(sd.resultPath ?? '');
+        if (mp4) derived.push({ path: mp4, role: 'ref-video', auto: true });
+      }
+    } else if (VIDEO_KINDS.includes(src.kind)) {
+      // 视频产物 → 镜头:ref-video 参考视频(video-upscale 增强成片等);
+      // first-frame 端口消费的是静帧,这里不注入(需经 frames 取帧后再连)
+      if (lbl === 'ref-video') {
+        const mp4 = String(sd.resultPath ?? '');
+        if (mp4) derived.push({ path: mp4, role: 'ref-video', auto: true });
       }
     } else if (IMAGE_KINDS.includes(src.kind)) {
       // 图片产物 → 镜头:first-frame 静帧直通首帧 / ref-image 参考图注入(图生视频双端口,与资产图行为一致)
@@ -406,6 +417,13 @@ export function validateRefsForSubmit(
         message: `${nodeId} mode=ref-image 但缺少 ref-image 参考`,
       });
     }
+    if (mode === 'ref-video' && !has('ref-video')) {
+      out.push({
+        code: 'ref-missing',
+        severity: 'warn',
+        message: `${nodeId} mode=ref-video 但缺少 ref-video 参考(W004):请连一条 ref-video 入边(视频 asset / 上游镜头成片 / 视频增强产物),否则将退化为文生视频`,
+      });
+    }
   }
   return out;
 }
@@ -436,4 +454,34 @@ export function referenceMediaIssues(
     }
   }
   return out;
+}
+
+/**
+ * h3.c 的 Ref2VA/FL2VA 互斥规则(提交前兜底)。
+ *
+ * h3.c 硬性校验(`h3.c:591`):
+ *     if (params->reference_count && (params->first_frame || params->last_frame))
+ *         h3_set_error(ctx, "full references cannot be combined with frame anchors");
+ * 即 `--ref-image` / `--ref-video`(references)**不能**与 `--first-frame` / `--last-frame`(frame anchors)共存。
+ *
+ * 为什么要在提交前拦:这条规则一旦违反,h3 是**入队后**才 exit 1 的,错误信息只有一句英文,
+ * 画布上看不出问题(用户只连了两条边,是渲染层的「镜头接续兜底」偷偷多注入了 first-frame)。
+ * 2026-09 真实事故:mode=ref-video 的镜头被自动抽上游尾帧当首帧 → h3 拒绝。
+ * 这里提前拒绝并**指明原因与修法**,不让错误跑到引擎里才暴露。
+ */
+export function referenceAnchorConflictIssues(
+  refs: Array<{ role?: string }>,
+): EdgeViolation[] {
+  const hasReference = refs.some((r) => r.role === 'ref-image' || r.role === 'ref-video');
+  const anchor = refs.find((r) => r.role === 'first-frame' || r.role === 'last-frame');
+  if (!hasReference || !anchor) return [];
+  return [
+    {
+      code: 'media-mismatch',
+      severity: 'error',
+      message:
+        `参考图/参考视频(--ref-image/--ref-video)与首/尾帧锁定(--first-frame/--last-frame)在 h3 中互斥,不能同时提交` +
+        `(当前同时存在 ${anchor.role})。请二选一:要么去掉首/尾帧锚定(参考类模式不需要它),要么去掉参考图/参考视频。`,
+    },
+  ];
 }

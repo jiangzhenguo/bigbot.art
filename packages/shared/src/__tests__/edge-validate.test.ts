@@ -76,7 +76,7 @@ describe('A · validateEdge 端口合法性', () => {
     const nodes = [shotNode('up', { resultPath: '/out/up.mp4', tailFramePath: '/out/up-last.png' }), shotNode('down')];
     const res = validateEdge(nodes, [], edge('up', 'down', 'first-frame'));
     expect(res.ok).toBe(true);
-    expect(allowedPortLabels(shotNode('up'), 'shot')).toEqual(['first-frame']);
+    expect(allowedPortLabels(shotNode('up'), 'shot')).toEqual(['first-frame', 'ref-video']);
   });
 
   it('shot → shot 尾帧未就绪也允许建边(连线先立,提交期 W004 兜底)', () => {
@@ -84,9 +84,20 @@ describe('A · validateEdge 端口合法性', () => {
     expect(validateEdge(nodes, [], edge('up', 'down', 'first-frame')).ok).toBe(true);
   });
 
-  it('shot → shot 其他端口仍被拒(last-frame/ref-image 媒体不匹配,ref-video 不在镜头接续端口表)', () => {
+  it('shot → shot ref-video 合法(整段成片作 Ref2VA 参考视频)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4' }), shotNode('down')];
+    expect(validateEdge(nodes, [], edge('up', 'down', 'ref-video')).ok).toBe(true);
+    // 同一对节点之间仍受既有 duplicate-edge 规则约束:first-frame 与 ref-video 不能共存于同一对 up→down
+    // (这是全端口通用限制,不是 ref-video 特有;下游要看参考视频就别再连首帧端口)
+    const edges = [edge('up', 'down', 'first-frame')];
+    const dup = validateEdge(nodes, edges, edge('up', 'down', 'ref-video'));
+    expect(dup.ok).toBe(false);
+    expect(dup.errors[0]!.code).toBe('duplicate-edge');
+  });
+
+  it('shot → shot 其他端口仍被拒(last-frame/ref-image 媒体不匹配)', () => {
     const nodes = [shotNode('up', { tailFramePath: '/out/up-last.png' }), shotNode('down')];
-    for (const label of ['last-frame', 'ref-image', 'ref-video']) {
+    for (const label of ['last-frame', 'ref-image']) {
       const res = validateEdge(nodes, [], edge('up', 'down', label));
       expect(res.ok, label).toBe(false);
       expect(res.errors[0]!.code, label).toBe('port-not-allowed');
@@ -204,6 +215,57 @@ describe('B · deriveShotRefsFromEdges(refs 由边推导)', () => {
     );
     expect(refs.find((r) => r.role === 'first-frame')).toEqual({ path: '/out/g.png', role: 'first-frame', auto: true });
     expect(refs.find((r) => r.role === 'ref-image')).toEqual({ path: '/out/c.png', role: 'ref-image', auto: true });
+  });
+
+  /* ── 视频参考(h3 --ref-video):三类视频源都必须能推导出 ref-video,否则连线可见但提交静默丢弃 ── */
+
+  it('shot → shot ref-video 用上游成片作参考视频(auto)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4', tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'ref-video')], 'down');
+    expect(refs).toEqual([{ path: '/out/up.mp4', role: 'ref-video', auto: true }]);
+  });
+
+  it('shot → shot 同时有 first-frame 与 ref-video 入边时:尾帧作首帧、成片作参考视频,两角色各自的推导互不干扰', () => {
+    // 注:同一对节点同时建这两条边会被 validateEdge 的 duplicate-edge 拦下(通用规则)。
+    // 本用例只锁死「推导层角色分派正确」,将来若放开同对多端口,行为仍然正确。
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4', tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'first-frame'), edge('up', 'down', 'ref-video')], 'down');
+    expect(refs.find((r) => r.role === 'first-frame')).toEqual({ path: '/out/up-last.png', role: 'first-frame', auto: true });
+    expect(refs.find((r) => r.role === 'ref-video')).toEqual({ path: '/out/up.mp4', role: 'ref-video', auto: true });
+  });
+
+  it('shot → shot ref-video 在上游成片就绪前不注入(不写空路径),就绪后自动补上', () => {
+    const pending = [shotNode('up', { tailFramePath: '/out/up-last.png' }), shotNode('down')];
+    expect(deriveShotRefsFromEdges(pending, [edge('up', 'down', 'ref-video')], 'down')).toEqual([]);
+    const ready = [shotNode('up', { resultPath: '/out/up.mp4' }), shotNode('down')];
+    expect(deriveShotRefsFromEdges(ready, [edge('up', 'down', 'ref-video')], 'down')).toHaveLength(1);
+  });
+
+  it('video-upscale → shot ref-video 用增强成片作参考视频(auto)', () => {
+    const nodes = [
+      { id: 'u', kind: 'video-upscale', data: { resultPath: '/out/enhanced.mp4' } },
+      shotNode('s'),
+    ];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('u', 's', 'ref-video')], 's');
+    expect(refs).toEqual([{ path: '/out/enhanced.mp4', role: 'ref-video', auto: true }]);
+  });
+
+  it('video-upscale → shot first-frame 不注入(端口载荷是静帧,须先取帧)', () => {
+    const nodes = [{ id: 'u', kind: 'video-upscale', data: { resultPath: '/out/enhanced.mp4' } }, shotNode('s')];
+    expect(deriveShotRefsFromEdges(nodes, [edge('u', 's', 'first-frame')], 's')).toEqual([]);
+  });
+
+  it('asset(video) → shot ref-video 推导出 assetId 引用', () => {
+    const nodes = [assetNode('v', 'video'), shotNode('s')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('v', 's', 'ref-video')], 's');
+    expect(refs).toEqual([{ assetId: 'asset-v', role: 'ref-video', auto: true }]);
+  });
+
+  it('ref-video 是被手动绑定或被 × 停用时不注入(单值端口让位规则)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4' }), shotNode('down')];
+    const existing = [{ assetId: 'asset-manual', role: 'ref-video', auto: false }];
+    expect(deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'ref-video')], 'down', existing)).toEqual(existing);
+    expect(deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'ref-video')], 'down', [], ['ref-video'])).toEqual([]);
   });
 });
 
