@@ -230,6 +230,13 @@ agent.onEvent = (ev: AgentEvent) => {
   } else if (ev.kind === 'aborted') {
     logger.log('warn', 'agent.chat 已被用户打断');
   }
+  // 记录「已成功完成的工具」:长任务失败/超时时用它说明画布改动是否已生效
+  if (ev.kind === 'tool-end' && ev.ok) {
+    const key = `${ev.projectId}:${ev.canvasId}`;
+    const list = toolActivity.get(key) ?? [];
+    list.push(describeToolAction(ev.toolName ?? '', ev.toolArgs ?? {}, ev.nodeId));
+    toolActivity.set(key, list.slice(-20));
+  }
   win?.webContents.send('agent-event', {
     ...ev,
     projectId: ev.projectId || currentToolCtx?.projectId || '',
@@ -284,6 +291,12 @@ queue.onChange = (jobs) => {
 const activeToolCtx = new Map<string, { projectId: string; canvasId: string }>();
 /** 最近一次 chat 上下文(事件兜底;工具 RPC 已自带 projectId/canvasId) */
 let currentToolCtx: { projectId: string; canvasId: string } | null = null;
+/**
+ * 本会话已成功完成的工具动作(按 project:canvas 归集)。
+ * 用途:长任务失败/超时时说明「哪些改动其实已经生效」——旧实现在收尾超时时只回一句
+ * 「agent 无响应」,让用户以为整轮白干,而画布改动其实早已落盘(真实事故 2026-09-28)。
+ */
+const toolActivity = new Map<string, string[]>();
 
 /**
  * 安全写 stderr —— 防「管道断裂把主进程写崩」(真实事故 2026-09)。
@@ -863,6 +876,8 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
   );
   const chatKey = `${req.projectId}:${req.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */
+  const activityKey = `${req.projectId}:${req.canvasId}`;
   const toolCtx = { projectId: req.projectId, canvasId: req.canvasId };
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
@@ -919,8 +934,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
       text: req.text + attNote + selNote,
       context: ctx,
       llm,
-    });
-    logger.log(
+    });    logger.log(
       'info',
       `agent.chat 完成 · 工具 ${result.toolCalls.length} 个${result.ask ? ' · 暂停待用户确认(ask.user)' : ''}${result.aborted ? ' · 已打断' : ''} · 回复 ${result.reply.length} 字`,
     );
@@ -958,10 +972,27 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
         toolResult: '(已暂停,等待用户选择)',
       });
     }
-    return { ok: true, reply: result.reply, thinking: result.thinking, toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted };
+    const final: AgentChatResponse = {
+      ok: true, reply: result.reply, thinking: result.thinking,
+      toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted,
+    };
+    win?.webContents.send('agent-event', {
+      kind: 'done', projectId: req.projectId, canvasId: req.canvasId, final,
+    } satisfies AgentEvent);
+    return final;
   } catch (e) {
-    logger.log('error', `agent.chat 失败:${(e as Error).message}`);
-    return { ok: false, error: (e as Error).message };
+    // 失败也要带上「已完成的工具」摘要:长任务常在收尾阶段超时,而画布改动其实已落盘,
+    // 只报一句「无响应」会让用户以为全丢了
+    const done = toolActivity.get(activityKey) ?? [];
+    const summary = done.length
+      ? `\n已完成 ${done.length} 个操作(${done.slice(-4).join('、')}${done.length > 4 ? ' 等' : ''}),画布改动已生效。`
+      : '';
+    const msg = `${(e as Error).message}${summary}`;
+    logger.log('error', `agent.chat 失败:${msg}`);
+    win?.webContents.send('agent-event', {
+      kind: 'failed', projectId: req.projectId, canvasId: req.canvasId, error: msg,
+    } satisfies AgentEvent);
+    return { ok: false, error: msg };
   } finally {
     activeToolCtx.delete(chatKey);
     // 仅当仍指向本会话时清空,避免并发 chat 的 finally 互相踩掉

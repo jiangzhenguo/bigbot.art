@@ -1344,10 +1344,16 @@ export default function CanvasPage({
   /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;带标题供用户气泡回显;渲染期同步保持稳定引用) */
   const selectedNodeRef = useRef<{ id: string; title: string } | null>(null);
   selectedNodeRef.current = selNode ? { id: selNode.id, title: selNode.title } : null;
+  /* ⚠️ 必须 useCallback 稳定引用:useAgentChat 里订阅 agent-event 的 effect 依赖它,
+     内联箭头每次渲染都换新引用 → effect 反复清理重订;dev StrictMode 双挂载下会出现
+     同一事件被两个监听器各收一次,导致收尾卡重复(真实事故:识别提示词显示 2 次)。 */
+  const handleCanvasMutated = useCallback(() => {
+    void refreshCanvasFromStore();
+  }, [refreshCanvasFromStore]);
   const chat = useAgentChat({
     projectId,
     canvasId: activeCanvasId,
-    onCanvasMutated: () => void refreshCanvasFromStore(),
+    onCanvasMutated: handleCanvasMutated,
     toastMsg,
     selectedNodeRef,
   });

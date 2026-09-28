@@ -14,6 +14,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** worker 入口(编译产物) */
 export const WORKER_ENTRY = join(__dirname, 'worker.js');
 
+/**
+ * chat 的**静默**超时(不是总超时):连续这么久没有任何心跳才判失败。
+ * 只要 worker 还在推进(每轮循环开始都发心跳),跑多久都不会被杀 —— 见 request 的看门狗说明。
+ *
+ * ⚠️ 取值必须 **大于单轮 LLM 最长思考时间**:心跳是「每轮一次」,如果某一轮的推理本身
+ * 就超过这个值,该轮会在心跳到来之前被误杀(实测:反推中文长提示词的单轮可达 10-20 秒,
+ * 设成 8 秒会在轮内被杀)。默认 3 分钟对本地 35B 模型是安全的余量。
+ */
+const SILENT_TIMEOUT_MS = Number(process.env.BIGBOTART_AGENT_SILENT_TIMEOUT_MS ?? 180_000);
+
 export interface AgentManagerOptions {
   /** 覆盖 worker 脚本路径(指向 pi 入口或自定义 worker) */
   workerEntry?: string;
@@ -31,7 +41,11 @@ export interface AgentManagerOptions {
 
 export class AgentManager {
   private child?: ChildProcess;
-  private pending = new Map<number, { resolve: (v: AgentResponse) => void }>();
+  /**
+   * 在飞请求表。`bump` 是静默看门狗的续期钩子(有 worker 活动时重置计时),
+   * 见 request() 的说明 —— 长任务靠它避免被「总时长」误杀。
+   */
+  private pending = new Map<number, { resolve: (v: AgentResponse) => void; bump?: () => void }>();
   private reqSeq = 0;
   private startedAt?: string;
   private inline: boolean;
@@ -78,9 +92,17 @@ export class AgentManager {
     rl.on('line', (line) => {
       try {
         const msg = JSON.parse(line) as AgentResponse | ToolCallRequest;
+        // worker 心跳(批次1):每轮循环开始都发,给静默看门狗续期 ——
+        // 覆盖「首轮 LLM 推理」这段没有工具活动的空窗期(否则任务会在真正开始前被误杀)
+        if ('method' in msg && (msg as { method?: string }).method === 'heartbeat') {
+          this.bumpAllHeartbeats();
+          return;
+        }
         // worker 发来的工具调用请求(反向 RPC):method==='tool'
         if ('method' in msg && msg.method === 'tool') {
           console.error('[agent-mgr] 收到 worker 工具请求:', (msg as ToolCallRequest).params?.tool);
+          // 有工具活动 = worker 活着 → 给当前在跑的 chat 请求续期(静默看门狗,见 request)
+          this.bumpAllHeartbeats();
           void this.handleToolCall(msg as ToolCallRequest);
           return;
         }
@@ -176,7 +198,15 @@ export class AgentManager {
         toolName: req.params.tool,
         toolArgs: req.params.args,
       });
-      res = await this.toolExecutor(req);
+      try {
+        res = await this.toolExecutor(req);
+      } catch (e) {
+        /* 工具执行**必须**兜住异常并回写结果:
+           否则 worker 侧 pendingTools 永远等不到 resolve → 整个对话挂起,
+           最终表现为看门狗超时「agent 无响应」,而真因(某个工具抛了)完全丢失。
+           这里转成 worker 可见的失败结果,让模型能据此调整或如实汇报。 */
+        res = { id: req.id, result: { ok: false, result: `工具执行异常:${(e as Error).message}` } };
+      }
       // 事件推送:工具结束
       this.onEvent?.({
         kind: 'tool-end',
@@ -191,7 +221,12 @@ export class AgentManager {
     } else {
       res = { id: req.id, error: { code: 'NO_EXECUTOR', message: '工具执行器未注入' } };
     }
-    this.child.stdin!.write(JSON.stringify(res) + '\n');
+    try {
+      this.child.stdin!.write(JSON.stringify(res) + '\n');
+    } catch (e) {
+      // 回写失败(管道断裂 / worker 已退):记录但不抛,避免未捕获的 rejection
+      console.error('[agent-mgr] 工具结果回写失败:', (e as Error).message);
+    }
   }
 
   /** 多轮对话 + 工具调用(画布页 Agent) */
@@ -213,21 +248,50 @@ export class AgentManager {
     return { ok: true };
   }
 
+  /**
+   * 静默看门狗(批次1)。
+   *
+   * 旧实现是一个固定的总超时(chat 5 分钟),长任务会被「总时长」误杀:实测一次「反推提示词」
+   * 跑了 11 轮 / 249 秒,最后生成回复时撞穿 5 分钟被判定「agent 无响应」,而任务其实已经成功
+   * (提示词早已写进节点)——用户看到的是假失败。
+   *
+   * 现在改为**静默超时**:只要 worker 还有动静(每轮工具调用都会 bump 心跳)就续期,
+   * 只有**真的卡死**(连续 SILENT_TIMEOUT_MS 无任何心跳)才判失败。
+   * 配合主进程改用事件推送终局,长任务不再受单次请求时长约束。
+   */
   private request<P, R>(method: AgentRequest<P>['method'], params: P): Promise<AgentResponse<R>> {
     const id = ++this.reqSeq;
     const msg: AgentRequest<P> = { id, method, params };
+    const timeoutMs = method === 'chat' ? SILENT_TIMEOUT_MS : this.requestTimeoutMs;
     return new Promise((resolve) => {
-      this.pending.set(id, { resolve: resolve as (v: AgentResponse) => void });
+      let timer: NodeJS.Timeout;
+      const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          const p = this.pending.get(id);
+          if (p) {
+            this.pending.delete(id);
+            p.resolve({ id, error: { code: 'TIMEOUT', message: `agent 无响应(已静默 ${Math.round(timeoutMs / 1000)}s,本地 LLM 可能加载中或已崩溃)` } });
+          }
+        }, timeoutMs);
+      };
+      // 心跳续期:worker 每次发出工具请求都算「还活着」
+      this.pending.set(id, { resolve: resolve as (v: AgentResponse) => void, bump: arm });
       this.child!.stdin!.write(JSON.stringify(msg) + '\n');
-      // 超时回退(本地 LLM 首次加载可能超过 1 分钟;chat 多轮工具循环给 5 分钟)
-      setTimeout(() => {
-        const p = this.pending.get(id);
-        if (p) {
-          this.pending.delete(id);
-          p.resolve({ id, error: { code: 'TIMEOUT', message: 'agent 无响应(本地 LLM 加载中或已崩溃)' } });
-        }
-      }, method === 'chat' ? 300_000 : this.requestTimeoutMs);
+      arm();
     });
+  }
+
+  /**
+   * 给所有在跑的长请求续期。
+   * 工具请求走的是反向 RPC,自带一个独立的 id(不是 chat 请求的 id),所以无法精确对应;
+   * 但同一时刻通常只有一个 chat 在跑,全部续期是安全且够用的(多 chat 并发时最坏也只是
+   * 让另一个请求的看门狗延后,不会误杀)。
+   */
+  private bumpAllHeartbeats(): void {
+    for (const p of this.pending.values()) {
+      p.bump?.();
+    }
   }
 
   private requestTimeoutMs = 180_000;

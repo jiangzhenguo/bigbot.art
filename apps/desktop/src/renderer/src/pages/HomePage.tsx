@@ -511,7 +511,6 @@ export default function HomePage({
                 </div>
               )}
               <span className="spacer"></span>
-              <span className="mono mut" style={{ fontSize: '11px' }}>{t('规划 Agent · {model}', { model: llmLabel })}</span>
               <button className="btn btn-p" id="goBtn" data-od-id="intake-generate" onClick={handleGenerate}>
                 {t('生成')}
               </button>

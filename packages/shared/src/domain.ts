@@ -890,6 +890,12 @@ export interface AskOption {
 
 export interface AgentChatResponse {
   ok: boolean;
+  /**
+   * 批次1 任务化:主进程收到请求即返回 `accepted: true`(此时本轮尚未跑完),
+   * 真正的结果经 AgentEvent `done` / `failed` 推送。
+   * 渲染层据此把「发送中」切成「执行中」,而不是继续 await。
+   */
+  accepted?: boolean;
   /** assistant 最终回复文本 */
   reply?: string;
   /** 模型思考内容(渲染层折叠展示;不进 recall 记忆) */
@@ -906,7 +912,12 @@ export interface AgentChatResponse {
 
 /** Agent 实时事件(主进程 → 渲染层推送) */
 export interface AgentEvent {
-  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity';
+  /**
+   * `done` / `failed` 是**终局事件**(批次1 任务化):agent-chat 不再 await 到底,
+   * 收到请求即返回 {ok:true, accepted:true},真正的结果经事件推送。
+   * 这样长任务(反推提示词等 11 轮 / 5 分钟以上的链路)不再被请求超时误杀成「假失败」。
+   */
+  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed';
   projectId: string;
   canvasId: string;
   toolName?: string;
@@ -915,4 +926,8 @@ export interface AgentEvent {
   result?: string;
   nodeId?: string;
   issues?: string[];
+  /** 终局(done):本轮最终结果,字段语义与 AgentChatResponse 一致 */
+  final?: AgentChatResponse;
+  /** 终局(failed):失败原因(带已完成工具摘要,便于判断画布改动是否已生效) */
+  error?: string;
 }

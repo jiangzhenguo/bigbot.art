@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import type { Asset, LlmSource } from '@bigbotart/shared';
+import type { AgentChatResponse, Asset, LlmSource } from '@bigbotart/shared';
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
 import { llmDisplayName } from './llm-display';
@@ -42,6 +42,15 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
   const msgId = useRef(100);
   /** 本轮工具聚合卡(ToolRunCard)的消息 id;一轮对话一张卡,SSE 实时更新,回复到达后对账 */
   const liveToolCardId = useRef<number | null>(null);
+  /**
+   * 本轮是否已收尾(settleChat 幂等闸)。
+   * `done`/`failed` 终局事件在 dev StrictMode 或 effect 重订阅竞态下可能被投递两次,
+   * 第二次会因 liveToolCardId 已清空而再补一张卡(真实事故:识别提示词显示两次)。
+   * 发送新消息时重置为 false,收尾时置 true。
+   */
+  const settleGuard = useRef(false);
+  /** 最近处理过的实时事件指纹(防止同一事件被重复订阅的监听器投递两次,见事件订阅 effect) */
+  const seenEvents = useRef<Set<string>>(new Set());
   /** 消息流是否贴底(用户在底部附近时新消息自动跟随;往上翻则不打扰) */
   const pinToBottom = useRef(true);
 
@@ -269,6 +278,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
       }
       // 新一轮开始:重置聚合卡指针(SSE tool-start 会建一张新卡)
       liveToolCardId.current = null;
+      settleGuard.current = false; // 新一轮:打开收尾闸(见 settleGuard 声明)
       // loading 气泡
       const loadingId = ++msgId.current;
       setSending(true);
@@ -284,79 +294,108 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           selectedNodeId: ctxNode?.id ?? undefined,
         })
         .then((res) => {
-          // StrictMode 下 setMsgs updater 会双跑:ref 的读与清必须在 updater 外完成,
-          // 否则第二趟跑到时 ref 已被第一趟清空 → 对账失败 → 重复建卡
-          const liveId = liveToolCardId.current;
-          liveToolCardId.current = null;
-          setMsgs((m) => {
-            const rest = m.filter((x) => x.id !== loadingId);
-            const out: ChatMsg[] = [...rest];
-            // 工具调用聚合卡:res.toolCalls 为权威列表——实时卡已存在则原地对账替换(避免与 SSE 行重复),否则补一张
-            if (res.toolCalls?.length) {
-              const runs: ToolRun[] = res.toolCalls.map((tc) => ({
-                name: tc.name,
-                args: tc.args,
-                status: tc.ok ? 'success' : 'error',
-                result: tc.result,
-                nodeId: tc.nodeId,
-              }));
-              const li = liveId != null ? out.findIndex((x) => x.id === liveId && x.toolRuns) : -1;
-              const liveCard = li >= 0 ? out[li] : undefined;
-              if (liveCard) out[li] = { ...liveCard, toolRuns: runs };
-              else out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: runs });
-            }
-            if (res.aborted) {
-              // 打断:把仍 running 的行标为失败,避免永久转圈
-              for (let i = 0; i < out.length; i++) {
-                const msg = out[i];
-                if (!msg?.toolRuns?.some((r) => r.status === 'running')) continue;
-                out[i] = {
-                  ...msg,
-                  toolRuns: msg.toolRuns.map((r) => (r.status === 'running' ? { ...r, status: 'error' as const, result: '已打断' } : r)),
-                };
-              }
-              out.push({ id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改' });
-            } else if (res.ask && res.ask.options.length >= 2) {
-              // 结构化提问:渲染确认卡片(不重复推 reply 文本,卡片已含问题);思考内容折叠展示
-              if (res.thinking) out.push({ id: ++msgId.current, kind: 'agent', thinking: res.thinking });
-              out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: res.ask.question, options: res.ask.options } });
-            } else if (res.ok && (res.reply || res.thinking)) {
-              out.push({ id: ++msgId.current, kind: 'agent', text: res.reply, thinking: res.thinking });
-            } else if (!res.ok) {
-              // 错误卡(LLM 不可达等):红头 + 原因 + 重试/去设置;本轮未执行的工具不受影响
-              const detail = res.error ?? '未知错误';
-              out.push({
-                id: ++msgId.current,
-                kind: 'agent',
-                error: {
-                  title: errorCardTitle(detail),
-                  detail,
-                  retryText: v,
-                },
-              });
-            }
-            return out;
-          });
+          // 批次1 任务化:主进程立即回执 {ok:true,accepted:true},真正结果走 agent-event
+          // 的 done/failed。收到回执时**只切状态、不收尾**(否则会在工具还在跑时就把卡片封死);
+          // 若主进程走了同步失败路径(带 error 且非 accepted),则在这里直接收尾。
+          if (res.accepted && res.ok) {
+            setMsgs((m) => m.map((x) => (x.id === loadingId ? { ...x, text: '执行中…' } : x)));
+            return;
+          }
+          settleRef.current(res);
         })
         .catch((e) => {
+          // 若终局事件已经收过尾,这里只解锁,不再补错误卡(防双开)
+          if (settleGuard.current) {
+            setSending(false);
+            return;
+          }
+          settleGuard.current = true;
           liveToolCardId.current = null;
           const detail = e instanceof Error ? e.message : String(e);
           setMsgs((m) => [
             ...m.filter((x) => x.id !== loadingId),
             { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail, retryText: v } },
           ]);
-        })
-        .finally(() => {
+          // 请求本身失败(IPC 断开等)是终局,必须解锁;正常路径的解锁在 settleChat 的 done 分支
           setSending(false);
-          // 画布可能被工具改动:重新加载当前画布
-          void window.bigbotart.loadProjectCanvases(pid).then(() => {
-            onCanvasMutated();
-          });
-          if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
         });
     },
     [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, selectedNodeRef],
   );
+
+  /**
+   * 终局收尾(批次1 任务化):把 AgentChatResponse 落成消息卡片。
+   * 由 agentChat 的 Promise 返回值与 agent-event 的 done 事件共用:
+   *  - accepted 回执(仅 {ok:true,accepted:true})不触发收尾,只把 loading 文案切成执行中
+   *  - 真正结果(带 reply/toolCalls/ask)才收尾
+   * 这样长任务不再依赖请求不超时 —— 结果从事件流回来,UI 全程有工具卡实时反馈。
+   *
+   * ⚠️ 幂等保护:`done` 事件在 dev StrictMode(或 effect 重订阅竞态)下可能被投递两次,
+   * 若不加闸,第二次会因 liveToolCardId 已被清空而**再补一张卡**(真实事故:识别提示词
+   * 在 UI 上显示两次)。用 settleGuard.current 记住「本轮的收尾已完成」,重复调用直接忽略。
+   */
+  const settleChat = useCallback(
+    (res: AgentChatResponse) => {
+      if (settleGuard.current) return; // 本轮已收尾 → 忽略重复投递
+      settleGuard.current = true;
+      const liveId = liveToolCardId.current;
+      liveToolCardId.current = null;
+      setMsgs((m) => {
+        const rest = m.filter((x) => !x.loading);
+        const out: ChatMsg[] = [...rest];
+        // 工具调用聚合卡:res.toolCalls 为权威列表——实时卡已存在则原地对账替换(避免与 SSE 行重复),否则补一张
+        if (res.toolCalls?.length) {
+          const runs: ToolRun[] = res.toolCalls.map((tc) => ({
+            name: tc.name,
+            args: tc.args,
+            status: tc.ok ? 'success' : 'error',
+            result: tc.result,
+            nodeId: tc.nodeId,
+          }));
+          const li = liveId != null ? out.findIndex((x) => x.id === liveId && x.toolRuns) : -1;
+          const liveCard = li >= 0 ? out[li] : undefined;
+          if (liveCard) out[li] = { ...liveCard, toolRuns: runs };
+          else out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: runs });
+        }
+        if (res.aborted) {
+          // 打断:把仍 running 的行标为失败,避免永久转圈
+          for (let i = 0; i < out.length; i++) {
+            const msg = out[i];
+            if (!msg?.toolRuns?.some((r) => r.status === 'running')) continue;
+            out[i] = {
+              ...msg,
+              toolRuns: msg.toolRuns.map((r) => (r.status === 'running' ? { ...r, status: 'error' as const, result: '已打断' } : r)),
+            };
+          }
+          out.push({ id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改' });
+        } else if (res.ask && res.ask.options.length >= 2) {
+          // 结构化提问:渲染确认卡片(不重复推 reply 文本,卡片已含问题);思考内容折叠展示
+          if (res.thinking) out.push({ id: ++msgId.current, kind: 'agent', thinking: res.thinking });
+          out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: res.ask.question, options: res.ask.options } });
+        } else if (res.ok && (res.reply || res.thinking)) {
+          out.push({ id: ++msgId.current, kind: 'agent', text: res.reply, thinking: res.thinking });
+        } else if (!res.ok) {
+          const detail = res.error ?? '未知错误';
+          out.push({
+            id: ++msgId.current,
+            kind: 'agent',
+            error: { title: errorCardTitle(detail), detail },
+          });
+        }
+        return out;
+      });
+      setSending(false);
+      void window.bigbotart.loadProjectCanvases(projectId ?? '').then(() => {
+        onCanvasMutated();
+      });
+      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    },
+    [projectId, onCanvasMutated],
+  );
+
+  /** 终局收尾的稳定引用(事件订阅的 effect 依赖它,避免因函数重建而反复退订) */
+  const settleRef = useRef(settleChat);
+  settleRef.current = settleChat;
 
   /** 真实打断:中止 worker 内 LLM 请求 */
   const interrupt = useCallback(() => {
@@ -473,6 +512,13 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
   /** 订阅 Agent 实时事件(工具开始/结束 → 聚合卡实时行;连续性校验 → 校验卡) */
   useEffect(() => {
     const off = window.bigbotart.onAgentEvent((ev) => {
+      // 事件去重:dev StrictMode 双挂载 / effect 重订阅竞态下,同一事件可能被投递两次。
+      // 同一毫秒内 kind+toolName+nodeId 完全相同的事件视为重复(事件本身没有 id,
+      // 用「时间片 + 工具名」做轻量指纹;真实事件间隔远大于 1ms,不会误伤)。
+      const sig = `${ev.kind}|${ev.toolName ?? ''}|${ev.nodeId ?? ''}|${Math.floor(Date.now() / 2)}`;
+      if (seenEvents.current.has(sig)) return;
+      seenEvents.current.add(sig);
+      if (seenEvents.current.size > 200) seenEvents.current.clear(); // 防无限增长
       if (ev.projectId && projectId && ev.projectId !== projectId) return;
       if (ev.canvasId && canvasId && ev.canvasId !== canvasId) return;
       if (ev.kind === 'tool-start' && ev.toolName) {
@@ -558,6 +604,31 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
         ]);
       } else if (ev.kind === 'aborted') {
         setMsgs((m) => m.filter((x) => !x.loading));
+      } else if (ev.kind === 'done' && ev.final) {
+        // 批次1 任务化:终局结果从事件流回来(不再依赖请求不超时)。
+        // 主进程已把 recall 写好,这里只负责 UI 收尾。
+        settleRef.current(ev.final);
+      } else if (ev.kind === 'failed') {
+        // 失败:清掉 loading 与实时卡的转圈,给错误卡(文案已含「已完成 N 个操作」摘要)
+        // 同样走 settleGuard 幂等闸:重复投递不得再补第二张错误卡
+        if (settleGuard.current) return;
+        settleGuard.current = true;
+        const detail = ev.error ?? '未知错误';
+        liveToolCardId.current = null;
+        setMsgs((m) => [
+          ...m
+            .filter((x) => !x.loading)
+            .map((x) =>
+              x.toolRuns?.some((r) => r.status === 'running')
+                ? { ...x, toolRuns: x.toolRuns.map((r) => (r.status === 'running' ? { ...r, status: 'error' as const, result: '未完成(本轮中断)' } : r)) }
+                : x,
+            ),
+          { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail } },
+        ]);
+        setSending(false);
+        void window.bigbotart.loadProjectCanvases(projectId ?? '').then(() => {
+          onCanvasMutated();
+        });
       }
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     });

@@ -35,6 +35,7 @@ import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
 import { cropImage, extractFrame } from './frames';
+import { captionImage } from './vision';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
 export { toolDefinitions } from '@bigbotart/shared';
@@ -791,6 +792,67 @@ export class ToolHandlers {
     },
 
     /* ── frames 域:从视频抽一帧存成图片资源节点(ffmpeg 秒级同步) ── */
+    /* ── vision 域:看图反推提示词(主对话模型纯文本,这是唯一的读图通道) ── */
+    'vision.caption': async (a, ctx) => {
+      // 参数校验优先于来源解析:非法 style 不该被「资产/节点不存在」抢先掩盖(报错要指向真因)
+      const style = String(a.style ?? 'prompt');
+      if (!['prompt', 'zimage', 'h3', 'json'].includes(style)) {
+        return { ok: false, result: `style 非法: ${style}(可选 prompt / zimage / h3 / json)` };
+      }
+      const nodeId = String(a.nodeId ?? '');
+      const assetIdArg = String(a.assetId ?? '');
+      if (!nodeId && !assetIdArg) {
+        return { ok: false, result: '需要给图片来源:nodeId(画布节点)或 assetId(资产库)' };
+      }
+      // 来源解析:assetId 直取;nodeId 走画布产物解析(asset 节点 → 资产路径;其余 → data.resultPath)
+      let imagePath: string | undefined;
+      let srcLabel = '';
+      const assetPath = (id: string) => this.assets.get(id)?.localPath;
+      // 报错要给出**可执行的下一步**:模型曾把节点 id 当 assetId 传 → 「资产不存在」后
+      // 绕道 assets.list 翻全库找 id(47 项),白烧 2 轮。这里直接告诉它去哪查。
+      if (assetIdArg) {
+        const asset = this.assets.get(assetIdArg);
+        if (!asset) {
+          return {
+            ok: false,
+            result:
+              `资产 ${assetIdArg} 不存在。若你手上的其实是**画布节点 id**,请改用参数 nodeId;` +
+              `要查真实资产 id 用 assets.list(或用 canvas.list_nodes 拿节点 id 后传 nodeId)。`,
+          };
+        }
+        imagePath = asset.localPath;
+        srcLabel = asset.name ?? assetIdArg;
+      } else {
+        const pc = this.store.loadProjectCanvases(ctx.projectId);
+        const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+        const srcNode = cur?.nodes.find((n) => n.id === nodeId);
+        if (!srcNode) {
+          return {
+            ok: false,
+            result: `节点 ${nodeId} 不存在(不要用标题拼 id)。先用 canvas.list_nodes 拉当前画布的最新节点 id,再重试。`,
+          };
+        }
+        srcLabel = srcNode.label || srcNode.id;
+        imagePath = resolveNodeImagePath(srcNode, undefined, assetPath);
+        if (!imagePath) {
+          return {
+            ok: false,
+            result:
+              `「${srcLabel}」没有可读的图片产物:asset 节点请确认已绑定资产;图片节点请先 engine.submit 生成。` +
+              `若它是**视频**(如 shot / 视频资产),本工具看不了视频,请先用 frames.extract 取一帧再调本工具。`,
+          };
+        }
+      }
+      const res = await captionImage(imagePath, style, a.extra ? String(a.extra) : undefined);
+      if (!res.ok || !res.caption) return { ok: false, result: `反推失败:${res.error ?? '未知错误'}` };
+      return {
+        ok: true,
+        result:
+          `已用视觉模型(${res.model})反推「${srcLabel}」:\n\n${res.caption}\n\n` +
+          `(说明:这是对图片内容的文字描述,可据此填写 shot/image-gen 的 prompt;` +
+          `需要调整侧重可再调本工具并传 extra)`,
+      };
+    },
     'frames.extract': async (a, ctx) => {
       const nodeId = String(a.nodeId ?? '');
       const videoPathArg = String(a.videoPath ?? '');
@@ -876,11 +938,16 @@ export class ToolHandlers {
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
+      // 返回文案必须把「节点 id」与「资产 id」分开写清:两者长的很像(都以 asset- 开头),
+      // 模型曾把节点 id 当 assetId 传给 vision.caption → 「资产不存在」,再绕道 assets.list
+      // 翻全库找 id。这里显式标注用途,并顺带给下一步可用的工具。
       return {
         ok: true,
         result:
-          `已抽出「${srcName}」的${atLabel}并建为资源节点「${label}」· ${basenameOf(res.path)}\n` +
-          `可用 canvas.connect 把它连给下游(image-edit 的 input 端口 / shot 的 first-frame 等)`,
+          `已抽出「${srcName}」的${atLabel},建为画布资源节点「${label}」· ${basenameOf(res.path)}\n` +
+          `- 节点 id:${node.id}(画布操作用它:canvas.get_node / canvas.connect)\n` +
+          `- 资产 id:${assetId ?? '(导入失败,无)'}(资产库操作与 vision.caption 的 assetId 用这个)\n` +
+          `若要看这一帧的画面/反推提示词:vision.caption(nodeId="${node.id}") 或 vision.caption(assetId="${assetId ?? ''}")${seconds !== undefined ? `;该帧是视频第 ${seconds}s 处` : ''}`,
         nodeId: node.id,
       };
     },

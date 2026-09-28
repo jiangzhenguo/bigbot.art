@@ -166,6 +166,14 @@ describe.runIf(hasFfmpeg)('frames.extract', () => {
     expect(d.assetId).toBeTruthy();
     expect((d.frameSource as Record<string, unknown>).fromNodeId).toBe('shot-1');
     expect((d.frameSource as Record<string, unknown>).mode).toBe('first');
+
+    // 返回文案必须把「节点 id」与「资产 id」分开写清 —— 真实事故:模型把节点 id 当
+    // assetId 传给 vision.caption → 「资产不存在」,再绕道 assets.list 翻全库找 id。
+    expect(res.result).toContain(res.nodeId!); // 节点 id 可见
+    expect(res.result).toContain(String(d.assetId)); // 资产 id 也可见
+    expect(res.result).toContain('节点 id');
+    expect(res.result).toContain('资产 id');
+    expect(res.result).toContain('vision.caption'); // 顺带给出下一步工具
   });
 
   it('at=数字 → 时间点模式(结果文案与 frameSource 都记录秒数)', async () => {

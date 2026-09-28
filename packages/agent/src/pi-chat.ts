@@ -64,6 +64,27 @@ export function isPollingExhausted(pollCount: number): boolean {
 export const POLL_ABORT_MESSAGE = POLL_ABORT_REPLY;
 
 /**
+ * 组装喂给模型的工具结果文本。
+ *
+ * 关键:工具的**结构化 nodeId 必须拼进正文**。此前只喂 `result` 文本,模型拿不到新建
+ * 节点的 id,只能拿标题硬猜(真实事故 2026-09-28:一次「反推提示词」共 18 次工具调用,
+ * 其中 get_node 用 `人物参考图-1790509845606-00a2` 这类「标题-id」拼出的幻觉 id 直接 404,
+ * 再绕道 assets.list 翻 47 项资产找真 id,白烧 4 个往返)。
+ *
+ * @param result 工具返回的人读摘要
+ * @param nodeId 工具返回的结构化节点 id(有则拼进正文)
+ * @param ok     工具是否成功(id 只在成功时才可信)
+ */
+export function buildToolResultText(result: string, nodeId?: string, ok = true): string {
+  if (!nodeId || !ok) return result;
+  return (
+    `${result}\n\n[节点 id = ${nodeId}] ` +
+    `后续以 id 为参数的工具(canvas.connect / canvas.get_node / vision.caption / engine.submit 等)` +
+    `直接用这个值,不要用标题拼 id。`
+  );
+}
+
+/**
  * 敏感操作强制确认闸(结构兜底,与 memory.ts 的提问规则对应)。
  * 模型不守 prompt、用纯文本提问/直接执行时,由这里拦截:不执行,改发 ask.user 确认卡。
  * 用户点选确认后,授权签名粘滞(approvedSensitive),同操作本会话内不再二次拦截。
@@ -177,6 +198,11 @@ export class PiChatSession {
   private lastAskQuestion: string | null = null;
   /** worker → 主进程的工具调用回调(由 worker.ts 注入) */
   onToolCall: ((req: ToolCallRequest) => Promise<ToolCallResponse>) | null = null;
+  /**
+   * 每轮循环开始时的回调(批次1):worker 用它向主进程发心跳,让静默看门狗续期。
+   * 覆盖「首轮 LLM 推理」这段没有任何工具活动的空窗期。
+   */
+  onRound: ((round: number) => void) | null = null;
 
   /** 敏感操作签名:同名同参视为同一操作(重跑同节点同参数 = 用户已授权过的动作) */
   private static sensitiveSig(name: string, args: Record<string, unknown>): string {
@@ -261,6 +287,10 @@ export class PiChatSession {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (signal.aborted) return { reply: '', toolCalls, aborted: true };
+      // 轮次心跳:主进程的静默看门狗据此续期。必须在**调用 LLM 之前**发 ——
+      // 首轮推理可以长达 30-60 秒(本地 35B 模型),若只在工具调用时才报活,
+      // 任务会在真正开始前就被看门狗误杀(实测踩过)。
+      this.onRound?.(round);
       const context: Context = { systemPrompt: params.context.systemPrompt, messages, tools };
       let assistant: AssistantMessage;
       try {
@@ -435,12 +465,14 @@ export class PiChatSession {
         toolCalls.push({ name: call.name, args, ok: tr.ok, result: tr.result, nodeId: tr.nodeId });
         // 提交成功 → 进入「收尾期」,后续只读轮询开始计数(见上方轮询抑制闸)
         if (call.name === 'engine.submit' && tr.ok) submitted = true;
+        // 工具结果文本:结构化 nodeId 必须拼进正文(见 buildToolResultText 注释)。
+        const resultText = buildToolResultText(tr.result, tr.nodeId, tr.ok);
         // toolResult 追加进 messages(OpenAI 协议)
         messages.push({
           role: 'toolResult' as const,
           toolCallId: call.id,
           toolName: call.name,
-          content: [{ type: 'text' as const, text: tr.result }],
+          content: [{ type: 'text' as const, text: resultText }],
           isError: !tr.ok,
           timestamp: Date.now(),
         } as never);

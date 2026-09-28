@@ -37,6 +37,19 @@ function respond(msg: AgentResponse) {
   process.stdout.write(JSON.stringify(msg) + '\n');
 }
 
+/**
+ * 心跳上报(批次1 静默看门狗):主进程据此给长任务续期。
+ *
+ * 为什么需要它:主进程的看门狗只认「有活动就不杀」,而此前唯一的活动信号是工具调用 ——
+ * **首轮 LLM 推理期间没有任何工具活动**,本地 35B 模型想 30-60 秒很正常,看门狗会在
+ * 任务真正开始前就把它误杀(实测:8 秒静默超时下,首轮推理直接被杀)。
+ * 这里让 worker 每一轮循环都主动报活,覆盖推理阶段。
+ */
+function heartbeat(phase: string) {
+  process.stdout.write(JSON.stringify({ method: 'heartbeat', params: { phase } }) + '\n');
+}
+chatSession.onRound = (round) => heartbeat(`round-${round}`);
+
 rl.on('line', async (line) => {
   let req: AgentRequest | ToolCallResponse;
   try {

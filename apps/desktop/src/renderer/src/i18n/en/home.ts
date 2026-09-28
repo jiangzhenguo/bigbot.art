@@ -23,7 +23,6 @@ export default {
   '角色锁定': 'Character Lock',
   '运镜参考': 'Camera Reference',
   '更多模型 · 到设置页配置…': 'More models · configure in Settings…',
-  '规划 Agent · {model}': 'Planning Agent · {model}',
   '技能库为空 · 可在 Skills 库页创建': 'No skills yet · create one in the Skills page',
   '默认模型': 'Default model',
   '生成': 'Generate',
