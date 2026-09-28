@@ -246,7 +246,7 @@ agent.onEvent = (ev: AgentEvent) => {
 
 /** 队列任务完成 → 自动归档 Take(渲染层先建 takeId,这里写终态)+ 连续性校验 */
 queue.onJobFinish = (job) => {
-  // Take 归档:有 takeId 就 patch(渲染层创建),否则补一条
+  // Take 归档:有 takeId 就 patch(提交方创建),否则补一条
   if (job.takeId && job.projectId) {
     void takes.patch(job.projectId, job.takeId, {
       status: job.status,
@@ -262,6 +262,17 @@ queue.onJobFinish = (job) => {
       resultPath: job.resultPath,
       error: job.error,
     });
+  } else if (job.status === 'succeeded' || job.status === 'failed') {
+    /* ⚠️ 兜底留痕(红线 R6:禁止静默吞错)。任务结局明确却没有 projectId 时,上面两个分支
+       全落空 → 这条任务在 Take 历史里**完全不存在**,用户看到「生成成功但画布上什么都没有」,
+       失败任务更是连错误都无处回查(2026-09-28 真实事故:Agent 提交漏传 projectId/canvasId,
+       17:10 出的片 18:09 才在产物目录里被人工发现)。工具侧已补齐字段,这里再兜一层日志,
+       让任何**未来新增的提交方**漏传字段时立刻在日志总线暴露,而不是静默丢归档。 */
+    logger.log(
+      'warn',
+      `[queue] job=${job.id} node=${job.nodeId} → ${job.status} 但缺少 projectId,Take 未归档` +
+        `(提交方漏传 projectId/canvasId;产物=${job.resultPath ?? '无'}${job.error ? ` err=${job.error}` : ''})`,
+    );
   }
   if (job.status !== 'succeeded' || !job.projectId || !job.canvasId) return;
   const ctx = { projectId: job.projectId, canvasId: job.canvasId };

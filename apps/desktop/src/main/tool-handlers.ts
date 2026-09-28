@@ -623,12 +623,15 @@ export class ToolHandlers {
 
     /* ── engine 域 ── */
     'engine.submit': async (a, ctx) => {
-      const nodeId = String(a.nodeId ?? '');
+      const rawSubmitId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      const node = cur?.nodes.find((n) => n.id === nodeId);
-      if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
       if (!cur) return { ok: false, result: '画布不存在' };
+      // id 优先、标题兜底(与 canvas.get_node 同口径)
+      const submitHit = resolveNodeRefOrError(cur.nodes, rawSubmitId, '节点');
+      if (!submitHit.ok) return { ok: false, result: submitHit.error };
+      const node = submitHit.node;
+      const nodeId = node.id;
       if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'video-upscale') {
         // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
@@ -698,6 +701,15 @@ export class ToolHandlers {
           });
         }
       }
+      // 提交前防呆:视频节点必须有提示词。h3 会以 `h3: prompt must not be empty` 退 1,
+      // 但那时任务已入队、错误发生在很远的地方(2026-09-28 正是被 update_node 的假成功
+      // 推到这里才炸)。在入口拦下并给出**可执行的下一步**。
+      if (node.kind === 'shot' && !String((node.data as { prompt?: string }).prompt ?? '').trim()) {
+        return {
+          ok: false,
+          result: `「${node.label || nodeId}」的提示词为空,无法提交(生成视频必须有 prompt)。请先用 canvas.update_node 写 data.prompt(注意 data 要传**对象**,不要传 JSON 字符串),再 engine.submit。`,
+        };
+      }
       // image 类节点:kind 推导 + input 连线解析(直传 node.data 会让 image-edit 缺省成 generate 丢输入图)
       let submitParams: Record<string, unknown> = (node.data as Record<string, unknown>) ?? {};
       if (node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale') {
@@ -705,10 +717,27 @@ export class ToolHandlers {
         if (!built.ok) return { ok: false, result: built.error };
         submitParams = built.params;
       }
+      /* ⚠️ 提交必须带全 projectId/canvasId/takeId,缺一个就会「生成成功但画布上什么都没有」
+         (2026-09-28 真实事故):Agent 侧此前只传 provider/nodeId/slot/params/references,
+         takeId 缺失 ⇒ 队列完成时 index.ts 的 onJobFinish 两个分支全落空(有 takeId 才 patch、
+         没有则按 projectId 补 append)——Take 历史里根本没有这条任务;projectId 缺失更糟,
+         连失败任务都不归档,**看门狗超时后完全无从回查**。
+         渲染层 runNode 早已是同口径(先 takesCreate(queued) 拿 takeId 再提交),这里补齐对齐。 */
+      let takeId: string | undefined;
+      if (this.takes && ctx.projectId) {
+        takeId = this.takes.append(ctx.projectId, {
+          shotNodeId: nodeId,
+          status: 'queued',
+          params: { ...submitParams, __refRoles: references.map((r) => r.role) },
+        }).id;
+      }
       const handle = this.queue.submit({
         provider: (node.data as { engine?: string }).engine === 'mlxgen' ? 'mlxgen' : isImage ? 'mlxgen' : 'h3c',
         nodeId,
         slot: isImage ? 'image' : 'video',
+        projectId: ctx.projectId || undefined,
+        canvasId: ctx.canvasId || undefined,
+        takeId,
         params: submitParams,
         references,
       });

@@ -1627,7 +1627,14 @@ export default function CanvasPage({
                     running: false,
                     extra: j.resultPath ? `✓ ${basenameOf(j.resultPath)}` : '✓ 生成完成',
                     // 产物路径存进节点 data(节点卡/检查器渲染视频用)
-                    data: { ...(n.data ?? {}), resultPath: j.resultPath ?? (n.data as Record<string, unknown>)?.resultPath },
+                    // + currentTakeId 绑定本次 Take:检查器的 attempt 列表 / Take 切换 / 时间线导出
+                    //   全靠它定位「当前生效的是哪一条」(2026-09-28:Agent 提交的任务此前只落
+                    //   resultPath 不落 currentTakeId,历史里那一栏永远是空的)
+                    data: {
+                      ...(n.data ?? {}),
+                      resultPath: j.resultPath ?? (n.data as Record<string, unknown>)?.resultPath,
+                      ...(j.takeId ? { currentTakeId: j.takeId } : {}),
+                    },
                   }
                 : n,
             ),
