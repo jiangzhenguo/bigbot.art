@@ -311,6 +311,12 @@ export default function CanvasPage({
   const [apOpen, setApOpen] = useState(false);
   /** 「+」弹层打开计数:每次打开 +1(AddNodePopover 用它重置内部搜索/选中) */
   const [apOpenCount, setApOpenCount] = useState(0);
+  /** apFrom/apOpen 的镜像 ref:供「节点级回调」读取而不必进依赖数组(P1)。
+   *  回调若直接依赖这两个 state,每次开关弹层都会重建 → NodeCard 的 memo 失效。 */
+  const apOpenRef = useRef(apOpen);
+  apOpenRef.current = apOpen;
+  const apFromRef = useRef(apFrom);
+  apFromRef.current = apFrom;
 
   /* Agent 对话面板:全部状态/副作用在 pages/agent/useAgentChat(本组件只持有返回值) */
   const selInfo = selected ? infoMap[selected] : undefined;
@@ -363,6 +369,24 @@ export default function CanvasPage({
       roRef.current = null;
     };
   }, [measure]);
+
+  /**
+   * 节点 DOM 注册(ResizeObserver 与拖拽定位用)。
+   *
+   * ⚠️ 必须是稳定引用(P1):它作为 `registerRef` 透传到每个 NodeCard,
+   * 而卡片包了 React.memo —— 若这里写成 JSX 内联箭头,每次渲染都是新函数,
+   * 浅比较必然失败,memo 直接失效(视口平移时全部卡片照样重渲染)。
+   * 实现里只用 ref(roRef/nodeRefs),无闭包依赖,故依赖数组为空。
+   */
+  const registerNodeRef = useCallback((id: string, el: HTMLDivElement | null) => {
+    if (el) {
+      nodeRefs.current.set(id, el);
+      // 新 DOM 挂载即测量(observe 幂等,重复调用无副作用)
+      roRef.current?.observe(el);
+    } else {
+      nodeRefs.current.delete(id);
+    }
+  }, []);
 
   /* ══ 撤销 / 重做(真正的实现:见 canvas/canvas-history.ts)══
      提交时机 = 离散编辑动作完成时(不是 state 每次变化):
@@ -3010,6 +3034,55 @@ export default function CanvasPage({
         .filter((x): x is { edge: Edge; node: CanvasNode } => !!x.node)
     : [];
 
+  /* ── 节点级回调(P1:全部 useCallback) ──
+     这些回调经 StageView 透传给每个 NodeCard,而卡片包了 React.memo。
+     写成 JSX 内联箭头会导致每次渲染都是新函数 → 浅比较失败 → memo 失效,
+     视口平移时全部卡片照样重渲染。实现一律只读 ref 或调用已稳定的回调,
+     故依赖数组里不出现 nodes/view,拖动与缩放期间引用保持不变。 */
+  const handleNodeSelect = useCallback(
+    (n: CanvasNode, e: React.PointerEvent) => beginNodeDrag(n, e),
+    [beginNodeDrag],
+  );
+  const handleNodeContextMenu = useCallback(
+    (e: React.MouseEvent, n: CanvasNode) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeAddPop();
+      setOpenPop(null);
+      // 右键未选中的节点 → 先选中它;已在选区内的 → 保留整块选区(右键可对多选操作)
+      if (!selectedIdsRef.current.includes(n.id)) selectNode(n.id);
+      setCtx({ x: e.clientX, y: e.clientY, id: n.id });
+    },
+    [closeAddPop, selectNode],
+  );
+  const handleNodeHeaderPointerDown = useCallback(
+    // 头部拖动与主体一致:都走「拖动整块选区」
+    (e: React.PointerEvent, n: CanvasNode) => beginNodeDrag(n, e),
+    [beginNodeDrag],
+  );
+  const handleNodeAddPointerDown = useCallback(
+    (e: React.PointerEvent, n: CanvasNode) => {
+      if (e.button !== 0) return;
+      // 启动拖拽预备态(未拖动仍走 click 弹层路径)
+      beginConnectDrag(n.id, e.clientX, e.clientY);
+      e.stopPropagation();
+    },
+    [beginConnectDrag],
+  );
+  const handleNodeAddClick = useCallback(
+    (e: React.MouseEvent, n: CanvasNode) => {
+      e.stopPropagation();
+      // 未拖动(<4px)才算 click,触发原弹层
+      const d2 = connectDragRef.current;
+      if (d2 && d2.moved) return;
+      if (apOpenRef.current && apFromRef.current === n.id) closeAddPop();
+      else openAddPop(n.id);
+      connectDragRef.current = null;
+      setConnectDrag(null);
+    },
+    [closeAddPop, openAddPop],
+  );
+
   const zoomPct = `${Math.round(view.z * 100)}%`;
   return (
     <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}${viewportAnimating ? ' animating' : ''}`}>
@@ -3116,46 +3189,13 @@ export default function CanvasPage({
               dropFromPalette(typeId, e.clientX, e.clientY);
             }}
             onBeginPan={beginPan}
-            onNodeSelect={(n, e) => beginNodeDrag(n, e)}
-            onNodeContextMenu={(e, n) => {
-              e.preventDefault();
-              e.stopPropagation();
-              closeAddPop();
-              setOpenPop(null);
-              // 右键未选中的节点 → 先选中它;已在选区内的 → 保留整块选区(右键可对多选操作)
-              if (!selectedIdsRef.current.includes(n.id)) selectNode(n.id);
-              setCtx({ x: e.clientX, y: e.clientY, id: n.id });
-            }}
-            onNodeHeaderPointerDown={(e, n) => {
-              // 头部拖动与主体一致:都走「拖动整块选区」
-              beginNodeDrag(n, e);
-            }}
-            onNodeAddPointerDown={(e, n) => {
-              if (e.button !== 0) return;
-              // 启动拖拽预备态(未拖动仍走 click 弹层路径)
-              beginConnectDrag(n.id, e.clientX, e.clientY);
-              e.stopPropagation();
-            }}
-            onNodeAddClick={(e, n) => {
-              e.stopPropagation();
-              // 未拖动(<4px)才算 click,触发原弹层
-              const d2 = connectDragRef.current;
-              if (d2 && d2.moved) return;
-              if (apOpen && apFrom === n.id) closeAddPop();
-              else openAddPop(n.id);
-              connectDragRef.current = null;
-              setConnectDrag(null);
-            }}
+            onNodeSelect={handleNodeSelect}
+            onNodeContextMenu={handleNodeContextMenu}
+            onNodeHeaderPointerDown={handleNodeHeaderPointerDown}
+            onNodeAddPointerDown={handleNodeAddPointerDown}
+            onNodeAddClick={handleNodeAddClick}
             onSelectGroup={selectGroup}
-            registerNodeRef={(id, el) => {
-              if (el) {
-                nodeRefs.current.set(id, el);
-                // 新 DOM 挂载即测量(observe 幂等,重复调用无副作用)
-                roRef.current?.observe(el);
-              } else {
-                nodeRefs.current.delete(id);
-              }
-            }}
+            registerNodeRef={registerNodeRef}
             popover={
               /* 「+」下游节点弹层 */
               <AddNodePopover

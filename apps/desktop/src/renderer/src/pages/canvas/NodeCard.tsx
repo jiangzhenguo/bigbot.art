@@ -46,7 +46,7 @@ interface NodeCardProps {  node: CanvasNode;
   registerRef: (id: string, el: HTMLDivElement | null) => void;
 }
 
-export function NodeCard({
+function NodeCardInner({
   node: n,
   selected,
   flash,
@@ -180,3 +180,16 @@ export function NodeCard({
     </div>
   );
 }
+
+/**
+ * 包 memo(P1):视口平移/缩放只改 view,节点内容与选中态都没变 ——
+ * 不加这层的话每次 setView 都会重跑全部卡片(含 NodeBody 里的分镜表统计、
+ * 产物图 diff),节点一多就是整帧的 reconcile 开销。
+ *
+ * ⚠️ memo 生效的前提是 props 引用稳定,调用方(StageView / CanvasPage)必须:
+ *   · 回调全部 useCallback(否则每帧都是新函数,浅比较永远为 false);
+ *   · 别把「每次渲染都新建」的数组/对象传进来(如全量 nodes → 见 StageView
+ *     的 refNodes 派生)。
+ * 这里用默认浅比较即可 —— 所有 props 都是原始值、稳定引用或已派生的精简值。
+ */
+export const NodeCard = React.memo(NodeCardInner);

@@ -11,6 +11,7 @@ import type { CanvasNode, ConnectDrag, EdgeClass } from './types';
 import { NodeCard } from './NodeCard';
 import { minimapLayout, minimapToWorld } from './minimap';
 import { boundingRect, type NodeGroup, type Rect } from './selection';
+import { refNodesSignature } from './storyboard';
 
 export interface EdgePathRender {
   key: string;
@@ -148,6 +149,26 @@ export function StageView({
   const selSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   /** 拖动中集合(O(1) 判断节点是否挂 dragging 类) */
   const dragSet = useMemo(() => new Set(draggingIds), [draggingIds]);
+
+  /* ── 分镜表统计用的「下游引用」派生数组(P1) ──
+     原实现把**整个 nodes** 传进每个 NodeCard,而 NodeBody 只用到三个统计函数
+     (sbMaterializedRows / sbImgCount / sbDirty),它们对任意节点只读
+     `kind` + `data.promptFrom` 两个字段。
+     直接传全量 nodes 有两个代价:
+       ① 每次 nodes 换引用(拖动、测量、写参数)所有卡片 props 都变 → memo 失效;
+       ② 拖动一个节点只改 x/y,却让所有分镜表卡片重算统计(与位置无关)。
+     这里只保留统计真正需要的字段;依赖数组用**签名**而非 nodes 本身,
+     只有引用关系真的变了才重建数组 —— 位置/尺寸变化不再穿透到卡片。 */
+  const refNodesSig = useMemo(() => refNodesSignature(nodes), [nodes]);
+  const refNodes = useMemo(() => {
+    const out: CanvasNode[] = [];
+    for (const n of nodes) {
+      const pf = (n.data ?? {}).promptFrom;
+      if (pf) out.push({ kind: n.kind, data: { promptFrom: pf } } as unknown as CanvasNode);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 签名即内容指纹,见上
+  }, [refNodesSig]);
   /** 有分组的节点 → 组色(节点卡片显示组徽标) */
   const groupOfNodeId = useMemo(() => {
     const m = new Map<string, NodeGroup>();
@@ -259,7 +280,7 @@ export function StageView({
           <NodeCard
             key={n.id}
             node={n}
-            nodes={nodes}
+            nodes={refNodes}
             selected={selSet.has(n.id)}
             flash={flashId === n.id}
             dragging={dragSet.has(n.id)}
