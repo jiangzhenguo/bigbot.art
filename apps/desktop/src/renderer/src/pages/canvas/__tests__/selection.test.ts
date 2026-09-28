@@ -13,6 +13,8 @@ import {
   UNMEASURED_NODE_H,
   rectFromPoints,
   screenToWorld,
+  clientPointOf,
+  type PointerLike,
   nodeRect,
   rectsIntersect,
   nodesInRect,
@@ -56,6 +58,35 @@ describe('screenToWorld — 屏幕→世界坐标', () => {
 
   it('缩放 1 平移 0 时等于自身', () => {
     expect(screenToWorld(42, 7, { x: 0, y: 0, z: 1 })).toEqual({ x: 42, y: 7 });
+  });
+});
+
+describe('clientPointOf — 指针坐标当场取出(合成事件回收防护)', () => {
+  it('正常事件取出 clientX/clientY', () => {
+    expect(clientPointOf({ clientX: 120, clientY: 45 })).toEqual({ x: 120, y: 45 });
+  });
+
+  it('React 合成事件被回收后 clientX 为 undefined → 回退 0(绝不产出 NaN)', () => {
+    // 真实事故:beginMarquee 存了 e、在 pointermove 里才读 e.clientX,
+    // 得到 undefined → NaN 矩形 → 框选永远框不中任何节点。
+    const recycled = { clientX: undefined, clientY: undefined } as unknown as PointerLike;
+    const p = clientPointOf(recycled);
+    expect(p).toEqual({ x: 0, y: 0 });
+    expect(Number.isNaN(p.x)).toBe(false);
+  });
+
+  it('NaN / Infinity / null 一律回退 0,保证几何函数拿到有限数', () => {
+    expect(clientPointOf({ clientX: NaN, clientY: Infinity })).toEqual({ x: 0, y: 0 });
+    expect(clientPointOf(null)).toEqual({ x: 0, y: 0 });
+    expect(clientPointOf(undefined)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('取出的坐标喂给 rectFromPoints 得到有限矩形(框选可命中)', () => {
+    const a = clientPointOf({ clientX: 10, clientY: 10 });
+    const b = clientPointOf({ clientX: 60, clientY: 90 });
+    const r = rectFromPoints(a.x, a.y, b.x, b.y);
+    expect(r).toEqual({ x: 10, y: 10, w: 50, h: 80 });
+    expect(nodesInRect([mkNode('n', 20, 20, 30, 30)], r)).toEqual(['n']);
   });
 });
 

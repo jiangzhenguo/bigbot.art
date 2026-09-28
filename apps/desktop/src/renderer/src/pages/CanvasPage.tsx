@@ -37,6 +37,7 @@ import {
   rectFromPoints,
   nodesInRect,
   nodeRect,
+  clientPointOf,
   createGroup,
   dissolveGroups,
   pruneGroups,
@@ -211,7 +212,17 @@ export default function CanvasPage({
   const [marqueeMode, setMarqueeMode] = useState(false);
   /** 正在拖拽的框选矩形(world 坐标;ref 供每帧读取,state 供渲染) */
   const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
-  const selRectRef = useRef<{ ax: number; ay: number; bx: number; by: number; additive: boolean } | null>(null);
+  const selRectRef = useRef<{
+    /** 起始点(world 坐标;pointerdown 当场拍下) */
+    ax: number;
+    ay: number;
+    /** 起始点的**屏幕坐标**(后续 pointermove 事件可能被 React 回收,不能回头读 e) */
+    sx: number;
+    sy: number;
+    additive: boolean;
+    /** 指针是否已移动过(区分「框选」与「点击空白清空选区」) */
+    moved: boolean;
+  } | null>(null);
   /** 节点分组(随快照持久化;组内节点整体拖动/删除/复制) */
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const groupsRef = useRef<NodeGroup[]>([]);
@@ -672,9 +683,15 @@ export default function CanvasPage({
     };
   }, [panning]);
 
-  /* ── 框选(marquee)── */
-  /** 每帧重算命中:与矩形相交的节点(**含组的整体扩张**) */
-  const applyMarquee = useCallback((rect: Rect, additive: boolean) => {
+  /* ── 框选(marquee)──
+   * ⚠️ 坐标必须在 **pointerdown / pointermove 当场**取出(`clientPointOf`):
+   * React 合成事件在处理器返回后会被回收,任何「先存 e、稍后再读 clientX」的写法
+   * 都会拿到 undefined → NaN 矩形 → 框选永远框不中(真实事故,见 selection.ts 注释)。
+   * 起止两点都用屏幕坐标存,计算时统一换算 world,不再依赖事件对象。 */
+  const applyMarquee = useCallback((sx: number, sy: number, cx: number, cy: number, additive: boolean) => {
+    const a = screenToWorld(sx, sy);
+    const b = screenToWorld(cx, cy);
+    const rect = rectFromPoints(a.x, a.y, b.x, b.y);
     const hit = nodesInRect(nodesRef.current, rect);
     // 命中组内任一节点 → 整组一起选中(组概念的核心手感)
     const expanded = expandSelectionToGroups(groupsRef.current, hit);
@@ -688,14 +705,16 @@ export default function CanvasPage({
   }, []);
 
   const beginMarquee = useCallback((e: React.PointerEvent) => {
-    const w = screenToWorld(e.clientX, e.clientY);
+    const p = clientPointOf(e);
+    const w = screenToWorld(p.x, p.y);
     selRectRef.current = {
       ax: w.x,
       ay: w.y,
-      bx: w.x,
-      by: w.y,
+      sx: p.x,
+      sy: p.y,
       // Shift = 并入现有选区(不清空),与 Figma 一致
       additive: e.shiftKey,
+      moved: false,
     };
     if (!e.shiftKey) setSelectedIds([]);
     setSelectionRect({ x: w.x, y: w.y, w: 0, h: 0 });
@@ -706,16 +725,27 @@ export default function CanvasPage({
     const onMove = (e: PointerEvent) => {
       const s = selRectRef.current;
       if (!s) return;
-      const w = screenToWorld(e.clientX, e.clientY);
-      s.bx = w.x;
-      s.by = w.y;
-      const r = rectFromPoints(s.ax, s.ay, s.bx, s.by);
+      // 坐标当场取出(原生事件同样不能跨帧留用)
+      const p = clientPointOf(e);
+      const b = screenToWorld(p.x, p.y);
+      if (!s.moved && Math.hypot(p.x - s.sx, p.y - s.sy) > 3) s.moved = true;
+      const r = rectFromPoints(s.ax, s.ay, b.x, b.y);
       setSelectionRect(r);
-      applyMarquee(r, s.additive);
+      applyMarquee(s.sx, s.sy, p.x, p.y, s.additive);
     };
-    const onUp = () => {
+    const onUp = (e: PointerEvent) => {
+      const s = selRectRef.current;
       selRectRef.current = null;
       setSelectionRect(null);
+      // 纯点击空白(未移动):清空选区 —— 原 `onStageClick` 的职责搬到这里,
+      // 因为它依赖「此刻 selRectRef 还在」,在 React 的 onClick 里读到时已被置空。
+      if (s && !s.moved && !s.additive) {
+        const p = clientPointOf(e);
+        const w = screenToWorld(p.x, p.y);
+        if (nodesInRect(nodesRef.current, { x: w.x, y: w.y, w: 0, h: 0 }).length === 0) {
+          setSelectedIds([]);
+        }
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -2982,6 +3012,12 @@ export default function CanvasPage({
             selectionRect={selectionRect}
             groups={groups}
             marqueeMode={marqueeMode}
+            onCancelMarquee={() => {
+              if (!selRectRef.current) return false;
+              selRectRef.current = null;
+              setSelectionRect(null);
+              return true;
+            }}
             flashId={flashId}
             connectDrag={connectDrag}
             takeResults={takeResults}
@@ -3000,15 +3036,14 @@ export default function CanvasPage({
             worldRef={worldRef}
             onStagePointerDown={onStagePointerDown}
             onStageClick={() => {
-              // 框选模式下拖拽结束会触发 click:此时不能清空刚框出的选区
-              if (selRectRef.current) return;
-              setSelectedIds([]);
+              // 选区清空一律在 onClick **之前**由「节点 pointerdown / 框选 pointerup」
+              // 处理完 —— React 合成事件的冒泡顺序是 pointerup → click,
+              // 在 click 里读 selRectRef 永远是 null(真实事故:框选刚框出的选区被立刻清掉)。
               closeAddPop();
               setCtx(null);
             }}
             onWorldClick={() => {
-              if (selRectRef.current) return;
-              setSelectedIds([]);
+              // 同上:清选区不在这里做(见 onStageClick 注释)
               closeAddPop();
             }}
             onDragOver={(e) => {

@@ -35,8 +35,11 @@ interface StageViewProps {
   selectionRect: Rect | null;
   /** 节点分组(绘制组框 + 组徽标) */
   groups: NodeGroup[];
-  /** 「框选」模式开关开启时,空白处拖拽走框选(否则平移) */
+  /** 框选模式开关开启时,空白处拖拽走框选(否则平移) */
   marqueeMode: boolean;
+  /** 取消进行中的框选(清 selRectRef + 隐藏矩形);返回 true = 确实取消了一次进行中的框选。
+   *  用于把「清空选区」的时机从 click 提前到 pointerdown(见下方注释) */
+  onCancelMarquee: () => boolean;
   flashId: string | null;
   connectDrag: ConnectDrag | null;
   takeResults: Record<string, string>;
@@ -85,6 +88,7 @@ export function StageView({
   selectionRect,
   groups,
   marqueeMode,
+  onCancelMarquee,
   flashId,
   connectDrag,
   takeResults,
@@ -119,6 +123,13 @@ export function StageView({
     () => minimapLayout(nodes, view, stageSize, MINIMAP_SIZE),
     [nodes, view, stageSize],
   );
+
+  /** 取消进行中的框选:返回 true = 确实取消了一次(调用方据此跳过「清空选区」) */
+  const cancelMarquee = (): boolean => {
+    if (!selectionRect) return false;
+    onCancelMarquee();
+    return true;
+  };
   /** 小地图拖拽中(pointer capture 期间持续跳转视图) */
   const mmDragging = useRef(false);
   /** 小地图指针位置 → 世界坐标 → 通知 CanvasPage 中心对准 */
@@ -155,6 +166,8 @@ export function StageView({
         stageRef.current = el;
       }}
       onPointerDown={(e) => {
+        // 任何按下先结束「上一轮」残留的框选状态(见下方清选区注释)
+        cancelMarquee();
         const t = e.target as HTMLElement;
         if (t !== e.currentTarget && !t.classList.contains('world') && t.tagName !== 'svg')
           return;
@@ -173,6 +186,17 @@ export function StageView({
         onClick={(e) => {
           if (e.target === e.currentTarget) onWorldClick();
         }}
+        onPointerDown={(e) => {
+          // 点在世界容器自身 = 点了空白(**注意不是 drag 事件**):
+          //  · 控件(节点 / 组框标题 / 弹层 / 框选矩形)的 pointerdown 都会 stopPropagation,
+          //    所以能冒泡到这里的只有空白;
+          //  · 选区清空放在 pointerdown 而不是 click —— React 的 click 在整套
+          //    pointerdown → pointerup → click 之后才触发,而框选结束就在 pointerup,
+          //    在 click 里清选区会把**刚框出来的选区**一起清掉(真实事故)。
+          if (e.target !== e.currentTarget) return;
+          if (cancelMarquee()) return;
+          onWorldClick();
+        }}
       >
         {/* 组框:画在节点下方(z-index 由 CSS 控制);只有标题条可点(避免挡住节点拖动) */}
         {groupBoxes.map(({ g, box }) => (
@@ -181,6 +205,7 @@ export function StageView({
             className={`group-box tone-${g.tone ?? 'neutral'}`}
             data-od-id="canvas-group-box"
             data-group={g.id}
+            onPointerDown={(e) => e.stopPropagation()}
             style={{
               left: box.x - GROUP_PAD,
               top: box.y - GROUP_PAD,

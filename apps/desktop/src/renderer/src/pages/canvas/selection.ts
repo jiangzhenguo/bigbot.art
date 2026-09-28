@@ -47,6 +47,28 @@ export function screenToWorld(
   return { x: (cx - view.x) / view.z, y: (cy - view.y) / view.z };
 }
 
+/** 带坐标的事件(仅取所需字段,便于纯函数测试) */
+export interface PointerLike {
+  clientX: number;
+  clientY: number;
+}
+
+/** 取事件的指针屏幕坐标。
+ *
+ *  为什么需要它:React 的 **SyntheticEvent 在事件处理器返回后会被置空**
+ *  (`clientX`/`clientY` 变 `undefined`)。任何「处理器里先记起止点、稍后(异步/下一帧)
+ *  再算几何」的写法都必须**当场**把坐标拍下来 —— 否则 `NaN` 会一路传染到
+ *  `rectFromPoints` → 框选矩形 `NaN` → **框选永远框不中任何节点**(真实事故)。
+ *  非有限值一律回退 0,保证几何函数永远拿到数字。 */
+export function clientPointOf(e: PointerLike | null | undefined): { x: number; y: number } {
+  const x = Number(e?.clientX);
+  const y = Number(e?.clientY);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
 /** 节点包围盒(宽度必有;高度缺失时按未测量兜底) */
 export function nodeRect(n: Pick<CanvasNode, 'x' | 'y' | 'w' | 'h'>): Rect {
   return { x: n.x, y: n.y, w: n.w, h: n.h ?? UNMEASURED_NODE_H };
