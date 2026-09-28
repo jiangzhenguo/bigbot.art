@@ -22,7 +22,7 @@ import {
   WAVE_BARS,
 } from '../constants';
 import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
-import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb } from '../media';
+import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb, VideoPoster } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
 
 interface NodeBodyProps {
@@ -473,12 +473,13 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
                 return (
                   <span key={sid} className="cs" title={`镜${i + 1} · 已生成`}>
                     {isVid ? (
-                      <video
+                      /* 纯展示的一格封面(P2):改用抽帧静态图,不再常驻 <video>。
+                         这里最多同屏 4 个,而每个 video 元素都要独立的媒体合成层
+                         与解码器上下文 —— 画布上几十个节点累积起来相当可观。
+                         抽帧失败会自动回退真实 video(见 VideoPoster),不会白屏。 */
+                      <VideoPoster
                         src={src}
-                        muted
-                        loop
-                        playsInline
-                        preload="metadata"
+                        alt={`镜${i + 1} 片段封面`}
                         style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: '#000' }}
                       />
                     ) : (

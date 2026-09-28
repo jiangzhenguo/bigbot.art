@@ -37,6 +37,166 @@ export function clamp32(v: number, fallback = 544): number {
   return Math.max(32, Math.round(n / 32) * 32);
 }
 
+/* ── 视频封面帧缓存(P2) ──
+   「渲染视频时画布卡」的主因之一:画布上大量真实 <video> 元素。
+   即使只给 preload="metadata"、从不播放,Chromium 也要为每个 video 维护
+   独立的媒体合成层与解码器上下文;节点一多就是几十个。
+
+   思路:纯展示场景(分镜表里的一格封面)没必要常驻 video ——
+   挂一个隐藏 video 抽第一帧到 canvas,转成 dataURL 后**立刻卸载 video**,
+   之后只渲染 <img>。缓存按 src 复用,同一视频不重复抽帧。 */
+const posterCache = new Map<string, string>();
+/** 抽帧中的 promise(同一 src 并发请求时复用,避免重复挂 video) */
+const posterPending = new Map<string, Promise<string | null>>();
+
+/**
+ * 抽帧所需的最小 DOM 能力(依赖注入)。
+ *
+ * 抽出来有两个理由:
+ *  ① 可测 —— 纯 node 环境(本项目 vitest 跑在 environment:'node'、且未装 jsdom)
+ *     也能覆盖缓存/并发/失败回退这些真正的逻辑,不必为了测一段状态机引依赖;
+ *  ② 意图清晰 —— 这个函数只碰这几样东西,没有隐藏的全局耦合。
+ */
+export interface PosterDeps {
+  /** 造一个 video 元素(调用方负责在 finally 里释放) */
+  createVideo: () => HTMLVideoElement;
+  /** 造一个 canvas 并返回 2d context(不可用时返回 null) */
+  createCanvas: (w: number, h: number) => { draw: (v: HTMLVideoElement) => void; toDataURL: () => string } | null;
+  setTimeout: (fn: () => void, ms: number) => number;
+  clearTimeout: (id: number) => void;
+}
+
+/** 浏览器环境默认实现 */
+const browserDeps: PosterDeps = {
+  createVideo: () => document.createElement('video'),
+  createCanvas: (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    return {
+      draw: (v) => ctx.drawImage(v, 0, 0, w, h),
+      toDataURL: () => c.toDataURL('image/jpeg', 0.72),
+    };
+  },
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (id) => window.clearTimeout(id),
+};
+
+/**
+ * 把视频首帧抽成 dataURL(纯渲染层,不走 IPC)。
+ * 失败/超时返回 null,调用方回退到真实 <video>(宁可多一个元素,也不能白屏)。
+ *
+ * @param deps 仅测试注入;生产走 browserDeps
+ */
+export function extractPoster(
+  src: string,
+  timeoutMs = 8000,
+  deps: PosterDeps = browserDeps,
+): Promise<string | null> {
+  const hit = posterCache.get(src);
+  if (hit) return Promise.resolve(hit);
+  const inflight = posterPending.get(src);
+  if (inflight) return inflight;
+
+  const task = new Promise<string | null>((resolve) => {
+    const v = deps.createVideo();
+    let done = false;
+    const finish = (url: string | null) => {
+      if (done) return;
+      done = true;
+      deps.clearTimeout(timer);
+      v.removeAttribute('src');
+      v.load(); // 主动释放解码器,别把临时元素留在后台
+      posterPending.delete(src);
+      if (url) posterCache.set(src, url);
+      resolve(url);
+    };
+    const timer = deps.setTimeout(() => finish(null), timeoutMs);
+
+    // 抽帧不需要声音,且必须 muted 才允许在无用户手势下 play/seek
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.crossOrigin = 'anonymous';
+
+    v.onloadeddata = () => {
+      try {
+        const w = v.videoWidth;
+        const h = v.videoHeight;
+        if (!w || !h) return finish(null);
+        // 缩到卡片级尺寸即可(封面最宽约 236px),避免大图 dataURL 占内存
+        const scale = Math.min(1, 320 / w);
+        const cw = Math.max(1, Math.round(w * scale));
+        const ch = Math.max(1, Math.round(h * scale));
+        const canvas = deps.createCanvas(cw, ch);
+        if (!canvas) return finish(null);
+        canvas.draw(v);
+        finish(canvas.toDataURL());
+      } catch {
+        // 跨源污染 canvas 等 → 放弃封面,回退真实 video
+        finish(null);
+      }
+    };
+    v.onerror = () => finish(null);
+    v.src = src;
+  });
+
+  posterPending.set(src, task);
+  return task;
+}
+
+/**
+ * 视频静态封面帧:抽帧成功渲染 <img>,失败回退真实 <video>(VideoThumb)。
+ *
+ * 用于**纯展示**场景(分镜表的一格封面)——那里不需要 hover 播放,
+ * 常驻 video 元素纯属浪费。需要 hover 播放的地方(主产物预览)仍用 VideoThumb。
+ */
+export function VideoPoster({
+  src,
+  alt,
+  badge,
+  style,
+}: {
+  src: string;
+  alt?: string;
+  badge?: string;
+  style?: React.CSSProperties;
+}) {
+  const [poster, setPoster] = React.useState<string | null>(() => posterCache.get(src) ?? null);
+  const [failed, setFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    let alive = true;
+    const hit = posterCache.get(src);
+    if (hit) {
+      setPoster(hit);
+      setFailed(false);
+      return;
+    }
+    setPoster(null);
+    setFailed(false);
+    void extractPoster(src).then((url) => {
+      if (!alive) return;
+      if (url) setPoster(url);
+      else setFailed(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [src]);
+
+  // 抽帧失败(编码不支持/超时):回退真实 video,保证不白屏
+  if (failed) return <VideoThumb src={src} badge={badge} />;
+
+  if (!poster) {
+    // 抽帧中:给一块与视频容器同色的占位,避免布局跳动
+    return <span style={{ display: 'block', width: '100%', height: '100%', background: '#000', ...style }} />;
+  }
+  return <img src={poster} alt={alt ?? ''} style={style} />;
+}
+
 /**
  * 视频封面:从 <video> metadata 读真实宽高,按视频比例展示(不再固定 16:9);
  * 鼠标悬停从头循环播放,移出暂停复位(产品既有交互,保留)。
@@ -135,7 +295,10 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
         // 数据到位 + 指针还在卡片上 → 续播;这是「卡住后不再自动播放」的兜底路径
         onCanPlay={resumeIfHovered}
         onLoadedData={resumeIfHovered}
-        style={{ width: '100%', height: '100%', objectFit: 'fill', display: 'block' }}
+        /* objectFit 用 contain 而非 fill(P2):外层容器已按视频真实宽高比设置
+           aspectRatio,contain 不会产生黑边;而 fill 会触发非等比拉伸的额外
+           重采样路径 —— 视频与容器比例一致时它纯属白付代价。 */
+        style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
       />
       {badge ? (
         <span
