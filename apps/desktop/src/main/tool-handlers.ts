@@ -375,11 +375,22 @@ export class ToolHandlers {
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
     'canvas.get_node': async (a, ctx) => {
-      const nodeId = String(a.nodeId ?? '');
+      const rawId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      const node = cur?.nodes.find((n) => n.id === nodeId);
-      if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      // 按 id 精确查;查不到再容错按「标题」查(见 resolveNodeRef 说明)。
+      // 真实事故:模型拿到 list_nodes 的「镜头 03」后把它当 nodeId 传回来,原实现直接报
+      // 「节点 镜头 03 不存在」,白烧一整轮往返(单轮实测 78 秒),把看门狗推向超时。
+      const hit = cur ? resolveNodeRef(cur.nodes, rawId) : { node: undefined, ambiguous: [] };
+      const node = hit.node;
+      if (!node) {
+        if (hit.ambiguous.length > 0) {
+          const list = hit.ambiguous.map((n) => `「${n.label || n.id}」 (id=${n.id})`).join('、');
+          return { ok: false, result: `标题「${rawId}」匹配到 ${hit.ambiguous.length} 个节点,无法确定:${list}。请改用 id 精确指定。` };
+        }
+        return { ok: false, result: `节点 ${rawId} 不存在` };
+      }
+      const nodeId = node.id;
       // 入/出边用对端标题展示(id 兜底),与「标题为主、id 为辅」的称呼规则一致
       const idToLabel = new Map((cur?.nodes ?? []).map((n) => [n.id, n.label || n.id]));
       const ins = (cur?.edges ?? [])
@@ -616,15 +627,38 @@ export class ToolHandlers {
       return { ok: true, result: `已创建节点「${label}」(${kind})${refsNote}`, nodeId: node.id };
     },
     'canvas.update_node': async (a, ctx) => {
-      const nodeId = String(a.nodeId ?? '');
+      const rawId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      const node = cur?.nodes.find((n) => n.id === nodeId);
-      if (!node) return { ok: false, result: `节点 ${nodeId} 不存在` };
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const hit = resolveNodeRefOrError(cur.nodes, rawId);
+      if (!hit.ok) return { ok: false, result: hit.error };
+      const node = hit.node;
+      const nodeId = node.id;
       if (a.label !== undefined) node.label = String(a.label);
       let refsNote = '';
-      if (a.data && typeof a.data === 'object') {
-        const patch = a.data as Record<string, unknown>;
+      // 参数规整:本地小模型常把嵌套对象序列化成 JSON 字符串再传(见 normalizeDataArg)。
+      // 原实现 `typeof a.data === 'object'` 对字符串为 false → 整段 patch 被**静默跳过**
+      // 却仍返回「✓ 已更新节点」= 假成功(2026-09-28 模型写了几百字 prompt、节点仍为空)。
+      const norm = normalizeDataArg((a as { data?: unknown }).data);
+      if (!norm.ok) return { ok: false, result: norm.error };
+      let patch: Record<string, unknown> | undefined = Object.keys(norm.data).length > 0 ? { ...norm.data } : undefined;
+      // 顶层 prompt 参数(B 方案,2026-09-28):长文本走**独立字符串参数**,不走 data 对象。
+      //
+      // 为什么:`data` 是 object,本地小模型总想把整个对象**序列化成 JSON 字符串**再传
+      // (`data:"{\"prompt\":\"…\"}"`),转义符 + 引号放大输出量;而模型在 thinking 里往往
+      // 还把内容再"想"一遍 —— 两者叠加把 maxTokens 烧光,JSON 被腰斩成非法值(实测在
+      // 552 字符处截断),下一轮重试又截断,最终 0 工具调用 / 0 字回复。
+      // 顶层 `prompt` 是**纯字符串参数**,模型没有"要不要序列化"的歧义空间,直击根因。
+      //
+      // 兼容:旧的 `data.prompt` 写法**保留有效**(见下方合并顺序),但工具描述里标注为不推荐。
+      const topPrompt = (a as { prompt?: unknown }).prompt;
+      if (typeof topPrompt === 'string') {
+        patch = { ...(patch ?? {}), prompt: topPrompt };
+      } else if (topPrompt !== undefined) {
+        return { ok: false, result: `prompt 必须是字符串,收到 ${Array.isArray(topPrompt) ? '数组' : typeof topPrompt}。` };
+      }
+      if (patch) {
         const next = { ...(node.data as Record<string, unknown>), ...patch };
         // 方案 B:refs 由连线推导,直写 refs 一律忽略(消除双写漂移)
         if ('refs' in patch) {
@@ -668,14 +702,19 @@ export class ToolHandlers {
       return { ok: true, result: `已删除节点 ${nodeId} 及其连线`, nodeId };
     },
     'canvas.connect': async (a, ctx) => {
-      const from = String(a.from ?? '');
-      const to = String(a.to ?? '');
+      const rawFrom = String(a.from ?? '');
+      const rawTo = String(a.to ?? '');
       const label = String(a.label ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
-      if (!cur.nodes.some((n) => n.id === from)) return { ok: false, result: `源节点 ${from} 不存在` };
-      if (!cur.nodes.some((n) => n.id === to)) return { ok: false, result: `目标节点 ${to} 不存在` };
+      // id 优先、标题兜底(模型常把 list_nodes 的标题当 id 传回;见 resolveNodeRef)
+      const srcHit = resolveNodeRefOrError(cur.nodes, rawFrom, '源节点');
+      if (!srcHit.ok) return { ok: false, result: srcHit.error };
+      const dstHit = resolveNodeRefOrError(cur.nodes, rawTo, '目标节点');
+      if (!dstHit.ok) return { ok: false, result: dstHit.error };
+      const from = srcHit.node.id;
+      const to = dstHit.node.id;
       if (cur.edges.some((e) => e.source === from && e.target === to)) return { ok: true, result: '连线已存在' };
       // 方案 A:写入点强制校验(端口合法性 + 媒体匹配 + 单值端口基数)
       const v = validateEdge(
@@ -964,13 +1003,17 @@ export class ToolHandlers {
       } else {
         const pc = this.store.loadProjectCanvases(ctx.projectId);
         const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-        const srcNode = cur?.nodes.find((n) => n.id === nodeId);
-        if (!srcNode) {
+        // id 优先、标题兜底(与 canvas.get_node 同口径;模型常把标题当 id)
+        const srcHit = cur ? resolveNodeRefOrError(cur.nodes, nodeId, '节点') : { ok: false as const, error: '画布不存在' };
+        if (!srcHit.ok) {
           return {
             ok: false,
-            result: `节点 ${nodeId} 不存在(不要用标题拼 id)。先用 canvas.list_nodes 拉当前画布的最新节点 id,再重试。`,
+            result:
+              `${srcHit.error}(提示:先用 canvas.list_nodes 拉当前画布的最新节点 id,不要用标题拼 id;` +
+              `本工具需要**图片**来源,视频请先用 frames.extract 取帧)`,
           };
         }
+        const srcNode = srcHit.node;
         srcLabel = srcNode.label || srcNode.id;
         imagePath = resolveNodeImagePath(srcNode, undefined, assetPath);
         if (!imagePath) {
@@ -1024,8 +1067,10 @@ export class ToolHandlers {
       let videoPath = videoPathArg;
       let srcNode: CanvasNode | undefined;
       if (nodeId) {
-        srcNode = cur.nodes.find((n) => n.id === nodeId);
-        if (!srcNode) return { ok: false, result: `节点 ${nodeId} 不存在` };
+        // id 优先、标题兜底(与 canvas.get_node 同口径)
+        const srcHit = resolveNodeRefOrError(cur.nodes, nodeId, '节点');
+        if (!srcHit.ok) return { ok: false, result: srcHit.error };
+        srcNode = srcHit.node;
         const resolved = resolveNodeVideoPath(srcNode, (id) => this.assets.get(id)?.localPath);
         if (!resolved) {
           return {
