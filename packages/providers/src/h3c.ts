@@ -20,7 +20,13 @@ import {
   type RenderJobHandle,
   type RenderStatus,
 } from '@bigbotart/shared';
-import { buildH3Args, validateTier, TIER_PRESETS } from './h3c-command.js';
+import { buildH3Args, validateParams, TIER_PRESETS } from './h3c-command.js';
+import {
+  ProgressTracker,
+  splitProgressChunks,
+  stallLevel,
+  stallMessage,
+} from './h3c-progress.js';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 
@@ -56,6 +62,8 @@ export class H3cProvider implements Provider {
   private progress = new Map<string, { startedAt: number; etaSec: number }>();
   /** 失败诊断:taskId → 累计 stderr(尾部) */
   private stderrs = new Map<string, string>();
+  /** 真实进度跟踪:taskId → ProgressTracker(解析 stderr 进度行,单调递增 + 停滞判定) */
+  private trackers = new Map<string, ProgressTracker>();
 
   constructor(opts: H3cProviderOptions = {}) {
     this.bin = opts.binaryPath ?? H3C_DEFAULTS.binaryPath;
@@ -125,13 +133,20 @@ export class H3cProvider implements Provider {
     const refVideo = refs.find((r) => r.role === 'ref-video')?.localPath;
     const refAudio = refs.find((r) => r.role === 'ref-audio')?.localPath;
 
-    const issues = validateTier({
+    // 参数组合防呆(validateParams 统一入口):
+    //  ① layers≤40+reuse≥3 → 拒绝
+    //  ② 带内嵌音轨的 ref-video + 输出 <2s → 拒绝(h3.c:1146 硬规则,否则入队后才 exit 1)
+    //  ③ reuse 配极少步数 → 拒绝提交前的**警告**(与 h3 同名 warning 同口径)
+    const issues = validateParams({
       steps: Number(p.steps ?? 30),
       layers: Number(p.layers ?? 50),
       reuse: Number(p.reuse ?? 1),
+      frames: Number(p.frames ?? 124),
+      seconds: Number(p.seconds ?? 0) > 0 ? Number(p.seconds) : undefined,
+      refVideo,
+      refVideoSilent: p.refVideoSilent === true,
     });
     if (issues.length > 0) {
-      // 骨架期防呆:发现危险组合抛错(或自动回退,这里抛错让上层感知)
       throw new Error(`h3c 参数防呆: ${issues.join('; ')}`);
     }
 
@@ -156,6 +171,8 @@ export class H3cProvider implements Provider {
       lastFrame: last?.localPath,
       refImages: refImgs,
       refVideo,
+      // 参考视频音轨:节点 data.refVideoSilent 为 true 时改走 --ref-silent-video
+      refVideoSilent: p.refVideoSilent === true,
       refAudio,
       ssdStreaming: p.ssdStreaming === true,
     });
@@ -185,32 +202,51 @@ export class H3cProvider implements Provider {
     }
     // 真实执行
     // cwd 必须 = h3 二进制所在目录:shader 解析依赖 cwd(H3_USAGE §2,否则立即 exit 1)
-    // stdout:默认 ignore(进度条 \r 覆盖式,pipe 不消费会背压死锁 H3_USAGE §5.2);
-    //         调试模式(onLog)时改 pipe 实时解析进度行推送,节流 1s
-    const withStdout = !!this.onLog;
-    const child = withStdout
-      ? spawn(this.bin, args, { cwd: dirname(this.bin), stdio: ['ignore', 'pipe', 'pipe'] })
-      : spawn(this.bin, args, { cwd: dirname(this.bin), stdio: ['ignore', 'ignore', 'pipe'] });
+    //
+    // ⚠️ 进度在 **stderr**,不在 stdout(h3.c main.c:168 `fprintf(stderr, "\r%-25s %4d/%-4d", ...)`)。
+    //    旧实现把 stdout 当进度源、stderr 只攒错误尾巴 —— 于是进度数据一直从手里流过却被丢掉,
+    //    进度条只能靠时间估算(elapsed/etaSec),会出现「爬到 99% 干等」和「卡死却显示正常」两种假象。
+    //    stdout 仍然丢弃(stdout 的 \r 覆盖式输出不消费会背压死锁,H3_USAGE §5.2);
+    //    stderr 必须持续消费(既拿真实进度、也保留错误尾部诊断)。
+    const child = spawn(this.bin, args, { cwd: dirname(this.bin), stdio: ['ignore', 'ignore', 'pipe'] });
+    const tracker = new ProgressTracker();
+    this.trackers.set(taskId, tracker);
     let errAcc = '';
-    child.stderr.on('data', (d: Buffer) => {
-      errAcc = (errAcc + d.toString()).slice(-2000);
-      this.stderrs.set(taskId, errAcc);
-    });
-    if (withStdout && child.stdout) {
-      let buf = '';
-      let lastPush = 0;
-      child.stdout.on('data', (d: Buffer) => {
-        buf += d.toString();
-        const parts = buf.split(/[\r\n]+/);
-        buf = parts.pop() ?? '';
-        const line = parts[parts.length - 1] ?? '';
-        const now = Date.now();
-        if (line.trim() && now - lastPush > 1000) {
-          lastPush = now;
-          this.onLog?.(line.trim());
+    let errTail = ''; // 未完成的行尾(进度行是 \r 覆盖式,必须按行切干净)
+    let lastLog = 0;
+    /** 处理一批已切分好的片段:进度行喂 tracker,其余留作错误诊断 */
+    const consume = (parts: string[]) => {
+      for (const raw of parts) {
+        const ev = tracker.pushLine(raw);
+        if (ev) {
+          // 调试日志:节流 1s,只推真实进度行(避免刷屏)
+          const now = Date.now();
+          if (this.onLog && now - lastLog > 1000) {
+            lastLog = now;
+            this.onLog(`${ev.phase} ${ev.done}/${ev.total}`);
+          }
+        } else if (raw.trim()) {
+          // 非进度行 = 真正的日志/错误,保留尾部供失败诊断
+          errAcc = (errAcc + raw + '\n').slice(-2000);
+          this.stderrs.set(taskId, errAcc);
         }
-      });
-    }
+      }
+    };
+    child.stderr.on('data', (d: Buffer) => {
+      const text = errTail + d.toString();
+      const [parts, tail] = splitProgressChunks(text);
+      errTail = tail;
+      consume(parts);
+    });
+    // 进程结束时冲刷**最后一个片段**:h3 的进度行以 `\r` 分隔,最后一行之后
+    // 可能没有换行符(尤其被 kill / 异常退出时),不冲刷就会丢掉最后一条进度
+    // (实测:少了末尾的 `FFmpeg 124/124`,总进度停在 95% 而非 100%)。
+    child.on('close', () => {
+      if (errTail.trim()) {
+        consume([errTail]);
+        errTail = '';
+      }
+    });
     this.stderrs.set(taskId, '');
     this.running.set(taskId, child);
     return { providerTaskId: taskId };
@@ -235,16 +271,31 @@ export class H3cProvider implements Provider {
         ? { status: 'SUCCEEDED', progress: 1, stage: 'done', resultPath: this.outPaths.get(handle.providerTaskId) }
         : { status: 'FAILED', error: `h3 exit ${child.exitCode}: ${errTail.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 300) || '见日志'}` };
     }
-    // 粗估进度(不超过 99%):elapsed / etaSec
-    const est = this.progress.get(handle.providerTaskId);
-    if (est) {
-      const pct = Math.min(0.99, (Date.now() - est.startedAt) / (est.etaSec * 1000));
-      const remainMin = Math.max(0, Math.round((est.etaSec - (Date.now() - est.startedAt) / 1000) / 60));
+    // 真实进度优先:解析自 h3 stderr 的阶段进度行(单调递增),附带停滞判定。
+    // 不再用 elapsed/etaSec 的估算 —— 那与引擎实际进度无关,会「爬到 99% 干等」
+    // 且在卡死时仍显示正常(实测:9 分钟、CPU 仅 42 秒的僵死任务,估算进度条一路照爬)。
+    const tracker = this.trackers.get(handle.providerTaskId);
+    if (tracker && tracker.stageText) {
+      const stalled = tracker.stalledFor();
+      const level = stallLevel(stalled, true);
+      const stallNote = stallMessage(level, tracker.stageText, stalled);
+      // 进度封顶 0.99:最后的收尾(落盘/编码)没进度行,别让 UI 提前显示 100%
+      const pct = Math.min(0.99, tracker.progress);
       return {
         status: 'RUNNING',
         progress: Number(pct.toFixed(3)),
-        stage: `h3 推理中 · 约剩 ${remainMin} 分钟(粗估)`,
+        stage: stallNote ?? `h3 · ${tracker.stageText}`,
       };
+    }
+    // 还没解析到任何进度行:可能仍在加载权重 / 编译 Metal shader(首跑可达 30 分钟)。
+    // 用已运行时长给一个诚实的说明,而不是编造百分比。
+    const est = this.progress.get(handle.providerTaskId);
+    if (est) {
+      const elapsedMin = Math.round((Date.now() - est.startedAt) / 60000);
+      const hint = elapsedMin >= 3
+        ? '(仍无进度行:可能在加载权重或编译 Metal shader,首跑较慢;持续无输出请留意)'
+        : '(正在启动…)';
+      return { status: 'RUNNING', progress: undefined, stage: `h3 准备中 · 已 ${elapsedMin} 分钟 ${hint}` };
     }
     return { status: 'RUNNING', progress: undefined, stage: 'h3 推理中(可数分钟)' };
   }
@@ -277,6 +328,7 @@ export class H3cProvider implements Provider {
       }
     }
     this.running.delete(handle.providerTaskId);
+    this.trackers.delete(handle.providerTaskId);
   }
 }
 
