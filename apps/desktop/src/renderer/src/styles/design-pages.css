@@ -296,7 +296,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 /* 框选模式:光标变十字(拖空白处框选);平移保底通道(中键/空格)仍是抓手 */
 .pg-canvas .stage.marquee{cursor:crosshair}
 .pg-canvas .stage.marquee.panning{cursor:grabbing}
-.pg-canvas .world{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0}
+/* 视口容器:.world 自身只做 transform(平移/缩放)。
+   合成层提示 —— 把「每帧重排 + 重绘整棵子树(节点 DOM + 连线 SVG)」降级为
+   「合成器直接平移已有纹理」,这是画布拖动/缩放卡顿的第一来源。 */
+.pg-canvas .world{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0;will-change:transform;backface-visibility:hidden;contain:layout style}
+/* ⚠️ 禁止给 .world 加 contain:paint —— 连线 SVG(.edges)是 overflow:visible、
+   节点也可能超出 1600×1000 的 world 边界,加 paint 会把它们直接裁掉。 */
 /* 框选矩形:world 坐标系内绘制(随缩放/平移自然跟手),不参与指针命中 */
 .pg-canvas .sel-rect{position:absolute;pointer-events:none;z-index:20;border:1px solid var(--accent);border-radius:2px;background:color-mix(in oklab,var(--accent),transparent 88%)}
 /* 组框:节点下方的命名容器(只有标题条可点,不挡节点拖动) */
@@ -330,6 +335,37 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .node.ghost .nh{background:transparent;color:var(--muted);font-weight:500}
 .pg-canvas .node.flash{animation:canvas-flash 1.2s var(--ease-standard)}
 @keyframes canvas-flash{0%,100%{box-shadow:0 0 0 0 transparent}30%{box-shadow:0 0 0 6px color-mix(in oklab,var(--accent),transparent 60%)}}
+/* 拖动中的节点:提前提升为独立合成层,拖动时只做合成器位移,不重绘节点内容。
+   ⚠️ 只在拖动期间挂 —— 常驻 will-change 会让每个节点都独占一层显存,节点一多反而更慢。 */
+.pg-canvas .node.dragging{will-change:transform;transition:none}
+
+/* ── 视口动画期间的性能降级(P0 优化) ──
+   拖动/缩放画布时,毛玻璃(backdrop-filter)是最昂贵的一环:每个玻璃元素都要在
+   每帧重新读取并模糊它下面的像素,而 .world 正在它们下面移动 → 逐帧重采样。
+   这里在动画期间把 blur 摘掉、换成不透明背景(视觉几乎无差别),停下 150ms 后恢复。 */
+.pg-canvas.animating .topbar,
+.pg-canvas.animating .palette,
+.pg-canvas.animating .agent,
+.pg-canvas.animating .queue,
+.pg-canvas.animating .zoomctl,
+.pg-canvas.animating .minimap,
+.pg-canvas.animating .pal-expand,
+.pg-canvas.animating .node-add,
+.pg-canvas.animating .btn-p,
+.pg-canvas.animating .btn-s,
+.pg-canvas.animating .chip{
+  -webkit-backdrop-filter:none;
+  backdrop-filter:none;
+}
+/* 摘掉 blur 后必须给不透明底色,否则面板会变成半透明、内容糊成一团 */
+.pg-canvas.animating .topbar,
+.pg-canvas.animating .queue,
+.pg-canvas.animating .zoomctl,
+.pg-canvas.animating .minimap,
+.pg-canvas.animating .pal-expand,
+.pg-canvas.animating .node-add{background:var(--bg)}
+.pg-canvas.animating .palette{background:var(--surface)}
+.pg-canvas.animating .agent{background:var(--bg)}
 .pg-canvas .nh{display:flex;align-items:center;gap:7px;padding:8px 11px;border-bottom:1px solid var(--border-soft);font-weight:600;font-size:var(--text-xs);background:var(--surface);border-radius:11px 11px 0 0;cursor:grab;user-select:none}
 .pg-canvas .nh svg{width:13px;height:13px;color:var(--fg-2);flex:none}
 .pg-canvas .nh .st{margin-left:auto}

@@ -23,6 +23,8 @@ function badgeTone(badge: string, running?: boolean): 'queued' | 'failed' | 'bus
 interface NodeCardProps {  node: CanvasNode;
   selected: boolean;
   flash: boolean;
+  /** 此节点正在被拖动:挂 `dragging` 类,提前提升为独立合成层(见 design-pages.css) */
+  dragging: boolean;
   /** 所属分组(null = 未分组);有组时头部显示组徽标 */
   group: NodeGroup | null;
   /** 当前 connectDrag 命中此节点(cur 是拖拽建边的目标) */
@@ -48,6 +50,7 @@ export function NodeCard({
   node: n,
   selected,
   flash,
+  dragging,
   group,
   isConnectTarget,
   connectHitOk,
@@ -71,6 +74,7 @@ export function NodeCard({
     n.agentOn ? 'agent-on' : '',
     selected ? 'sel' : '',
     flash ? 'flash' : '',
+    dragging ? 'dragging' : '',
     group ? `grouped tone-${group.tone ?? 'neutral'}` : '',
     isConnectTarget && connectHitOk ? 'connecting-target-ok' : '',
     isConnectTarget && !connectHitOk ? 'connecting-target-bad' : '',

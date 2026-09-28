@@ -41,6 +41,8 @@ interface StageViewProps {
    *  用于把「清空选区」的时机从 click 提前到 pointerdown(见下方注释) */
   onCancelMarquee: () => boolean;
   flashId: string | null;
+  /** 正在被拖动的节点 id 集合(NodeCard 据此挂 `dragging` 类,做合成层提升) */
+  draggingIds: string[];
   connectDrag: ConnectDrag | null;
   takeResults: Record<string, string>;
   /** assetId → 资产展示元信息(asset 节点渲染用) */
@@ -90,6 +92,7 @@ export function StageView({
   marqueeMode,
   onCancelMarquee,
   flashId,
+  draggingIds,
   connectDrag,
   takeResults,
   assetMeta,
@@ -143,6 +146,8 @@ export function StageView({
 
   /** 选中集合(用于 O(1) 判断节点是否高亮) */
   const selSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  /** 拖动中集合(O(1) 判断节点是否挂 dragging 类) */
+  const dragSet = useMemo(() => new Set(draggingIds), [draggingIds]);
   /** 有分组的节点 → 组色(节点卡片显示组徽标) */
   const groupOfNodeId = useMemo(() => {
     const m = new Map<string, NodeGroup>();
@@ -257,6 +262,7 @@ export function StageView({
             nodes={nodes}
             selected={selSet.has(n.id)}
             flash={flashId === n.id}
+            dragging={dragSet.has(n.id)}
             group={groupOfNodeId.get(n.id) ?? null}
             isConnectTarget={connectDrag?.hitId === n.id}
             connectHitOk={connectDrag?.hitOk === true}

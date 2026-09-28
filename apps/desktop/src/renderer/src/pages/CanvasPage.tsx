@@ -155,6 +155,31 @@ export default function CanvasPage({
   const viewRef = useRef(view);
   viewRef.current = view;
   const [panning, setPanning] = useState(false);
+  /**
+   * 视口动画中(平移/缩放/拖动节点):期间给根容器挂 `animating` 类,
+   * CSS 侧据此摘掉毛玻璃(backdrop-filter)并恢复不透明底色。
+   *
+   * 为什么需要:毛玻璃元素每帧都要重新读取并模糊它下面的像素,而 .world 正在
+   * 它们下面移动 → 逐帧重采样,是「节点不多却很卡」的主要来源。
+   * 停止操作 150ms 后自动摘掉,静态时视觉完全不变。
+   */
+  const [viewportAnimating, setViewportAnimating] = useState(false);
+  const animatingTimer = useRef<number | null>(null);
+  /** 打上动画标记并续期:操作期间持续调用,停手 150ms 后自动降级回毛玻璃 */
+  const markViewportAnimating = useCallback(() => {
+    setViewportAnimating(true);
+    if (animatingTimer.current !== null) window.clearTimeout(animatingTimer.current);
+    animatingTimer.current = window.setTimeout(() => {
+      animatingTimer.current = null;
+      setViewportAnimating(false);
+    }, 150);
+  }, []);
+  useEffect(
+    () => () => {
+      if (animatingTimer.current !== null) window.clearTimeout(animatingTimer.current);
+    },
+    [],
+  );
 
   /* ── 画布数据 ──
    初始为空画布(不播种设计稿演示数据):真实节点一律来自已存盘画布快照。
@@ -452,6 +477,13 @@ export default function CanvasPage({
   } | null>(null);
   /** 拖动开始时的内容(撤销要回到的位置):拖拽过程中每帧 setState 只写状态,不动历史 */
   const dragPrevRef = useRef<HistoryContent | null>(null);
+  /**
+   * 正在被拖动的节点 id 集合(空集合 = 没在拖)。
+   * 用途只有一个:给这些节点挂 `dragging` 类 → CSS 提前提升为独立合成层
+   * (`will-change:transform`),拖动时只做合成器位移、不重绘节点内容。
+   * ⚠️ 必须随拖动结束立刻清空 —— 常驻 will-change 会让每个节点独占一层显存。
+   */
+  const [draggingIds, setDraggingIds] = useState<string[]>([]);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -459,6 +491,7 @@ export default function CanvasPage({
       if (!d) return;
       const z = viewRef.current.z;
       if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      markViewportAnimating();
       const dx = (e.clientX - d.sx) / z;
       const dy = (e.clientY - d.sy) / z;
       const ids = new Set(d.ids);
@@ -475,6 +508,7 @@ export default function CanvasPage({
       const d = dragRef.current;
       if (!d) return;
       dragRef.current = null;
+      setDraggingIds([]);
       // 拖动结束 = 一次离散编辑 ✓ 提交历史(未真正移动过则不记)
       if (d.moved && dragPrevRef.current) {
         // 拖动是唯一「跨越很长时间、起点状态必须显式记下」的编辑:直接把拖动前内容当撤销目标
@@ -494,7 +528,7 @@ export default function CanvasPage({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, []);
+  }, [markViewportAnimating]);
 
   /* ── 「+」按钮 → 拖拽连接到已有节点(松开命中目标即建边)──
    * 拖动期间:跟手画临时虚线 + 命中节点高亮(可连=绿,不可连=红);
@@ -596,6 +630,8 @@ export default function CanvasPage({
       const d = connectDragRef.current;
       if (!d) return;
       pending = { cx: e.clientX, cy: e.clientY };
+      // 拖拽建边同样每帧触发重渲染且临时预览线在动 → 一并走毛玻璃降级
+      markViewportAnimating();
       if (!rafId) rafId = requestAnimationFrame(flush);
     };
 
@@ -651,7 +687,7 @@ export default function CanvasPage({
       window.removeEventListener('keydown', onKey);
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [hitTestNode, commitConnectEdge]);
+  }, [hitTestNode, commitConnectEdge, markViewportAnimating]);
 
   /* ── 空白处拖拽:框选(marqueeMode)或平移 ──
    * 方案 A + 开关模式:开关开启 → 拖空白框选;关闭 → 拖空白平移(原行为)。
@@ -672,6 +708,7 @@ export default function CanvasPage({
     if (!panning) return;
     const onMove = (e: PointerEvent) => {
       const s = panStartRef.current;
+      markViewportAnimating();
       setView((v) => ({ ...v, x: s.vx + (e.clientX - s.sx), y: s.vy + (e.clientY - s.sy) }));
     };
     const onUp = () => setPanning(false);
@@ -681,7 +718,7 @@ export default function CanvasPage({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [panning]);
+  }, [panning, markViewportAnimating]);
 
   /* ── 框选(marquee)──
    * ⚠️ 坐标必须在 **pointerdown / pointermove 当场**取出(`clientPointOf`):
@@ -786,6 +823,7 @@ export default function CanvasPage({
       if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
       e.preventDefault();
       const rect = stage.getBoundingClientRect();
+      markViewportAnimating();
       setView((v) => {
         const factor = Math.exp(-e.deltaY * 0.0016);
         const nz = Math.min(1.3, Math.max(0.4, v.z * factor));
@@ -797,7 +835,7 @@ export default function CanvasPage({
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
     return () => stage.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [markViewportAnimating]);
 
   /* ── Agent 面板宽度 ── */
   const agentMax = useCallback(
@@ -943,6 +981,8 @@ export default function CanvasPage({
       }
       dragRef.current = { ids: dragIds, sx: e.clientX, sy: e.clientY, origins, moved: false };
       dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
+      // 挂 dragging 类(合成层提升);即使未真正移动也会在 pointerup 清空
+      setDraggingIds(dragIds);
       e.stopPropagation();
     },
     [],
@@ -2956,7 +2996,7 @@ export default function CanvasPage({
 
   const zoomPct = `${Math.round(view.z * 100)}%`;
   return (
-    <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}`}>
+    <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}${viewportAnimating ? ' animating' : ''}`}>
       <div className={`app${palCollapsed ? ' palette-collapsed' : ''}`} data-od-id="canvas-app">
         <Toolbar
           projectName={projectName}
@@ -3019,6 +3059,7 @@ export default function CanvasPage({
               return true;
             }}
             flashId={flashId}
+            draggingIds={draggingIds}
             connectDrag={connectDrag}
             takeResults={takeResults}
             assetMeta={assetMeta}
