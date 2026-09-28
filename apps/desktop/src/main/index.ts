@@ -24,6 +24,7 @@ import { TakeStore } from './takes';
 import { DebugLogger } from './logger';
 import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus, mlxgenDownloadActive, mlxgenDownloadCancel } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
+import { runSelfCheck } from './selfcheck';
 import {
   credentialDelete,
   credentialGet,
@@ -474,6 +475,8 @@ ipcMain.handle('probe-runtimes', async (): Promise<RuntimeProbe[]> => {
 });
 
 ipcMain.handle('install-runtime', (_e, id: string) => installRuntime(id, logger));
+// 引擎自检(引导向导第 4 步):轻量真探测,不加载大模型、不触发真实推理
+ipcMain.handle('run-selfcheck', () => runSelfCheck(logger));
 
 // ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询 / 取消) ----------
 ipcMain.handle('mlxgen-models', () => mlxgenModelInfo(logger));

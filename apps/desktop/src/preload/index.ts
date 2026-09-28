@@ -12,6 +12,7 @@ import type {
 const api: BigBotArtApi = {
   probeRuntimes: () => ipcRenderer.invoke('probe-runtimes'),
   installRuntime: (id) => ipcRenderer.invoke('install-runtime', id),
+  runSelfCheck: () => ipcRenderer.invoke('run-selfcheck'),
   mlxgenModels: () => ipcRenderer.invoke('mlxgen-models'),
   mlxgenDownload: (repoId: string) => ipcRenderer.invoke('mlxgen-download', repoId),
   mlxgenDownloadStatus: (jobId: string) => ipcRenderer.invoke('mlxgen-download-status', jobId),

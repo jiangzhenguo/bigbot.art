@@ -1,11 +1,43 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { RuntimeProbe } from '@bigbotart/shared';
+import type { RuntimeProbe, SelfCheckItem } from '@bigbotart/shared';
 
 interface OnboardingPageProps {
   onNavigate: (
     page: 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects',
   ) => void;
 }
+
+/** 图片模型展示元数据(与主进程 KNOWN_MODELS 同口径;id 即下载标识) */
+const IMAGE_MODELS: Array<{ id: string; name: string; desc: string; recommended?: boolean }> = [
+  { id: 'z-image-turbo', name: 'Z-Image-Turbo', desc: '文生图 · ~11GB', recommended: true },
+  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', desc: '文生图 · 新一代 7.1B · ~24GB' },
+  { id: 'qwen-image-edit', name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 37.5GB' },
+  { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', desc: '多参考生成/编辑 · Outpain ~18GB' },
+  { id: 'seedvr2-3b', name: 'SeedVR2 3B', desc: '超分修复 · ~4.7GB' },
+  { id: 'qwen2.5-vl', name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · ~16.6GB' },
+];
+
+/** 自检项占位(运行前展示「待检测」;真实结果由主进程返回,见 selfcheck.ts) */
+const CHECK_ITEMS: Array<{ id: SelfCheckItem['id']; label: string }> = [
+  { id: 'h3c', label: 'h3.c 视频引擎(二进制 + 模型 checkpoint)' },
+  { id: 'mlxgen', label: 'mlxgen 图片引擎(CLI + 已下载模型)' },
+  { id: 'llm', label: 'LLM 工具调用回环(端点 + tools 支持)' },
+  { id: 'storage', label: '数据目录可写与渲染队列' },
+];
+
+/** 非 mlxgen 的模型:本应用无下载通道,明确标注手动(不假装能一键下) */
+const MANUAL_MODELS: Array<{ name: string; desc: string; how: string }> = [
+  {
+    name: 'MiniMax-H3 视频模型组',
+    desc: '文生视频 + 带声直出 · 144GB',
+    how: '手动下载(本应用不代下)· 见 docs/MiniMax-H3-加速-LoRA-使用手册.md',
+  },
+  {
+    name: 'Ornith-1.5-35B-A3B · MLX 4bit',
+    desc: 'LLM · Agent 内核 · 19.4GB',
+    how: '在 LM Studio 内下载(本应用不代下)',
+  },
+];
 
 /**
  * 引擎引导向导 — 1:1 还原 OpenDesign 设计稿 onboarding.html
@@ -25,15 +57,14 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     message: string;
   }>({ state: 'idle', message: '未安装 · pip 包(uv tool install)' });
   const [consent, setConsent] = useState(true);
+  /** 模型 id → 进度(undefined=未开始,-1=失败,0..100=进行中/完成) */
   const [owns, setOwns] = useState<Record<string, number>>({});
+  /** 模型 id → 主进程已知下载状态(挂载时回填,含本地直用目录命中的「已就绪」) */
+  const [modelReady, setModelReady] = useState<Record<string, boolean>>({});
   const [checkHint, setCheckHint] = useState('点击「开始自检」');
   const [checking, setChecking] = useState(false);
-  const [checks, setChecks] = useState<Array<{ spin: boolean; done: boolean; t: string }>>([
-    { spin: false, done: false, t: '' },
-    { spin: false, done: false, t: '' },
-    { spin: false, done: false, t: '' },
-    { spin: false, done: false, t: '' },
-  ]);
+  /** 自检真实结果(主进程 runSelfCheck 返回;null=尚未运行) */
+  const [checks, setChecks] = useState<SelfCheckItem[] | null>(null);
   const [checkedAll, setCheckedAll] = useState(false);
   const timersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const dlTimersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
@@ -50,20 +81,39 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     [],
   );
 
-  /* 挂载时确认图片模型下载状态(Z-Image-Turbo 已缓存则显示已就绪) */
+  /* 挂载时回填全部图片模型的真实下载状态(本地直用目录命中也算已就绪) */
   useEffect(() => {
     let cancelled = false;
+    const refreshModels = () =>
+      window.bigbotart
+        .mlxgenModels()
+        .then((list) => {
+          if (cancelled) return;
+          const map: Record<string, boolean> = {};
+          for (const m of list) map[m.id] = m.downloaded;
+          setModelReady(map);
+          // 已就绪的模型直接显示 100%(避免「已就绪」与进度条状态打架)
+          setOwns((o) => {
+            const next = { ...o };
+            for (const m of list) if (m.downloaded && next[m.id] == null) next[m.id] = 100;
+            return next;
+          });
+        })
+        .catch(() => {});
+    void refreshModels();
+    /* 进入页面时恢复主进程仍在进行的下载任务(此前轮询只存在于组件 state) */
     void window.bigbotart
-      .mlxgenModels()
-      .then((list) => {
+      .mlxgenDownloadActive()
+      .then((active) => {
         if (cancelled) return;
-        const z = list.find((m) => m.id === 'z-image-turbo');
-        if (z?.downloaded) setOwns((o) => ({ ...o, img: 100 }));
+        for (const a of active) startPolling(a.id, a.jobId, a.pct ?? 0);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
+    // startPolling 为稳定回调(useCallback 无依赖),不随渲染变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const go = useCallback((i: number) => {
@@ -168,13 +218,14 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     loading: string,
   ): JSX.Element => {
     const probe = probes.find((p) => p.id === key);
-    if (!probe) return <DetectRow name={name} text={loading} />;
+    // key 必须挂在实际返回的根节点上(map 里调用时外面套不了 key,否则 React 报重复 key)
+    if (!probe) return <DetectRow key={key} name={name} text={loading} />;
     const txt = [probe.version, probe.path, probe.detail].filter(Boolean).join(' · ');
     let st: 'ok' | 'warn' | 'err';
     if (probe.status === 'ready') st = 'ok';
     else if (probe.status === 'error') st = 'err';
     else st = 'warn';
-    return <DetectRow name={name} text={txt || '未检测到'} state={st} />;
+    return <DetectRow key={key} name={name} text={txt || '未检测到'} state={st} />;
   };
 
   /* ── 步骤 2:LM Studio 安装(接入 installRuntime)── */
@@ -222,71 +273,91 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
     }
   };
 
-  /* ── 步骤 3:模型下载(真实执行 mlxgen download,进度轮询;llm/vid 为手动项)── */
-  const handleDownload = (key: string) => {
-    if (owns[key] != null || key !== 'img') return;
-    setOwns((o) => ({ ...o, [key]: 0 }));
-    void window.bigbotart
-      .mlxgenDownload('AbstractFramework/z-image-turbo-8bit')
-      .then((res) => {
-        const jobId = res.jobId;
-        if (!res.ok || !jobId) {
-          setOwns((o) => ({ ...o, [key]: -1 }));
-          return;
-        }
-        const t = setInterval(() => {
-          void window.bigbotart
-            .mlxgenDownloadStatus(jobId)
-            .then((st) => {
-              if (st.status === 'running') {
-                setOwns((o) => ({ ...o, [key]: Math.round(st.pct ?? 0) }));
-                return;
-              }
-              clearInterval(t);
-              delete dlTimersRef.current[key];
-              if (st.status === 'done') {
-                setOwns((o) => ({ ...o, [key]: 100 }));
-                void window.bigbotart.probeRuntimes().then(setProbes).catch(() => {});
-              } else {
-                setOwns((o) => ({ ...o, [key]: -1 }));
-              }
-            })
-            .catch(() => {});
-        }, 700);
-        dlTimersRef.current[key] = t;
-      })
-      .catch(() => setOwns((o) => ({ ...o, [key]: -1 })));
-  };
+  /* ── 步骤 3:模型下载(mlxgen 通道真实执行;进度轮询)── */
 
-  /* ── 步骤 4:自检 ── */
-  const handleSelfcheck = () => {
+  /** 轮询单个下载任务直到终态(挂载恢复与新建任务共用) */
+  const startPolling = useCallback((id: string, jobId: string, initialPct: number) => {
+    // 同一模型不重复起轮询(挂载恢复 + 用户点击可能撞车)
+    if (dlTimersRef.current[id]) return;
+    setOwns((o) => ({ ...o, [id]: initialPct }));
+    const t = setInterval(() => {
+      void window.bigbotart
+        .mlxgenDownloadStatus(jobId)
+        .then((st) => {
+          if (st.status === 'running') {
+            setOwns((o) => ({ ...o, [id]: Math.round(st.pct ?? 0) }));
+            return;
+          }
+          clearInterval(t);
+          delete dlTimersRef.current[id];
+          if (st.status === 'done') {
+            setOwns((o) => ({ ...o, [id]: 100 }));
+            setModelReady((m) => ({ ...m, [id]: true }));
+            void window.bigbotart.probeRuntimes().then(setProbes).catch(() => {});
+          } else {
+            setOwns((o) => ({ ...o, [id]: -1 }));
+          }
+        })
+        .catch(() => {});
+    }, 700);
+    dlTimersRef.current[id] = t;
+  }, []);
+
+  /** 下载指定模型:repoId 由主进程白名单校验(id→repo 映射在主进程,渲染层只传 id 对应的 repo) */
+  const handleDownload = useCallback(
+    (id: string, repoId: string) => {
+      if (owns[id] != null || modelReady[id]) return;
+      setOwns((o) => ({ ...o, [id]: 0 }));
+      void window.bigbotart
+        .mlxgenDownload(repoId)
+        .then((res) => {
+          if (!res.ok || !res.jobId) {
+            setOwns((o) => ({ ...o, [id]: -1 }));
+            return;
+          }
+          startPolling(id, res.jobId, 0);
+        })
+        .catch(() => setOwns((o) => ({ ...o, [id]: -1 })));
+    },
+    [owns, modelReady, startPolling],
+  );
+
+  /* ── 步骤 4:自检(主进程真实探测:不再是无条件打勾的动画)── */
+  const handleSelfcheck = async () => {
     if (checking || checkedAll) return;
     setChecking(true);
-    setCheckHint('自检中…');
-    checks.forEach((_, i) => {
-      timersRef.current.push(
-        setTimeout(() => {
-          setChecks((cs) =>
-            cs.map((c, j) => (j === i ? { spin: true, done: false, t: '' } : c)),
-          );
-          timersRef.current.push(
-            setTimeout(() => {
-              const times: string[] = ['1.2s', '0.8s', '240ms', '通过'];
-              setChecks((cs) =>
-                cs.map((c, j) =>
-                  j === i ? { spin: false, done: true, t: times[i] ?? '' } : c,
-                ),
-              );
-              if (i === checks.length - 1) {
-                setChecking(false);
-                setCheckedAll(true);
-                setCheckHint('全部通过');
-              }
-            }, 900),
-          );
-        }, i * 1300),
+    setCheckHint('自检中…(真实探测引擎,不加载大模型)');
+    try {
+      const report = await window.bigbotart.runSelfCheck();
+      setChecks(report.items);
+      setCheckedAll(true);
+      setCheckHint(
+        report.passed === report.total
+          ? `全部通过(${report.passed}/${report.total})`
+          : `${report.passed}/${report.total} 项通过 · 失败的项可按提示修复后重试`,
       );
-    });
+    } catch (e) {
+      setChecks([
+        {
+          id: 'storage',
+          label: '自检执行失败',
+          ok: false,
+          detail: (e as Error).message,
+          hint: '见主进程日志',
+          ms: 0,
+        },
+      ]);
+      setCheckHint('自检执行失败 · 见主进程日志');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  /** 重跑自检(失败的项修复后) */
+  const handleRecheck = () => {
+    setCheckedAll(false);
+    setChecks(null);
+    void handleSelfcheck();
   };
 
   const railSteps = [
@@ -475,47 +546,57 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
           {/* 3 下载 */}
           <section className={`pane${cur === 2 ? ' on' : ''}`} data-pane="2" data-od-id="ob-step-download">
             <h1>下载模型</h1>
-            <p className="sub">按需下载,支持断点续传;可以先跳过,之后在「设置 · 模型下载」中安装。</p>
-            {[
-              {
-                key: 'llm',
-                name: 'Ornith-1.5-35B-A3B · MLX 4bit',
-                d: 'LLM · Agent 内核 · 推荐 · 19.4GB',
-                auto: false,
-              },
-              {
-                key: 'img',
-                name: 'Z-Image-Turbo',
-                d: '文生图 · 默认图片引擎 · 推荐 · 11.8GB',
-                auto: true,
-              },
-              { key: 'vid', name: 'h3 视频模型组', d: '文生视频 + 带声直出 · 144GB · 磁盘充足', auto: false },
-            ].map((m) => {
-              const p = owns[m.key];
+            <p className="sub">
+              图片模型支持应用内下载(断点续传);视频与 LLM 模型需手动获取,已明确标注。
+            </p>
+            <div className="mut" style={{ fontSize: 'var(--text-xs)', margin: '2px 0 6px' }}>
+              图片引擎模型({IMAGE_MODELS.length} 个 · 至少装 1 个即可用)
+            </div>
+            {IMAGE_MODELS.map((m) => {
+              const p = owns[m.id];
+              const ready = modelReady[m.id] === true || p === 100;
               return (
-                <div className="d-row" key={m.key}>
+                <div className="d-row" key={m.id} data-model={m.id}>
                   <div className="grow">
-                    <b>{m.name}</b>
+                    <b>
+                      {m.name}
+                      {m.recommended && (
+                        <span className="badge" style={{ marginLeft: 6 }}>
+                          推荐
+                        </span>
+                      )}
+                    </b>
                     <div className="mut mono" style={{ fontSize: 11 }}>
-                      {m.d}
+                      {m.desc}
                     </div>
                   </div>
-                  {p == null ? (
-                    m.auto ? (
-                      <button
-                        className="btn btn-s"
-                        data-dl
-                        style={{ padding: '7px 14px', fontSize: 'var(--text-xs)' }}
-                        onClick={() => handleDownload(m.key)}
-                      >
-                        下载
-                      </button>
-                    ) : (
-                      <span className="badge">手动 · 稍后在设置中处理</span>
-                    )
+                  {ready ? (
+                    <span className="badge ok">已就绪</span>
+                  ) : p == null ? (
+                    <button
+                      className="btn btn-s"
+                      data-dl={m.id}
+                      style={{ padding: '7px 14px', fontSize: 'var(--text-xs)' }}
+                      onClick={() =>
+                        handleDownload(
+                          m.id,
+                          // repoId 与主进程白名单同口径(mlxgen-models.ts KNOWN_MODELS)
+                          {
+                            'z-image-turbo': 'AbstractFramework/z-image-turbo-8bit',
+                            'qwen-image-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+                            'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
+                            'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
+                            'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
+                            'qwen2.5-vl': 'Qwen/Qwen2.5-VL-7B-Instruct',
+                          }[m.id] ?? m.id,
+                        )
+                      }
+                    >
+                      下载
+                    </button>
                   ) : p < 0 ? (
                     <span className="badge err">下载失败 · 见主进程日志</span>
-                  ) : p < 100 ? (
+                  ) : (
                     <div style={{ minWidth: 140 }}>
                       <div
                         className="row"
@@ -528,21 +609,24 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                         <i style={{ width: `${p}%` }} />
                       </div>
                     </div>
-                  ) : (
-                    <span className="badge ok">已就绪</span>
                   )}
                 </div>
               );
             })}
-            <div className="d-row">
-              <div className="grow mut">
-                <b style={{ color: 'var(--fg-2)' }}>Qwen Image Edit / SeedVR2 / Qwen2.5-VL</b>
-                <div className="mono" style={{ fontSize: 11 }}>
-                  可选 · 稍后在设置中下载
-                </div>
-              </div>
-              <span className="badge">可选</span>
+            <div className="mut" style={{ fontSize: 'var(--text-xs)', margin: '10px 0 6px' }}>
+              需手动获取(本应用不代下)
             </div>
+            {MANUAL_MODELS.map((m) => (
+              <div className="d-row" key={m.name}>
+                <div className="grow">
+                  <b style={{ color: 'var(--fg-2)' }}>{m.name}</b>
+                  <div className="mono" style={{ fontSize: 11 }}>
+                    {m.desc} · {m.how}
+                  </div>
+                </div>
+                <span className="badge">手动</span>
+              </div>
+            ))}
             <div className="foot">
               <button className="btn btn-s" data-back onClick={() => go(1)}>
                 上一步
@@ -560,31 +644,37 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
           {/* 4 自检 */}
           <section className={`pane${cur === 3 ? ' on' : ''}`} data-pane="3" data-od-id="ob-step-check">
             <h1>自检</h1>
-            <p className="sub">冒烟测试每个引擎的最小任务,确认可用后进入工作台。</p>
+            <p className="sub">
+              真实探测每个引擎是否可用(轻量检查,不加载大模型、不触发真实推理)。
+            </p>
             <div id="checkList">
-              {[
-                'h3.c 生成 1 秒预览视频',
-                'mlxgen 生成 1 张测试图',
-                'LLM 工具调用回环(create_node)',
-                '队列互斥与项目锁',
-              ].map((txt, i) => {
-                const c = checks[i] ?? { spin: false, done: false, t: '' };
-                return (
-                  <div className="check" data-c key={i}>
-                    {c.spin ? (
-                      <span className="ck">
-                        <span className="spin" />
+              {checks == null
+                ? CHECK_ITEMS.map((txt) => (
+                    <div className="check" data-c key={txt.id}>
+                      <span className="ck">{checking ? <span className="spin" /> : '·'}</span>
+                      <div className="grow">{txt.label}</div>
+                      <span className="mono mut" style={{ fontSize: 11 }} />
+                    </div>
+                  ))
+                : checks.map((c) => (
+                    <div className="check" data-c data-check={c.id} key={c.id}>
+                      <span className={`ck${c.ok ? ' ok' : ' err'}`}>{c.ok ? '✓' : '×'}</span>
+                      <div className="grow">
+                        <b>{c.label}</b>
+                        <div className="mut" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                          {c.detail}
+                        </div>
+                        {!c.ok && c.hint && (
+                          <div style={{ fontSize: 11, color: 'var(--danger)', lineHeight: 1.5 }}>
+                            → {c.hint}
+                          </div>
+                        )}
+                      </div>
+                      <span className="mono mut" style={{ fontSize: 11 }}>
+                        {c.ms >= 1000 ? `${(c.ms / 1000).toFixed(1)}s` : `${c.ms}ms`}
                       </span>
-                    ) : (
-                      <span className={`ck${c.done ? ' ok' : ''}`}>{c.done ? '✓' : '·'}</span>
-                    )}
-                    <div className="grow">{txt}</div>
-                    <span className="mono mut" style={{ fontSize: 11 }}>
-                      {c.t}
-                    </span>
-                  </div>
-                );
-              })}
+                    </div>
+                  ))}
             </div>
             <div className="foot">
               <button className="btn btn-s" data-back onClick={() => go(2)}>
@@ -594,15 +684,19 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                 {checkHint}
               </span>
               <span className="spacer" />
-              {checkedAll ? null : (
+              {checkedAll ? (
+                <button className="btn btn-s" data-od-id="ob-recheck" onClick={handleRecheck}>
+                  重新自检
+                </button>
+              ) : (
                 <button
                   className="btn btn-p"
                   id="selfcheck"
                   data-od-id="ob-selfcheck"
                   disabled={checking}
-                  onClick={handleSelfcheck}
+                  onClick={() => void handleSelfcheck()}
                 >
-                  开始自检
+                  {checking ? '自检中…' : '开始自检'}
                 </button>
               )}
               {checkedAll && (
