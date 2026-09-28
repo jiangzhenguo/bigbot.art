@@ -16,13 +16,20 @@ export const WORKER_ENTRY = join(__dirname, 'worker.js');
 
 /**
  * chat 的**静默**超时(不是总超时):连续这么久没有任何心跳才判失败。
- * 只要 worker 还在推进(每轮循环开始都发心跳),跑多久都不会被杀 —— 见 request 的看门狗说明。
+ * 只要 worker 还在推进(轮首心跳 + 轮内定时心跳)就续期,跑多久都不会被杀 —— 见 request 的看门狗说明。
  *
- * ⚠️ 取值必须 **大于单轮 LLM 最长思考时间**:心跳是「每轮一次」,如果某一轮的推理本身
- * 就超过这个值,该轮会在心跳到来之前被误杀(实测:反推中文长提示词的单轮可达 10-20 秒,
- * 设成 8 秒会在轮内被杀)。默认 3 分钟对本地 35B 模型是安全的余量。
+ * ⚠️ 取值必须 **大于「最长无心跳间隔」**。心跳来自两处:
+ *   ① 轮首(每轮 LLM 调用前一次,`PiChatSession.onRound`);
+ *   ② **轮内定时心跳**(pi-chat 等待 LLM 返回期间按 `LLM_HEARTBEAT_MS` 周期补发)。
+ * 轮内心跳把最大间隔压到 LLM_HEARTBEAT_MS 量级,所以本值主要防「worker 真死/整体挂起」,
+ * 不必再贴着单轮推理耗时去设。
+ *
+ * 默认 10 分钟(2026-09 由 3 分钟调大):本机 35B 本地模型实测,**一轮**真实规模请求
+ * (30 个工具定义 + 13 节点画布状态 + 历史 ≈ 75KB,thinking + maxTokens 12000)就要 **78 秒**,
+ * 连「你好」这种极小请求都要 30 秒;多步任务动辄 5-10 轮,原 180s 会在任务正常推进中判死,
+ * 表现为「agent 无响应」的**假失败**(模型其实还在算,画布改动也可能已生效)。
  */
-const SILENT_TIMEOUT_MS = Number(process.env.BIGBOTART_AGENT_SILENT_TIMEOUT_MS ?? 180_000);
+const SILENT_TIMEOUT_MS = Number(process.env.BIGBOTART_AGENT_SILENT_TIMEOUT_MS ?? 600_000);
 
 export interface AgentManagerOptions {
   /** 覆盖 worker 脚本路径(指向 pi 入口或自定义 worker) */

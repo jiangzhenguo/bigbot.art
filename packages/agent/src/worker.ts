@@ -44,11 +44,15 @@ function respond(msg: AgentResponse) {
  * **首轮 LLM 推理期间没有任何工具活动**,本地 35B 模型想 30-60 秒很正常,看门狗会在
  * 任务真正开始前就把它误杀(实测:8 秒静默超时下,首轮推理直接被杀)。
  * 这里让 worker 每一轮循环都主动报活,覆盖推理阶段。
+ *
+ * 2026-09 补轮内心跳:轮首一次只标记「进入本轮」,而本轮耗时全在推理上(实测单轮 78 秒),
+ * 期间无任何信号。onTick 按 LLM_HEARTBEAT_MS 周期补发,把最长无信号间隔压到 15 秒级。
  */
 function heartbeat(phase: string) {
   process.stdout.write(JSON.stringify({ method: 'heartbeat', params: { phase } }) + '\n');
 }
 chatSession.onRound = (round) => heartbeat(`round-${round}`);
+chatSession.onTick = (round) => heartbeat(`round-${round}-tick`);
 
 rl.on('line', async (line) => {
   let req: AgentRequest | ToolCallResponse;

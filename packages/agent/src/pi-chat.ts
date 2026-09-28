@@ -26,6 +26,15 @@ import { toolDefinitions } from '@bigbotart/shared';
 const MAX_TOOL_ROUNDS = 20;
 
 /**
+ * 轮内心跳间隔(2026-09 补):等待 LLM 返回期间,每隔这么久向主进程报活一次。
+ *
+ * 动机:轮首心跳(见 onRound)之后,本轮剩余时间全花在推理上,期间零信号 ——
+ * 本机 35B 模型一轮真实规模请求实测 78 秒,主进程看门狗只能盲等。取 15 秒:
+ * 远小于看门狗默认值(600s),又不会把心跳刷得太密(每轮只多发几条 stdout 行)。
+ */
+const LLM_HEARTBEAT_MS = Number(process.env.BIGBOTART_AGENT_HEARTBEAT_MS ?? 15_000);
+
+/**
  * 轮询抑制闸(结构兜底,与 system prompt 的「提交即收尾」规则同口径)。
  *
  * 真实事故:用户说「连给 image-gen 的 ref-image」,模型建节点+连线+engine.submit 都做对了,
@@ -40,6 +49,25 @@ const MAX_TOOL_ROUNDS = 20;
 const POLL_TOOLS = new Set(['engine.queue_status', 'canvas.get_node', 'canvas.list_nodes']);
 /** 提交成功后允许的只读轮询次数上限(超过即视为空转) */
 const POST_SUBMIT_POLL_LIMIT = 2;
+/**
+ * 单轮输出预算(tokens)。
+ *
+ * 2026-09-28 由 12000 调大到 32000 —— **实测依据**:本机 LM Studio 上
+ * `ornith-1.5-35b-a3b-abliterated-mlx` 的 `loaded_context_length = 262144`(256K),
+ * 且实测 `max_tokens: 20000` / `32000` 均被接受(finish_reason=stop,无报错),空间充足。
+ *
+ * 为什么必须调大:原 12000 在「写带几千字提示词的节点参数」时会被烧光 ——
+ * 本地推理模型带 thinking,思维链常占输出预算的一半以上;模型还倾向把 `data` 对象
+ * **序列化成 JSON 字符串**(转义符放大输出量),两者叠加导致输出被腰斩:
+ * 实测 JSON 在 552 字符处断成非法值,下一轮重试又截断,最终 0 工具调用 / 0 字回复。
+ *
+ * 可用 `BIGBOTART_AGENT_MAX_TOKENS` 覆盖(不同模型/端点上限不同)。
+ */
+const LLM_MAX_TOKENS = Number(process.env.BIGBOTART_AGENT_MAX_TOKENS ?? 32_000);
+
+/** 声明给框架的模型上下文窗口(实际由端点决定;本地 35B 实测 256K) */
+const LLM_CONTEXT_WINDOW = Number(process.env.BIGBOTART_AGENT_CONTEXT_WINDOW ?? 100_000);
+
 /** 强制收尾话术(submit 已成功,不能报成失败) */
 const POLL_ABORT_REPLY = '已提交生成,任务正在后台排队渲染。完成后画布会自动刷新,无需等待——你可以先继续别的工作。';
 
@@ -62,6 +90,29 @@ export function isPollingExhausted(pollCount: number): boolean {
 
 /** 强制收尾话术(导出供测试断言:提交成功的话术不能长成「已失败」) */
 export const POLL_ABORT_MESSAGE = POLL_ABORT_REPLY;
+
+/**
+ * 输出被 maxTokens 截断时的收尾文案(纯函数,便于单测)。
+ *
+ * 背景:`assistant.stopReason === 'length'` 表示模型输出达到 token 上限被腰斩。
+ * 原实现对此**毫无处理** —— 若本轮没发出工具调用,就把 `reply`(可能为空)当作正常回复返回,
+ * 用户看到静默的 0 字回复;若有半句话,则被当成完整交付。二者都是「假成功」。
+ *
+ * 分两种:
+ *   - 无任何文本 → 完整解释 + 可执行建议(提示"一次写入太长"这个最常见原因);
+ *   - 有部分文本 → 保留内容(模型确实说了话,不该丢),但**明确标注不完整**。
+ */
+export function composeTruncatedReply(reply: string): string {
+  const body = reply.trim();
+  if (!body) {
+    return (
+      '⚠️ 本轮输出被截断(模型输出达到 token 上限,未产生任何有效操作或回复)。\n' +
+      '常见原因:一次要写入的内容太长(例如把几千字的提示词塞进单个 canvas.update_node 的 data 里)。\n' +
+      '建议:把内容拆成多轮写入,或先写简短版本再逐步补充;也可减少单次任务涉及的节点数。'
+    );
+  }
+  return `${reply}\n\n⚠️(以上回复被截断:模型输出达到 token 上限,内容可能不完整。)`;
+}
 
 /**
  * 组装喂给模型的工具结果文本。
@@ -203,6 +254,13 @@ export class PiChatSession {
    * 覆盖「首轮 LLM 推理」这段没有任何工具活动的空窗期。
    */
   onRound: ((round: number) => void) | null = null;
+  /**
+   * 轮内心跳(2026-09 补):等待 LLM 返回期间的周期性报活。
+   * 轮首心跳只标记「进入本轮」这一瞬间,而本轮真正耗时的是**推理本身** ——
+   * 实测本机 35B 模型一轮真实规模请求 78 秒(极小请求也要 30 秒),这期间没有任何信号,
+   * 看门狗只能干等。轮内定时心跳把最长无信号间隔压到 LLM_HEARTBEAT_MS。
+   */
+  onTick: ((round: number) => void) | null = null;
 
   /** 敏感操作签名:同名同参视为同一操作(重跑同节点同参数 = 用户已授权过的动作) */
   private static sensitiveSig(name: string, args: Record<string, unknown>): string {
@@ -225,7 +283,7 @@ export class PiChatSession {
       provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 100_000, maxTokens: 12000,
+      contextWindow: LLM_CONTEXT_WINDOW, maxTokens: LLM_MAX_TOKENS,
     };
     const provider = createProvider({
       id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,
@@ -293,12 +351,13 @@ export class PiChatSession {
       this.onRound?.(round);
       const context: Context = { systemPrompt: params.context.systemPrompt, messages, tools };
       let assistant: AssistantMessage;
+      // 轮内心跳:推理期间定时报活(见 onTick 说明)。只包住 LLM 调用这一段 ——
+      // 工具执行本身已由主进程的 tool 请求续期,不需要重复计时。
+      const tick = this.onTick ? setInterval(() => this.onTick?.(round), LLM_HEARTBEAT_MS) : null;
       try {
         assistant = await models.complete(models.getModel('bigbotart-llm', ep.modelId)!, context, {
-          // 输出预算:12000(2026-09 从 4000 调大)——本地推理型(带 thinking)模型做多节点规划
-          // 时思维链会吃掉大量 output token,4000 常在发出工具调用前被 finish_reason=length 截断,
-          // 表现为「思考半天后空回复」;配合工具说明的「大任务分步」双管齐下
-          maxTokens: 12000,
+          // 输出预算:见 LLM_MAX_TOKENS(2026-09-28 由 12000 调大到 32000)
+          maxTokens: LLM_MAX_TOKENS,
           temperature: 0.4,
           apiKey: ep.apiKey ?? 'unused',
           signal,
@@ -308,6 +367,8 @@ export class PiChatSession {
         // LLM 请求失败(401/超时/不可达)必须向上抛,让主进程返回 {ok:false, error}
         // ——静默吞掉会让错误端点表现为"成功但空回复"
         throw e;
+      } finally {
+        if (tick) clearInterval(tick);
       }
       if (assistant.stopReason === 'aborted') return { reply: '', toolCalls, aborted: true };
       if (assistant.stopReason === 'error' || assistant.errorMessage) {
@@ -395,6 +456,16 @@ export class PiChatSession {
             .map((c) => ('text' in c ? c.text : ''))
             .join(''),
         ).text;
+        // 输出被 maxTokens 截断(assistant.stopReason === 'length')时**必须明确告知** ——
+        // 否则会返回「reply 空 / 无工具调用」或「半句话」,被上层当作**正常完成**:
+        // 用户看到静默的 0 字回复,或把腰斩的内容当成完整交付(真实事故 2026-09-28
+        // 「将3d人物转化成真人」:第 2 轮写含几千字 prompt 的 data JSON 烧光 12000 token
+        // → JSON 在 552 字符处断成非法值;第 3 轮重试时 thinking 又用尽 token,
+        // 连工具调用都没发 → stop=length / blocks=thinking / 回复 0 字,整轮被判成功)。
+        // 这是「假成功」,与批次1 修的「假失败」是同一类问题的镜像:都不能静默吞掉。
+        if (assistant.stopReason === 'length') {
+          return { reply: composeTruncatedReply(reply), thinking, toolCalls };
+        }
         return { reply, thinking, toolCalls };
       }
 
