@@ -29,6 +29,8 @@ export interface H3CliOptions {
   lastFrame?: string;
   refImages?: string[];
   refVideo?: string;
+  /** 参考视频是否忽略源片内嵌音轨:true → --ref-silent-video,false/缺省 → --ref-video(连音轨一起注入) */
+  refVideoSilent?: boolean;
   refAudio?: string;
   /** 加速选项(骨架期不开放) */
   extra?: string[];
@@ -94,14 +96,75 @@ export function clampDimension(w: number, h: number): { width: number; height: n
   return { width, height };
 }
 
+/** h3 输出帧率(与 h3.c 的 H3_FPS 一致) */
+export const H3_FPS = 24;
+
+/**
+ * 带**内嵌音轨**的参考视频要求的最小输出时长(h3 硬规则)。
+ *
+ * 依据 h3.c:1146(truncate 分支):
+ *     max_samples = condition_frames[visual] * 32000 / H3_FPS;
+ *     if (max_samples < 64000)  → "video soundtrack %zu requires at least 2 seconds;
+ *                                  request at least 56 output frames"
+ * 即输出 < 2 秒(64000/32000)时,h3 无法从参考视频里截出足够音轨,直接 exit 1。
+ * h3 自己建议 ≥56 帧(56/24 ≈ 2.33s,兼顾 5+17n 帧数对齐)。
+ */
+export const MIN_SOUNDTRACK_SECONDS = 2;
+export const MIN_SOUNDTRACK_FRAMES = 56;
+
+/** 输出时长(秒):seconds 优先,否则 frames / H3_FPS */
+export function outputSeconds(opts: Pick<H3CliOptions, 'frames' | 'seconds'>): number {
+  if (opts.seconds && opts.seconds > 0) return opts.seconds;
+  return (opts.frames ?? 0) / H3_FPS;
+}
+
+/**
+ * 参数组合统一防呆(提交前调用,返回所有违规说明;空数组 = 安全)。
+ *
+ * 覆盖三件事:
+ *  ① 档位危险组合(layers≤40 + reuse≥3):易出鬼影/振铃 —— **拒绝**;
+ *  ② 带内嵌音轨的参考视频 + 输出时长不足 2 秒(h3.c:1146 硬规则)—— **拒绝**,
+ *     并给出「忽略音轨」这条绕法(--ref-silent-video 不走 truncate 分支,短时长合法);
+ *  ③ reuse 配极少步数:模型新鲜评估太少,画质/多样性下降 —— **警告**(沿用 h3 自己的判断)。
+ *
+ * ② 为什么必须拦:带音轨的 ref-video 端口现在已经全链路打通(asset / 上游镜头 / 视频增强都可连),
+ * 而 preview 档只有 22 帧(≈0.92s)—— 组合起来必炸,且 h3 的报错发生在**入队之后**,
+ * 错误信息(`video soundtrack 2 requires at least 2 seconds`)看不出该怎么改。真实事故 2026-09。
+ */
+export function validateParams(
+  opts: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse' | 'frames' | 'seconds' | 'refVideo' | 'refVideoSilent'>,
+): string[] {
+  const issues = validateTier(opts);
+
+  // ② 带音轨参考视频的时长下限
+  const hasAudioRefVideo = !!opts.refVideo && opts.refVideoSilent !== true;
+  if (hasAudioRefVideo) {
+    const secs = outputSeconds(opts);
+    if (secs < MIN_SOUNDTRACK_SECONDS) {
+      issues.push(
+        `参考视频带音轨时,h3 要求输出时长 ≥ ${MIN_SOUNDTRACK_SECONDS} 秒(否则无法从参考片截取音轨)——` +
+          `当前 ${secs.toFixed(2)} 秒(${opts.frames ?? 0} 帧)。两个修法任选:` +
+          `① 把时长提到 ≥ ${MIN_SOUNDTRACK_SECONDS} 秒(帧数 ≥ ${MIN_SOUNDTRACK_FRAMES},如 draft/default 档);` +
+          `② 只想借参考视频的画面/动作时,勾选「忽略参考视频音轨」(改走 --ref-silent-video,不再受该限制)`,
+      );
+    }
+  }
+
+  // ③ reuse 配极少步数:与 h3 的 warning 同口径,但提前到提交前告知
+  if ((opts.reuse ?? 1) >= 2 && (opts.steps ?? 0) < 8) {
+    issues.push(
+      `警告:--reuse ${opts.reuse} 配 ${opts.steps} 步时,模型新鲜评估次数很少,画面质量与多样性会下降` +
+        `(h3 亦会提示 "leaves very few fresh model evaluations")。建议 reuse 1,或把步数提到 ≥8。`,
+    );
+  }
+  return issues;
+}
+
 /** 危险组合防呆;返回所有违规说明(空数组 = 安全) */
 export function validateTier(options: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse'>): string[] {
   const issues: string[] = [];
   if ((options.layers ?? 50) <= 40 && (options.reuse ?? 1) >= 3) {
     issues.push('layers≤40 + reuse≥3 组合易出鬼影/振铃,已拒绝提交(请提高 layers 或降低 reuse)');
-  }
-  if (options.steps < 8 && options.layers >= 50 && options.reuse <= 2) {
-    // 预览档快速;允许,仅提示
   }
   return issues;
 }
@@ -123,7 +186,8 @@ export function buildH3Args(opts: H3CliOptions): string[] {
   if (opts.firstFrame) args.push('--first-frame', opts.firstFrame);
   if (opts.lastFrame) args.push('--last-frame', opts.lastFrame);
   for (const img of opts.refImages ?? []) args.push('--ref-image', img);
-  if (opts.refVideo) args.push('--ref-video', opts.refVideo);
+  // 参考视频:默认 --ref-video(连源片内嵌音轨一起注入);勾「忽略音轨」走 --ref-silent-video
+  if (opts.refVideo) args.push(opts.refVideoSilent === true ? '--ref-silent-video' : '--ref-video', opts.refVideo);
   if (opts.refAudio) args.push('--ref-audio', opts.refAudio);
   if (opts.ssdStreaming === true) args.push('--ssd-streaming');
   for (const e of opts.extra ?? []) args.push(e);
