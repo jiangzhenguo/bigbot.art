@@ -64,6 +64,96 @@ const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
 
 const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
 
+/**
+ * 规整工具参数里的 `data` 字段为普通对象。
+ *
+ * 为什么需要:工具 schema 把 `data` 声明为 object,但**本地小模型(Ornith 等)常把它
+ * 序列化成 JSON 字符串**再传(`"{\"prompt\": \"...\"}"`)。旧实现在 update_node 里用
+ * `typeof a.data === 'object'` 判断,对字符串为 false → 整段 patch 被**静默跳过**,
+ * 函数却返回「✓ 已更新节点」:模型写了几百字 prompt 而节点 prompt 长度仍为 0,
+ * h3 在很远的地方才炸 `prompt must not be empty`(2026-09-28 真实事故)。
+ *
+ * 语义:对象直接用;字符串尝试 JSON.parse(必须是对象,不能是数组/标量);
+ * 解析失败**明确报错**——绝不静默放行,因为「报告成功但没做」比直接失败更难查。
+ */
+export function normalizeDataArg(
+  raw: unknown,
+): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, data: {} };
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return { ok: true, data: {} };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(s);
+    } catch (e) {
+      return {
+        ok: false,
+        error: `data 是字符串但不是合法 JSON,无法应用:${(e as Error).message}。请直接传对象(不要用字符串包裹)。`,
+      };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {
+        ok: false,
+        error: `data 解析后不是对象(收到 ${Array.isArray(parsed) ? '数组' : typeof parsed})。请传形如 {"prompt":"..."} 的对象。`,
+      };
+    }
+    return { ok: true, data: parsed as Record<string, unknown> };
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) return { ok: true, data: raw as Record<string, unknown> };
+  return { ok: false, error: `data 必须是对象,收到 ${Array.isArray(raw) ? '数组' : typeof raw}。` };
+}
+
+/**
+ * 按「id 优先、标题兜底」解析工具参数里的节点引用(nodeId / from / to 等)。
+ *
+ * 为什么需要:主对话 LLM 拿到的节点信息是「标题为主、id 在行尾」(`canvas.list_nodes` /
+ * `get_node` 都这么排版,出自「对用户称呼用标题」的产品规则),模型很容易把**标题**当 id 回传。
+ * 原实现只做 `n.id === nodeId` 严格匹配,于是必然报「节点 镜头 03 不存在」——
+ * 白烧一整轮往返(本机单轮实测 78 秒),把静默看门狗推向超时。真实事故见 2026-09 主画布对话失败。
+ *
+ * 容错策略(保守,宁可报歧义也不猜):
+ *   1. id 精确命中 → 直接用(零风险,绝不被标题同名干扰);
+ *   2. 标题**去空白后**精确命中且**唯一** → 用;
+ *   3. 命中多个 → 不猜,返回 candidates 让调用方报「歧义,请用 id」;
+ *   4. 都没命中 → node undefined。
+ *
+ * 去空白是为了容忍模型排版差异(「镜头 03」vs「镜头03」)。
+ */
+export function resolveNodeRef(
+  nodes: CanvasNode[],
+  ref: string,
+): { node: CanvasNode | undefined; ambiguous: CanvasNode[] } {
+  const raw = String(ref ?? '').trim();
+  if (!raw) return { node: undefined, ambiguous: [] };
+  const byId = nodes.find((n) => n.id === raw);
+  if (byId) return { node: byId, ambiguous: [] };
+  const norm = (s: string) => s.replace(/\s+/g, '');
+  const target = norm(raw);
+  const hits = nodes.filter((n) => norm(String(n.label ?? '')) === target);
+  if (hits.length === 1) return { node: hits[0], ambiguous: [] };
+  if (hits.length > 1) return { node: undefined, ambiguous: hits };
+  return { node: undefined, ambiguous: [] };
+}
+
+/**
+ * resolveNodeRef 的「解析或给出友好报错」包装,供各工具入口统一使用。
+ * 命中 id/唯一标题 → 返回节点;歧义/不存在 → 返回可直接当 result 用的错误文案。
+ */
+export function resolveNodeRefOrError(
+  nodes: CanvasNode[],
+  ref: string,
+  role = '节点',
+): { ok: true; node: CanvasNode } | { ok: false; error: string } {
+  const hit = resolveNodeRef(nodes, ref);
+  if (hit.node) return { ok: true, node: hit.node };
+  if (hit.ambiguous.length > 0) {
+    const list = hit.ambiguous.map((n) => `「${n.label || n.id}」 (id=${n.id})`).join('、');
+    return { ok: false, error: `${role}「${ref}」匹配到多个节点:${list}。请改用 id 精确指定。` };
+  }
+  return { ok: false, error: `${role} ${ref} 不存在` };
+}
+
 /* ── ffmpeg 本地图片节点(image-crop / image-stitch / image-split)输入解析:纯函数,与渲染层
  * CanvasPage.upstreamImagePath 同口径,供 engine.submit 本地执行路径与单测复用 ── */
 
@@ -474,7 +564,11 @@ export class ToolHandlers {
     'canvas.create_node': async (a, ctx) => {
       const kind = String(a.kind ?? 'document');
       const label = String(a.label ?? '新节点');
-      const rawData = (a.data as Record<string, unknown>) ?? {};
+      // data 同样容忍字符串化(本地小模型常见退化;旧实现在这里直接当对象用,
+      // 传字符串会让 `'refs' in rawData` 抛错或把字符串当 data 存进节点)
+      const normCreate = normalizeDataArg((a as { data?: unknown }).data);
+      if (!normCreate.ok) return { ok: false, result: normCreate.error };
+      const rawData = normCreate.data;
       // 方案 B:refs 由连线推导,创建时直写 refs 一律忽略
       let refsNote = '';
       let data = rawData;
@@ -540,14 +634,30 @@ export class ToolHandlers {
         node.data = next as CanvasNode['data'];
       }
       node.updatedAt = new Date().toISOString();
-      if (cur) { cur.updatedAt = node.updatedAt; this.store.saveCanvasSnapshot(cur); }
+      cur.updatedAt = node.updatedAt;
+      this.store.saveCanvasSnapshot(cur);
+      // 写入后**回读校验**:请求里要写的关键字段必须真的落进 node.data。
+      // 防的是「patch 因某种原因没生效但函数照样返回成功」——一次假的 ✓ 会让模型
+      // 以为已完成而继续 engine.submit,错误被推到很远的地方(空 prompt 的 h3 exit 1)。
+      const missed = patch
+        ? Object.keys(patch).filter((k) => {
+            if (k === 'refs') return false; // 有意忽略,不算未生效
+            return JSON.stringify((node.data as Record<string, unknown>)[k]) !== JSON.stringify(patch[k]);
+          })
+        : [];
+      if (missed.length > 0) {
+        return { ok: false, result: `更新未生效(写入后校验失败):${missed.join('、')} 没有落进节点。请重试或检查参数类型。` };
+      }
       return { ok: true, result: `已更新节点「${node.label}」${refsNote}`, nodeId };
     },
     'canvas.delete_node': async (a, ctx) => {
-      const nodeId = String(a.nodeId ?? '');
+      const rawId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
+      const hit = resolveNodeRefOrError(cur.nodes, rawId);
+      if (!hit.ok) return { ok: false, result: hit.error };
+      const nodeId = hit.node.id;
       const before = cur.nodes.length;
       cur.nodes = cur.nodes.filter((n) => n.id !== nodeId);
       cur.edges = cur.edges.filter((e) => e.source !== nodeId && e.target !== nodeId);
