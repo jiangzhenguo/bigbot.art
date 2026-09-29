@@ -55,27 +55,83 @@ export function takeElapsedSec(t: { elapsedSec?: number; durationSec?: number })
   return t.elapsedSec ?? t.durationSec;
 }
 
+/**
+ * 计算「需要重拉 Take 历史」的签名。
+ *
+ * ⚠️ 为什么不能只看 job 状态(2026-09-29 真实事故:图片生成成功后 chip 一直停在「排队中」):
+ * 此前签名 = `nodeId | job.id:status,...`,只在**本节点的 job 出现在 `jobs` 列表里**时才会变。
+ * 但 `RenderQueue` 的 jobs 是**纯内存**的 —— 应用重启 / 窗口重载 / 切画布再回来之后,
+ * 队列里根本没有这条 job(签名恒为 `<nodeId>|`),effect 首次挂载拉一次后就**永不重拉**,
+ * 于是磁盘上早已是 `succeeded` 的 Take 在界面上永远显示「排队中」。
+ * 现在把**节点产物路径**也纳入签名:`resultPath` 出现/变化(队列完成回写、切换 Take、Agent 回写)
+ * 本身就是一个「历史一定变了」的强信号,与 job 是否存在无关。
+ */
+export function takeRefreshSig(
+  nodeId: string,
+  jobs: Array<{ nodeId: string; id: string; status: string }>,
+  dataResultPath: unknown,
+): string {
+  const mine = jobs.filter((j) => j.nodeId === nodeId);
+  const jobPart = mine.map((j) => `${j.id}:${j.status}`).join(',');
+  const pathPart = typeof dataResultPath === 'string' ? dataResultPath : '';
+  return `${nodeId}|${jobPart}|${pathPart}`;
+}
+
+/** 历史里是否还有未终态记录(queued/running)——有则不信任本次结果,短延时复检 */
+export function hasUnsettledTake(takes: Array<{ status?: string }> | undefined): boolean {
+  return Array.isArray(takes) && takes.some((t) => t.status === 'queued' || t.status === 'running');
+}
+
 export function ImageTakeSection({ node, projectId, jobs, onSelectTake, toastMsg }: ImageTakeSectionProps) {
   const [hist, setHist] = useState<ShotTakeHistory | null>(null);
+  /** 卸载后不回写(setState on unmounted component) */
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
-  const refreshHist = useCallback(() => {
+  const refreshHist = useCallback(async (): Promise<void> => {
     if (!projectId) return;
-    void window.bigbotart.takesHistory(projectId, node.id).then(setHist).catch(() => setHist(null));
+    try {
+      const h = await window.bigbotart.takesHistory(projectId, node.id);
+      if (!aliveRef.current) return;
+      setHist(h);
+      /* 落盘竞态兜底:主进程 `finishJob` 已改为「Take 终态先落盘再 notify」,但
+         「任务已完成、Take 仍是 queued」这条路上没有任何**主动**重试 —— 一旦某次
+         恰好在 patch 落盘前读盘,界面就永久定格在错误状态,只能靠用户手点一下。
+         这里对「读到未终态记录」做一次短延时复检(仅一次,不轮询),把这类竞态收敛掉。 */
+      if (hasUnsettledTake(h?.takes)) {
+        window.setTimeout(() => {
+          if (!aliveRef.current) return;
+          void window.bigbotart
+            .takesHistory(projectId, node.id)
+            .then((again) => {
+              if (aliveRef.current) setHist(again);
+            })
+            .catch(() => {
+              /* 复检失败保留首次结果,不静默清空 */
+            });
+        }, 1200);
+      }
+    } catch {
+      if (aliveRef.current) setHist(null);
+    }
   }, [projectId, node.id]);
 
+  /* 任务提交/完成 + 节点产物变化时自动刷新(单一入口,避免挂载时重复请求)。
+     签名同时含 job 状态与 `data.resultPath`:后者保证「job 已不在队列里」(重启/重载/
+     切画布)时依然能因产物出现而重拉 —— 只看 job 的老写法在这些场景下永不刷新。
+     首挂载 `sigRef` 为空 → 签名必然不同 → 必定拉一次,旧行为保持不变。 */
+  const sigRef = useRef('');
   useEffect(() => {
-    refreshHist();
-  }, [refreshHist]);
-
-  // 任务提交/完成时自动刷新:按本节点 job 签名变化才重拉(避免长跑轮询重复请求)
-  const jobSigRef = useRef('');
-  useEffect(() => {
-    const mine = jobs.filter((j) => j.nodeId === node.id);
-    const sig = `${node.id}|${mine.map((j) => `${j.id}:${j.status}`).join(',')}`;
-    if (sig === jobSigRef.current) return;
-    jobSigRef.current = sig;
-    refreshHist();
-  }, [jobs, node.id, refreshHist]);
+    const sig = takeRefreshSig(node.id, jobs, node.data?.resultPath);
+    if (sig === sigRef.current) return;
+    sigRef.current = sig;
+    void refreshHist();
+  }, [jobs, node.id, node.data?.resultPath, refreshHist]);
 
   const takes = hist?.takes ?? [];
   if (takes.length === 0) return null;
