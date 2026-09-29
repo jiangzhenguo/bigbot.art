@@ -7,6 +7,7 @@ import type { RenderJob } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { ImagePreview } from './ImagePreview';
 import { ImageTakeSection } from './ImageTakeSection';
+import { useTakeResult } from './useTakeResult';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
 import { GenStatePanel } from './GenState';
@@ -34,7 +35,8 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
   const steps = Number(d.steps ?? 24);
   const guidance = Number(d.guidance ?? 1.0);
   const seeds = Array.isArray(d.seeds) ? (d.seeds as number[]) : [];
-  const resultPath = String(d.resultPath ?? '');
+  // 产物路径:节点 data 优先,缺失时回退 Take 历史里最新成功产物(2026-09-29 事故修复)
+  const resultPath = useTakeResult(node.id, projectId, d.resultPath, jobs) ?? '';
   const hasTake = !!d.currentTakeId || !!resultPath;
 
   const running = jobs.some((j) => j.nodeId === node.id && j.status === 'running');

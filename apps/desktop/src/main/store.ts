@@ -1,25 +1,27 @@
 /**
  * ProjectStore — 项目/画布持久化(M1+:一个项目可有多画布)
  *
- * 文件布局:
- *   ~/.bigbotart/projects.json                 ← 项目列表(含 canvasIds/activeCanvasId)
- *   ~/.bigbotart/canvases-${projectId}.json    ← 该项目下所有画布快照 + activeCanvasId
+ * 文件布局(2026-09-29 起按工作空间收拢到子目录,见 workspace-paths.ts):
+ *   ~/.bigbotart/projects.json                        ← 项目列表(含 canvasIds/activeCanvasId)
+ *   ~/.bigbotart/workspaces/<projectId>/canvases.json ← 该项目下所有画布快照 + activeCanvasId
  *
- * 向后兼容:旧版 ~/.bigbotart/canvas-${projectId}.json(单个画布)会在第一次
- * loadProjectCanvases 时自动迁移为"主画布"并归入新容器,迁移后旧文件保留
- * 备份但不再使用。
+ * 旧布局(canvases-<pid>.json 平铺在 DATA_DIR 下)由 migrate.ts 在启动时一次性搬迁;
+ * 更早的 ~/.bigbotart/canvas-${projectId}.json(单个画布)在第一次 loadProjectCanvases
+ * 时仍会自动迁移为"主画布"并归入新容器(目标改为新子目录),迁移后旧文件改名 .bak 保留。
  *
  * 骨架期实现:纯 JSON 文件存储(基于 Node 内置 fs,零依赖,Electron 内置 Node 20 也能跑)。
  * PRD §5.7 要求 SQLite(node:sqlite);由于 Electron 31 内置 Node 20.x 无 node:sqlite,
  * 采用"存储接口 + 文件实现",后续可无缝替换为 better-sqlite3 等(接口不变)。
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { CanvasSnapshot, Project, ProjectCanvases } from '@bigbotart/shared';
-
-const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
-const PROJECTS_FILE = join(DATA_DIR, 'projects.json');
+import {
+  DATA_DIR,
+  PROJECTS_FILE,
+  canvasesFile as wsCanvasesFile,
+  legacySingleCanvasFile,
+} from './workspace-paths.js';
 
 interface StoredDoc {
   projects: Project[];
@@ -57,22 +59,78 @@ export class ProjectStore {
     writeFileSync(PROJECTS_FILE, JSON.stringify(this.docs, null, 2));
   }
 
-  /** 项目下的画布容器文件路径 */
+  /** 项目下的画布容器文件路径(workspaces/<pid>/canvases.json) */
   private canvasesFile(projectId: string): string {
-    return join(DATA_DIR, `canvases-${projectId}.json`);
+    return wsCanvasesFile(projectId);
   }
 
   /** 旧版单画布文件路径(用于一次性迁移) */
   private legacyCanvasFile(projectId: string): string {
-    return join(DATA_DIR, `canvas-${projectId}.json`);
+    return legacySingleCanvasFile(projectId);
   }
 
-  /** 读项目下的画布容器;不存在时尝试从旧文件迁移;都没有则返回空容器 */
+  /** 确保文件所在目录存在 —— 2026-09-29 改为子目录后,name 平铺时代只 mkdir DATA_DIR 的做法会 ENOENT */
+  private ensureDir(file: string): void {
+    mkdirSync(dirname(file), { recursive: true });
+  }
+
+  /**
+   * 索引自愈:把 `projects.json` 里的 `canvasIds/activeCanvasId` 对齐到 `canvases.json` 的**真实内容**。
+   *
+   * 触发条件(任一不满足即视为索引被污染):
+   *   - `canvasIds` 与文件里的画布 id 集合不一致;
+   *   - `activeCanvasId` 不在真实画布列表里(悬空 → 渲染层加载不到,会误判成空项目)。
+   *
+   * 为什么必须做:渲染层 `App.tsx` 按 `activeCanvasId` 取画布,取不到就**新建一张空画布** ——
+   * 索引一旦悬空,用户看到的就是「画布全空」,而真实数据其实完好(2026-09-29 真实事故)。
+   * 这里以文件为准静默纠正,并在日志总线留痕(红线 R6:不静默吞)。
+   */
+  private reconcileProjectIndex(projectId: string, pc: ProjectCanvases): void {
+    const p = this.docs.projects.find((x) => x.id === projectId);
+    if (!p) return; // 孤立 pid(项目已删但文件还在):不动 projects.json
+    const realIds = pc.canvases.map((c) => c.id);
+    // active 的取舍:索引里的值**仍然有效就保留**(那是用户当前选中的画布,不能被文件里的旧值覆盖);
+    // 只有悬空(指向已不存在的画布)时才回退到文件值,再不行退回第一张。
+    const activeStillValid = !!p.activeCanvasId && realIds.includes(p.activeCanvasId);
+    const idsMatch =
+      Array.isArray(p.canvasIds) && p.canvasIds.length === realIds.length && p.canvasIds.every((id, i) => id === realIds[i]);
+    if (idsMatch && activeStillValid) return;
+
+    const nextActive = activeStillValid
+      ? p.activeCanvasId
+      : realIds.includes(pc.activeCanvasId)
+        ? pc.activeCanvasId
+        : (realIds[0] ?? MAIN_CANVAS_ID);
+
+    console.warn(
+      `[store] 画布索引与文件不一致,已自愈 projectId=${projectId} ` +
+        `canvasIds=${JSON.stringify(p.canvasIds)} → ${JSON.stringify(realIds)} ` +
+        `active=${p.activeCanvasId} → ${nextActive}`,
+    );
+    p.canvasIds = realIds;
+    p.activeCanvasId = nextActive;
+    this.save();
+  }
+
+  /**
+   * 读项目下的画布容器;不存在时尝试从旧文件迁移;都没有则返回空容器。
+   *
+   * 🛡️ **自愈(2026-09-29 画布消失事故)**:`canvases.json` 是画布的**唯一真源**,
+   * `projects.json` 里的 `canvasIds/activeCanvasId` 只是索引副本。二者不一致时(例如被一个
+   * 跑旧构建、写旧路径的实例用悬空 id 覆盖过),**以文件为准回写 projects.json**。
+   *
+   * 事故形态:旧构建的 `createCanvas` 读旧路径 `canvases-<pid>.json`(已迁移 → 视为空)→
+   * 新建一张空画布写到旧路径 + 用新 id 更新 projects.json;而新位置的真实画布纹丝不动。
+   * 渲染层随后按 activeCanvasId 找不到画布 → 判为「空项目」→ 再建一张 ⇒ 用户看到**画布全空**。
+   * 数据从未丢失,只是索引被污染。此处的自愈让下一次启动即自动纠正。
+   */
   loadProjectCanvases(projectId: string): ProjectCanvases {
     const f = this.canvasesFile(projectId);
     if (existsSync(f)) {
       try {
-        return JSON.parse(readFileSync(f, 'utf-8')) as ProjectCanvases;
+        const pc = JSON.parse(readFileSync(f, 'utf-8')) as ProjectCanvases;
+        this.reconcileProjectIndex(projectId, pc);
+        return pc;
       } catch {
         // 文件损坏:尝试迁移/回退到空容器
       }
@@ -100,6 +158,7 @@ export class ProjectStore {
           canvases: [main],
           activeCanvasId: MAIN_CANVAS_ID,
         };
+        this.ensureDir(f);
         writeFileSync(f, JSON.stringify(migrated, null, 2));
         // 把旧文件改名备份(.bak),保留以便排错
         try { renameSync(legacy, legacy + '.bak'); } catch { /* ignore */ }
@@ -113,7 +172,9 @@ export class ProjectStore {
 
   /** 写项目下的画布容器;同时回写项目的 activeCanvasId */
   private saveProjectCanvases(pc: ProjectCanvases): void {
-    writeFileSync(this.canvasesFile(pc.projectId), JSON.stringify(pc, null, 2));
+    const f = this.canvasesFile(pc.projectId);
+    this.ensureDir(f);
+    writeFileSync(f, JSON.stringify(pc, null, 2));
     const p = this.docs.projects.find((x) => x.id === pc.projectId);
     if (p) {
       p.canvasIds = pc.canvases.map((c) => c.id);

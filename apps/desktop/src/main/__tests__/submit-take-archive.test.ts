@@ -104,9 +104,10 @@ afterAll(() => {
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
-/** 读取临时 HOME 下的 takes json(断言真实落盘,而不是只看内存) */
+/** 读取临时 HOME 下的 takes json(断言真实落盘,而不是只看内存)。
+ *  2026-09-29 起 Take 落在 workspaces/<pid>/takes.json(原 takes-<pid>.json 平铺)。 */
 function readTakes() {
-  const f = join(tmpHome, `takes-${PROJECT}.json`);
+  const f = join(tmpHome, 'workspaces', PROJECT, 'takes.json');
   return existsSync(f) ? JSON.parse(readFileSync(f, 'utf-8')) : { takes: [] };
 }
 

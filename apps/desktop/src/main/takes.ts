@@ -1,6 +1,7 @@
 /**
  * TakeStore — shot 节点的 Take 历史(每次生成 = 一条 Take,保留历史不覆盖)
- * 持久化:~/.bigbotart/takes-<projectId>.json
+ * 持久化:~/.bigbotart/workspaces/<projectId>/takes.json(2026-09-29 起按工作空间收敛;
+ * 旧路径 takes-<projectId>.json 由 migrate.ts 启动时搬迁)
  *
  * 与 AssetStore / SkillStore 同模式:
  * - 项目维度一份 JSON,增量小、查找方便
@@ -8,12 +9,10 @@
  * - takeId 与 RenderJob.takeId 对应,Job 完成时自动 append
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
 import type { ShotTakeHistory, Take } from '@bigbotart/shared';
 import { probeMedia } from './assets.js';
-
-const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
+import { takesFile } from './workspace-paths.js';
 
 interface TakeDoc {
   takes: Take[];
@@ -23,14 +22,14 @@ export class TakeStore {
   private cache = new Map<string, TakeDoc>(); // projectId → doc
 
   private file(projectId: string): string {
-    return join(DATA_DIR, `takes-${projectId}.json`);
+    return takesFile(projectId);
   }
 
   private load(projectId: string): TakeDoc {
     const cached = this.cache.get(projectId);
     if (cached) return cached;
-    mkdirSync(DATA_DIR, { recursive: true });
     const f = this.file(projectId);
+    mkdirSync(dirname(f), { recursive: true });
     if (existsSync(f)) {
       try {
         const doc = JSON.parse(readFileSync(f, 'utf-8')) as TakeDoc;
@@ -48,8 +47,9 @@ export class TakeStore {
   private save(projectId: string): void {
     const doc = this.cache.get(projectId);
     if (!doc) return;
-    mkdirSync(DATA_DIR, { recursive: true });
-    writeFileSync(this.file(projectId), JSON.stringify(doc, null, 2));
+    const f = this.file(projectId);
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, JSON.stringify(doc, null, 2));
   }
 
   /** 追加一条新 Take(新跑/重跑都走这个;attempt 自动累加) */
@@ -97,6 +97,42 @@ export class TakeStore {
   /** 列出项目下全部 Take(按 createdAt 倒序,最新在前) */
   list(projectId: string): Take[] {
     return [...this.load(projectId).takes].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  /**
+   * 清理「孤儿 Take」——残留的 queued/running 记录(2026-09-29)。
+   *
+   * **为什么需要**:`RenderQueue` 的 jobs 是**纯内存**的(`render-queue.ts` 的 `private jobs = []`),
+   * 应用一旦退出/崩溃,**队列没了但 Take 记录留在磁盘上**。下次启动后这些 Take 永远停在
+   * `queued`/`running` —— 检查器里显示成「排队中」永不消失,用户以为任务还在跑(实际早随进程消失)。
+   * 真实场景:生成中重启应用(或开发时热重启),就会留下这类记录。
+   *
+   * 语义:进程已不可能再更新这些 Take,故一律标记为 `failed` 并写明原因(比「排队中」诚实,
+   * 也符合红线 R6 不静默吞)。**不改已终态的 Take**,也不删产物文件。
+   *
+   * @param projectIds 要清理的项目;由调用方从 ProjectStore 取(避免本模块反向依赖)
+   * @returns 清理条数与明细(供日志总线留痕)
+   */
+  reconcileOrphaned(projectIds: string[]): { cleaned: number; details: Array<{ projectId: string; takeId: string; from: string }> } {
+    const details: Array<{ projectId: string; takeId: string; from: string }> = [];
+    const now = new Date().toISOString();
+    for (const pid of projectIds) {
+      const doc = this.load(pid);
+      let changed = false;
+      for (const t of doc.takes) {
+        if (t.status !== 'queued' && t.status !== 'running') continue;
+        details.push({ projectId: pid, takeId: t.id, from: t.status });
+        t.status = 'failed';
+        t.error = '应用已重启,该任务不再运行(队列为内存态,重启后无法续跑)';
+        t.finishedAt = now;
+        if (t.createdAt) {
+          t.elapsedSec = Math.max(0, (Date.parse(now) - Date.parse(t.createdAt)) / 1000);
+        }
+        changed = true;
+      }
+      if (changed) this.save(pid);
+    }
+    return { cleaned: details.length, details };
   }
 
   /** 列出指定 shot 节点的 Take 历史(按 attempt 倒序) */

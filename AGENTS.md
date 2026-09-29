@@ -24,10 +24,36 @@ pnpm build                       # electron-vite build
 
 > 与 dry-run 相对。红线 R2 不变:真实推理**只能由用户显式触发**,AI 代理不得默认进入真实跑。
 
+### 0.5.1 「重启」的语义(AI 必须遵守,2026-09-29 定)
+
+| 谁开口 | 用什么命令 | 说明 |
+|---|---|---|
+| **用户说「重启 / 启动 / 跑起来」** | `pnpm dev`(**真实跑**) | 这就是用户对真实推理的**显式触发**,视为已满足红线 R2;不用再问一次 |
+| **AI 自己验证 / 排障 / 冒烟** | `pnpm dev:dry`(**dry-run**) | AI **永远不得**自作主张用 `pnpm dev` |
+
+⚠️ **禁止拿 dry-run 冒充重启**:给用户"重启"却起成 `pnpm dev:dry` = 提交后 Take「无产物文件」,用户白等一场。重启后必须**回读启动日志确认**是 `BIGBOTART_DRYRUN=0 · dryRun=false`。
+
+### 0.5.2 重启前必做:清干净残留实例(2026-09-29 真实事故)
+
+**两个版本的进程同时操作同一份数据是本项目最难查的一类故障。**
+
+真实事故:一个 `12:46` 启动的旧实例一直没关,而代码在 `13:31` 之后改了数据目录布局。旧实例内存里是旧路径代码,**每次窗口活动都往旧路径写、并用新画布 id 覆盖 `projects.json`**——表现为"用户画布全空了",而数据其实完好。排查时被这个僵尸实例绕了整整一轮(误判成"旧构建产物")。
+
+**所以:每次重启前先跑**
+
+```bash
+pgrep -fl "MacOS/Electron \." | head
+```
+
+- 只有一行 → 直接启动
+- 多于一行 → 先 `pkill -9 -f "MacOS/Electron \."`,确认清空后再启动
+
+配套防护:`ProjectStore.loadProjectCanvases` 有**索引自愈**(`reconcileProjectIndex`)——`canvases.json` 是唯一真源,`projects.json` 的 `canvasIds/activeCanvasId` 悬空时读盘自动纠正并打日志。即便再被污染,下次启动即自愈,不会再让用户看到空画布。
+
 | 入口 | 模式 | 行为 |
 |---|---|---|
-| `pnpm dev:dry` | dry-run(测试) | 只构造命令 + 占位结果,不碰真模型;**开发/排障默认** |
-| `pnpm dev` / `pnpm start` | **真实跑** | 根脚本已显式 `BIGBOTART_DRYRUN=0`,真实 spawn h3.c / mlxgen |
+| `pnpm dev:dry` | dry-run(测试) | 只构造命令 + 占位结果,不碰真模型;**AI 开发/排障默认** |
+| `pnpm dev` / `pnpm start` | **真实跑** | 根脚本已显式 `BIGBOTART_DRYRUN=0`,真实 spawn h3.c / mlxgen;**用户说「重启」时用** |
 
 真实跑必须**两层开关同时满足**(缺一不可):
 
@@ -43,7 +69,7 @@ pnpm build                       # electron-vite build
 常见坑(均为本项目实测):
 
 - 启动报「does not provide an export named …」:`packages/*` 的 dist 过期,先 `pnpm build:packages` 再启动
-- 提交成功但 Take「无产物文件」:仍是 dry-run(回查上面两层开关)
+- 提交成功但 Take「无产物文件」:仍是 dry-run(回查上面两层开关 + §0.5.1)
 - 启动日志显示 `BIGBOTART_DRYRUN=1`:实例是用 `pnpm dev:dry` 起的,要重启切 `pnpm dev`
 
 ## 1. 红线(违反 = 直接打回)

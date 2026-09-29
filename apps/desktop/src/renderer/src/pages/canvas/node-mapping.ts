@@ -110,7 +110,7 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
 }
 
 /** shared → 本地渲染节点(kind 已对齐,直接透传;不写 ui 状态位,状态由卡片从 data 派生) */
-export function fromSharedNode(cn: { id: string; kind: string; label?: string; position?: { x: number; y: number }; width?: number; data?: unknown }): CanvasNode {
+export function fromSharedNode(cn: { id: string; kind: string; label?: string; position?: { x: number; y: number }; width?: number; data?: unknown; extra?: string }): CanvasNode {
   return {
     id: cn.id,
     title: cn.label ?? cn.id,
@@ -119,11 +119,13 @@ export function fromSharedNode(cn: { id: string; kind: string; label?: string; p
     y: cn.position?.y ?? 40,
     kind: (cn.kind as NodeKind) ?? 'shot',
     data: (cn.data ?? {}) as Record<string, unknown>,
+    // 完成提示行(「✓ 产物名」):随快照持久化,重启后仍在(2026-09-29)
+    ...(cn.extra ? { extra: cn.extra } : {}),
   };
 }
 
 /** 本地 → shared */
-export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: string; label: string; position: { x: number; y: number }; width?: number; data: unknown; createdAt?: string; updatedAt?: string }> {
+export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: string; label: string; position: { x: number; y: number }; width?: number; data: unknown; extra?: string; createdAt?: string; updatedAt?: string }> {
   return ns.map((n) => ({
     id: n.id,
     kind: n.kind ?? 'document',
@@ -131,6 +133,9 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
     position: { x: n.x, y: n.y },
     width: n.w,
     data: n.data ?? defaultDataFor(n.kind ?? 'document'),
+    // 完成提示行随快照持久化 —— 它参与 contentKey 比对,若不落盘会造成
+    // 「回推后本地与基线不等 → 每次推送都整体替换」的抖动(2026-09-29 事故)
+    ...(n.extra ? { extra: n.extra } : {}),
   }));
 }
 
@@ -147,13 +152,39 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
  * 归一化 = 剔除上述瞬态键后做 JSON 串,语义仍是「用户内容一致」。
  */
 export function contentKey(nodes: CanvasNode[], edges: Edge[], groups: unknown): string {
+  // ⚠️ 这些是**不进快照**的纯 UI 瞬态字段,必须从比对里剔除(badge/running/progress/ghost/stale/agentOn)。
+  // 注意 `extra` **不在**此列:它是节点卡上的「✓ 产物名」完成提示行,由 toSharedNodes 持久化,
+  // 并**有意参与比对**(抹掉会丢反馈,见 node-mapping.test.ts)。曾因它「参与比对却不进快照」
+  // 导致快照回推被判成内容变更、setNodes 整体替换把 resultPath 一并回退(2026-09-29 事故),
+  // 修法是让它真正进快照(见 toSharedNodes/fromSharedNode),而非把它列为瞬态。
   const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn'] as const;
   const norm = nodes.map((n) => {
     const clean: Record<string, unknown> = { ...n };
     for (const k of TRANSIENT) delete clean[k];
-    return clean;
+    return sortKeys(clean);
   });
   return JSON.stringify([norm, edges, groups]);
+}
+
+/**
+ * 递归按键名排序后再序列化。
+ *
+ * **为什么需要**:`contentKey` 用 `JSON.stringify` 比对,而它**对键顺序敏感**。
+ * 对象经过一轮「本地 → toSharedNodes → 快照 → fromSharedNode → 本地」往返后,
+ * 字段集合相同但顺序可能变化(如 `extra` 从 `data` 前移到后),导致
+ * `contentKey` 判不相等 → 推送被误判为「内容变了」→ `setNodes` 整体替换
+ * → 把刚落盘的字段回退(2026-09-29 事故的最后一环)。
+ * 排序后比对只反映「内容是否真的不同」,与构造顺序无关。
+ */
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (v && typeof v === 'object') {
+    const src = v as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(src).sort()) out[k] = sortKeys(src[k]);
+    return out;
+  }
+  return v;
 }
 
 export function toLocalEdges(ces: Array<{ id?: string; source: string; target: string; label?: string }>): Edge[] {

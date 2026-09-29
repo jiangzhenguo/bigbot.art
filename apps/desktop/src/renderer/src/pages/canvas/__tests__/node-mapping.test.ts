@@ -60,4 +60,27 @@ describe('contentKey · 瞬态 UI 字段归一化', () => {
     const a = contentKey([{ ...base }], [], []);
     expect(contentKey([{ ...base, extra: '✓ out.mp4' }], [], [])).not.toBe(a);
   });
+
+  /* ═══ 2026-09-29 事故回归:extra 参与比对 ⇒ 必须进快照 ═══
+     事故:生成完成后 ⑨ 分支设 extra='✓ 文件名' 与 data.resultPath,但 toSharedNodes **丢掉 extra**;
+     写盘广播回推后 fromSharedNode 还原的节点没有 extra → applyCanvasSnapshot 的裸 stringify 比对
+     判「内容变了」→ setNodes 整体替换 → 刚写入的 resultPath 一并被回退。
+     表现:图片明明生成成功(Take 里 resultPath 完整),节点卡不出图、Take 停在「排队中」。
+     修法:让 extra 真正随快照往返(而不是把它列为瞬态)。 */
+  it('extra 随快照往返 —— 写盘再回推后内容相等(事故回归)', () => {
+    const local = { ...base, extra: '✓ out.png', data: { resultPath: '/o/a.png' } };
+    const shared = toSharedNodes([local as never]);
+    expect((shared[0] as { extra?: string }).extra).toBe('✓ out.png');
+    const roundTrip = fromSharedNode(shared[0] as never);
+    expect(roundTrip.extra).toBe('✓ out.png');
+    // 关键断言:往返后 contentKey 必须相等,否则每次推送都会整体替换掉刚落盘的字段
+    expect(contentKey([roundTrip as never], [], [])).toBe(contentKey([local as never], [], []));
+  });
+
+  it('无 extra 的节点往返后仍无 extra(不凭空造字段)', () => {
+    const local = { ...base, data: { prompt: 'x' } };
+    const shared = toSharedNodes([local as never]);
+    expect('extra' in (shared[0] as object)).toBe(false);
+    expect(fromSharedNode(shared[0] as never).extra).toBeUndefined();
+  });
 });

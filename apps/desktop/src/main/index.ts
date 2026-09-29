@@ -21,6 +21,8 @@ import { RenderQueue } from './render-queue';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
 import { TakeStore } from './takes';
+import { runDataMigration } from './migrate';
+import { DATA_DIR } from './workspace-paths';
 import { DebugLogger } from './logger';
 import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus, mlxgenDownloadActive, mlxgenDownloadCancel } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
@@ -44,7 +46,6 @@ import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/
 
 const isDev = !app.isPackaged;
 
-const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 /** 渲染产物根目录(h3c/mlxgen/mock 输出;bba-output:// 协议只读这里及子目录) */
 const H3_OUTPUTS_DIR = process.env.BIGBOTART_H3_OUTPUTS ?? OUTPUTS_DIR;
 // 让 packages/providers 内 mock/h3c 与主进程同一产物根
@@ -162,6 +163,20 @@ const registry = createRegistry({
 
 const settings = new SettingsStore();
 const accel = new AccelStore(settings);
+
+/* ── 数据迁移:平铺文件 → workspaces/<pid>/ 子目录(2026-09-29) ──
+ * ⚠️ 必须在**任何 Store 构造之前**执行:ProjectStore 的构造函数就会读画布文件,
+ * 晚于它调用会读到旧路径的空容器。幂等,重复启动秒返回。 */
+const migration = runDataMigration();
+if (migration.ran) {
+  logger.log(
+    'info',
+    `[migrate] 数据目录已按工作空间收拢:${migration.projectsHandled} 个项目 / ${migration.movedFiles} 个文件` +
+      (migration.failures.length ? ` · ⚠️ ${migration.failures.length} 项失败:${JSON.stringify(migration.failures)}` : '') +
+      (migration.backupDir ? ` · 备份 ${migration.backupDir}` : ''),
+  );
+}
+
 const store = new ProjectStore();
 /** 任何画布快照写盘(Agent 工具增量 / 渲染层整体保存)都广播给渲染层,
  *  画布页订阅后刷新本地状态 —— Agent 改的画布实时可见,并且渲染层保存不再带旧版本覆盖。 */
@@ -171,6 +186,20 @@ store.onCanvasSaved = (snap) => {
 const assets = new AssetStore();
 const skills = new SkillStore();
 const takes = new TakeStore();
+/* 清理「孤儿 Take」:RenderQueue 的 jobs 是内存态,应用退出后队列丢失但 Take 留在磁盘,
+ * 这些 queued/running 记录会永久显示成「排队中」(用户以为还在跑)。启动时统一标为 failed。 */
+try {
+  const orphans = takes.reconcileOrphaned(store.listProjects().map((p) => p.id));
+  if (orphans.cleaned > 0) {
+    logger.log(
+      'warn',
+      `[takes] 清理 ${orphans.cleaned} 条重启前残留的未完成 Take(标记为失败):` +
+        orphans.details.map((d) => `${d.projectId}/${d.takeId}(${d.from})`).join(', '),
+    );
+  }
+} catch (e) {
+  logger.log('warn', `[takes] 孤儿 Take 清理失败(不影响启动):${(e as Error).message}`);
+}
 const exportSvc = new ExportService(takes);
 const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();

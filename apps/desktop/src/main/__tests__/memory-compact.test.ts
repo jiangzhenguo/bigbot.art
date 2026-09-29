@@ -135,9 +135,10 @@ describe('MemoryStore 技能激活状态(activeSkillId)', () => {
     store.setActiveSkillId(pid, 'cA', 'skill-paper');
     expect(store.getActiveSkillId(pid, 'cA')).toBe('skill-paper');
     // 落盘后重新读取仍保留(跨会话/重启不丢)
+    // 2026-09-29 起记忆落在 workspaces/<pid>/memory.json(原 memory-<pid>.json 平铺)
     store.setActiveSkillId(pid, 'cA', 'skill-paper');
     store.get(pid); // 触发缓存读
-    expect(JSON.parse(readFileSync(join(tmpHome, `memory-${pid}.json`), 'utf-8')).canvasMemory['cA'].activeSkillId).toBe('skill-paper');
+    expect(JSON.parse(readFileSync(join(tmpHome, 'workspaces', pid, 'memory.json'), 'utf-8')).canvasMemory['cA'].activeSkillId).toBe('skill-paper');
   });
 
   it('deactivate(传 null)清除激活,其他画布不受影响', () => {

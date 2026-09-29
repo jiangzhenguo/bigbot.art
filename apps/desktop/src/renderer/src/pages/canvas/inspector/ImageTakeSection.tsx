@@ -28,6 +28,28 @@ export function takePromptOf(t: { params?: unknown }): string {
   return String((t.params as { prompt?: string } | undefined)?.prompt ?? '');
 }
 
+/**
+ * Take 状态的界面文案。
+ * 2026-09-29 修复:此前 queued/running 直接把英文原样渲染成「queued」,用户看到一条
+ * 明明已完成的记录写着英文状态,极易误判成「还卡在排队中」。这里统一映射为中文。
+ */
+export function takeStatusLabel(t: { status?: string; resultPath?: string }): string {
+  switch (t.status) {
+    case 'succeeded':
+      return t.resultPath ? '✓' : '✓·无产物';
+    case 'failed':
+      return '✗';
+    case 'queued':
+      return '排队中';
+    case 'running':
+      return '生成中';
+    case 'cancelled':
+      return '已取消';
+    default:
+      return t.status ?? '未知';
+  }
+}
+
 /** 生成时长(秒):优先墙钟耗时 elapsedSec,历史数据缺该字段时回退 durationSec */
 export function takeElapsedSec(t: { elapsedSec?: number; durationSec?: number }): number | undefined {
   return t.elapsedSec ?? t.durationSec;
@@ -106,7 +128,7 @@ export function ImageTakeSection({ node, projectId, jobs, onSelectTake, toastMsg
               onClick={() => selectTake(t)}
               title={title}
             >
-              T{t.attempt} · {t.status === 'succeeded' ? (t.resultPath ? '✓' : '✓·空') : t.status === 'failed' ? '✗' : t.status}
+              T{t.attempt} · {takeStatusLabel(t)}
               {/* 生成时长:每条 Take 都显示;缺失显式写「时长未知」,不装作没这回事 */}
               <span className="mut" style={{ fontSize: 10, marginLeft: 4 }}>{took ?? '时长未知'}</span>
             </span>

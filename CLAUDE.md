@@ -12,15 +12,23 @@ BigBotArt — 无限画布的视频/图片生成 Agent(跨端桌面 App,本地�
 
 ```bash
 pnpm install                          # 安装依赖(workspace + electron 二进制)
-pnpm dev                              # 真实跑(根脚本显式 BIGBOTART_DRYRUN=0,细则见 AGENTS.md §0.5)
-pnpm dev:dry                          # 开发/排障 dry-run(安全默认,不碰真模型)
+pnpm dev                              # 「重启/启动」用这个 = 真实跑(显式 BIGBOTART_DRYRUN=0,见 §0.5)
+pnpm dev:dry                          # AI 自己验证/排障用这个 = dry-run(不碰真模型)
 pnpm build                            # 构建产物(electron-vite build)
 pnpm start                            # electron-vite preview(运行已构建产物)
 pnpm build:packages                   # 单独构建 packages/*
 pnpm typecheck                        # 全 workspace tsc --noEmit
-pnpm test                             # vitest 单测/集成(200+ 用例 · 见 docs/测试用例-图片节点与裁切.md)
+pnpm test                             # vitest 单测/集成(800+ 用例 · 见 docs/测试用例-图片节点与裁切.md)
 pnpm --filter @bigbotart/desktop typecheck  # 单包类型检查
 ```
+
+### ⚠️ 「重启」的语义(AI 必读)
+
+- **用户说「重启 / 启动 / 跑起来」= 用 `pnpm dev`(真实跑)**,这是用户对真实推理的显式触发(R2 已满足),**不用再问一次**;禁止拿 `pnpm dev:dry` 冒充重启。
+- **AI 自己验证 / 排障 / 冒烟 = 用 `pnpm dev:dry`**,AI 永不自作主张 `pnpm dev`。
+- 重启后**回读启动日志确认** `BIGBOTART_DRYRUN=0 · dryRun=false`。
+- **重启前先清残留实例**:`pgrep -fl "MacOS/Electron \." | head`——多于一行先 `pkill -9 -f "MacOS/Electron \."`。**两个版本的进程同时写同一份数据是本项目最难查的故障**(2026-09-29 画布"全空"事故真因:一个 12:46 启动的旧实例持续用旧路径覆盖 `projects.json`)。
+- 完整细则(两层开关/前置条件/常见坑)见 **AGENTS.md §0.5**。
 
 单个 package 开发:`cd packages/agent && pnpm dev`(tsc -w)。
 
@@ -109,6 +117,11 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
 - **内置技能(官方精选)**:`apps/desktop/src/main/skills.ts` 的 `BUILTIN_SKILLS` = 3 个自研(纸拼贴/电商/科普,内联)+ 9 个 MiniMax 官方技能(H3 提示词写作规范 + 8 个场景生成器,源 github.com/MiniMax-AI/MiniMax-H3,已适配为 BigBotArt 工具流程;指令文档在 `apps/desktop/src/main/builtin-skills/*.md`,经 `?raw` 打进 main 包,大文件一律 `inject:'summary'`)。**种子合并机制**:空库首次启动 seed 全部内置;已有库每次启动按 id 合并「官方新增的内置技能」(已存在的内容不覆盖);用户删除内置技能会记入 `~/.bigbotart/skills-builtin-deleted.json`(tombstone),之后不再复活。改内置技能内容 = 改 `builtin-skills/*.md`,注意只对新装/缺失用户生效(已有库里的同 id 旧内容不会被覆盖)。单测:`src/main/__tests__/skills-seed.test.ts`。
 - **画布持久化**:`ProjectStore` 用 JSON 文件 + `mkdirSync(BIGBOTART_HOME ?? ~/.bigbotart)`,接口已抽象,Electron 31 内置 Node 20 暂不支持 `node:sqlite`。**两个写入者协调**(2026-09 事故修复):Agent 工具(`canvas.*`/`storyboard.*`)在主进程增量写 `saveCanvasSnapshot`;**版本防护**——传入快照 `version` 落后于 store 当前版本(渲染层未同步)时拒绝整体覆盖(`{ok:false, stale, current}`,渲染层刷新后再存);**写盘广播**——`store.onCanvasSaved` → `canvas-snapshot-updated` 事件推送最新快照,渲染层 `CanvasPage` 据此同步本地(knownVersion + 内容基线比对,无变化不写盘,卸载/崩溃 flush 禁止空快照覆盖)。契约:`BigBotArtApi.saveCanvasSnapshot` 返回扩展 `stale`/`current`;新增 `onCanvasSnapshotUpdated`(preload 订阅)。
 - **项目文件夹**:对话发给 Agent 的附件先拷入 `~/.bigbotart/projects/<projectId>/assets/`(`copyAttachmentsToProject`,按资产 id 幂等复用),Agent 一律使用项目内副本——项目自包含、可迁移;全局资产库在 `~/.bigbotart/assets/`。
+- **项目级数据按工作空间收拢(2026-09-29)**:项目级数据从 `~/.bigbotart/` 下**平铺**改为**每个项目一个子目录**:`workspaces/<projectId>/{canvases,memory,takes,assets}.json`(原 `canvases-<pid>.json` / `memory-<pid>.json` / `takes-<pid>.json`,以及**项目资源从全局 assets.json 拆出**)。路径唯一事实来源是新模块 **`apps/desktop/src/main/workspace-paths.ts`**(store/memory/takes/assets 四处都从它取,不再各自拼字符串)。**用户可见概念仍叫「项目」**,`projects.json` 文件名与内部 `projects` 键名**都不改**——只做目录收拢,不做全仓库改名(`BigBotArtApi` 契约零改动)。
+  - **资源:只拆元数据,不搬实体文件**。`AssetStore` 改为**读写分离**:内存仍是一份扁平数组(`list`/`get`/引用检查等全部调用点**零改动**),`readAll()` 在构造时合并「全局 `assets.json` + 各 `workspaces/<pid>/assets.json`」,`save()` 按 `projectId` 分流写回。**`Asset.localPath` 是绝对路径且不改写**,48+ 条实体文件仍在全局 `~/.bigbotart/assets/`。副作用(正面):**单个项目文件损坏只丢该项目的资源**,不再像单文件时代一旦 JSON 坏掉整个资产库不可读。搬实体文件要连带改 `bba-asset://` 协议白名单 + `importAllowRoots` + `export.ts` 白名单,属独立一步(与 `outputs/` 同口径)。
+  - **迁移器 `apps/desktop/src/main/migrate.ts`**:`runDataMigration()` 在 **main/index.ts 中任何 Store 构造之前**调用(各 Store 构造函数就会读文件,晚于它会读到旧路径空容器)。五条不变量:①**幂等**(权威依据是 `.migration-ws-v1.json` 标记;**「workspaces/ 目录存在」不等于迁移完成**——上次可能中断在半途,故不据此直接 return,而是续跑补搬);②**先备份再移动**(被搬文件在 `backups-<YYYYMMDD>-ws-migrate/` 留副本,**全局 assets.json 也备份为 `(global).assets.before-split.json`**;备份失败则**中止资源拆分**——没有回滚依据的破坏性操作不做;总回滚 = 删 `workspaces/` + revert 代码,旧文件永不删,符合红线 R5);③**孤立 pid 一并迁移**(实测 6 个项目却有 19 个画布文件——已删项目的遗留文件靠扫目录取并集,不丢);④**不吞错**(单 pid 失败记 `failures` 继续做其余并写日志总线;目标已存在**拒绝覆盖**而非静默丢弃);⑤**续跑合并而非覆盖**(项目 assets.json 已存在时按 id 去重合并,不丢上次拆出的条目)。`.bak` / `.demo-bak-*` / `.pre-rescue-*` 等历史快照后缀一律跳过留在原地。全局 assets.json 若是**旧版裸数组**则不拆(交给 `AssetStore` 的 V1 迁移处理)。
+  - ⚠️ **`outputs/` 与 assets/ 实体文件不在本次迁移内**:节点 `data.resultPath` 与 `asset.localPath` 存的是**绝对路径**(实测 30 个节点 resultPath 全指向 `outputs/`),搬迁会让历史产物全部失效。要动需独立的路径重写方案。
+  - ⚠️ **改路径后必须补 `mkdirSync(dirname(f))`**:平铺时代只 `mkdirSync(DATA_DIR)` 就够,改子目录后不建目录直接 ENOENT。单测 `apps/desktop/src/main/__tests__/migrate.test.ts`(**20 例**:无损/幂等/备份/孤立 pid/拒绝覆盖/续跑/全新安装 + 资源拆分的拆分正确性/不重写 localPath/备份/无项目资源时不写盘/合并续跑/裸数组跳过)。
 - **IPC 契约**:`BigBotArtApi`(`packages/shared/src/index.ts`)是主进程与渲染进程的类型化合同,preload 通过 `contextBridge` 暴露到 `window.bigbotart`。
 - **加速 LoRA(h3.c 加速)**:h3.c CLI 不接受 `--lora`;「加速 LoRA」= 蒸馏模型包(设置页 `accelPacks`,`src/main/lora.ts` 管理)+ 4/8 步。镜头 `data.accel.enabled` 时,主进程 `submit-render` 把包 id 解析为 `params.modelDir`(-d)与 `params.steps`(包缺失 → 提交报错)。详见 `docs/MiniMax-H3-加速-LoRA-使用手册.md` §8。
 - **视频增强(超分 + 合修脸)节点**:`video-upscale`(`apps/desktop/src/main/video-post.ts` + `~/ai/face-fix/video_post.py`,IPC `video-upscale` / `video-post-probe` / 推送 `video-post-progress`)。h3 出片后的**本地后处理**,对应 `/Users/jiangzhenguo/ai/h3/POST_PROCESSING.md`:① 去块(ffmpeg `deblock=filter=strong:block=4` + CRF 14,**必须在超分之前**,否则压缩块被放大成方格;⚠️ 文档 §5.4 的 `flat-strength=20` 在新版 ffmpeg(实测 8.0.1)已不存在,照抄会 `exit 8`——单测用本机 ffmpeg 真实解析该 filtergraph 防回归)→ ② 超分 → ③ 修脸。**不走渲染队列、不加载 h3 模型、与 dry-run 无关**,但属**分钟级长任务**,只由用户显式触发。

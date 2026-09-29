@@ -9,6 +9,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { RenderJob } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { ImageTakeSection } from './ImageTakeSection';
+import { useTakeResult } from './useTakeResult';
 import { ImagePreview } from './ImagePreview';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
@@ -102,8 +103,9 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
     ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
   const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
-  const hasTake = !!d.currentTakeId || !!String(d.resultPath ?? '');
-  const resultPath = String(d.resultPath ?? '');
+  // 产物路径:节点 data 优先,缺失时回退 Take 历史里最新成功产物(2026-09-29 事故修复)
+  const resultPath = useTakeResult(node.id, projectId, d.resultPath, jobs) ?? '';
+  const hasTake = !!d.currentTakeId || !!resultPath;
   const running = jobs.some((j) => j.nodeId === node.id && j.status === 'running');
 
   // 模式切换:当前模型不在该模式可用集合里时自动切到推荐模型(自定义模型不动)

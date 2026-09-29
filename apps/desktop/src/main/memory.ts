@@ -1,6 +1,7 @@
 /**
  * MemoryStore — Agent 分层记忆(MemGPT 式)
- * 持久化 ~/.bigbotart/memory-<projectId>.json
+ * 持久化 ~/.bigbotart/workspaces/<projectId>/memory.json(2026-09-29 起按工作空间收敛;
+ * 旧路径 memory-<projectId>.json 由 migrate.ts 启动时搬迁)
  *
  * 四层:
  * - core: 核心记忆(项目目标/风格/约束/偏好),始终全量注入 system prompt
@@ -9,12 +10,10 @@
  * - archival: 长期事实(生成产物/关键决定),关键字检索注入
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
 import type { ProjectMemory, RecallMessage, ArchivalEntry, CanvasNode, CanvasEdge } from '@bigbotart/shared';
 import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
-
-const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
+import { DATA_DIR, memoryFile } from './workspace-paths.js';
 
 const RECALL_INJECT_LIMIT = 12; // 当前画布最近 N 条可注入消息(user/assistant/system;tool 留痕记录不占窗口)
 const ARCHIVAL_INJECT_LIMIT = 3; // archival 检索 top N
@@ -33,7 +32,7 @@ export function compactFallbackSummary(msgs: RecallMessage[]): string {
 }
 
 function memFile(projectId: string): string {
-  return join(DATA_DIR, `memory-${projectId}.json`);
+  return memoryFile(projectId);
 }
 
 function emptyMemory(projectId: string): ProjectMemory {
@@ -73,7 +72,11 @@ export class MemoryStore {
 
   private persist(projectId: string): void {
     const m = this.cache.get(projectId);
-    if (m) writeFileSync(memFile(projectId), JSON.stringify(m, null, 2));
+    if (m) {
+      const f = memFile(projectId);
+      mkdirSync(dirname(f), { recursive: true }); // 工作空间子目录可能尚未建立
+      writeFileSync(f, JSON.stringify(m, null, 2));
+    }
   }
 
   /** 追加对话消息到 recall */

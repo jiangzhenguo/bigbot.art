@@ -10,15 +10,16 @@
  */
 import {
   mkdirSync, copyFileSync, unlinkSync, existsSync, readFileSync, writeFileSync, statSync, renameSync,
-  createReadStream,
+  createReadStream, readdirSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename, extname, resolve } from 'node:path';
+import { join, basename, extname, resolve, dirname } from 'node:path';
 import { dialog, BrowserWindow } from 'electron';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Asset, AssetCategory, AssetRef, AssetImportResult } from '@bigbotart/shared';
 import type { ProjectStore as MainProjectStore } from './store';
+import { WORKSPACES_DIR, workspaceAssetsFile } from './workspace-paths.js';
 
 /** ffprobe 探测用:异步 execFile(不阻塞主进程),8s 超时 */
 const execFileP = promisify(execFile);
@@ -328,7 +329,7 @@ export class AssetStore {
   constructor() {
     mkdirSync(ASSETS_DIR, { recursive: true });
     mkdirSync(TRASH_DIR, { recursive: true });
-    const data = this.read();
+    const data = this.readAll();
     this.assets = data.assets;
     this.categories = data.categories;
     // V1 数组 → 立即落 V2(新主进程加载的明确证据:assets.json 变为 {version:2,...};后续写入统一走 V2)
@@ -377,9 +378,72 @@ export class AssetStore {
     }
   }
 
+  /**
+   * 读取全部资源:**全局库文件 + 各工作空间的 assets.json**(2026-09-29 批次2)。
+   *
+   * 内存里仍是**一份扁平数组**(`this.assets`),调用点(`list`/`get`/引用检查…)全部零改动;
+   * 只有**写盘**按 `projectId` 分流到两个位置(见 save)。某个项目文件损坏时**只丢该项目**
+   * 的资源,不再像单文件时代那样一旦 JSON 坏掉就整个资产库不可读。
+   */
+  private readAll(): { assets: Asset[]; categories: AssetCategory[]; migratedV1: boolean } {
+    const base = this.read();
+    const assets: Asset[] = [...base.assets];
+    const categories: AssetCategory[] = [...base.categories];
+    // 扫 workspaces/<pid>/assets.json,合并各项目的资源与分类
+    let dirs: string[] = [];
+    try {
+      dirs = readdirSync(WORKSPACES_DIR).filter((d) => {
+        try { return statSync(join(WORKSPACES_DIR, d)).isDirectory(); } catch { return false; }
+      });
+    } catch { /* workspaces/ 尚不存在(全新安装或未迁移) */ }
+    for (const pid of dirs) {
+      const f = workspaceAssetsFile(pid);
+      if (!existsSync(f)) continue;
+      try {
+        const doc = JSON.parse(readFileSync(f, 'utf-8')) as Partial<AssetStoreFile>;
+        if (Array.isArray(doc.assets)) assets.push(...(doc.assets as Asset[]));
+        if (Array.isArray(doc.categories)) categories.push(...(doc.categories as AssetCategory[]));
+      } catch {
+        // 单个项目文件损坏不影响其余(比单文件时代更健壮),但要显式记一笔不静默吞
+        console.warn(`[assets] 项目资源文件损坏,已跳过:${f}`);
+      }
+    }
+    return { assets, categories, migratedV1: !!base.migratedV1 };
+  }
+
+  /** 写盘:按 projectId 分流 —— 项目资源写进自己的工作空间,其余(缺省=全局库)写全局文件。
+   *  categories 同样按 projectId 分流。只写有内容的文件,避免给每个项目留下空壳 assets.json。 */
   private save() {
-    const file: AssetStoreFile = { version: 2, assets: this.assets, categories: this.categories };
-    writeFileSync(ASSETS_FILE, JSON.stringify(file, null, 2));
+    const globalAssets = this.assets.filter((a) => !a.projectId);
+    const globalCats = this.categories.filter((c) => !c.projectId);
+    writeFileSync(
+      ASSETS_FILE,
+      JSON.stringify({ version: 2, assets: globalAssets, categories: globalCats } satisfies AssetStoreFile, null, 2),
+    );
+
+    const byProject = new Map<string, { assets: Asset[]; categories: AssetCategory[] }>();
+    for (const a of this.assets) {
+      if (!a.projectId) continue;
+      const b = byProject.get(a.projectId) ?? { assets: [], categories: [] };
+      b.assets.push(a);
+      byProject.set(a.projectId, b);
+    }
+    for (const c of this.categories) {
+      if (!c.projectId) continue;
+      const b = byProject.get(c.projectId) ?? { assets: [], categories: [] };
+      b.categories.push(c);
+      byProject.set(c.projectId, b);
+    }
+    for (const [pid, b] of byProject) {
+      const f = workspaceAssetsFile(pid);
+      try {
+        mkdirSync(dirname(f), { recursive: true });
+        writeFileSync(f, JSON.stringify({ version: 2, assets: b.assets, categories: b.categories } satisfies AssetStoreFile, null, 2));
+      } catch (e) {
+        // 红线 R6:不静默吞 —— 写项目资源失败必须留痕(否则用户看到"导入成功但列表没有")
+        console.error(`[assets] 写项目资源失败 projectId=${pid}:${(e as Error).message}`);
+      }
+    }
   }
 
   /** 列资产:projectId 给定 = 项目视图(该项目的资源);缺省 = 总资源库(全部,不含回收站) */

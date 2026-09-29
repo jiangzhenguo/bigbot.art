@@ -1501,10 +1501,13 @@ export default function CanvasPage({
     const version = cur.version ?? 0;
     // 分组:按**自愈后的**节点 id 规整(剔除已删节点/空组/重复归属)
     const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
+    /* ⚠️ 比对必须走 contentKey 归一化(2026-09-29 修复):此前用裸 JSON.stringify,
+       而本地节点带 badge/running/extra 等**不进快照**的瞬态字段,快照还原出的节点没有它们
+       → 每次推送都判「内容变了」→ setNodes 整体替换 → 把刚写入的 data.resultPath 一并回退
+       (表现为「生成成功但节点不显示产物」)。与 markBaseline / maybePersist 同口径。 */
     const sameContent =
-      JSON.stringify(selfHeal.nodes) === JSON.stringify(nodesRef.current) &&
-      JSON.stringify(selfHeal.edges) === JSON.stringify(edgesRef.current) &&
-      JSON.stringify(nextGroups) === JSON.stringify(groupsRef.current);
+      contentKey(selfHeal.nodes as unknown as CanvasNode[], selfHeal.edges as unknown as Edge[], nextGroups) ===
+      contentKey(nodesRef.current, edgesRef.current, groupsRef.current);
     // 内容确实变了(外部写入:Agent 工具 / 另一个窗口):连视口一起同步,
     // 并换历史基线 —— 历史里的节点引用已失效,撤销会回到与 store 不一致的旧内容
     if (!sameContent && cur.viewport) {

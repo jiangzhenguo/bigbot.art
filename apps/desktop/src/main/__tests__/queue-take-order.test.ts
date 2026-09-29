@@ -38,9 +38,10 @@ let TakeStore: typeof import('../takes.js').TakeStore;
 type TakeRow = { id: string; status: string; resultPath?: string };
 let takes: InstanceType<typeof TakeStore>;
 
-/** 读盘(断言真实落盘内容,不看内存缓存) */
+/** 读盘(断言真实落盘内容,不看内存缓存)
+ *  2026-09-29 起 Take 落在 workspaces/<pid>/takes.json(原 takes-<pid>.json 平铺)。 */
 function readTake(takeId: string): TakeRow | undefined {
-  const f = join(tmpHome, `takes-${PROJECT}.json`);
+  const f = join(tmpHome, 'workspaces', PROJECT, 'takes.json');
   if (!existsSync(f)) return undefined;
   const doc = JSON.parse(readFileSync(f, 'utf-8')) as { takes: TakeRow[] };
   return doc.takes.find((t) => t.id === takeId);
