@@ -756,6 +756,100 @@ export function InspectorBody({
         </div>
       );
     }
+    case 'frame-grab': {
+      /* 视频裁切取帧:从视频截一帧 → 导入资产库 + 产物是图片(供 image-edit/upscale/参考图下游)。
+         不推理,ffmpeg 秒级完成;下游接的是**图片**,故与 image-crop 同类。 */
+      const mode = String(d.mode ?? 'first');
+      const seconds = Number(d.seconds);
+      const atInvalid = mode === 'at' && (!Number.isFinite(seconds) || seconds < 0);
+      const inputAssetId = String(d.inputAssetId ?? '');
+      const vFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
+      const outPath = String(d.resultPath ?? '');
+      const resultAssetId = String(d.resultAssetId ?? '');
+      /* 视频源预览:资产直取本地路径;连线上游取 resultPath */
+      const srcVideo = (() => {
+        if (inputAssetId && assetCache[inputAssetId]) return assetCache[inputAssetId];
+        if (vFrom?.nodeId) {
+          const up = (nodes ?? []).find((x) => x.id === vFrom.nodeId);
+          const upData = (up?.data ?? {}) as Record<string, unknown>;
+          if (up?.kind === 'asset') {
+            const aid = String(upData.assetId ?? '');
+            if (aid && assetCache[aid]) return assetCache[aid];
+          }
+          return String(upData.resultPath ?? '') || null;
+        }
+        return null;
+      })();
+      const srcLabel = vFrom?.nodeId
+        ? (nodes ?? []).find((x) => x.id === vFrom.nodeId)?.title ?? vFrom.nodeId
+        : inputAssetId
+          ? `资产 ${inputAssetId.slice(0, 8)}`
+          : '';
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <Lbl>取帧位置</Lbl>
+            <div className="row g6" style={{ flexWrap: 'wrap' }}>
+              {([
+                ['first', '首帧'],
+                ['last', '尾帧'],
+                ['at', '指定时间点'],
+              ] as const).map(([v, label]) => (
+                <span key={v} className={`chip${mode === v ? ' on' : ''}`} onClick={() => setData({ mode: v })}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          {mode === 'at' && (
+            <div>
+              <Lbl>时间点(秒)</Lbl>
+              <input
+                className="input-w mono"
+                type="number"
+                min={0}
+                step={0.1}
+                value={Number.isFinite(seconds) ? seconds : 0}
+                onChange={(e) => setData({ seconds: Math.max(0, Number(e.target.value) || 0) })}
+                style={{ width: '100%' }}
+              />
+              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
+                超出片长的位置取不到帧(会明确报错,不会静默产出空文件)
+              </div>
+            </div>
+          )}
+          <div>
+            <Lbl>视频源(由连线直通{srcLabel ? ` · ${srcLabel}` : ''})</Lbl>
+            {srcVideo ? (
+              <video
+                src={previewUrlOf(srcVideo) ?? ''}
+                controls
+                muted
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)' }}
+              />
+            ) : (
+              <div className="mut" style={{ fontSize: 11 }}>
+                连一个 镜头 / 视频增强 / 视频素材(asset) 作为取帧源 —— 产物是图片,可再交给 图片编辑 / 图片增强
+              </div>
+            )}
+          </div>
+          <KVSection
+            rows={[
+              ['引擎', 'ffmpeg · 不推理 · 秒级'],
+              ['产物', 'PNG 静帧(自动导入资产库)'],
+              ['下游', '图片编辑 / 图片增强 / 图片裁切 / 镜头首帧'],
+            ]}
+          />
+          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="取帧结果" emptyHint="运行后显示裁切出的静帧" />
+          {resultAssetId ? (
+            <div className="mut mono" style={{ fontSize: 11 }}>
+              已入资产库 · {resultAssetId}
+            </div>
+          ) : null}
+          <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
+        </div>
+      );
+    }
     case 'shot': {
       return (
         <ShotInspector

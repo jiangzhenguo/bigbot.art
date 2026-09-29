@@ -313,6 +313,31 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
         </div>
       );
     }
+    case 'frame-grab': {
+      // 视频裁切取帧:产物是**图片**(静帧),故用图片缩略图呈现;
+      // 未跑时显示取帧位置 + 视频源绑定状态(与 image-crop 的「输入待绑定」同风格)
+      const mode = String(d.mode ?? 'first');
+      const sec = Number(d.seconds);
+      const atLabel = mode === 'last' ? '尾帧' : mode === 'at' && Number.isFinite(sec) ? `第 ${sec}s 帧` : '首帧';
+      const outImg = productOf(n);
+      const inputState = String(d.inputAssetId ?? '')
+        ? `视频 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
+        : (d.inputVideoFrom as { nodeId?: string } | undefined)?.nodeId
+          ? `视频 · 节点 ${String((d.inputVideoFrom as { nodeId?: string }).nodeId).slice(0, 8)}`
+          : '视频待绑定';
+      return (
+        <div className="nb">
+          {outImg ? (
+            <div className="nthumb fit"><img src={outputUrlOf(outImg)} alt="取帧产物" /></div>
+          ) : (
+            <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
+              裁切{atLabel} → 图片资源 · {inputState}
+            </div>
+          )}
+          <div className="nmeta mono">{atLabel} → PNG · 导入资产库</div>
+        </div>
+      );
+    }
     case 'image-stitch': {
       const mode = String(d.mode ?? 'column');
       const modeLabel = mode === 'row' ? '横排' : mode === 'grid' ? `网格×${Number(d.gridCols ?? 3)}` : '竖排长图';

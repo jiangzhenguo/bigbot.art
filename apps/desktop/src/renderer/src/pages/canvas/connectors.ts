@@ -9,6 +9,7 @@
  *   连接器本身对用户不可见(D1);可见的只是「端口语义」。S2 会把 shot 的端口
  *   改为由 ProviderCapabilities.videoModes[].refs 派生,届时本表的 shot 分支退场。
  */
+import { validateEdge } from '@bigbotart/shared';
 import type { CanvasNode } from './types';
 
 export interface PortResolution {
@@ -46,7 +47,11 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 上游尾帧自动取帧'],
       ['ref-video', '参考视频 · 上游整段成片(风格/动作参考)'],
     ],
-    edit: ['input', '输入帧 · 首/尾帧可取'],
+    // ⚠️ shot → image-edit **不再提供**直接连线:图片编辑的 input 要的是静帧,
+    // 视频必须先经「视频裁切取帧(frame-grab)」落成图片资源再交给图片编辑 ——
+    // 直连会造出一条「shared 判定无可用端口」的裸边,边派生态与写盘广播对拉,
+    // 节点在「有输入图 / 无输入图」之间反复翻(2026-09 不停闪烁事故)。
+    grab: ['input-video', '输入视频 · 待取帧的成片'],
     vupscale: ['input', '输入视频 · 镜头成片增强(超分/修脸)'],
     timeline: ['clip', '视频片段 · 整段入轨'],
   },
@@ -87,12 +92,28 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     image: ['ref-image', '参考图'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
+  // 🆕 视频裁切取帧:产物是**图片** → 与其它图片产物同类(可接图片编辑/超分/裁切/拼接/拆分、
+  // 可作镜头首帧或参考图、可入轨、可收口)
+  'frame-grab': {
+    shot: [
+      ['first-frame', '首帧 · 裁切出的静帧直通'],
+      ['ref-image', '参考图 · 裁切出的静帧作 Ref2VA'],
+    ],
+    edit: ['input', '输入图 · 裁切出的静帧'],
+    upscale: ['input', '输入图 · 超分源'],
+    crop: ['input', '输入图 · 原图裁切'],
+    stitch: ['piece', '拼接件 · 多图按画布位置排序'],
+    split: ['input', '输入图 · 拆分源'],
+    image: ['ref-image', '参考图'],
+    timeline: ['clip', '静帧片段 · 入轨'],
+  },
   // 🆕 视频增强(超分 + 合修脸):产物是视频 → 首帧/参考视频/入轨/链式再增强
   'video-upscale': {
     shot: [
       ['first-frame', '首帧 · 增强成片首帧直通'],
       ['ref-video', '参考视频 · 风格/动作参考'],
     ],
+    grab: ['input-video', '输入视频 · 从增强成片取帧'],
     vupscale: ['input', '输入视频 · 链式二次增强'],
     timeline: ['clip', '增强成片 · 整段入轨'],
   },
@@ -167,8 +188,9 @@ const BY_TARGET: Record<string, PortRow> = {
   'wf-output': ['output', '产物汇聚 · 运行收口'],
 };
 
-/** 图片产物类节点(静帧直通) */
-export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
+/** 图片产物类节点(静帧直通)。
+ *  frame-grab 产出的就是 PNG,故与其它图片产物同类 —— 它正是「视频 → 图片」的合法转换点。 */
+export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab'];
 
 /** 视频产物类节点(视频直通:video-upscale 产物是 mp4,不能当静帧用) */
 export const VIDEO_KINDS = ['video-upscale'];
@@ -234,6 +256,7 @@ export const KIND_TO_TAGID: Record<string, string> = {
   'image-crop': 'crop',
   'image-stitch': 'stitch',
   'image-split': 'split',
+  'frame-grab': 'grab',
   document: 'doc',
   'audio-ref': 'audio',
   'workflow-input': 'wf-input',
@@ -285,7 +308,8 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
       },
       video: {
         shot: ['ref-video', '参考视频 · 风格/动作参考'],
-        edit: ['input', '取帧源 · 首/尾帧'],
+        // 视频素材生成静帧的唯一通道:经「视频裁切取帧」落成图片资源后再用
+        grab: ['input-video', '输入视频 · 从素材取帧'],
         vupscale: ['input', '输入视频 · 超分/修脸源'],
         timeline: ['clip', '视频素材 · 入轨'],
       },
@@ -358,4 +382,52 @@ export function resolvePort(src: CanvasNode, dstTypeId: string): PortResolution 
 /** 「+」弹窗:该类型是否该列出(只列出有可用连接器的类型) */
 export function hasConnector(src: CanvasNode, dstTypeId: string): boolean {
   return resolvePortOptions(src, dstTypeId).length > 0;
+}
+
+/* ─────────────────── 写边前的权威校验(与 Agent 侧同口径) ─────────────────── */
+
+export interface EdgeGuardResult {
+  ok: boolean;
+  /** 不合法时的可执行提示(直接 toast) */
+  message?: string;
+}
+
+/**
+ * 渲染层写边前的**最终校验闸**。
+ *
+ * 事故背景(2026-09):`connectors.ts` 的 BY_KIND 与 `packages/shared/connector-map.ts`
+ * 是两份手工维护的同构表,已经分叉 —— 渲染层**从不调用** shared 的 `validateEdge`,
+ * 于是「人手动能连、Agent 连不了」的错位边照样能建出来。典型受害者
+ * `video-upscale → image-edit`:shared 侧明确判为「该组合没有可用端口」(mp4 不是静帧,
+ * 不该直连图片编辑的 input),但渲染层写边时毫无阻拦;边建出来后
+ * `edge-dispatch` 又不认 VIDEO_KINDS(什么都不写)、而写盘广播把快照推回来,
+ * 两边对同一条边的期望相反 ⇒ 节点在「有输入图 / 无输入图」之间反复翻 ⇒ **不停闪烁**。
+ *
+ * 正解是让两份表**共用同一套规则**:这里直接调用 shared 的 `validateEdge`,
+ * 而不是在渲染层复制一份 if 判断 —— 复制会分叉,分叉就是本次事故的根因。
+ *
+ * 注意:`validateEdge` 对**单值端口冲突**返回 `replaceable: true`(替换语义),
+ * 那是「先顶掉旧边」的正常交互,不属于非法组合,一律放行。
+ */
+export function guardEdge(
+  src: CanvasNode,
+  dst: CanvasNode,
+  label: string | undefined,
+  nodes: CanvasNode[],
+  edges: Array<{ from: string; to: string; label?: string }>,
+): EdgeGuardResult {
+  if (!label?.trim()) {
+    // 无端口锚定 = 无可用连接器(resolvePort 已判过);给一句人话而不是放任脏边落盘
+    return { ok: false, message: '这两种节点之间没有可用的连线角色,无法连接' };
+  }
+  const res = validateEdge(
+    nodes.map((n) => ({ id: n.id, kind: n.kind ?? '', data: n.data })),
+    edges.map((e) => ({ source: e.from, target: e.to, label: e.label })),
+    { source: src.id, target: dst.id, label },
+  );
+  if (res.ok) return { ok: true };
+  // 单值端口冲突走「替换语义」,由调用方的既有逻辑处理,这里不算非法组合
+  if (res.errors.every((e) => e.replaceable)) return { ok: true };
+  const first = res.errors.find((e) => !e.replaceable) ?? res.errors[0];
+  return { ok: false, message: first?.message ?? '连线不合法' };
 }

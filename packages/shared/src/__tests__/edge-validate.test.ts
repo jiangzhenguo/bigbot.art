@@ -362,3 +362,61 @@ describe('A+ · 图片拼接/拆分(image-stitch / image-split)', () => {
     expect(allowedPortLabels(splitNode('sp'), 'shot')).not.toContain('piece-N');
   });
 });
+/**
+ * 2026-09:视频**不得**直连图片编辑,须先经 frame-grab(视频裁切取帧)落成图片。
+ * 这一组锁死新端口的媒体类型约束 —— 它是「视频/图片」类型匹配的唯一保障点。
+ */
+describe('frame-grab · 视频裁切取帧端口与媒体约束', () => {
+  const grabNode = (id: string, extra: Record<string, unknown> = {}): EdgeNodeMin => ({
+    id,
+    kind: 'frame-grab',
+    data: { mode: 'first', ...extra },
+  });
+  const editNode = (id: string): EdgeNodeMin => ({ id, kind: 'image-edit', data: {} });
+  const shotVideo = (id: string): EdgeNodeMin => ({
+    id,
+    kind: 'shot',
+    data: { resultPath: `/out/${id}.mp4` },
+  });
+
+  it('shot → image-edit 不再被允许(旧直连已取消)', () => {
+    const res = validateEdge([shotVideo('s'), editNode('e')], [], edge('s', 'e', 'input'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('port-not-allowed');
+  });
+
+  it('视频源 → frame-grab 走 input-video 端口,允许', () => {
+    const nodes = [shotVideo('s'), grabNode('g')];
+    expect(allowedPortLabels(nodes[0]!, 'frame-grab')).toEqual(['input-video']);
+    expect(validateEdge(nodes, [], edge('s', 'g', 'input-video')).ok).toBe(true);
+  });
+
+  it('视频增强产物 → frame-grab 也允许(增强成片同样可取帧)', () => {
+    const nodes: EdgeNodeMin[] = [
+      { id: 'u', kind: 'video-upscale', data: { resultPath: '/out/u.mp4' } },
+      grabNode('g'),
+    ];
+    expect(validateEdge(nodes, [], edge('u', 'g', 'input-video')).ok).toBe(true);
+  });
+
+  it('图片源 → frame-grab 被拒(input-video 要求 video 媒体)', () => {
+    const nodes = [imageNode('i'), grabNode('g')];
+    expect(allowedPortLabels(nodes[0]!, 'frame-grab')).toEqual([]);
+    const res = validateEdge(nodes, [], edge('i', 'g', 'input-video'));
+    expect(res.ok).toBe(false);
+  });
+
+  it('frame-grab 产物是图片 → 可接 image-edit 的 input(替代旧 shot→edit 的合法通道)', () => {
+    const nodes = [grabNode('g'), editNode('e')];
+    expect(validateEdge(nodes, [], edge('g', 'e', 'input')).ok).toBe(true);
+  });
+
+  it('input-video 是单值端口:同目标已有入边 ⇒ 冲突但可替换', () => {
+    const nodes = [shotVideo('s1'), shotVideo('s2'), grabNode('g')];
+    const edges = [edge('s1', 'g', 'input-video')];
+    const res = validateEdge(nodes, edges, edge('s2', 'g', 'input-video'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('single-port-conflict');
+    expect(res.errors[0]!.replaceable).toBe(true);
+  });
+});

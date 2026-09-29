@@ -343,10 +343,15 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
    ⚠️ 只在拖动期间挂 —— 常驻 will-change 会让每个节点都独占一层显存,节点一多反而更慢。 */
 .pg-canvas .node.dragging{will-change:transform;transition:none}
 
-/* ── 视口动画期间的性能降级(P0 优化) ──
+/* ── 视口动画期间的性能降级(P0 优化 · 2026-09 改为「不摘模糊」) ──
    拖动/缩放画布时,毛玻璃(backdrop-filter)是最昂贵的一环:每个玻璃元素都要在
    每帧重新读取并模糊它下面的像素,而 .world 正在它们下面移动 → 逐帧重采样。
-   这里在动画期间把 blur 摘掉、换成不透明背景(视觉几乎无差别),停下 150ms 后恢复。 */
+
+   ⚠️ 这里**不再把 backdrop-filter 整个摘掉**(旧实现换 `none` + 不透明底色,
+   视口一动面板就「啪」地失去模糊、停手再弹回来,非常难看)。
+   现改为**保留模糊、只降档**:去掉 saturate()(它要求额外一次颜色矩阵重采样,
+   是这笔开销里占比最大的一项),并把半径从 24px/14px 降到 10px ——
+   模糊感仍在、视觉几乎连续,收益仍拿到大部分。停下 150ms 后恢复原样。 */
 .pg-canvas.animating .topbar,
 .pg-canvas.animating .palette,
 .pg-canvas.animating .agent,
@@ -355,21 +360,18 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas.animating .minimap,
 .pg-canvas.animating .pal-expand,
 .pg-canvas.animating .node-add,
+.pg-canvas.animating .pop,
+.pg-canvas.animating .add-pop{
+  -webkit-backdrop-filter:blur(10px);
+  backdrop-filter:blur(10px);
+}
+/* 小尺寸控件半径再小一档(与静态态的 --glass-blur-sm 对齐,避免降档后反而更糊) */
 .pg-canvas.animating .btn-p,
 .pg-canvas.animating .btn-s,
 .pg-canvas.animating .chip{
-  -webkit-backdrop-filter:none;
-  backdrop-filter:none;
+  -webkit-backdrop-filter:blur(8px);
+  backdrop-filter:blur(8px);
 }
-/* 摘掉 blur 后必须给不透明底色,否则面板会变成半透明、内容糊成一团 */
-.pg-canvas.animating .topbar,
-.pg-canvas.animating .queue,
-.pg-canvas.animating .zoomctl,
-.pg-canvas.animating .minimap,
-.pg-canvas.animating .pal-expand,
-.pg-canvas.animating .node-add{background:var(--bg)}
-.pg-canvas.animating .palette{background:var(--surface)}
-.pg-canvas.animating .agent{background:var(--bg)}
 .pg-canvas .nh{display:flex;align-items:center;gap:7px;padding:8px 11px;border-bottom:1px solid var(--border-soft);font-weight:600;font-size:var(--text-xs);background:var(--surface);border-radius:11px 11px 0 0;cursor:grab;user-select:none}
 .pg-canvas .nh svg{width:13px;height:13px;color:var(--fg-2);flex:none}
 .pg-canvas .nh .st{margin-left:auto}
@@ -1171,9 +1173,13 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .btn-xs{font-size:11px;padding:2px 8px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg);color:var(--fg-2);cursor:pointer;flex:none;line-height:1.5}
 .pg-canvas .btn-xs:hover{border-color:var(--meta);color:var(--fg)}
 .pg-canvas .btn-s:disabled,.pg-canvas .btn-xs:disabled{opacity:.45;cursor:not-allowed}
-/* 参考绑定媒体预览:图片小图(点击试看用简单 img;视频/音频小预览后续扩展) */
+/* 参考绑定媒体预览:图片用 <img>,视频用抽帧封面(见 media.tsx 的 thumbImageSrc) */
 .pg-canvas .refprev{flex:none;position:relative;width:64px;border-radius:6px;overflow:hidden;border:1px solid var(--border-soft);background:var(--surface)}
 .pg-canvas .refprev img{display:block;width:100%;height:auto;min-height:36px;object-fit:cover}
+/* 视频封面容器:抽帧期间是黑底占位,给它最小高度,避免塌成一条线 */
+.pg-canvas .refprev-vid{min-height:36px;background:#000}
+.pg-canvas .refprev-vid>span{min-height:36px}
+.pg-canvas .refprev-vid video,.pg-canvas .refprev-vid img{min-height:36px}
 .pg-canvas .slot:has(.refprev) .sval{max-width:36%}
 
 /* ═══ 调试面板(右下浮动;性能 + 日志两个页签) ═══ */

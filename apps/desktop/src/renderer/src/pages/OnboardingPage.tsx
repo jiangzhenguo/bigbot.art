@@ -10,7 +10,7 @@ interface OnboardingPageProps {
 /** 图片模型展示元数据(与主进程 KNOWN_MODELS 同口径;id 即下载标识) */
 const IMAGE_MODELS: Array<{ id: string; name: string; desc: string; recommended?: boolean }> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', desc: '文生图 · ~11GB', recommended: true },
-  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', desc: '文生图 · 新一代 7.1B · ~24GB' },
+  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', desc: '文生图 / 参考编辑 · 7.1B · ~33GB' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 37.5GB' },
   { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', desc: '多参考生成/编辑 · Outpain ~18GB' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', desc: '超分修复 · ~4.7GB' },
@@ -583,7 +583,7 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                           // repoId 与主进程白名单同口径(mlxgen-models.ts KNOWN_MODELS)
                           {
                             'z-image-turbo': 'AbstractFramework/z-image-turbo-8bit',
-                            'qwen-image-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+                            'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
                             'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
                             'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
                             'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',

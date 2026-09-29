@@ -34,7 +34,13 @@ const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?:
   // Qwen-Image-2.1 MLX 8bit（JoyFusionAI 自建导出，24GB / 本地 22GB）：
   // MS 仓库名与 HF repo 不同名，故 msRepoId 必须显式给出（其余条目同名可省略）；
   // 需要 mlx-gen ≥ 0.38.0（feat/qwen-image-2.1）才认这个模型族，老版本会静默路由到旧 Qwen Image
-  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', repoId: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', msRepoId: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', localDir: 'qwen-image-2.1-mlx-8bit' },
+  // Qwen-Image-2.1 全量 bf16(官方 Qwen/Qwen-Image-2.1,33GB):2.1 的**唯一**模型
+  // (2026-09-28 收敛:原 8bit 社区导出已移除)。文生图 / latent img2img / `qwen21.edit`
+  // 参考编辑(1-10 张参考图、原生 RGBA)三种能力全有。
+  // 被移除的 8bit 导出是为纯文生图产的:text_encoder 只有 399 个语言侧张量、0 个 `visual.*`、
+  // 且缺 per-component config.json → 跑编辑直接失败。留两个只会让用户在「文生图选了 8bit、
+  // 想编辑时编辑不了」上踩坑。无 msRepoId(HF 官方仓库,走 HF 通道)
+  { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1 (bf16 全量)', repoId: 'Qwen/Qwen-Image-2.1', localDir: 'Qwen-Image-2.1-bf16' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', msRepoId: 'mlx-community/Qwen-Image-Edit-8bit' },
   // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需)。
   // 官方 AbstractFramework 仓库在 HF 上是 gated(需登录授权),且国内直连常不通;
@@ -214,7 +220,7 @@ function indexShardsPresent(indexPath: string): boolean {
 export function mlxgenModelInfo(logger?: DebugLogger): MlxModelInfo[] {
   return KNOWN_MODELS.map((m) => {
     let downloaded = false;
-    // 本地直用目录优先:用户已自行下载/导出的散装模型(如 ~/ai/models/qwen-image-2.1-mlx-8bit),
+    // 本地直用目录优先:用户已自行下载/导出的散装模型(如 ~/ai/models/Qwen-Image-2.1-bf16),
     // 命中即可直接选,不必再拉一份 20GB+ 到 HF 缓存
     let localPath: string | undefined;
     try {

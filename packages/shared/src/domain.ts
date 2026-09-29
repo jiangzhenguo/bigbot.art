@@ -14,6 +14,7 @@ export type NodeKind =
   | 'image-crop' // 图片裁切:按目标画幅裁剪原图,供下游节点使用(如 1:1 → 9:16)
   | 'image-stitch' // 🆕 图片拼接:多张图按横排/竖排/网格拼成一张(纯 ffmpeg,不推理)
   | 'image-split' // 🆕 图片拆分:一张图等分成多片(长图切片/九宫格切图,纯 ffmpeg)
+  | 'frame-grab' // 🆕 视频裁切取帧:从视频截取一帧导出为**图片资源**(ffmpeg,不推理;产物是图片)
   | 'video-upscale' // 🆕 视频增强(超分 + 合修脸):Real-ESRGAN 超分 + GFPGAN/CodeFormer 修脸 + ffmpeg 去块,不走推理队列
   | 'shot' // 视频镜头(h3.c)
   | 'director' // 运镜调度小样(占位)
@@ -133,6 +134,8 @@ export interface NodeDataMap {
   'image-crop': ImageCropParams;
   'image-stitch': ImageStitchParams;
   'image-split': ImageSplitParams;
+  /** 🆕 视频裁切取帧:从视频截一帧导出为图片资源(ffmpeg,产物是图片) */
+  'frame-grab': FrameGrabParams;
   /** 🆕 视频增强(超分 + 合修脸):Real-ESRGAN + GFPGAN/CodeFormer + ffmpeg 去块 */
   'video-upscale': VideoUpscaleParams;
   shot: ShotParams;
@@ -338,6 +341,35 @@ export interface ImageSplitParams {
   inputAssetId?: string;
   /** 最近一次运行的全部切片产物路径(第 1 片同步写 resultPath;下游 piece-N 端口按序号取片) */
   pieces?: string[];
+  /** 🆕 提示词来源追溯(占位,保持结构一致) */
+  promptFrom?: PromptSource;
+}
+
+/**
+ * 视频裁切取帧参数(frame-grab 节点:不推理,ffmpeg 从视频截一帧导出为图片资源)。
+ *
+ * 与 image-crop 的区别:image-crop 是「按画幅裁剪一张**已有的图**」;
+ * 本节点是「从一段**视频**里截取某一时刻的画面,产出一张图片」——
+ * 产物是图片(可继续接 image-edit / image-upscale / 参考图端口),
+ * 因此不得把视频产物直连图片编辑(需先经本节点落成静帧)。
+ */
+export interface FrameGrabParams {
+  /** 取帧位置:first=首帧(默认)/ last=尾帧 / at=指定时间点(seconds 必填) */
+  mode: 'first' | 'last' | 'at';
+  /** mode='at' 时的取帧时间点(秒,非负有限数) */
+  seconds?: number;
+  /** 输入视频来源(镜头/视频增强/视频素材连线派生,渲染层写入) */
+  inputVideoFrom?: { nodeId: string };
+  /** 输入视频 Asset id(手动绑定,与连线二选一) */
+  inputAssetId?: string;
+  /** 抽出并导入资产库后的 asset id(产物本身也是一条资产) */
+  resultAssetId?: string;
+  /** 成片产物路径(抽出的 PNG;交给引擎一律用它,不要用 assetCache) */
+  resultPath?: string;
+  /** 最近一次运行的耗时(秒,仅展示) */
+  elapsedSec?: number;
+  /** 当前绑定 Take(覆盖历史回看用) */
+  currentTakeId?: string;
   /** 🆕 提示词来源追溯(占位,保持结构一致) */
   promptFrom?: PromptSource;
 }

@@ -89,40 +89,72 @@ export class MlXGenProvider implements Provider {
       aspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3'],
       models: [
         'AbstractFramework/z-image-turbo-8bit (Z-Image Turbo, 文生图, ~11GB)',
-        'JoyFusionAI/Qwen-Image-2.1-MLX-8bit (Qwen-Image-2.1, 文生图, ~24GB, 需 mlx-gen ≥ 0.38.0)',
         'qwen-image (Qwen Image, 文生图)',
+        'Qwen/Qwen-Image-2.1 (Qwen-Image-2.1 全量 bf16, 文生图/图生图/参考编辑(1-10 张), ~33GB)',
         'mlx-community/Qwen-Image-Edit-8bit (Qwen Image Edit 8bit, 指令编辑/mask, ~37.5GB)',
         'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint, ~18GB)',
         'AbstractFramework/seedvr2-3b-8bit (超分修复, ~4.7GB)',
       ],
-      notes: ['图片槽位与视频槽位互斥', '模型文件需 mlxgen download 预下载'],
+      notes: [
+        '图片槽位与视频槽位互斥',
+        '模型文件需 mlxgen download 预下载',
+        'Qwen-Image-2.1 统一用全量 bf16 checkpoint(8bit 社区导出无 vision tower,做不了编辑,已移除)',
+      ],
     };
   }
 
   /** 自定义量化仓库 → 基座模型提示(CLI `--base-model`;不给会被误路由成文生图 handler) */
   private static readonly BASE_MODEL_HINTS: Record<string, string> = {
     'mlx-community/Qwen-Image-Edit-8bit': 'Qwen/Qwen-Image-Edit',
-    // Qwen-Image-2.1(JoyFusionAI 自建 8bit 导出,24GB):仓库全名不在 mlxgen 的 catalog 里,
-    // ConfigResolution 解析失败 → aliases 为空 → 落到家族兜底 `qwen.generate`(旧 Qwen Image,
-    // 完全不同的 transformer/text encoder/VAE,加载必然失败)。实测(2026-09 mlx-gen 0.38.0):
-    // 补 `--base-model qwen-image-2.1` 后正确路由到 `qwen21.generate`
+    // Qwen-Image-2.1 全量 bf16(官方 Qwen/Qwen-Image-2.1 仓库或其本地就地目录):
+    // 必须给家族提示 —— 仓库全名不在 mlxgen catalog 里时 ConfigResolution 解析失败 →
+    // aliases 为空 → 落家族兜底 `qwen.generate`(旧 Qwen Image,transformer/text encoder/VAE
+    // 完全不同,加载必炸);**本地目录路径同样要给**(ConfigResolution 只按目录内容猜,
+    // 不保证命中 2.1 族)。实测(2026-09-28):不给提示 capabilities 只报旧 `qwen.*` 行,
+    // 给了才出 `qwen21.text` / `qwen21.edit` / `qwen21.latent`
+    'Qwen/Qwen-Image-2.1': 'qwen-image-2.1',
+    'Qwen-Image-2.1-bf16': 'qwen-image-2.1',
+    // 已移除的 8bit 社区导出(2026-09-28 收敛到 bf16):**保留提示作向后兼容** ——
+    // 老项目文件 / 老节点里存的模型名仍是它,不给提示会被家族兜底误路由成旧 `qwen.generate`
+    // 直接加载失败。列表里已不提供该模型,但历史数据仍要能打开、能给出可用的报错或降级
     'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'qwen-image-2.1',
   };
 
   /**
-   * mlxgen 短别名 → 本机可用量化仓库(实测 2026-09:短别名 `qwen-image-edit` 被 CLI 解析为
-   * 全量 `Qwen/Qwen-Image-Edit` 57.7GB,64GB 内存跑不动且未下载 → exit 1 DownloadRequiredError;
-   * 归一化到 8bit 社区仓库,BASE_MODEL_HINTS 再补路由提示)
+   * mlxgen 短别名 → 本机可用仓库
    *
-   * `qwen-image-2.1`:短别名本身能路由到 qwen21,但 CLI 会去找 `Qwen/Qwen-Image-2.1`
-   * (~33GB bf16,未下载 → DownloadRequiredError);归一化到本机可下的 24GB 8bit 社区导出
+   * `qwen-image-edit`:短别名会被 CLI 解析为全量 `Qwen/Qwen-Image-Edit`(57.7GB,未下载 →
+   * exit 1 DownloadRequiredError),归一化到 8bit 社区仓库 + BASE_MODEL_HINTS 补路由提示。
+   *
+   * `qwen-image-2.1` / `qwen-2.1` / `qwen-image-21`:**统一归一化到全量 bf16**
+   * (2026-09-28 收敛,原本指向 8bit 社区导出)。原因:
+   *  - 8bit 社区导出为纯文生图产物,**无 vision tower**(text_encoder 仅 399 个语言侧张量、
+   *    0 个 `visual.*`)且缺 per-component config.json → `qwen21.edit` 参考编辑根本做不了;
+   *    而 bf16 三样能力(文生图 / latent img2img / 参考编辑)全有,真跑出图质量与速度都够用
+   *    (实测 512²/20 步约 21 秒)
+   *  - 留两个模型只会让用户在「文生图选了 8bit、想编辑时编辑不了」上踩坑
    */
   private static readonly MODEL_ALIASES: Record<string, string> = {
     'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
-    'qwen-image-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
-    'qwen-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
-    'qwen-image-21': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+    'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
+    'qwen-2.1': 'Qwen/Qwen-Image-2.1',
+    'qwen-image-21': 'Qwen/Qwen-Image-2.1',
   };
+
+  /**
+   * Qwen-Image-2.1 参考编辑(`qwen21.edit`)可用的 checkpoint 标识。
+   * ⚠️ 编辑路由**必须走带 vision tower 的全量 checkpoint**(bf16 实测 750 tensors 含
+   * `visual.*` 351 个)。8bit 社区导出为纯文生图产物,缺 vision tower 与 per-component
+   * config.json,跑编辑的直接失败文案:
+   *   "<dir>/vae/config.json is missing. Qwen-Image-2.1 editing needs a full checkpoint..."
+   * 本项目已统一到 bf16(短别名亦指向它),此判定保留作防御:若有人手工填了 8bit 仓库,
+   * 仍能正确识别并走「纯文生图族」的既有防呆,而不是发出一条必炸的命令。
+   */
+  /** 该 repo(或本地目录名)是否是可用的 2.1 全量 checkpoint(带 vision tower) */
+  private static isQwen21EditModel(model: string): boolean {
+    const base = model.split('/').pop() ?? model;
+    return /Qwen-Image-2\.1-bf16/i.test(base) || /Qwen-Image-2\.1$/i.test(model);
+  }
 
   /**
    * repoId → 本地直用目录(用户已自行下载/导出的散装模型;命中则免下载、直接当 `--model` 传)。
@@ -130,7 +162,16 @@ export class MlXGenProvider implements Provider {
    * (不带提示时本地路径也会被家族兜底误路由;见 BASE_MODEL_HINTS)
    */
   private static readonly LOCAL_MODEL_DIRS: Record<string, string> = {
-    'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'qwen-image-2.1-mlx-8bit',
+    // Qwen-Image-2.1 全量 bf16(官方 Qwen/Qwen-Image-2.1 的本地就地目录,31GB,带 vision tower):
+    // 2.1 的**唯一**模型(2026-09-28 收敛,原 8bit 社区导出已移除)。
+    // 文生图 / latent img2img / `qwen21.edit` 参考编辑三种能力全有;8bit 社区导出缺 vision tower
+    // 与 per-component config.json,做不了编辑(见 isQwen21EditModel 注释)。
+    // 需要 BASE_MODEL_HINTS 的 `--base-model qwen-image-2.1` 路由提示(不给会落到旧 Qwen 家族兜底)
+    'Qwen/Qwen-Image-2.1': 'Qwen-Image-2.1-bf16',
+    'Qwen-Image-2.1-bf16': 'Qwen-Image-2.1-bf16',
+    // 兼容曾用过 8bit 本地目录的用户:仍认这个目录名,但归一化到同一份 bf16 模型
+    // (旧目录若还在也只作路径解析,编辑能力以 bf16 为准)
+    'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'Qwen-Image-2.1-bf16',
     // FLUX.2 Klein 9B:官方 AbstractFramework 仓库在 HF 上是 gated,国内直连常不通;
     // 实际来源是 ModelScope 的 mlx-community/flux2-klein-9b-8bit(与之同源),
     // 下到本地模型根后即以散装目录直用,免下载、免 HF 授权。
@@ -156,13 +197,18 @@ export class MlXGenProvider implements Provider {
   /**
    * 是否「只有 latent img2img、没有 reference edit 能力」的模型(纯文生图族)。
    * 判定依据 = mlxgen capabilities 的 handler(实测 2026-09):
-   *  - z-image-turbo / qwen-image-2.1 → handler `z-image.generate` / `qwen21.generate`,
-   *    能力集只有 text-only 与 latent-img2img,**没有** edit-reference/inpaint/outpaint
+   *  - z-image-turbo / qwen-image-2.1(8bit 文生图导出) → handler `z-image.generate` /
+   *    `qwen21.generate`,能力集只有 text-only 与 latent-img2img,**没有** edit-reference
    *  - Qwen-Image-Edit → `qwen.edit`(edit-reference);flux.2-klein → `flux2.edit`(含 outpaint)
-   * 传给前者的输入图会被 auto 路由成 latent i2i,进而要求 --image-strength(缺则 exit 2)
+   *  - 🌟 **Qwen-Image-2.1 全量 bf16 → `qwen21.edit`(edit-reference,1-10 张参考图)**。
+   *    这是 2026-09-28 引擎新增的能力:同一个模型族,文生图导出做不了编辑、全量导出能编辑,
+   *    **不能按族名一刀切**,故此处先放行带 vision tower 的编辑 checkpoint。
+   * 传给纯文生图族的输入图会被 auto 路由成 latent i2i,进而要求 --image-strength(缺则 exit 2)
    */
   private static latentOnly(model: string): boolean {
     if (/qwen.*image.*edit/i.test(model) || /flux.?2.*klein/i.test(model)) return false;
+    // 2.1 全量 bf16 有 edit-reference 能力(qwen21.edit),不是纯文生图族
+    if (MlXGenProvider.isQwen21EditModel(model)) return false;
     return /z-image/i.test(model) || /qwen-image-2\.1/i.test(model) || /qwen.*2\.1/i.test(model);
   }
 
@@ -205,6 +251,8 @@ export class MlXGenProvider implements Provider {
     // 默认模型按 kind 分派(真实事故:Agent 建 image-edit 节点只写了 prompt,没写 model,
     // 缺省成 z-image 纯文生图模型,CLI auto 路由成 latent i2i 缺 --image-strength 直接 exit 2):
     //   文生图/img2img → z-image-turbo;指令编辑/inpaint/outpaint → Qwen Image Edit;超分 → SeedVR2
+    // 注意:instruction 的默认仍是 Qwen Image Edit(存量行为不变)。要用 Qwen-Image-2.1 参考编辑
+    // (1-10 张参考图 / 原生 RGBA)需在检查器把模型显式换成 Qwen/Qwen-Image-2.1(全量 bf16)
     const DEFAULT_MODEL_BY_KIND: Record<string, string> = {
       generate: 'AbstractFramework/z-image-turbo-8bit',
       img2img: 'AbstractFramework/z-image-turbo-8bit',
@@ -240,8 +288,9 @@ export class MlXGenProvider implements Provider {
       cmd.push('--width', String(p.width ?? 768), '--height', String(p.height ?? 768));
       // Qwen-Image-2.1 官方推荐 40 步且无 guidance(guidance 1.0 时负向 pass 整体跳过);
       // 其余模型维持 24 步 + guidance 1.0 的既有默认(见 mlxgen 各模型 README)
-      // 同样按 repoId 判(本地路径时 model 是目录,否则 40 步默认会失效回落到 24)
-      const isQwen21 = repoModel === 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit';
+      // 按 **repoModel 正则**判 2.1 族(不能只匹配某一个 repoId:本地路径时 model 是目录,
+      // 且 2.1 现有 bf16 与历史 8bit 两个标识,漏一个就会让 40 步默认静默回落成 24)
+      const isQwen21 = /qwen.*2\.1/i.test(repoModel);
       const defSteps = isQwen21 ? 40 : 24;
       // ⚠️ 根因记录(2026-09,真实事故:klein exit 2 且表现为「同参数一次成一次败」):
       // FLUX.2 Klein 是**蒸馏**模型,裸 `mflux-generate-flux2` 只对 FLUX.2 **base** 模型接受
@@ -301,6 +350,77 @@ export class MlXGenProvider implements Provider {
       cmd.push('--image-path', String(p.inputPath ?? ''), '--resolution', res, '--output', outPath);
     } else {
       // edit:instruction / img2img / inpaint / outpaint(统一走 mlxgen generate 路由)
+      //
+      // 🌟 Qwen-Image-2.1 参考编辑(`qwen21.edit`,2026-09-28 引擎新增):**独立路由**,
+      // 参数面与其它编辑族不同,必须单独构造,不能混用下面的通用分支:
+      //  - 参考图用 `--image-paths p1 p2 ...`(`nargs='+'`,一次给多张);
+      //    而 flux2/qwen-edit 是重复 `--image`(路由器按 `--i2i-mode` 改写成 --image-path(s))
+      //  - 支持 1-10 张参考图;超过 10 张 CLI 直接 parser.error
+      //  - **不接受 `--image-strength`**(该路由是 edit-reference,不是 latent i2i)
+      //  - 输出**必须是 RGBA 保留格式**(.png/.webp/.tif/.tiff),否则 CLI 报错退出
+      //  - `--scheduler` 只能是 linear(未传=默认 linear,安全)
+      //  - 最少 2 步("requires at least two steps for terminal sigma shifting")
+      const isQwen21Edit = MlXGenProvider.isQwen21EditModel(repoModel) && kind === 'instruction';
+      if (isQwen21Edit) {
+        // 参考图:input 连线的输入图 + ref-image 连线的参考图,统一进 --image-paths。
+        // 2.1 编辑的「底图」和「参考图」在 CLI 侧是同一个参数(参考图列表),
+        // 顺序即语义:第一张锚定几何,后续提供风格/材质线索(见 mlx-gen docs/image-edit-modes.md)
+        const qwen21Refs: string[] = [];
+        if (p.inputPath) qwen21Refs.push(String(p.inputPath));
+        for (const r of req.references ?? []) {
+          if (r.localPath && !qwen21Refs.includes(String(r.localPath))) qwen21Refs.push(String(r.localPath));
+        }
+        if (qwen21Refs.length === 0) {
+          throw new Error(
+            'Qwen-Image-2.1 参考编辑需要至少 1 张参考图:请把图片节点/资产节点连到本节点的输入端口;' +
+              '若想纯文生图,请把模型换成 AbstractFramework/z-image-turbo-8bit 或改用「文生图」节点',
+          );
+        }
+        if (qwen21Refs.length > 10) {
+          throw new Error(
+            `Qwen-Image-2.1 参考编辑最多支持 10 张参考图(当前 ${qwen21Refs.length} 张);` +
+              '请断开多余的参考图连线',
+          );
+        }
+        cmd.push('--image-paths');
+        for (const rp of qwen21Refs) cmd.push(rp);
+        // ⚠️ **必须显式声明 `--i2i-mode edit`**(真实事故 2026-09-28,多参考真跑 exit 2):
+        // ml-gen 的模式推断(task_inference._resolve_i2i_mode)在「多张 `--image-paths`」时
+        // 会自动判成 `multi-reference`:
+        //   requested_mode = MODE_MULTI_REFERENCE if image_count > 1 else MODE_EDIT_REFERENCE
+        // 而 2.1 的能力行是 **edit-reference**(`qwen21.edit`,max_images=10),
+        // 于是撞上通用校验:
+        //   "Qwen Image 2.1 does not support multi-reference image-to-image generation." → exit 2
+        // 1 张时碰巧推对(edit-reference)所以单参考正常,多参考必炸 —— 显式传 `edit` 后
+        // 走 `requested_mode = i2i_mode` 分支不被改写,1 张与多张都对。
+        // 注意:这里的 `edit` 是 CLI 的模式名(≡ edit-reference),与我们的 `--image-paths` 复数
+        // 参数不冲突(那是「怎么给图」,这是「走哪条路由」)。
+        cmd.push('--i2i-mode', 'edit');
+        // 像素面积预算:参考图会被缩放到该预算,并据此推导输出尺寸(默认 1024)
+        if (p.outputResolution != null && Number.isFinite(Number(p.outputResolution))) {
+          cmd.push('--output-resolution', String(Number(p.outputResolution)));
+        }
+        // 步骤:检查器未设置时兜底 30,与检查器 DEFAULT_EDIT_STEPS 同口径(A 方案)。
+        // ⚠️ 根因记录(2026-09-29「不改 step 直接就是 40 步」):此处原为无条件 `?? 40`,
+        // 而检查器只把 4 显示在滑块上、并不写回 data → **界面显示 4、实跑 40**,
+        // 且没有任何地方能让用户看出来(2.1 上 40 步约 4 分钟,6 步版仅 54-92 秒)。
+        // 现在两端统一 30:检查器负责写回 data,这里的兜底只作**安全网**
+        // (历史节点 / Agent 直传 data 未带 steps 时),不再是一套隐藏默认值。
+        cmd.push('--steps', String(Number(p.steps ?? 30)));
+        if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
+        if (seeds.length > 0) {
+          cmd.push('--seed');
+          for (const s of seeds) cmd.push(String(s));
+          if (seeds.length > 1) outPath = `${outBase}_seed_${seeds[0]}.png`;
+        }
+        // RGBA 硬约束:输出必须保留 alpha 的后缀(2.1 编辑会生成透明像素)
+        outPath = `${outBase}.png`;
+        cmd.push('--output', outPath);
+        (this as unknown as Record<string, unknown>).lastCmd = cmd;
+        this.outPaths.set(taskId, outPath);
+        if (!this.dryRun) this.spawnRun(taskId, cmd);
+        return { providerTaskId: taskId };
+      }
       if (p.inputPath) cmd.push('--image-path', String(p.inputPath));
       // 采样步数:仅在用户显式设置时传(检查器未设置 → data 无 steps → 不传,
       // 交给 mlxgen 用模型自身默认值,既有节点行为完全不变)。
@@ -358,34 +478,39 @@ export class MlXGenProvider implements Provider {
     }
     (this as unknown as Record<string, unknown>).lastCmd = cmd;
     this.outPaths.set(taskId, outPath);
-    if (!this.dryRun) {
-      // 真实执行
-      const child = spawn(this.bin, cmd, { stdio: ['ignore', 'pipe', 'pipe'] });
-      const errAcc: string[] = [];
-      child.stderr.on('data', (d: Buffer) => {
-        errAcc.push(d.toString());
-        this.stderrs.set(taskId, errAcc.join('').slice(-1600));
-      });
-      // --json-events:stdout 逐行 JSON(phase/step/total_steps/progress),解析成实时进度
-      let buf = '';
-      child.stdout.on('data', (d: Buffer) => {
-        buf += d.toString();
-        const lines = buf.split('\n');
-        buf = lines.pop() ?? '';
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t.startsWith('{')) continue;
-          try {
-            const ev = JSON.parse(t) as MlxgenEvent;
-            if (ev && typeof ev === 'object') this.events.set(taskId, ev);
-          } catch {
-            /* 非 JSON 行忽略 */
-          }
-        }
-      });
-      this.running.set(taskId, child);
-    }
+    if (!this.dryRun) this.spawnRun(taskId, cmd);
     return { providerTaskId: taskId };
+  }
+
+  /**
+   * 真实执行一次 mlxgen 命令(spawn + stderr 诊断留存 + stdout JSONL 进度解析)。
+   * 抽成方法供 submit 的多条路由分支复用(2.1 参考编辑分支提前 return,否则会漏掉这套接线)
+   */
+  private spawnRun(taskId: string, cmd: string[]): void {
+    const child = spawn(this.bin, cmd, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const errAcc: string[] = [];
+    child.stderr.on('data', (d: Buffer) => {
+      errAcc.push(d.toString());
+      this.stderrs.set(taskId, errAcc.join('').slice(-1600));
+    });
+    // --json-events:stdout 逐行 JSON(phase/step/total_steps/progress),解析成实时进度
+    let buf = '';
+    child.stdout.on('data', (d: Buffer) => {
+      buf += d.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('{')) continue;
+        try {
+          const ev = JSON.parse(t) as MlxgenEvent;
+          if (ev && typeof ev === 'object') this.events.set(taskId, ev);
+        } catch {
+          /* 非 JSON 行忽略 */
+        }
+      }
+    });
+    this.running.set(taskId, child);
   }
 
   async status(handle: RenderJobHandle): Promise<RenderStatus> {

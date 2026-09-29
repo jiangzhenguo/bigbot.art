@@ -11,7 +11,7 @@
  * 更容易构造,而这些恰恰是最该被锁住的路径。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { extractPoster, type PosterDeps } from '../media.js';
+import { extractPoster, hasVisibleContent, type PosterDeps } from '../media.js';
 
 /** 假 video:记录属性写入,并暴露触发事件的手段 */
 interface FakeVideo {
@@ -32,7 +32,19 @@ interface FakeVideo {
   fireError: () => void;
 }
 
-function makeDeps(opts: { w?: number; h?: number; behavior?: 'loaded' | 'error' | 'silent'; noCanvas?: boolean; throwInDraw?: boolean } = {}) {
+/** 中庸亮度的假像素:既有用例(不关心过暗判定)走这条,避免误触黑帧回退 */
+function brightPixels(n: number): Uint8ClampedArray {
+  const d = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    d[i * 4] = 128;
+    d[i * 4 + 1] = 128;
+    d[i * 4 + 2] = 128;
+    d[i * 4 + 3] = 255;
+  }
+  return d;
+}
+
+function makeDeps(opts: { w?: number; h?: number; behavior?: 'loaded' | 'error' | 'silent'; noCanvas?: boolean; throwInDraw?: boolean; sample?: Uint8ClampedArray; noSample?: boolean } = {}) {
   const videos: FakeVideo[] = [];
   let loadCalls = 0;
   let now = 0;
@@ -84,6 +96,8 @@ function makeDeps(opts: { w?: number; h?: number; behavior?: 'loaded' | 'error' 
             if (opts.throwInDraw) throw new Error('tainted canvas');
           },
           toDataURL: () => `data:image/jpeg;base64,CANVAS_${w}x${h}`,
+          // 不传 sample 时默认给「正常亮度」像素,让既有用例走成功路径
+          sample: opts.noSample ? undefined : () => opts.sample ?? brightPixels(w * h),
         }),
     setTimeout: (fn, ms) => {
       const id = seq++;
@@ -229,6 +243,51 @@ describe('extractPoster — 状态机只跑一次', () => {
     videos[0]!.fireError();
     expect(url).toBe('data:image/jpeg;base64,CANVAS_320x180');
     expect(await extractPoster(src, 8000, deps)).toBe('data:image/jpeg;base64,CANVAS_320x180');
+  });
+});
+
+describe('extractPoster — 首帧过暗视为无封面(2026-09 参考视频事故)', () => {
+  /** 构造指定像素的 sample(每 4 字节一个像素) */
+  const px = (n: number, v: number) => {
+    const d = new Uint8ClampedArray(n * 4);
+    for (let i = 0; i < n; i++) {
+      d[i * 4] = v;
+      d[i * 4 + 1] = v;
+      d[i * 4 + 2] = v;
+      d[i * 4 + 3] = 255;
+    }
+    return d;
+  };
+
+  it('hasVisibleContent:纯黑 / 近黑 = 无内容', () => {
+    expect(hasVisibleContent(px(100, 0))).toBe(false);
+    expect(hasVisibleContent(px(100, 8))).toBe(false); // 实测那支素材视频首帧均亮 8
+    expect(hasVisibleContent(px(100, 15))).toBe(false);
+    expect(hasVisibleContent(new Uint8ClampedArray(0))).toBe(false);
+  });
+
+  it('hasVisibleContent:正常画面 / 少量高光的夜景 = 有内容', () => {
+    expect(hasVisibleContent(px(100, 128))).toBe(true);
+    expect(hasVisibleContent(px(100, 40))).toBe(true); // 均值 40 > 16
+    // 全黑底 + 几处亮像素(字幕/灯光):仍算有内容
+    const dark = px(100, 0);
+    for (let i = 0; i < 4; i++) { dark[i * 4] = 255; dark[i * 4 + 1] = 255; dark[i * 4 + 2] = 255; }
+    expect(hasVisibleContent(dark)).toBe(true);
+  });
+
+  it('首帧近全黑 → 抽出 null,让调用方回退真实 video(而不是给一块黑方块)', async () => {
+    const { deps } = makeDeps({ sample: px(320 * 180, 8) });
+    expect(await extractPoster(nextSrc(), 8000, deps)).toBeNull();
+  });
+
+  it('首帧正常 → 正常出封面', async () => {
+    const { deps } = makeDeps({ sample: px(320 * 180, 120) });
+    expect(await extractPoster(nextSrc(), 8000, deps)).toBe('data:image/jpeg;base64,CANVAS_320x180');
+  });
+
+  it('取不到像素(sample 返回 null)→ 按旧行为出图,不因判定失败而丢封面', async () => {
+    const { deps } = makeDeps({ noSample: true });
+    expect(await extractPoster(nextSrc(), 8000, deps)).toBe('data:image/jpeg;base64,CANVAS_320x180');
   });
 });
 

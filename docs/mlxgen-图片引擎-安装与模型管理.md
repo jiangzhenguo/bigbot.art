@@ -54,18 +54,18 @@ mlxgen --help          # 应打印帮助与版本号
 | 节点用途 | 模型 id(capabilities 声明) | 体积* | 说明 |
 |---|---|---|---|
 | 文生图(默认) | `AbstractFramework/z-image-turbo-8bit` | ~11GB | Z-Image Turbo,image-gen 默认 |
-| 文生图(新一代) | `JoyFusionAI/Qwen-Image-2.1-MLX-8bit` | ~24GB | Qwen-Image-2.1(7.1B 单流 block-causal + Qwen3-VL 文本编码器 + 4 通道因果 VAE)。**需 mlx-gen ≥ 0.38.0**;Provider 自动追加 `--base-model qwen-image-2.1`(仓库全名不在 mlxgen catalog 里,不给提示会被家族兜底误路由成旧 `qwen.generate`,transformer/编码器/VAE 全不同,加载必失败);默认 **40 步**(官方推荐,guidance 1.0 时负向 pass 整体跳过)。**不支持** ControlNet / 指令编辑 / outpaint / reframe |
+| 文生图 + 参考编辑(新一代) | `Qwen/Qwen-Image-2.1`(本地目录 `Qwen-Image-2.1-bf16`) | ~33GB | Qwen-Image-2.1 全量 bf16(7.1B 单流 block-causal + Qwen3-VL 文本编码器 + 4 通道因果 VAE)。**2.1 的唯一模型**(2026-09-28 收敛,原 `JoyFusionAI/...-8bit` 已移除 —— 它无 vision tower、做不了编辑)。能力:**文生图 / latent img2img / 参考编辑 `qwen21.edit`(1-10 张 / 原生 RGBA)**。Provider 自动追加 `--base-model qwen-image-2.1`(仓库全名不在 catalog 里、本地目录同样要给,否则被家族兜底误路由成旧 `qwen.generate`,transformer/编码器/VAE 全不同,加载必失败);默认 **40 步**(官方推荐,guidance 1.0 时负向 pass 整体跳过)。**不支持** ControlNet / outpaint / reframe |
 | 文生图(备选) | `qwen-image` | 中等 | Qwen Image(初代,与 2.1 不是同一模型族) |
 | 指令编辑 / mask | `mlx-community/Qwen-Image-Edit-8bit` | ~37.5GB | image-edit `instruction` / `inpaint`;8bit 量化版(官方原版 57.7GB,64GB 内存跑不动)。生成时 Provider 自动追加 `--base-model Qwen/Qwen-Image-Edit`(不给会被误路由成文生图 handler) |
 | 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | image-edit 多参考 / 扩图 |
 | 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~4.7GB | image-upscale |
 
-*体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)。Qwen-Image-2.1 为 ModelScope 直连清单实测 24.04GB
+*体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)。Qwen-Image-2.1 bf16 全量约 33GB(本地目录实测 31GB)
 
 ```bash
 # 全部装齐(建议先只装 Z-Image-Turbo 跑通闭环;Qwen 系建议用设置页下载,走 ModelScope 直连)
 mlxgen download --model AbstractFramework/z-image-turbo-8bit
-mlxgen download --model JoyFusionAI/Qwen-Image-2.1-MLX-8bit
+mlxgen download --model Qwen/Qwen-Image-2.1
 mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwen-Image-Edit
 # ...
 ```
@@ -82,7 +82,7 @@ mlxgen download --model mlx-community/Qwen-Image-Edit-8bit --base-model Qwen/Qwe
 
 ```bash
 # 手动验证本地目录可用(注意 --base-model 提示不能省)
-mlxgen capabilities --model ~/ai/models/qwen-image-2.1-mlx-8bit --base-model qwen-image-2.1
+mlxgen capabilities --model ~/ai/models/Qwen-Image-2.1-bf16 --base-model qwen-image-2.1
 ```
 
 > ⚠️ 本地路径**同样需要** `--base-model` 提示。实测:不带提示时本地目录也会被家族兜底
@@ -92,7 +92,7 @@ mlxgen capabilities --model ~/ai/models/qwen-image-2.1-mlx-8bit --base-model qwe
 实测性能(M5 Max,1024²,40 步):约 **3.5 s/步、全图 2 分 20 秒**;权重约 22GB 常驻(8bit 导出)。
 
 > ⚠️ **Qwen-Image-2.1 需要 mlx-gen ≥ 0.38.0**。0.37.0 及更早版本没有 `qwen21` 模型族:
-> `mlxgen capabilities --model JoyFusionAI/Qwen-Image-2.1-MLX-8bit` 不会报错,但会返回**旧 Qwen Image**
+> `mlxgen capabilities --model Qwen/Qwen-Image-2.1` 不会报错,但会返回**旧 Qwen Image**
 > 的能力集(`qwen.generate` handler),真跑才会在加载权重时失败。本机源码在 `~/ai/mlx-gen`
 > (分支 `feat/qwen-image-2.1`),用 `uv tool install --force --no-cache ~/ai/mlx-gen` 安装/升级。
 > 该分支 `pyproject.toml` 的 `[project.scripts]` 里两个含裸点号的 key
@@ -111,6 +111,60 @@ mlxgen capabilities --model ~/ai/models/qwen-image-2.1-mlx-8bit --base-model qwe
 > 缺的只是 CLI 层的事件订阅——排查时别往推理循环里找。
 > 验证:`mlxgen generate --json-events ... | head` 应输出 `start/denoise(N/N)/save/complete` JSONL;
 > 若只有 tqdm 进度条(stderr)而 stdout 为空,就是这套事件没接。
+
+### Qwen-Image-2.1 参考编辑(`qwen21.edit`,2026-09-28)
+
+2.1 支持**指令化参考编辑**(1–10 张参考图、原生 RGBA、prefix KV cache)。App 里统一用
+**全量 bf16** 一个模型搞定全部三种能力:
+
+| 能力 | 全量 bf16(`Qwen/Qwen-Image-2.1`) |
+|---|---|
+| 文生图 + latent img2img | ✅ |
+| **参考编辑 `qwen21.edit`** | ✅ 1–10 张参考图、原生 RGBA |
+| text_encoder tensors | 750(**351 个 `visual.*`**) |
+
+> ⚠️ **8bit 社区导出(`JoyFusionAI/Qwen-Image-2.1-MLX-8bit`)已从列表移除**(2026-09-28)。
+> 它只能做文生图/latent img2img —— 编辑链路要用 Qwen3-VL vision tower 编码每张参考图,
+> 而 8bit 导出是为纯文生图产的:text_encoder 只有 399 个语言侧张量、**0 个 `visual.*`**,
+> 且缺 per-component `config.json`。实测失败文案:
+> `<dir>/vae/config.json is missing. Qwen-Image-2.1 editing needs a full checkpoint...`
+> **留着它只会让人在「文生图选了 8bit、想编辑时编辑不了」上踩坑**,而 bf16 出图质量与速度
+> 都够用(实测 512²/20 步约 21 秒),故收敛为一个模型。
+> 老项目文件里存的 8bit 仓库名仍能正常打开(别名与 `--base-model` 提示保留作向后兼容,
+> 会落到同一份 bf16);手工填 8bit 跑编辑则走既有防呆明确报错,不发必炸的命令。
+
+**引擎版本要求**:正式包 0.38.0 **没有** `qwen21.edit` 路由 —— `mlxgen capabilities` 只报
+`qwen21.text`/`qwen21.latent`,传参考图会被判成 latent i2i 并索要 `--image-strength`。
+该实现目前只在源码工作区(未提交):`src/mflux/models/qwen21/reference/` +
+`variants/edit/qwen_image_21_edit.py` + `cli/qwen21_edit_generate.py`。安装方式:
+
+```bash
+cd ~/ai/mlx-gen && uv tool install --editable . --force   # 改代码即时生效,调试期推荐
+# 或一次性覆盖安装:uv tool install --force --no-cache ~/ai/mlx-gen
+# 复核(必须能列出 qwen21.edit 行):
+mlxgen capabilities --model ~/ai/models/Qwen-Image-2.1-bf16 --base-model qwen-image-2.1
+```
+
+**参数面**(Provider 的 `isQwen21Edit` 分支已按此构造,**与 flux2/qwen-edit 写法完全不同**):
+
+```bash
+mlxgen generate --model <bf16 目录> --base-model qwen-image-2.1 \
+  --image-paths ref1.png ref2.png \
+  --prompt "..." --steps 40 --output-resolution 1024 --output out.png
+```
+
+- 参考图用 **`--image-paths p1 p2 ...`**(复数、`nargs='+'`,一次给多张);
+  **不是** flux2/qwen-edit 的重复 `--image` + `--i2i-mode`
+- 顺序即语义:第一张锚定几何,后续提供风格/材质线索
+- **禁用 `--image-strength`**(该路由是 edit-reference,不是 latent i2i)
+- **输出后缀必须 `.png/.webp/.tif/.tiff`**(RGBA 硬约束,其他后缀 CLI 直接报错)
+- **最少 2 步**(`requires at least two steps for terminal sigma shifting`),官方推荐 40 步
+- 最多 10 张参考图;`--scheduler` 只能 linear(不传即默认)
+- 实测(M5 Max,256²、2 步)约 3 秒出图,输出确认 RGBA(35–48% 像素含透明)
+
+App 侧:检查器把模型选为「Qwen-Image-2.1 (bf16 全量 · 参考编辑)」即可;`instruction` 模式的
+**默认模型仍是 Qwen Image Edit**(存量行为不变),要用 2.1 编辑需显式换模型。单测见
+`packages/providers/src/__tests__/mlxgen.test.ts` 的「Qwen-Image-2.1 参考编辑」组。
 
 > \* 体积为骨架期估算;模型 id、下载命令与落盘目录以 `mlxgen download --help` 与官方仓库(mkdocs/mlx-gen)为准——本应用只把 id 透传给 CLI,不内置下载逻辑。
 > 模型由 mlxgen 自管理缓存,应用不需要也不应该手动指定模型路径。

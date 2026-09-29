@@ -26,10 +26,10 @@ import {
   seedIdCounter,
   contentKey,
 } from './canvas/node-mapping';
-import { resolvePort, resolvePortOptions, type PortResolution } from './canvas/connectors';
+import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from './canvas/connectors';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
-import { basenameOf, thumbSrc } from './canvas/media';
+import { basenameOf, thumbSrc, previewUrlOf } from './canvas/media';
 import { nodesReducer } from './canvas/edge-dispatch';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
 import {
@@ -157,10 +157,25 @@ export default function CanvasPage({
      平移/缩放只调 applyView(直写 .world 的 CSS 变量)并同步 viewRef,
      完全不 setState —— 这正是「拖动时整棵树重渲染」的根治。
      `view` 这个 state 只在**离散时点**更新:挂载/切画布/恢复快照/点小地图跳转,
-     它的作用是让「首帧与快照恢复」这类需要 React 参与的场景有单一真源。 */
+     它的作用是让「首帧与快照恢复」这类需要 React 参与的场景有单一真源。
+
+     🚨 viewRef 是命令式路径的**唯一真源,绝不能在渲染期回写**(2026-09 真实事故:
+     「滚轮缩放闪烁不动」)。曾经的写法是渲染期无条件 `viewRef.current = view;`,
+     而注释里说的「只在离散时点 setState」并不成立 —— applyViewLive 为更新底部百分比
+     会 setZoomPctLive,于是滚轮的每一次 setState 都伴随一次渲染,渲染又把
+     viewRef 拽回那个还没被 commitView 推进的旧 view。结果:
+
+       滚轮事件 → 写 ref(新值) → 渲染 → ref 被旧 state 覆盖 → 下一次滚轮
+       又从同一个旧起点重算 → 帧间在两个值之间来回跳 = 「闪烁不动」
+
+     为什么只有滚轮中招、平移正常:平移在 pointerdown 时**快照** vx/vy 一次,
+     之后每帧只用快照 + 指针位移,ref 被回写也不影响;滚轮则是**每个事件都读
+     live ref**,ref 不前进就等于原地打转。
+
+     修法:ref 只在构造时初始化,之后一律由 commitView / applyViewLive 推进。 */
   const [view, setView] = useState({ ...DEFAULT_VIEW });
   const viewRef = useRef(view);
-  viewRef.current = view;
+  // ⛔ 禁止在此处写 viewRef.current = view —— 会把命令式更新抹掉(见上)。
 
   /**
    * 把视口写进 `.world` 的 CSS 变量(命令式,不触发 React 渲染)。
@@ -680,6 +695,14 @@ export default function CanvasPage({
     const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
     const edgeLabel = deriveEdgeLabel(src, tag, port);
     if (edgeLabel === undefined) return; // 无连接器(双重保险)
+    // 🛡️ 权威校验闸:渲染层 BY_KIND 与 shared CONNECTOR_MAP 是两份表,可能分叉
+    //(事故:video-upscale → image-edit 建出裸边 ⇒ 派生态与写盘广播对拉 ⇒ 节点不停闪烁)。
+    // 这里直接复用 shared validateEdge,让两份表共用同一套规则,不在渲染层复制判断。
+    const guard = guardEdge(src, dst, edgeLabel, nodesRef.current, edgesRef.current);
+    if (!guard.ok) {
+      toastMsg(`无法连线:${guard.message}`);
+      return;
+    }
     const before = { nodes: nodesRef.current, edges: edgesRef.current };
     setEdges((es) => {
       // 完全相同边不去重:允许同 src→dst 重复(shot→timeline 多条入线本就支持)
@@ -1389,7 +1412,14 @@ export default function CanvasPage({
     const m: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }> = {};
     for (const a of assetsList) {
       const cat = categories.find((c) => c.id === a.categoryId);
-      m[a.id] = { name: a.name, kind: a.kind, categoryName: cat?.name, src: thumbSrc(a.localPath) };
+      m[a.id] = {
+        name: a.name,
+        kind: a.kind,
+        categoryName: cat?.name,
+        // 视频资产要给 <video> 能播的 URL(封面/playsInline 预览都用它);
+        // 旧实现一律 thumbSrc → 视频资产恒为 null,<VideoThumb src=""> 只能渲染出一个空框
+        src: (a.kind === 'video' ? previewUrlOf(a.localPath) : thumbSrc(a.localPath)) ?? null,
+      };
     }
     return m;
   }, [assetsList, categories]);
@@ -1893,6 +1923,17 @@ export default function CanvasPage({
           : t.sub;
       // 按 kind 初始化 data(写入 CanvasSnapshot;生成时走 RenderQueue)
       const initData = makeInitialData(t);
+      // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
+      const edgeLabel = deriveEdgeLabel(src, t, port);
+      /* 🛡️ 与拖拽建边同口径的权威校验:「+」弹层只列出 resolvePortOptions 认为可连的类型,
+         但那仍是渲染层那份表 —— shared 的 validateEdge 可能判它非法(两份表分叉)。
+         这里在建节点**之前**拦下,避免留下一个「已新建但连不上」的孤儿节点。 */
+      const dstStub = { id, kind: t.kind, data: initData } as CanvasNode;
+      const guard = guardEdge(src, dstStub, edgeLabel, [...nodesRef.current, dstStub], edgesRef.current);
+      if (!guard.ok) {
+        toastMsg(`无法创建连线:${guard.message}`);
+        return;
+      }
       setNodes((ns) => [
         ...ns,
         {
@@ -1908,8 +1949,6 @@ export default function CanvasPage({
           data: initData,
         } as CanvasNode,
       ]);
-      // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
-      const edgeLabel = deriveEdgeLabel(src, t, port);
       setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
       commitEdit(`新增「${t.name}」并连线`);
       setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
@@ -2353,6 +2392,81 @@ export default function CanvasPage({
         // 下游 ghost 边转正(裁切绕过渲染队列,补一次与队列完成相同的边状态刷新)
         setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
         toastMsg(`已裁切至 ${aspect} · ${n.title}`);
+        return;
+      }
+      // 视频裁切取帧节点(frame-grab):不推理,ffmpeg 从视频截一帧 → 导入资产库 + 产物是图片
+      if (n.kind === 'frame-grab') {
+        // 视频源:资产直取 / 连线上游产物(与 video-upscale 同口径,只收视频)
+        let srcPath: string | undefined;
+        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        const vFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
+        if (!srcPath && vFrom?.nodeId) {
+          const up = nodesRef.current.find((x) => x.id === vFrom.nodeId);
+          srcPath = upstreamVideoPath(up, assetCache.current);
+        }
+        if (!srcPath) {
+          toastMsg('视频裁切取帧需要视频输入:连一个 镜头 / 视频增强 / 视频素材(asset),或在检查器填 Asset ID');
+          return;
+        }
+        const mode = String(d.mode ?? 'first') as 'first' | 'last' | 'at';
+        // mode='at' 时秒数必须是非负有限数(与主进程 parseAtSeconds 同口径,提前拦下不白跑 ffmpeg)
+        const rawSec = Number(d.seconds);
+        if (mode === 'at' && (!Number.isFinite(rawSec) || rawSec < 0)) {
+          toastMsg('指定时间点取帧需要填一个非负秒数(如 3.5)');
+          return;
+        }
+        setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '取帧中…', ghost: false } : x)));
+        const res = await window.bigbotart.extractFrame(
+          srcPath,
+          mode,
+          mode === 'at' ? rawSec : undefined,
+        );
+        if (!res.ok || !res.path) {
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `取帧失败 · ${res.error ?? '未知错误'}` } : x)));
+          toastMsg(`取帧失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        // 抽出的 PNG → 导入资产库(产物本身也是资源;失败不静默吞,但帧已在磁盘上,提示后可继续)
+        let resultAssetId: string | undefined;
+        try {
+          const imported = await window.bigbotart.importAssets({
+            paths: [res.path],
+            ...(projectId ? { projectId } : {}),
+          });
+          if (imported.assets.length > 0) resultAssetId = imported.assets[0]!.id;
+        } catch {
+          /* 入资产库失败不影响节点产物可用性;下面 toast 里说明 */
+        }
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: res.path,
+            params: { kind: 'frame-grab', mode, seconds: mode === 'at' ? rawSec : undefined, inputPath: srcPath },
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  extra: `✓ ${basenameOf(res.path as string)}`,
+                  data: { ...(x.data ?? {}), resultPath: res.path, resultAssetId, currentTakeId: takeId },
+                }
+              : x,
+          ),
+        );
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(
+          resultAssetId
+            ? `已取帧并导入资产库 · ${n.title}`
+            : `已取帧 · ${n.title}(入资产库失败,帧文件已在产物目录)`,
+        );
         return;
       }
       // 图片拼接节点(image-stitch):不推理,ffmpeg 把多张图按行/列/网格拼成一张 → 直接出产物 + 记 Take

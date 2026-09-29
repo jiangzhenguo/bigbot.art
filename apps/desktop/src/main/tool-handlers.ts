@@ -216,8 +216,9 @@ export function resolveNodeVideoPath(
 }
 
 /**
- * video-upscale 的单值视频输入:连线(input 端口)> data.inputVideoFrom(渲染层边派生)> data.inputAssetId(检查器手填)。
+ * 视频输入节点的单值视频输入:连线(input / input-video 端口)> data.inputVideoFrom(渲染层边派生)> data.inputAssetId(检查器手填)。
  * 与 resolveSingleImageInput 同口径(单值端口 + 逐级回退)。
+ * 端口兼容两种:video-upscale 用 `input`,frame-grab(视频裁切取帧)用 `input-video`。
  */
 export function resolveSingleVideoInput(
   canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
@@ -226,7 +227,7 @@ export function resolveSingleVideoInput(
 ): string | undefined {
   const d = (node.data ?? {}) as Record<string, unknown>;
   for (const e of canvas.edges) {
-    if (e.target !== node.id || e.label !== 'input') continue;
+    if (e.target !== node.id || (e.label !== 'input' && e.label !== 'input-video')) continue;
     const p = resolveNodeVideoPath(canvas.nodes.find((n) => n.id === e.source), assetPath);
     if (p) return p;
   }
@@ -781,7 +782,7 @@ export class ToolHandlers {
       if (!submitHit.ok) return { ok: false, result: submitHit.error };
       const node = submitHit.node;
       const nodeId = node.id;
-      if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'video-upscale') {
+      if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'frame-grab' || node.kind === 'video-upscale') {
         // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
       }
@@ -1340,6 +1341,42 @@ export class ToolHandlers {
         if (!res.ok || !res.path) return { ok: false, result: `裁切失败:${res.error ?? '未知错误'}` };
         finish(res.path, { kind: 'crop', aspect, focus, inputPath: srcPath });
         return { ok: true, result: `已裁切至 ${aspect}:${basenameOf(res.path)}`, nodeId: node.id };
+      }
+      if (node.kind === 'frame-grab') {
+        // 视频裁切取帧:输入**视频**(镜头成片 / 视频增强产物 / 视频素材),产出 PNG 并导入资产库
+        const srcVideo = resolveSingleVideoInput(cur, node, assetPath);
+        if (!srcVideo) {
+          return {
+            ok: false,
+            result: '视频裁切取帧需要视频输入:把 镜头 / 视频增强 / 视频素材(asset) 连到本节点(input-video 端口),或在检查器填输入视频 Asset ID',
+          };
+        }
+        const mode = String(d.mode ?? 'first') as 'first' | 'last' | 'at';
+        const rawSec = Number(d.seconds);
+        if (mode === 'at' && (!Number.isFinite(rawSec) || rawSec < 0)) {
+          return { ok: false, result: '指定时间点取帧需要一个非负秒数(如 3.5)' };
+        }
+        const res = await extractFrame(srcVideo, mode, mode === 'at' ? rawSec : undefined);
+        if (!res.ok || !res.path) return { ok: false, result: `取帧失败:${res.error ?? '未知错误'}` };
+        // 产物 PNG → 导入资产库(source='product',归本项目);失败不阻断产物可用性
+        let resultAssetId: string | undefined;
+        try {
+          const imported = await this.assets.importFromPaths([res.path], { projectId: ctx.projectId });
+          if (imported.assets.length > 0) resultAssetId = imported.assets[0]!.id;
+        } catch {
+          /* 入资产库失败不影响节点产物 */
+        }
+        finish(
+          res.path,
+          { kind: 'frame-grab', mode, seconds: mode === 'at' ? rawSec : undefined, inputPath: srcVideo },
+          resultAssetId ? { resultAssetId } : undefined,
+        );
+        const atLabel = mode === 'last' ? '尾帧' : mode === 'at' ? `第 ${rawSec}s 帧` : '首帧';
+        return {
+          ok: true,
+          result: `已裁切「${basenameOf(srcVideo)}」的${atLabel} → 图片资源 ${basenameOf(res.path)}${resultAssetId ? `(资产 ${resultAssetId})` : '(未入资产库)'};产物是**图片**,可连给 图片编辑 / 图片增强 的 input 端口`,
+          nodeId: node.id,
+        };
       }
       if (node.kind === 'image-stitch') {
         const paths = resolveStitchInputs(cur, node, assetPath);

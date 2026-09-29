@@ -54,8 +54,9 @@ export interface ValidateEdgeOptions {
   resolveAssetMedia?: (assetId: string) => 'image' | 'video' | 'audio' | 'document' | undefined;
 }
 
-/** 图片产物类节点(静帧直通;与渲染层 IMAGE_KINDS 同口径) */
-export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split'];
+/** 图片产物类节点(静帧直通;与渲染层 IMAGE_KINDS 同口径)。
+ *  frame-grab 产出的就是 PNG,故与其它图片产物同类 —— 它正是「视频 → 图片」的合法转换点。 */
+export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab'];
 
 /** 视频产物类节点(视频直通:video-upscale 的产物是 mp4,不是静帧) */
 export const VIDEO_KINDS = ['video-upscale'];
@@ -73,6 +74,7 @@ export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'te
   'image-crop': 'image',
   'image-stitch': 'image',
   'image-split': 'image',
+  'frame-grab': 'image', // 取帧产物是 PNG(静帧)
   document: 'text',
   storyboard: 'text',
 };
@@ -86,6 +88,8 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
   'ref-audio': 'audio',
   'audio-track': 'audio',
   input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可;video-upscale 输入:视频
+  /** 视频裁切取帧的输入端口:必须是视频(mp4),不能把静帧塞进来 */
+  'input-video': 'video',
   piece: 'image', // stitch 拼接件:仅图片
   'piece-N': 'image', // split 产物按序号取片(piece-1/piece-2/…;替代 input/piece 端口)
   clip: undefined, // 静帧/视频皆可入轨
@@ -110,6 +114,7 @@ const TARGET_KIND_ALIAS: Record<string, string> = {
   'image-crop': 'crop',
   'image-stitch': 'stitch',
   'image-split': 'split',
+  'frame-grab': 'grab',
   document: 'doc',
 };
 

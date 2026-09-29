@@ -19,6 +19,24 @@ export function outputUrlOf(p: string): string {
   return `bba-output://${encodeURIComponent(basenameOf(p))}`;
 }
 
+/**
+ * 秒 → 人类可读时长(空值/非法值返回 null,由调用方决定不显示)。
+ *
+ * 用于 Take 历史/检查器的「生成时长」展示:低于 1 分钟只给秒,否则「N分M秒」;
+ * 秒数取整(生成耗时是墙钟秒,小数位没有信息量)。
+ * 非有限数(NaN / Infinity)一律当缺失 —— `Math.round(NaN)` 会渲染成「NaN秒」。
+ */
+export function formatDurationSec(sec: number | null | undefined): string | null {
+  if (sec === null || sec === undefined) return null;
+  const s = Number(sec);
+  if (!Number.isFinite(s) || s < 0) return null;
+  const total = Math.round(s);
+  if (total < 60) return `${total}秒`;
+  const m = Math.floor(total / 60);
+  const rest = total % 60;
+  return rest === 0 ? `${m}分` : `${m}分${rest}秒`;
+}
+
 /** 缩略图 src(asset localPath → bba-asset://) */
 export function thumbSrc(assetPath: string | undefined): string | null {
   if (!assetPath) return null;
@@ -29,6 +47,42 @@ export function thumbSrc(assetPath: string | undefined): string | null {
 export function previewUrlOf(p: string | null | undefined): string | null {
   if (!p) return null;
   return p.includes('/outputs/') ? outputUrlOf(p) : thumbSrc(p);
+}
+
+/** 视频扩展名白名单(与主进程 assets.ts 的 MIME_BY_EXT 同口径) */
+const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
+
+/**
+ * 该路径是否为视频文件。
+ *
+ * 取文件名再判扩展名,而不是直接测整串:目录名里带 `.mov` 之类会误判,
+ * 且 h3 产物路径形如 `outputs/frames/shot-1.mp4/` 这类前缀命中也会传染。
+ */
+export function isVideoPath(p: string | null | undefined): boolean {
+  if (!p) return false;
+  return VIDEO_EXT_RE.test(basenameOf(p));
+}
+
+/**
+ * 参考绑定槽位/资源卡的缩略图 —— **视频必须走 <video> 抽帧,不能塞进 <img>**。
+ *
+ * 真实事故(2026-09):检查器「参考绑定」只写 `<img src={thumbSrc(path)}>`,
+ * 当 ref 是视频(asset 视频素材 / 上游镜头整段成片)时拿到的是
+ * `bba-asset://asset-x.mp4`,而 `<img src=…mp4>` 是**必然 onerror**(浏览器不做视频解码),
+ * 于是参考视频那一行左侧只剩一块空框。
+ *
+ * 注意**不能用 `isShotSrc`(有没有 path 字段)来判断是否为视频** —— 资产视频的 ref 只有
+ * `assetId`,同样得到空框。唯一可靠依据是 URL/路径的扩展名。
+ *
+ * 返回 null = 调用方渲染 VideoPoster(抽帧 → 失败自动回退 VideoThumb)。
+ */
+export function thumbImageSrc(
+  p: string | null | undefined,
+): { kind: 'img'; src: string } | { kind: 'video' } | null {
+  if (!p) return null;
+  const src = p.includes('/outputs/') ? outputUrlOf(p) : thumbSrc(p);
+  if (!src) return null;
+  return isVideoPath(p) ? { kind: 'video' } : { kind: 'img', src };
 }
 
 /** 宽/高 → 合法 32 倍数(小于 32 取 32;h3 硬性要求) */
@@ -50,6 +104,30 @@ const posterCache = new Map<string, string>();
 const posterPending = new Map<string, Promise<string | null>>();
 
 /**
+ * 首帧「几乎全黑」判定 —— 见到纯黑封面等于没封面。
+ *
+ * 真实案例(2026-09):素材视频 `asset-1790491690265-qpsg.mp4` 首帧平均亮度 8/255(近全黑),
+ * 抽帧**成功**却给出一个纯黑方块 —— 和修复前的空框一样让用户以为「封面没展示」。
+ * 因此抽帧后统计亮度,过暗就当作失败,回退真实 `<video>`(它同样显示首帧为黑,
+ * 但至少是可悬停播放的元素,且能区分「视频就是这么黑」与「缩略图坏了」)。
+ *
+ * 阈值刻意取「像素均值 <16 且没有亮像素」而不是单纯均值:
+ * 夜景/黑底字幕视频常有少量高光,那些仍应正常显示。
+ */
+export function hasVisibleContent(data: Uint8ClampedArray | Uint8Array): boolean {
+  let sum = 0;
+  let bright = 0;
+  const n = Math.floor(data.length / 4);
+  if (n === 0) return false;
+  for (let i = 0; i < data.length; i += 4) {
+    const v = (data[i]! + data[i + 1]! + data[i + 2]!) / 3;
+    sum += v;
+    if (v > 60) bright += 1;
+  }
+  return bright >= 3 || sum / n >= 16;
+}
+
+/**
  * 抽帧所需的最小 DOM 能力(依赖注入)。
  *
  * 抽出来有两个理由:
@@ -61,7 +139,12 @@ export interface PosterDeps {
   /** 造一个 video 元素(调用方负责在 finally 里释放) */
   createVideo: () => HTMLVideoElement;
   /** 造一个 canvas 并返回 2d context(不可用时返回 null) */
-  createCanvas: (w: number, h: number) => { draw: (v: HTMLVideoElement) => void; toDataURL: () => string } | null;
+  createCanvas: (w: number, h: number) => {
+    draw: (v: HTMLVideoElement) => void;
+    toDataURL: () => string;
+    /** 取像素(可选):用于首帧过暗判定;缺失时跳过该判定,行为与旧版一致 */
+    sample?: () => Uint8ClampedArray | null;
+  } | null;
   setTimeout: (fn: () => void, ms: number) => number;
   clearTimeout: (id: number) => void;
 }
@@ -78,6 +161,14 @@ const browserDeps: PosterDeps = {
     return {
       draw: (v) => ctx.drawImage(v, 0, 0, w, h),
       toDataURL: () => c.toDataURL('image/jpeg', 0.72),
+      sample: () => {
+        try {
+          return ctx.getImageData(0, 0, w, h).data;
+        } catch {
+          // canvas 被跨源污染等 → 无法判定,交由调用方按「有内容」处理
+          return null;
+        }
+      },
     };
   },
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -133,6 +224,9 @@ export function extractPoster(
         const canvas = deps.createCanvas(cw, ch);
         if (!canvas) return finish(null);
         canvas.draw(v);
+        // 抽帧成功但画面近全黑 → 等同于「没有封面」,回退真实 <video>(见 hasVisibleContent 注释)
+        const px = canvas.sample?.();
+        if (px && !hasVisibleContent(px)) return finish(null);
         finish(canvas.toDataURL());
       } catch {
         // 跨源污染 canvas 等 → 放弃封面,回退真实 video

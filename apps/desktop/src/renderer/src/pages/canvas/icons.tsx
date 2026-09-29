@@ -60,6 +60,14 @@ export const ICON_SHOT = (
     <path d="m10 9.5 5 2.5-5 2.5Z" />
   </>
 );
+/** 视频裁切取帧:胶片格中切出单帧(产物是静帧图片) */
+export const ICON_FRAME_GRAB = (
+  <>
+    <rect x="2.5" y="5" width="19" height="14" rx="2" />
+    <path d="M7 5v14M17 5v14" strokeDasharray="2 2" />
+    <path d="M11 9.5h3.5v5H11z" />
+  </>
+);
 export const ICON_DIRECTOR = (
   <>
     <circle cx="12" cy="12" r="9" />
@@ -112,6 +120,7 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   crop: ICON_CROP,
   stitch: ICON_STITCH,
   split: ICON_SPLIT,
+  grab: ICON_FRAME_GRAB,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   audio: ICON_AUDIO,
@@ -131,6 +140,7 @@ export const TYPE_ICON: Record<string, React.ReactNode> = {
   'image-crop': ICON_CROP,
   'image-stitch': ICON_STITCH,
   'image-split': ICON_SPLIT,
+  'frame-grab': ICON_FRAME_GRAB,
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   'audio-ref': ICON_AUDIO,

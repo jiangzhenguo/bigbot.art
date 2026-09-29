@@ -5,7 +5,7 @@
  *   inpaint → 可视化遮罩(拖入 PNG / 框选生成 → 保存为遮罩资产 → --mask-path)
  *   outpaint → 四边 padding(→ --outpaint-padding top,right,bottom,left)
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { RenderJob } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { ImageTakeSection } from './ImageTakeSection';
@@ -36,6 +36,25 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
 ];
 
 /**
+ * 图片编辑默认采样步数。
+ *
+ * ⚠️ 根因记录(2026-09-29 真实事故「图片编辑不改 step 直接就是 40 步」):
+ *   此前这里默认 4,且注释明写「仅作滑块初始值展示——不写回 data」;
+ *   而 provider `mlxgen.ts` 的 Qwen-Image-2.1 参考编辑分支又硬兜底 `p.steps ?? 40`。
+ *   两套默认互不认识 → **滑块显示 4、实跑 40**,提交参数里压根没有 `steps` 键
+ *   (实测 take 存档确认),用户完全无从察觉。2.1 bf16 上 40 步约 4 分钟,
+ *   是 6 步版(54-92s)的 6-7 倍耗时。
+ *
+ * 修法(A 方案,用户 2026-09-29 指定):默认值改 30,且**未设置时显式写回 data**。
+ * 硬约束:「滑块显示几步 = 实际跑几步」。provider 侧的 `?? 30` 降级为安全网
+ * (历史节点 / Agent 直传 data 未带 steps 时),不再是一套隐藏默认值。
+ *
+ * ⚠️ 改动本值时必须同步 `packages/providers/src/mlxgen.ts` 参考编辑分支的兜底值
+ * (renderer 不能 import providers —— 包边界)。单测 `__tests__/edit-steps-default.test.ts` 锁一致性。
+ */
+export const DEFAULT_EDIT_STEPS = 30;
+
+/**
  * 各编辑模式可用的已知模型 + 推荐默认(2026-09 mlxgen capabilities 实测):
  * - instruction/inpaint/outpaint → qwen.edit handler(Qwen Edit / flux2)
  * - img2img(latent)→ 只有 z-image / flux2 有 latent 能力,Qwen Edit 没有(Provider 侧也有防呆)
@@ -57,10 +76,28 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   const inputAssetId = String(d.inputAssetId ?? '');
   const maskAssetId = String(d.maskAssetId ?? '');
   const imageStrength = Number(d.imageStrength ?? 0.5);
-  // 编辑步数:未显式设置时显示模型默认值(实测 flux.2-klein / z-image 均为 4 步)。
-  // 仅作滑块初始值展示——不写回 data,提交侧据「data 里有没有 steps」决定是否传 --steps
-  const DEFAULT_EDIT_STEPS = 4;
   const steps = Number(d.steps ?? DEFAULT_EDIT_STEPS);
+  /** data 里是否有显式步数(未设置时下面 effect 会补写,补写前提交侧会走 provider 兜底) */
+  const hasExplicitSteps = d.steps !== undefined && Number.isFinite(Number(d.steps));
+  /* 补写默认步数:仅在缺失时执行一次(用户拖动滑块后 data.steps 存在,不再覆盖)。
+     ⚠️⚠️ 依赖数组**故意只放节点 id**,不放 hasExplicitSteps / setData —— 这是防「无限重渲染」的硬要求:
+       - `setData` 由 InspectorBody 内联定义,**每次渲染都是新引用**;
+       - 写入 steps 后 props 里的 `d.steps` 要等下一轮渲染才更新,故本轮 `hasExplicitSteps` 仍为 false。
+     若把这两者放进依赖,effect 会在「写入 → 重渲染 → 依赖变化 → 再写入」间自我维持,
+     实测直接打爆 React 的 `Maximum update depth exceeded`(2026-09-29 真实事故,日志刷屏 672 条)。
+     以 node.id 为界即可:切节点时才重新判断是否需要补写。 */
+  const setDataRef = useRef(setData);
+  setDataRef.current = setData;
+  /** 是否已有显式步数:从 ref 读,避免进入 effect 依赖(见上方注释) */
+  const hasExplicitStepsRef = useRef(hasExplicitSteps);
+  hasExplicitStepsRef.current = hasExplicitSteps;
+  const nodeId = node.id;
+  useEffect(() => {
+    // 已有显式步数(用户调过 / 补写过)不再覆盖
+    if (hasExplicitStepsRef.current) return;
+    setDataRef.current({ steps: DEFAULT_EDIT_STEPS });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上方注释:稳定依赖,防止自维持死循环
+  }, [nodeId]);
   const outpaintSides = (d.outpaintSides as { top: number; right: number; bottom: number; left: number } | undefined)
     ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
@@ -282,12 +319,12 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
 
         {/* 采样步数:编辑原本没有该控件,导致编辑质量被静默固定在模型自身默认步数
             (实测 2026-09:flux.2-klein / z-image 不传 --steps 时都是 4 步,对去水印、改动作
-            这类细活明显不够)。未设置时不写 data,提交侧同样"未设置就不传 --steps",
-            既有节点行为不变;显式拖动后才覆盖 */}
+            这类细活明显不够)。现在默认 30 并**写回 data**(见上方 DEFAULT_EDIT_STEPS 注释),
+            滑块显示几步就实跑几步;拖动即覆盖。min 保留下限 4 以兼容存量节点里的小步数 */}
         <div className="f-sec">
           <div className="f-sec-h">
             <span className="lbl">采样</span>
-            <span className="mut" style={{ fontSize: 10.5 }}>不调则用模型默认</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>默认 {DEFAULT_EDIT_STEPS} 步 · 拖动可覆盖</span>
           </div>
           <div className="f-row">
             <span className="f-lbl">steps</span>

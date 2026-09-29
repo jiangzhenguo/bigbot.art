@@ -14,7 +14,8 @@ import {
   MIN_SOUNDTRACK_SECONDS,
   MIN_SOUNDTRACK_FRAMES,
 } from '../constants';
-import { clamp32, thumbSrc, outputUrlOf } from '../media';
+import { clamp32, thumbImageSrc, previewUrlOf, outputUrlOf, VideoPoster, formatDurationSec } from '../media';
+import { takePromptOf, takeElapsedSec } from './ImageTakeSection';
 
 export interface ShotInspectorProps {
   node: CanvasNode;
@@ -125,7 +126,7 @@ export function ShotInspector({
   /** 最近一次生成实际用过的提示词(存档在 Take.params 里)——节点 prompt 为空时可用于找回 */
   const takePrompt = (() => {
     for (const t of takes) {
-      const p = String((t.params as { prompt?: string } | undefined)?.prompt ?? '').trim();
+      const p = takePromptOf(t).trim();
       if (p) return p;
     }
     return '';
@@ -143,6 +144,10 @@ export function ShotInspector({
     ?? takes.find((t) => t.status === 'succeeded' && !!t.resultPath)
     ?? takes[0]
     ?? null;
+
+  /** 当前 Take 的生成提示词 / 生成时长(存档在 Take.params / elapsedSec 里,切换 Take 即随之切换) */
+  const curTakePrompt = curTake ? takePromptOf(curTake) : '';
+  const curTakeTook = curTake ? formatDurationSec(takeElapsedSec(curTake)) : null;
 
   const selectTake = (t: (typeof takes)[number]) => {
     setSelTakeId(t.id);
@@ -594,13 +599,22 @@ export function ShotInspector({
             const path = r.path ?? assetCache[r.assetId ?? ''];
             const def = roleDefs.find((rd) => rd.role === r.role);
             const isShotSrc = !!r.path;
+            // 缩略图:视频必须走抽帧封面(旧实现把 mp4 塞进 <img> = 必然 onerror,
+            // 参考视频那一行因此只剩空框);图片仍用 <img>。
+            const thumb = thumbImageSrc(path);
             const srcNote =
               r.role === 'ref-video'
                 ? (isShotSrc ? '视频产物 · 整段成片' : '视频素材')
                 : isShotSrc ? '上游镜头尾帧' : '';
             return (
               <div className="slot" key={`${r.assetId ?? r.path}-${i}`}>
-                {path ? <span className="refprev"><img src={isShotSrc ? outputUrlOf(path) : (thumbSrc(path) ?? '')} alt="" /></span> : <span className="refprev" />}
+                {thumb?.kind === 'img' ? (
+                  <span className="refprev"><img src={thumb.src} alt="" /></span>
+                ) : thumb?.kind === 'video' ? (
+                  <span className="refprev refprev-vid"><VideoPoster src={previewUrlOf(path) ?? ''} /></span>
+                ) : (
+                  <span className="refprev" />
+                )}
                 <span className="grow">
                   <div className="sname">{def?.label ?? r.role}{r.auto ? ' · 自动' : ''}</div>
                   {srcNote ? <div className="mut mono" style={{ fontSize: 9 }}>{srcNote}</div> : null}
@@ -682,17 +696,43 @@ export function ShotInspector({
         <div className="f-sec">
           <div className="lbl">Take 历史</div>
           <div className="f-chips">
-            {takes.slice(0, 8).map((t) => (
-              <span
-                key={t.id}
-                className={`chip${t.id === curTake?.id ? ' on' : ''}${t.status === 'failed' ? ' dis' : ''}`}
-                onClick={() => selectTake(t)}
-                title={t.resultPath ?? t.error ?? (t.status === 'succeeded' ? '无产物文件' : `Take ${t.attempt}`)}
-              >
-                T{t.attempt} · {t.status === 'succeeded' ? (t.resultPath ? '✓' : '✓·空') : t.status === 'failed' ? '✗' : t.status}
-              </span>
-            ))}
+            {takes.slice(0, 8).map((t) => {
+              const took = formatDurationSec(takeElapsedSec(t));
+              const pr = takePromptOf(t);
+              const title = [
+                `Take ${t.attempt} · ${t.status}`,
+                `生成时长 ${took ?? '未知'}`,
+                pr ? `提示词:${pr}` : '无提示词存档',
+                t.resultPath ?? t.error,
+              ]
+                .filter(Boolean)
+                .join('\n');
+              return (
+                <span
+                  key={t.id}
+                  className={`chip${t.id === curTake?.id ? ' on' : ''}${t.status === 'failed' ? ' dis' : ''}`}
+                  onClick={() => selectTake(t)}
+                  title={title}
+                >
+                  T{t.attempt} · {t.status === 'succeeded' ? (t.resultPath ? '✓' : '✓·空') : t.status === 'failed' ? '✗' : t.status}
+                  {/* 生成时长(墙钟 elapsedSec,缺则回退 durationSec):缺失显式写「时长未知」 */}
+                  <span className="mut" style={{ fontSize: 10, marginLeft: 4 }}>{took ?? '时长未知'}</span>
+                </span>
+              );
+            })}
           </div>
+          {/* 切到旧 Take 时提示词区仍显示节点当前 prompt,容易误判「这条就是用这段生成的」——
+              这里把该 Take 存档的原文单独回显,口径与「本条 Take 实际提交的参数」对齐 */}
+          {curTake ? (
+            <div data-od-id="shot-take-prompt" style={{ marginTop: 8 }}>
+              <div className="f-hint" style={{ marginBottom: 4 }}>
+                当前 Take T{curTake.attempt} 的生成提示词{curTakeTook ? ` · 生成时长 ${curTakeTook}` : ''}
+                {curTakePrompt ? '' : ' · 该 Take 未存档提示词'}
+                {curTakePrompt && curTakePrompt !== prompt ? ' · 与上方节点提示词不同' : ''}
+              </div>
+              {curTakePrompt ? <textarea className="f-ta short mono" rows={3} readOnly value={curTakePrompt} /> : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

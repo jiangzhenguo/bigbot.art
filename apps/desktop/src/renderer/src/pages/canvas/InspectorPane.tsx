@@ -25,6 +25,7 @@ const RERUNABLE_KINDS = new Set<NodeKind | 'plain'>([
   'image-crop',
   'image-stitch',
   'image-split',
+  'frame-grab',
   'video-upscale',
 ]);
 

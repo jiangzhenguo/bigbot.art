@@ -365,8 +365,8 @@ describe('submit · 默认模型按 kind 分派', () => {
   });
 });
 
-describe('submit · Qwen-Image-2.1(8bit 社区导出)', () => {
-  const Q21 = 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit';
+describe('submit · Qwen-Image-2.1(bf16 全量)', () => {
+  const Q21 = 'Qwen/Qwen-Image-2.1';
   // 整组隔离本机真实 ~/ai/models:否则命中本地目录,断言的是路径而非 repoId(本机已有该模型)
   beforeAll(() => {
     process.env.BIGBOTART_MODELS_DIR = join(tmpdir(), `bbart-mlxiso-${process.pid}`);
@@ -383,12 +383,29 @@ describe('submit · Qwen-Image-2.1(8bit 社区导出)', () => {
     expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
   });
 
-  it('短别名 qwen-image-2.1 归一化到 8bit 社区仓库(避免去找未下载的 33GB bf16 全量)', async () => {
+  it('短别名 qwen-image-2.1 归一化到 bf16 全量(2026-09-28 收敛:原指向 8bit 已移除)', async () => {
     const p = makeProvider();
     await p.submit(req('generate', { prompt: '雪山日出', model: 'qwen-image-2.1' }));
     const cmd = lastCmd(p);
     expect(cmd[cmd.indexOf('--model') + 1]).toBe(Q21);
     expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
+  });
+
+  it('其余短别名(qwen-2.1 / qwen-image-21)同样归一化到 bf16', async () => {
+    for (const alias of ['qwen-2.1', 'qwen-image-21']) {
+      const p = makeProvider();
+      await p.submit(req('generate', { prompt: '雪山日出', model: alias }));
+      expect(lastCmd(p)[lastCmd(p).indexOf('--model') + 1]).toBe(Q21);
+    }
+  });
+
+  it('已移除的 8bit 仓库名仍能路由:--base-model 提示不丢、40 步默认不回落', async () => {
+    // 防御:老项目文件/老节点里可能还存着 8bit 仓库名。它不该炸,也不该静默换语义
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: 'x', model: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('40');
   });
 
   it('缺省 40 步(官方推荐),未被通用 24 步覆盖', async () => {
@@ -411,13 +428,13 @@ describe('submit · Qwen-Image-2.1(8bit 社区导出)', () => {
 });
 
 describe('submit · 本地模型目录直用(免下载)', () => {
-  const Q21 = 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit';
+  const Q21 = 'Qwen/Qwen-Image-2.1';
   const root = join(tmpdir(), `bbart-mlxlocal-${process.pid}`);
 
   beforeAll(() => {
     process.env.BIGBOTART_MODELS_DIR = root;
-    mkdirSync(join(root, 'qwen-image-2.1-mlx-8bit', 'transformer'), { recursive: true });
-    writeFileSync(join(root, 'qwen-image-2.1-mlx-8bit', 'transformer', '0.safetensors'), 'w');
+    mkdirSync(join(root, 'Qwen-Image-2.1-bf16', 'transformer'), { recursive: true });
+    writeFileSync(join(root, 'Qwen-Image-2.1-bf16', 'transformer', '0.safetensors'), 'w');
   });
   afterAll(() => {
     delete process.env.BIGBOTART_MODELS_DIR;
@@ -429,7 +446,7 @@ describe('submit · 本地模型目录直用(免下载)', () => {
     await p.submit(req('generate', { prompt: '雪山日出', model: Q21 }));
     const cmd = lastCmd(p);
     const m = cmd[cmd.indexOf('--model') + 1];
-    expect(m).toBe(join(root, 'qwen-image-2.1-mlx-8bit'));
+    expect(m).toBe(join(root, 'Qwen-Image-2.1-bf16'));
   });
 
   it('走本地路径时仍带 --base-model 路由提示(否则被家族兜底误路由)', async () => {
@@ -448,7 +465,7 @@ describe('submit · 本地模型目录直用(免下载)', () => {
   it('本地目录缺权重分片(只建了空 transformer/)→ 不认作就绪,回退 repoId', async () => {
     // 隔离到只含「空 transformer」的根:目录存在但无权重,应回退 repoId 而非误用空目录
     const bare = join(tmpdir(), `bbart-mlxiso-bare-${process.pid}`);
-    mkdirSync(join(bare, 'qwen-image-2.1-mlx-8bit', 'transformer'), { recursive: true });
+    mkdirSync(join(bare, 'Qwen-Image-2.1-bf16', 'transformer'), { recursive: true });
     const prev = process.env.BIGBOTART_MODELS_DIR;
     process.env.BIGBOTART_MODELS_DIR = bare;
     try {
@@ -463,7 +480,7 @@ describe('submit · 本地模型目录直用(免下载)', () => {
 
   it('index.json 引用的分片缺失 → 判未就绪(防半截模型)', async () => {
     const half = join(tmpdir(), `bbart-mlxiso-half-${process.pid}`);
-    const tf = join(half, 'qwen-image-2.1-mlx-8bit', 'transformer');
+    const tf = join(half, 'Qwen-Image-2.1-bf16', 'transformer');
     mkdirSync(tf, { recursive: true });
     writeFileSync(join(tf, '0.safetensors'), 'w');
     writeFileSync(
@@ -598,5 +615,135 @@ describe('submit · 纯 latent 模型的编辑防呆(--image-strength is require
     const cmd = lastCmd(p);
     expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
     expect(cmd).toContain('--image-strength');
+  });
+});
+
+describe('submit · Qwen-Image-2.1 参考编辑(qwen21.edit,2026-09-28 引擎新增)', () => {
+  const Q21BF16 = 'Qwen/Qwen-Image-2.1';
+  // 隔离本机真实 ~/ai/models:否则命中本地目录直用,断言的是路径而非 repoId
+  beforeAll(() => {
+    process.env.BIGBOTART_MODELS_DIR = join(tmpdir(), `bbart-q21edit-iso-${process.pid}`);
+  });
+  afterAll(() => {
+    delete process.env.BIGBOTART_MODELS_DIR;
+  });
+
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image' as const,
+      localPath: p,
+    }));
+
+  it('instruction 模式走 2.1 编辑路由:--image-paths 复数参数 + --base-model 提示', async () => {
+    const p = makeProvider();
+    await p.submit(
+      req('instruction', { model: Q21BF16, prompt: '把背景换成雪山', inputPath: '/in/base.png' }),
+    );
+    const cmd = lastCmd(p);
+    // --image-paths 是 nargs='+' 的复数参数:一次给路径列表,而非重复 --image
+    expect(cmd).toContain('--image-paths');
+    expect(cmd[cmd.indexOf('--image-paths') + 1]).toBe('/in/base.png');
+    expect(cmd).toContain('--base-model');
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
+    // 该路由是 edit-reference,绝不能带 --image-strength(那是 latent i2i 的参数)
+    expect(cmd).not.toContain('--image-strength');
+    // 也绝不能用 flux2/qwen-edit 的重复 --image 写法
+    expect(cmd).not.toContain('--image');
+    expect(cmd).not.toContain('--image-path');
+  });
+
+  it('input 图 + ref-image 连线合并进同一份 --image-paths 列表(顺序=input 在前)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('instruction', { model: Q21BF16, prompt: 'dress the person', inputPath: '/in/base.png' }),
+      references: refs(['/lib/jacket.png', '/lib/shoes.png']),
+    });
+    const cmd = lastCmd(p);
+    const i = cmd.indexOf('--image-paths');
+    // --image-paths 之后的连续路径 token(到下一个 --flag 为止)
+    const tail: string[] = [];
+    for (let k = i + 1; k < cmd.length && !cmd[k]!.startsWith('--'); k++) tail.push(cmd[k]!);
+    expect(tail).toEqual(['/in/base.png', '/lib/jacket.png', '/lib/shoes.png']);
+  });
+
+  it('⚠️ 必须显式带 --i2i-mode edit(多参考真跑 exit 2 回归)', async () => {
+    const p = makeProvider();
+    // 根因:ml-gen 在「多张 --image-paths」时自动把模式推成 multi-reference,
+    // 而 2.1 的能力行是 edit-reference → 通用校验直接拒绝:
+    //   "Qwen Image 2.1 does not support multi-reference image-to-image generation."
+    // 1 张碰巧推对、多张必炸,故必须显式声明 edit。
+    await p.submit({
+      ...req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }),
+      references: refs(['/lib/a.png', '/lib/b.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd).toContain('--i2i-mode');
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+
+  it('单参考同样带 --i2i-mode edit(不依赖 CLI 的 auto 推断)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+
+  it('无任何参考图 → 明确报错并给出换模型的指引(不静默发空命令)', async () => {
+    const p = makeProvider();
+    await expect(p.submit(req('instruction', { model: Q21BF16, prompt: 'x' }))).rejects.toThrow('至少 1 张参考图');
+  });
+
+  it('参考图超过 10 张 → 提交前拦截(CLI 也会拒,但文案难懂)', async () => {
+    const p = makeProvider();
+    const many = refs(Array.from({ length: 11 }, (_, i) => `/lib/r${i}.png`));
+    await expect(
+      p.submit({ ...req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }), references: many }),
+    ).rejects.toThrow('最多支持 10 张');
+  });
+
+  it('缺省 30 步(与检查器 DEFAULT_EDIT_STEPS 同口径),显式 steps 优先', async () => {
+    // 事故回归(2026-09-29「图片编辑不改 step 直接就是 40 步」):
+    // 此处原为 40,而检查器只在滑块上显示 4、不写回 data → 界面显示 4、实跑 40,
+    // 用户无从察觉(2.1 上 40 步约 4 分钟,是 6 步版的 6-7 倍耗时)。
+    // 现在两端统一 30;检查器负责写回 data,provider 这里的兜底只作安全网
+    // (历史节点 / Agent 直传 data 未带 steps 时)。
+    const p = makeProvider();
+    await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--steps') + 1]).toBe('30');
+    const p2 = makeProvider();
+    await p2.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png', steps: 12 }));
+    expect(lastCmd(p2)[lastCmd(p2).indexOf('--steps') + 1]).toBe('12');
+  });
+
+  it('输出固定 .png(RGBA 硬约束:CLI 拒绝非 png/webp/tif 后缀)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--output') + 1]).toMatch(/\.png$/);
+  });
+
+  it('本地目录名 Qwen-Image-2.1-bf16 同样按编辑路由判定(不能只看 repoId)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { model: 'Qwen-Image-2.1-bf16', prompt: 'x', inputPath: '/in/base.png' }));
+    const cmd = lastCmd(p);
+    expect(cmd).toContain('--image-paths');
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe('Qwen-Image-2.1-bf16');
+  });
+
+  it('已移除的 8bit 仓库名不会被当成可编辑 checkpoint(按名字判,不因别名归一化误放行)', async () => {
+    const p = makeProvider();
+    // 8bit 导出无 vision tower:latentOnly 判为纯文生图族 → 沿用既有「不支持指令编辑」报错。
+    // (别名归一化只作用于 --model 落盘值;isQwen21EditModel 按原始 repoModel 判定,
+    //  故手工填 8bit 仍会被拦,而不是发出一条必炸的命令)
+    await expect(
+      p.submit(req('instruction', { model: 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit', prompt: 'x', inputPath: '/in/base.png' })),
+    ).rejects.toThrow('不支持');
+  });
+
+  it('2.1 全量 bf16 不再被 latentOnly 误拦(本次修复的核心)', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' })),
+    ).resolves.toBeTruthy();
   });
 });

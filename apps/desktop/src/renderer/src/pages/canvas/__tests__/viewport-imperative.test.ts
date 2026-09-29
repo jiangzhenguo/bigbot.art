@@ -110,6 +110,46 @@ describe('CanvasPage — 高频视口路径不得 setState', () => {
     expect(seg).toMatch(/setView\(v\)/);
     expect(seg).toMatch(/setZoomPctLive\(/);
   });
+
+  /* ── 🚨 渲染期不得回写 viewRef(2026-09「滚轮缩放闪烁不动」事故) ──
+     曾经是渲染期无条件 `viewRef.current = view;`。注释声称「只在离散时点 setState」
+     并不成立:applyViewLive 为更新底部百分比会 setZoomPctLive,于是滚轮每一格都
+     触发一次渲染,而渲染又把 viewRef 拽回那个尚未被 commitView 推进的旧 view。
+     后果:下一次滚轮从同一个旧起点重算 → 帧间在两个值之间来回跳(闪烁不动)。
+
+     为什么平移没中招:平移在 pointerdown 快照 vx/vy,之后只用快照 + 指针位移;
+     滚轮是**每个事件都读 live ref**,ref 不前进就等于原地打转。
+
+     ⚠️ 断言前必须剥掉注释:上面那段事故说明本身就含有 `viewRef.current = view;`
+     和 `viewRef.current =` 字样,不剥离会把「文档」当成「违规代码」误报。 */
+  const stripComments = (s: string) =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  it('viewRef 绝不在渲染期被 view 回写(否则滚轮缩放原地打转)', () => {
+    // 反面:任何 `viewRef.current = view;`(右值就是 state 本身,不带 .current / 不来自参数)
+    expect(stripComments(src)).not.toMatch(/viewRef\.current\s*=\s*view\s*;/);
+  });
+
+  it('viewRef 的合法写入点只有 applyViewLive 与 commitView', () => {
+    const code = stripComments(src);
+    const writes = code.match(/viewRef\.current\s*=/g) ?? [];
+    /* 恰好 2 处:applyViewLive(高频命令式推进) + commitView(离散收尾)。
+       构造走 `useRef(view)` 的初值,不算写入点。
+       多出来的第 3 处就是事故形态(渲染期回写),必须审视。 */
+    expect(writes.length).toBe(2);
+    const apply = code.indexOf('const applyViewLive = useCallback');
+    const commit = code.indexOf('const commitView = useCallback');
+    expect(code.slice(apply, apply + 400)).toMatch(/viewRef\.current = v/);
+    expect(code.slice(commit, commit + 300)).toMatch(/viewRef\.current = v/);
+  });
+
+  it('applyViewLive 必须真的推进 ref(滚轮依赖它逐格前进)', () => {
+    const i = src.indexOf('const applyViewLive = useCallback');
+    const seg = src.slice(i, i + 400);
+    // 读 ref 是为了推进它,不是为了原地读旧值再写回
+    expect(seg).toMatch(/viewRef\.current = v/);
+    expect(seg).toMatch(/applyView\(v\)/);
+  });
 });
 
 describe('缩放百分比显示 — 不能卡在旧值', () => {

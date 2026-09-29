@@ -76,6 +76,9 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
       return { mode: 'column', gridCols: 3, gap: 0, bg: 'white' };
     case 'image-split':
       return { mode: 'grid', gridCols: 3, gridRows: 3, count: 3 };
+    case 'frame-grab':
+      // 从视频截一帧导出为图片资源:默认取首帧(与 Agent frames.extract 的默认一致)
+      return { mode: 'first' };
     case 'shot':
       return {
         engine: 'h3c',

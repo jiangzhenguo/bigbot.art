@@ -245,11 +245,18 @@ agent.onEvent = (ev: AgentEvent) => {
   });
 };
 
-/** 队列任务完成 → 自动归档 Take(渲染层先建 takeId,这里写终态)+ 连续性校验 */
-queue.onJobFinish = (job) => {
+/**
+ * 队列任务完成 → 自动归档 Take(渲染层先建 takeId,这里写终态)+ 连续性校验。
+ *
+ * ⚠️ 这里是 async,且 RenderQueue.finishJob 会 **await 本回调落盘后**才 notify 渲染层。
+ * 原因:takes.patch 内部要 await ffprobe 探测媒体时长,若不等它 save 完就推送队列变更,
+ * 渲染层重拉 Take 历史会读到仍是 queued 的旧记录 → 检查器 chip 停在「排队中」,
+ * 必须用户再点一下才刷新(2026-09-29 真实事故)。
+ */
+queue.onJobFinish = async (job) => {
   // Take 归档:有 takeId 就 patch(提交方创建),否则补一条
   if (job.takeId && job.projectId) {
-    void takes.patch(job.projectId, job.takeId, {
+    await takes.patch(job.projectId, job.takeId, {
       status: job.status,
       resultPath: job.resultPath,
       error: job.error,

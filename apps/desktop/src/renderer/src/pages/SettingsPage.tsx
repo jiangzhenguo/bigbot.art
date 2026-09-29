@@ -221,7 +221,9 @@ const MODEL_IDS = ['qwen-image-2.1', 'qwen-image-edit', 'flux2-klein-9b', 'seedv
 /** 模型 id → huggingface repo(mlxgen download 参数,与主进程白名单同口径) */
 const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> = {
   'z-image-turbo': 'AbstractFramework/z-image-turbo-8bit',
-  'qwen-image-2.1': 'JoyFusionAI/Qwen-Image-2.1-MLX-8bit',
+  // 2.1 统一用 bf16 全量:文生图 + 参考编辑(qwen21.edit)三能力全有;
+  // 原 8bit 社区导出无 vision tower(做不了编辑)已移除(2026-09-28)
+  'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
   'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
   'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
   'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
@@ -1980,10 +1982,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
                 // 模型大小按 HF 官方文件清单实测(2026-09,hf-mirror tree 汇总 / ModelScope 直连清单):
-                //   z-image-turbo-8bit 10.99GB · qwen-image-2.1-mlx-8bit 24.04GB · qwen-image-edit-8bit 37.5GB · flux.2-klein-9b-8bit ~18GB · seedvr2-3b-8bit 4.72GB · qwen2.5-vl-7b 16.6GB
+                //   z-image-turbo-8bit 10.99GB · Qwen-Image-2.1-bf16 ~33GB · qwen-image-edit-8bit 37.5GB · flux.2-klein-9b-8bit ~18GB · seedvr2-3b-8bit 4.72GB · qwen2.5-vl-7b 16.6GB
                 const meta: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], { name: string; desc: string }> = {
                   'z-image-turbo': { name: 'Z-Image-Turbo', desc: t('文生图 · 推荐 · ~11GB') },
-                  'qwen-image-2.1': { name: 'Qwen-Image-2.1', desc: t('文生图 · 新一代 7.1B · ~24GB') },
+                  'qwen-image-2.1': { name: 'Qwen-Image-2.1 (bf16 全量)', desc: t('文生图 / 参考编辑 1-10 张 · ~33GB') },
                   'qwen-image-edit': { name: 'Qwen Image Edit', desc: t('指令编辑 / Inpaint · 推荐 · 37.5GB') },
                   'flux2-klein-9b': { name: 'FLUX.2 Klein 9B', desc: t('多参考生成/编辑 · Outpaint · ~18GB') },
                   'seedvr2-3b': { name: 'SeedVR2 3B', desc: t('超分修复 · 可选 · ~4.7GB') },

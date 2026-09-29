@@ -37,8 +37,18 @@ export class RenderQueue {
     private logger?: DebugLogger,
   ) {}
 
-  /** 任务完成回调(连续性校验等) */
-  onJobFinish: ((job: RenderJob) => void) | null = null;
+  /**
+   * 任务完成回调(Take 终态归档 + 连续性校验等)。
+   *
+   * ⚠️ **可以返回 Promise,且 finishJob 会等它落盘后才 notify**。
+   * 这是 2026-09-29「图片编辑生成成功后 Take 不会自动变成完成,需要再点一次」的修法:
+   * 旧实现 `void takes.patch(...)` 是异步的(成功且有产物时还要 await ffprobe 探测媒体时长),
+   * 而 finishJob 紧接着就 `notify()` 把新队列状态推给渲染层 → 渲染层按 job 签名变化重拉
+   * takesHistory 时,**盘上那条 Take 还是 queued**(patch 尚未 save()),
+   * 于是检查器里 chip 一直显示排队中;又因为此后没有任何事件再触发刷新,
+   * 只能等用户手动点一下(触发重渲染)才看到「已完成」。
+   */
+  onJobFinish: ((job: RenderJob) => void | Promise<void>) | null = null;
 
   /** 队列变更回调(当前 tick 内合并去抖;推送 slimList 精简视图,渲染层订阅用) */
   onChange: ((jobs: RenderJob[]) => void) | null = null;
@@ -262,10 +272,22 @@ export class RenderQueue {
     this.logger?.log("info", `[queue] job=${job.id} node=${job.nodeId} → ${job.status}${patch.error ? ` · err=${patch.error}` : ''}${patch.resultPath ? ` · out=${basename(patch.resultPath)}` : ''}`);
     this.handles.delete(job.id);
     this.running = null;
-    // 完成回调(连续性校验等)
-    this.onJobFinish?.(job);
-    this.pump();
-    this.notify();
+    /* 终态归档必须先于 notify:渲染层收到队列变更就会重拉 Take 历史,
+       若 Take 还没落盘(见 onJobFinish 注释),检查器会一直停在「排队中」。
+       onJobFinish 抛错不能吞(红线 R6),也不该阻断 notify 与 pump —— 否则
+       一次归档异常会卡死整个队列,所以这里分开 catch。 */
+    const afterFinish = (): void => {
+      this.pump();
+      this.notify();
+    };
+    void (async () => {
+      try {
+        await this.onJobFinish?.(job);
+      } catch (e) {
+        this.logger?.log('warn', `[queue] job=${job.id} onJobFinish 回调异常: ${(e as Error).message}`);
+      }
+      afterFinish();
+    })();
   }
 }
 

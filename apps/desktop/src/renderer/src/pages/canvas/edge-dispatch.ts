@@ -8,7 +8,9 @@
  *   - shot / asset(video|audio) → timeline:shotNodeIds 入线(按边序去重)
  *   - 操作节点 → workflow-output:outputs[].sourceNodeIds(按 kind 匹配)
  *   - asset / document → workflow-input(label=slot-<name>):slots[name].value
- *   - shot → image-edit:inputFrameSource(取帧再编辑的帧源)
+ *
+ * ⚠️ 2026-09:`shot → image-edit` 的 inputFrameSource 派发已移除 —— 视频不再直连图片编辑,
+ *    改用 frame-grab(视频裁切取帧)节点落成图片。存量画布上的 inputFrameSource 仍由 runNode 兼容读取。
  *
  * 拆分的价值:计算与 React 解耦 —— 输入 (nodes, edges),输出 { nextNodes, changed },
  * 可直接单测;CanvasPage 通过 nodesReducer 的 derive-from-edges action 消费它。
@@ -36,9 +38,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const timelinePatch = new Map<string, string[]>();
   const outputPatch = new Map<string, Record<string, string[]>>();
   const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
-  const framePatch = new Map<string, { videoNodeId: string; at: 'first' | 'last' } | null>();
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
-  /** 视频输入端口(video-upscale 的 input):只收视频来源(shot/video-upscale/视频 asset) */
+  /** 视频输入端口(video-upscale / frame-grab 的输入):只收视频来源(shot/video-upscale/视频 asset) */
   const videoFromPatch = new Map<string, { nodeId: string } | null>();
   /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
   const stitchPatch = new Map<string, Array<{ nodeId: string; x: number; y: number }>>();
@@ -167,6 +168,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           'image-crop': 'image',
           'image-stitch': 'image',
           'image-split': 'image',
+          'frame-grab': 'image',
           'video-upscale': 'video',
           'audio-ref': 'audio',
           asset: String(s.mediaType ?? ''),
@@ -216,12 +218,10 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         break;
       }
       case 'image-edit': {
-        if (src.kind === 'shot') {
-          const cur = d.inputFrameSource as { videoNodeId?: string; at?: string } | undefined;
-          const next = { videoNodeId: e.from, at: 'first' as const };
-          if (!cur || cur.videoNodeId !== next.videoNodeId || cur.at !== next.at) framePatch.set(e.to, next);
-        } else if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
-          // 输入图端口 input:静帧产物直通 / 素材引用;无条件登记(内容比对由 JSON 兜底,保证幂等)
+        // 输入图端口 input:静帧产物直通 / 素材引用;无条件登记(内容比对由 JSON 兜底,保证幂等)
+        // ⚠️ 不再有 `shot` 分支:视频 → 图片编辑的直连已取消(图片编辑要静帧,
+        //    视频须先经 frame-grab 落成图片)。frame-grab 产物已计入 IMAGE_KINDS,走下面这支。
+        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
           imageFromPatch.set(e.to, { nodeId: e.from });
         }
         if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
@@ -254,6 +254,14 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       }
       case 'video-upscale': {
         // 输入**视频**端口 input:镜头成片 / 视频增强产物 / 视频素材;无条件登记(幂等)
+        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+          videoFromPatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
+      case 'frame-grab': {
+        // 输入**视频**端口 input-video:镜头成片 / 视频增强产物 / 视频素材(只收视频源)。
+        // 这是「视频 → 图片」的唯一合法转换点:产物 PNG 再交给 image-edit/upscale/… 下游。
         if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
           videoFromPatch.set(e.to, { nodeId: e.from });
         }
@@ -349,19 +357,14 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       // value 完全由 slot-<name> 边决定:边删除 → 清回未填充
       data.slots = curSlots.map((x2) => ({ ...x2, value: byName.has(x2.name) ? byName.get(x2.name) : undefined }));
     }
-    if (n.kind === 'image-edit') {
-      const target = framePatch.get(n.id) ?? null;
-      if (target) data.inputFrameSource = target;
-      else delete data.inputFrameSource;
-    }
     // 输入图端口 input(静帧直通 / 素材):与边同步,删除边即撤销
     if (n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop' || n.kind === 'image-split') {
       const target = imageFromPatch.get(n.id) ?? null;
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;
     }
-    // 视频输入端口(video-upscale):与边同步,删除边即撤销
-    if (n.kind === 'video-upscale') {
+    // 视频输入端口(video-upscale / frame-grab):与边同步,删除边即撤销
+    if (n.kind === 'video-upscale' || n.kind === 'frame-grab') {
       const target = videoFromPatch.get(n.id) ?? null;
       if (target) data.inputVideoFrom = target;
       else delete data.inputVideoFrom;
