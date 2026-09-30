@@ -208,6 +208,23 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         }}
       />
 
+      {/* 预览置顶(与 image-gen / shot 检查器同口径):点中节点先看到「输入图 + 产物」,
+          再往下才是编辑模式/指令等参数。此前编辑模式芯片块压在预览之上,要滚动才看得到结果 */}
+      <UpstreamCard label={up.label} sub={up.sub} src={up.src} pill={up.pill} />
+      {/* 输入图大图预览(有源时;点 ⛶ 可全屏) */}
+      {up.src ? <ImagePreview src={up.src} alt="输入图预览" /> : null}
+
+      {/* 产物预览(与 image-gen 检查器同模式) */}
+      {resultPath ? (
+        <div className="kv" data-od-id="edit-result-preview">
+          <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
+          <ImagePreview src={previewUrlOf(resultPath)} label="" />
+          <div className="row g6">
+            <button className="btn btn-s btn-sm" data-od-id="cta-archive" type="button" onClick={onArchive}>作为素材入库</button>
+          </div>
+        </div>
+      ) : null}
+
       {upstreamStale ? (
         <div className="stale-banner" data-od-id="stale-banner">
           <div className="sb-ico">
@@ -235,21 +252,6 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
           ))}
         </div>
       </div>
-
-      <UpstreamCard label={up.label} sub={up.sub} src={up.src} pill={up.pill} />
-      {/* 输入图大图预览(有源时;点 ⛶ 可全屏) */}
-      {up.src ? <ImagePreview src={up.src} alt="输入图预览" /> : null}
-
-      {/* 产物预览(与 image-gen 检查器同模式) */}
-      {resultPath ? (
-        <div className="kv" data-od-id="edit-result-preview">
-          <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
-          <ImagePreview src={previewUrlOf(resultPath)} label="" />
-          <div className="row g6">
-            <button className="btn btn-s btn-sm" data-od-id="cta-archive" type="button" onClick={onArchive}>作为素材入库</button>
-          </div>
-        </div>
-      ) : null}
 
       {/* 输入图 Asset ID(与连线二选一,保留原能力) */}
       <div className="f-sec" style={running ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>

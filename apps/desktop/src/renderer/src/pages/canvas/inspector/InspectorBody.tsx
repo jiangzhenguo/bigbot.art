@@ -269,8 +269,12 @@ export function InspectorBody({
     case 'image-upscale': {
       const scale = Number(d.scale ?? 2);
       const model = String(d.model ?? 'AbstractFramework/seedvr2-3b-8bit');
+      const upscaleResult = String(d.resultPath ?? '');
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 产物预览置顶:此前该检查器完全没有预览块,产物只能靠底部 Take 历史看;
+              统一到与其它图片节点一致 —— 点中节点即见增强结果 */}
+          <ImagePreview src={upscaleResult ? previewUrlOf(upscaleResult) : null} label="增强结果" emptyHint="运行后显示增强结果" />
           <div>
             <Lbl>放大倍数</Lbl>
             <div className="row g6">
@@ -338,6 +342,35 @@ export function InspectorBody({
                   <i className="fill" style={{ width: `${Math.round((node.progress.pct ?? 0) * 100)}%` }}></i>
                 )}
               </span>
+            </div>
+          ) : null}
+          {/* 产物预览置顶:增强结果优先于源视频,都没有时下面给「连一个镜头/视频素材」的提示。
+              此前这块压在整套超分/修脸参数之后,点中节点要一路滚到底才看得到结果 */}
+          {outPath ? (
+            <div>
+              <Lbl>增强结果</Lbl>
+              <video
+                src={previewUrlOf(outPath) ?? ''}
+                controls
+                muted
+                preload="metadata"
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+              />
+              <div className="mono mut" style={{ fontSize: 11, marginTop: 4 }}>
+                {d.width && d.height ? `${d.width}×${d.height}` : ''}
+                {d.durationSec ? ` · ${d.durationSec}s` : ''}
+              </div>
+            </div>
+          ) : srcPath ? (
+            <div>
+              <Lbl>源视频预览</Lbl>
+              <video
+                src={previewUrlOf(srcPath) ?? ''}
+                controls
+                muted
+                preload="metadata"
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+              />
             </div>
           ) : null}
           <div>
@@ -542,6 +575,9 @@ export function InspectorBody({
       })();
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 产物预览置顶:点中节点即可看到裁剪结果(未生成时回退源图),
+              不必先滚过目标画幅/锚点这些参数 */}
+          <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} />
           <div>
             <Lbl>目标画幅</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -579,7 +615,6 @@ export function InspectorBody({
             <div className="mut" style={{ fontSize: 11 }}>连一个 图片生成/编辑/增强 节点或 asset 可自动作为裁剪源</div>
           )}
           <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['输出', `裁剪至 ${aspect} · 保持原分辨率`]]} />
-          <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} />
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
@@ -593,6 +628,8 @@ export function InspectorBody({
       const outPath = String(d.resultPath ?? '');
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 产物预览置顶:点中节点即见拼接结果,不必先滚过拼接方式/列数/间距 */}
+          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="拼接结果" emptyHint="运行后显示拼接结果" />
           <div>
             <Lbl>拼接方式</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -658,7 +695,6 @@ export function InspectorBody({
             )}
           </div>
           <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['对齐', '按最小边等比缩放(只缩不放)'], ['输出', mode === 'grid' ? `网格 · ${gridCols} 列` : mode === 'row' ? '横排长图' : '竖排长图']]} />
-          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="拼接结果" emptyHint="运行后显示拼接结果" />
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
@@ -687,6 +723,23 @@ export function InspectorBody({
       const pieceCount = mode === 'grid' ? gridCols * gridRows : count;
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 产物预览置顶:点中节点即见切片结果(未跑过时回退源图),不必先滚过拆分方式/份数 */}
+          {pieces.length > 0 ? (
+            <div>
+              <Lbl>切片结果(共 {pieces.length} 片 · 按切分形态排布)</Lbl>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${mode === 'rows' ? 1 : mode === 'cols' ? count : gridCols}, 1fr)`, gap: 3, alignItems: 'start' }}>
+                {pieces.map((p, i) => (
+                  <div key={p} style={{ position: 'relative', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-soft)' }}>
+                    <img src={previewUrlOf(p) ?? ''} alt={`第 ${i + 1} 片`} style={{ display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }} />
+                    <span className="mono" style={{ position: 'absolute', left: 4, top: 2, fontSize: 10, color: 'var(--fg)', background: 'var(--surface-warm)', padding: '0 4px', borderRadius: 4 }}>{i + 1}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>下游取片:从本节点连出时在「取第 N 片」里选;不选默认第 1 片</div>
+            </div>
+          ) : (
+            <ImagePreview src={splitSrc ? previewUrlOf(splitSrc) : null} label="源图预览" emptyHint="运行后显示切片结果 · 未运行时显示源图" />
+          )}
           <div>
             <Lbl>拆分方式</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -736,22 +789,6 @@ export function InspectorBody({
             <div className="mut" style={{ fontSize: 11 }}>连一个 图片节点 / asset 可自动作为拆分源</div>
           )}
           <KVSection rows={[['引擎', 'ffmpeg · 不推理'], ['输出', `等分 ${pieceCount} 片(末行/末列吃余数)`], ['下游取值', '连线选 piece-N = 取第 N 片']]} />
-          {pieces.length > 0 ? (
-            <div>
-              <Lbl>切片结果(共 {pieces.length} 片 · 按切分形态排布)</Lbl>
-              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${mode === 'rows' ? 1 : mode === 'cols' ? count : gridCols}, 1fr)`, gap: 3, alignItems: 'start' }}>
-                {pieces.map((p, i) => (
-                  <div key={p} style={{ position: 'relative', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-soft)' }}>
-                    <img src={previewUrlOf(p) ?? ''} alt={`第 ${i + 1} 片`} style={{ display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }} />
-                    <span className="mono" style={{ position: 'absolute', left: 4, top: 2, fontSize: 10, color: 'var(--fg)', background: 'var(--surface-warm)', padding: '0 4px', borderRadius: 4 }}>{i + 1}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>下游取片:从本节点连出时在「取第 N 片」里选;不选默认第 1 片</div>
-            </div>
-          ) : (
-            <ImagePreview src={splitSrc ? previewUrlOf(splitSrc) : null} label="源图预览" emptyHint="运行后显示切片结果 · 未运行时显示源图" />
-          )}
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
@@ -787,6 +824,13 @@ export function InspectorBody({
           : '';
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 产物预览置顶:点中节点即见取到的静帧,不必先滚过取帧位置/时间点 */}
+          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="取帧结果" emptyHint="运行后显示裁切出的静帧" />
+          {resultAssetId ? (
+            <div className="mut mono" style={{ fontSize: 11 }}>
+              已入资产库 · {resultAssetId}
+            </div>
+          ) : null}
           <div>
             <Lbl>取帧位置</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -840,12 +884,6 @@ export function InspectorBody({
               ['下游', '图片编辑 / 图片增强 / 图片裁切 / 镜头首帧'],
             ]}
           />
-          <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="取帧结果" emptyHint="运行后显示裁切出的静帧" />
-          {resultAssetId ? (
-            <div className="mut mono" style={{ fontSize: 11 }}>
-              已入资产库 · {resultAssetId}
-            </div>
-          ) : null}
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
