@@ -13,6 +13,8 @@ import { useTakeResult } from './useTakeResult';
 import { ImagePreview } from './ImagePreview';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
+import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
+import { getToolModelsSync } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { UpstreamCard, ImageStrengthField, OutpaintPads, MaskField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
@@ -56,23 +58,36 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
 export const DEFAULT_EDIT_STEPS = 30;
 
 /**
- * 各编辑模式可用的已知模型 + 推荐默认(2026-09 mlxgen capabilities 实测):
- * - instruction/inpaint/outpaint → qwen.edit handler(Qwen Edit / flux2)
- * - img2img(latent)→ 只有 z-image / flux2 有 latent 能力,Qwen Edit 没有(Provider 侧也有防呆)
+ * 各编辑模式可用的已知模型 + 推荐默认(2026-09 mlxgen capabilities 实测,矩阵见
+ * docs/工具模型选择-产品设计与技术方案.md §2.1.1):
+ * - instruction:Qwen Edit / flux2 / **Qwen-Image-2.1**(qwen21.edit,1-10 张参考图。
+ *   2026-09-29 缺陷 B 修复:此前 allowed 漏了 2.1,用户选了 2.1 一切模式就被自动切走)
+ * - img2img(latent):z-image / flux2 / **Qwen-Image-2.1**(qwen21.latent;
+ *   2026-09-29 缺陷 A 已修:Provider 不再误拒 2.1,故入列)
+ * - inpaint/outpaint → qwen.edit handler(Qwen Edit / flux2);2.1 实测无 mask/outpaint 能力
  * 自定义 repoId(matchModel 匹配不到)不自动切换,由用户自行负责。
  */
 const MODE_MODELS: Record<string, { allowed: string[]; recommend: string }> = {
-  instruction: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
-  img2img: { allowed: ['AbstractFramework/z-image-turbo-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'AbstractFramework/z-image-turbo-8bit' },
+  instruction: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
+  img2img: { allowed: ['AbstractFramework/z-image-turbo-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1'], recommend: 'AbstractFramework/z-image-turbo-8bit' },
   inpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'AbstractFramework/z-image-turbo-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
   outpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
 };
+
+/** 模式切换判定(纯函数,供单测):当前已知模型不支持目标模式时给出推荐切换目标,否则 null */
+export function modeSwitchDecision(currentModel: string, targetMode: string): { recommend: string } | null {
+  const rule = MODE_MODELS[targetMode];
+  const curRepo = matchModel(currentModel)?.repoId;
+  if (rule && curRepo && !rule.allowed.includes(curRepo)) return { recommend: rule.recommend };
+  return null;
+}
 
 export function ImageEditInspector(p: ImageEditInspectorProps) {
   const { node, setData, jobs, projectId, nodes, assetCache, runNode, toastMsg, onSelectTake } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'instruction');
-  const model = String(d.model ?? 'mlx-community/Qwen-Image-Edit-8bit');
+  // 未显式选模型时显示缺省解析结果(按当前 mode 对应的能力;2026-09-29 v1)
+  const model = String(d.model ?? '').trim() || (resolveImageModel(getToolModelsSync(), capabilityOf('image-edit', mode)) ?? '');
   const prompt = String(d.prompt ?? '');
   const inputAssetId = String(d.inputAssetId ?? '');
   const maskAssetId = String(d.maskAssetId ?? '');
@@ -110,12 +125,11 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
 
   // 模式切换:当前模型不在该模式可用集合里时自动切到推荐模型(自定义模型不动)
   const onModeChange = (m: string) => {
-    const rule = MODE_MODELS[m];
-    const curRepo = matchModel(model)?.repoId;
-    if (rule && curRepo && !rule.allowed.includes(curRepo)) {
-      const to = matchModel(rule.recommend);
-      setData({ mode: m, model: rule.recommend });
-      toastMsg(`「${MODE_META.find((x) => x.key === m)?.label ?? m}」模式不支持当前模型,已自动切换为 ${to?.name ?? rule.recommend}`);
+    const decision = modeSwitchDecision(model, m);
+    if (decision) {
+      const to = matchModel(decision.recommend);
+      setData({ mode: m, model: decision.recommend });
+      toastMsg(`「${MODE_META.find((x) => x.key === m)?.label ?? m}」模式不支持当前模型,已自动切换为 ${to?.name ?? decision.recommend}`);
     } else {
       setData({ mode: m });
     }

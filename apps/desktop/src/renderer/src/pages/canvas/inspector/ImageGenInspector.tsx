@@ -10,6 +10,8 @@ import { ImageTakeSection } from './ImageTakeSection';
 import { useTakeResult } from './useTakeResult';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
+import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
+import { getToolModelsSync } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { AspectPresets, SeedEditor, StepsGuidanceField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
@@ -27,7 +29,8 @@ export interface ImageGenInspectorProps {
 export function ImageGenInspector(p: ImageGenInspectorProps) {
   const { node, setData, jobs, projectId, runNode, toastMsg, onSelectTake } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
-  const model = String(d.model ?? 'AbstractFramework/z-image-turbo-8bit');
+  // 未显式选模型时显示缺省解析结果(设置页工具模型 > 内置默认;2026-09-29 v1)
+  const model = String(d.model ?? '').trim() || (resolveImageModel(getToolModelsSync(), capabilityOf('image-gen')) ?? '');
   const prompt = String(d.prompt ?? '');
   const negative = String(d.negativePrompt ?? '');
   const w = Number(d.width ?? 1024);

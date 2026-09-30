@@ -15,7 +15,8 @@ describe('CONNECTOR_MAP · image-crop', () => {
     const src = CONNECTOR_MAP['image-crop'];
     expect(src).toBeDefined();
     expect(src?.['shot']).toBe('first-frame/ref-image');
-    expect(src?.['edit']).toBe('input');
+    // 2026-09-29:image-edit 补 ref-image 端口(2.1 多参考编辑,§2.1.0b)
+    expect(src?.['edit']).toBe('input/ref-image');
     expect(src?.['upscale']).toBe('input');
     expect(src?.['image']).toBe('ref-image');
     expect(src?.['timeline']).toBe('clip');

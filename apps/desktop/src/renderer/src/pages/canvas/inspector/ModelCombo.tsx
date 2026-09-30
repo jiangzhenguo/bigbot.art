@@ -35,10 +35,14 @@ export function ModelCombo({
   value,
   onChange,
   disabled,
+  filter,
 }: {
   value: string;
   onChange: (repoId: string) => void;
   disabled?: boolean;
+  /** 🆕 可选:按能力过滤可选项(如设置页「工具模型」各行只列支持该能力的模型);
+   *  当前已选值即使不满足 filter 也会正常显示(存量/自定义不隐藏) */
+  filter?: (m: ModelItem) => boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [ready, setReady] = useState<Record<string, boolean>>({});
@@ -117,7 +121,7 @@ export function ModelCombo({
 
       {open ? (
         <div className="combo-menu open" data-od-id="combo-menu-open">
-          {IMAGE_MODELS.map((m) => {
+          {IMAGE_MODELS.filter((m) => !filter || filter(m) || m.repoId === value || m.alias === value).map((m) => {
             const dl = dls[m.repoId];
             const bad = dl?.error;
             return (

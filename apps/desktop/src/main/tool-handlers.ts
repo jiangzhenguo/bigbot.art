@@ -23,8 +23,11 @@ import {
   deriveShotRefsFromEdges,
   validateRefsForSubmit,
   referenceMediaIssues,
+  capabilityOf,
+  resolveImageModel,
   type DerivedRef,
   type PromptSource,
+  type ToolModelBinding,
 } from '@bigbotart/shared';
 import type { ProjectStore } from './store';
 import type { AssetStore } from './assets';
@@ -261,21 +264,37 @@ export function buildImageSubmitParams(
   canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
   node: CanvasNode,
   assetPath: (assetId: string) => string | undefined,
+  toolModels?: ToolModelBinding,
 ): { ok: true; params: Record<string, unknown> } | { ok: false; error: string } {
   const d = (node.data ?? {}) as Record<string, unknown>;
   const params: Record<string, unknown> = { ...d };
   params.kind =
     node.kind === 'image-upscale' ? 'upscale' : node.kind === 'image-edit' ? String(d.mode ?? 'instruction') : 'generate';
+  // 🆕 缺省模型解析(2026-09-29 v1):节点未显式选模型时按能力取「工具模型 > 内置默认」,
+  // 与渲染层 runNode 同口径(显式值永远优先)
+  if (!String(d.model ?? '').trim()) {
+    const cap = capabilityOf(String(node.kind ?? ''), String(d.mode ?? 'instruction'),
+      resolveRefImagePaths(canvas, node, assetPath).length > 0);
+    const m = resolveImageModel(toolModels, cap);
+    if (m) params.model = m;
+  }
   if (node.kind === 'image-edit' || node.kind === 'image-upscale') {
     if (!params.inputPath) {
       const input = resolveSingleImageInput(canvas, node, assetPath);
       if (input) params.inputPath = input;
     }
     if (!params.inputPath) {
-      return {
-        ok: false,
-        error: `节点「${node.label || node.id}」没有输入图:请先用 canvas.connect 把图片/资产节点连到它的 input 端口`,
-      };
+      /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」;
+         其它模型必须给输入图,维持原拦截(与渲染层 runNode 同口径) */
+      const model = String(d.model ?? '');
+      const isQwen21 = /qwen.*2\.1/i.test(model);
+      const hasRefs = node.kind === 'image-edit' && resolveRefImagePaths(canvas, node, assetPath).length > 0;
+      if (node.kind === 'image-upscale' || !(isQwen21 && hasRefs)) {
+        return {
+          ok: false,
+          error: `节点「${node.label || node.id}」没有输入图:请先用 canvas.connect 把图片/资产节点连到它的 input 端口(Qwen-Image-2.1 指令编辑可只连 ref-image 参考图)`,
+        };
+      }
     }
   }
   return { ok: true, params };
@@ -331,6 +350,8 @@ export class ToolHandlers {
   private planStoryboard?: StoryboardPlanFn;
   private accel?: AccelStore;
   private takes?: TakeStore;
+  private getToolModels?: () => ToolModelBinding | undefined;
+  private resolveVisionOverride?: () => Promise<{ baseUrl: string; apiKey?: string; model: string } | undefined>;
 
   constructor(
     private store: ProjectStore,
@@ -339,11 +360,21 @@ export class ToolHandlers {
     private exportSvc: ExportService,
     private queue: RenderQueue,
     private memory: MemoryStore,
-    opts: { planStoryboard?: StoryboardPlanFn; accel?: AccelStore; takes?: TakeStore } = {},
+    opts: {
+      planStoryboard?: StoryboardPlanFn;
+      accel?: AccelStore;
+      takes?: TakeStore;
+      /** 🆕 工具模型设置(v1):图片节点缺省模型 / vision 端点覆盖,从 SettingsStore 实时读 */
+      getToolModels?: () => ToolModelBinding | undefined;
+      /** 🆕 看图端点覆盖(v1):settings.toolModels.vision → VisionEndpoint;未配置返回 undefined(走 env 回退链) */
+      resolveVisionOverride?: () => Promise<{ baseUrl: string; apiKey?: string; model: string } | undefined>;
+    } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
     this.accel = opts.accel;
     this.takes = opts.takes;
+    this.getToolModels = opts.getToolModels;
+    this.resolveVisionOverride = opts.resolveVisionOverride;
   }
 
   /** 工具路由表 */
@@ -552,7 +583,8 @@ export class ToolHandlers {
             id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
             position: { x: anchorX + 300, y: anchorY + r * 186 }, width: 232,
             data: {
-              engine: 'mlxgen', model: 'AbstractFramework/z-image-turbo-8bit', prompt: z.text,
+              // 🆕 不写 model(2026-09-29 v1 工具模型):留给提交时缺省解析
+              engine: 'mlxgen', prompt: z.text,
               width: size.width, height: size.height, steps: 24, guidance: 1.0, seeds: [42],
               promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
             } as CanvasNode['data'],
@@ -591,12 +623,14 @@ export class ToolHandlers {
       }
       // 图片节点默认 engine/model/mode(与检查器/渲染层默认同口径)——真实事故:Agent 建 image-edit
       // 只写了 prompt,缺省模型落到 z-image 纯文生图,提交时 CLI auto 路由 latent i2i 缺参数报错
+      // 🆕 不写 model(2026-09-29 v1 工具模型):留给 buildImageSubmitParams 按能力缺省解析;
+      // Agent 显式传 model 仍优先(...data 在后)
       if (kind === 'image-edit') {
-        data = { engine: 'mlxgen', model: 'mlx-community/Qwen-Image-Edit-8bit', mode: 'instruction', ...data };
+        data = { engine: 'mlxgen', mode: 'instruction', ...data };
       } else if (kind === 'image-gen') {
-        data = { engine: 'mlxgen', model: 'AbstractFramework/z-image-turbo-8bit', ...data };
+        data = { engine: 'mlxgen', ...data };
       } else if (kind === 'image-upscale') {
-        data = { engine: 'mlxgen', model: 'AbstractFramework/seedvr2-3b-8bit', ...data };
+        data = { engine: 'mlxgen', ...data };
       } else if (kind === 'video-upscale') {
         // 本地后处理节点(无 engine/模型),默认走 POST_PROCESSING.md §9.1 标准配方:
         // Real-ESRGAN ×2(真人模型 realesrgan-x4plus)+ GFPGAN 修脸(强度 0.5),去块默认关
@@ -832,8 +866,10 @@ export class ToolHandlers {
           return { ok: false, result: `提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}` };
         }
       }
-      // image-gen:ref-image 连线 → 参考图(多参考生成;mlxgen 侧对不支持的模型给指引报错)
-      if (node.kind === 'image-gen') {
+      // image-gen / image-edit:ref-image 连线 → 参考图(多参考生成 / 2.1 多参考编辑;
+      // mlxgen 侧对不支持的模型给指引报错。2026-09-29:此前只认 image-gen,
+      // Agent 连到 image-edit 的参考图被静默丢弃,2.1 的 qwen21.edit 永远只有 1 张图)
+      if (node.kind === 'image-gen' || node.kind === 'image-edit') {
         const refPaths = resolveRefImagePaths(cur, node, (id) => this.assets.get(id)?.localPath);
         const now = new Date().toISOString();
         for (const p of refPaths) {
@@ -863,7 +899,7 @@ export class ToolHandlers {
       // image 类节点:kind 推导 + input 连线解析(直传 node.data 会让 image-edit 缺省成 generate 丢输入图)
       let submitParams: Record<string, unknown> = (node.data as Record<string, unknown>) ?? {};
       if (node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale') {
-        const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath);
+        const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath, this.getToolModels?.());
         if (!built.ok) return { ok: false, result: built.error };
         submitParams = built.params;
       }
@@ -1026,8 +1062,17 @@ export class ToolHandlers {
           };
         }
       }
-      const res = await captionImage(imagePath, style, a.extra ? String(a.extra) : undefined);
-      if (!res.ok || !res.caption) return { ok: false, result: `反推失败:${res.error ?? '未知错误'}` };
+      // 🆕 设置页「工具模型 → 看图反推」覆盖端点(未配置则走 env 回退链,存量行为不变)
+      const overrideEp = this.resolveVisionOverride ? await this.resolveVisionOverride() : undefined;
+      const res = await captionImage(imagePath, style, a.extra ? String(a.extra) : undefined, overrideEp);
+      if (!res.ok || !res.caption) {
+        // 决策 7(§4.2.1):未单独配置看图模型时,报错必须给出可执行的下一步 ——
+        // 最常见的失败就是「回退到了无视觉能力的主 LLM」,裸错误用户无从下手
+        const hint = overrideEp
+          ? ''
+          : `。当前未单独配置看图模型(可能回退到了无视觉能力的端点);可到「设置 → 工具模型 → 看图反推」配置视觉模型(本机已下载的 Qwen2.5-VL 可直接选),或设 BIGBOTART_VL_MODEL 环境变量`;
+        return { ok: false, result: `反推失败:${res.error ?? '未知错误'}${hint}` };
+      }
       return {
         ok: true,
         result:

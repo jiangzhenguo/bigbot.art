@@ -22,7 +22,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   'image-gen': {
     // 图生视频双端口:first-frame 静帧直通首帧(FL2VA)/ ref-image 参考图注入(Ref2VA 身份/场景锁定)
     shot: 'first-frame/ref-image',
-    edit: 'input',
+    edit: 'input/ref-image',
     upscale: 'input',
     crop: 'input', // 原图裁切源
     stitch: 'piece', // 拼接件(多值,按画布位置排序)
@@ -32,16 +32,21 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   },
   'image-edit': {
     shot: 'first-frame/ref-image',
-    edit: 'input',
+    edit: 'input/ref-image',
     upscale: 'input',
     crop: 'input', // 原图裁切源
     stitch: 'piece',
     split: 'input', // 拆分源
+    // 🆕 参考图 → 多参考编辑(2026-09-29):Qwen-Image-2.1 的 `qwen21.edit` 支持 1-10 张参考图。
+    // 此前该端口只挂在 image-gen 上,导致 2.1 的多图参考「Provider 写了但用户画不出边」
+    // (详见 docs/工具模型选择-产品设计与技术方案.md §2.1.0b)。
+    // ref-image 是**多值端口**(不在 SINGLE_VALUE_PORTS),故天然允许连多条。
+    image: 'ref-image',
     timeline: 'clip',
   },
   'image-upscale': {
     shot: 'first-frame/ref-image',
-    edit: 'input',
+    edit: 'input/ref-image',
     crop: 'input', // 原图裁切源
     stitch: 'piece',
     split: 'input', // 拆分源
@@ -57,7 +62,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   },
   'image-crop': {
     shot: 'first-frame/ref-image', // 裁切结果 → 首帧直通 / 参考图注入
-    edit: 'input', // 裁切结果作输入图
+    edit: 'input/ref-image', // 裁切结果作输入图
     upscale: 'input',
     stitch: 'piece',
     split: 'input', // 拆分源
@@ -66,7 +71,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   },
   'image-stitch': {
     shot: 'first-frame/ref-image', // 拼接结果 → 首帧直通 / 参考图注入
-    edit: 'input', // 拼接结果作输入图
+    edit: 'input/ref-image', // 拼接结果作输入图
     upscale: 'input',
     crop: 'input',
     stitch: 'piece', // 拼接结果可再作拼接件
@@ -77,7 +82,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   'image-split': {
     // 拆分产物多片:下游经 piece-N 端口按序号取片(piece-1 缺省 = 第 1 片)
     shot: 'first-frame/ref-image', // 选定片 → 首帧直通 / 参考图注入
-    edit: 'input', // 选定片作输入图
+    edit: 'input/ref-image', // 选定片作输入图
     upscale: 'input',
     crop: 'input',
     stitch: 'piece', // 选定片作拼接件(拆分→拼接回路)
@@ -92,7 +97,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   // 🆕 视频裁切取帧:产物是**图片** → 与其它图片产物同类(视频 → 图片的合法转换点)
   'frame-grab': {
     shot: 'first-frame/ref-image', // 裁切出的静帧 → 首帧直通 / 参考图注入
-    edit: 'input', // 裁切出的静帧作输入图
+    edit: 'input/ref-image', // 裁切出的静帧作输入图
     upscale: 'input',
     crop: 'input',
     stitch: 'piece',
@@ -126,7 +131,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   asset: {
     shot: 'first-frame/ref-image/ref-video/ref-audio/prompt', // 按媒体类型:图片=首帧参考(first-frame)/参考图(ref-image) · 视频 ref-video · 音频 ref-audio · 文档 prompt
     image: 'ref-image', // 图片参考图(多参考生成,需 flux.2-klein 模型)
-    edit: 'input', // 输入图/取帧源
+    edit: 'input/ref-image', // 输入图/取帧源
     upscale: 'input', // 超分源
     crop: 'input', // 裁切源
     stitch: 'piece', // 拼接件(图片素材)

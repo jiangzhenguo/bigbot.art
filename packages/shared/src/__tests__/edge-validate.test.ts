@@ -420,3 +420,38 @@ describe('frame-grab · 视频裁切取帧端口与媒体约束', () => {
     expect(res.errors[0]!.replaceable).toBe(true);
   });
 });
+
+describe('2.1 多参考编辑:→ image-edit ref-image 端口(2026-09-29 接线)', () => {
+  const editNode = (id: string): EdgeNodeMin => ({ id, kind: 'image-edit', data: {} });
+
+  it('asset(图片)→ image-edit ref-image 合法(此前端口表没有,会被拒)', () => {
+    const nodes = [assetNode('a'), editNode('e')];
+    const res = validateEdge(nodes, [], edge('a', 'e', 'ref-image'));
+    expect(res.ok).toBe(true);
+  });
+
+  it('image-gen 产物 → image-edit ref-image 合法', () => {
+    const nodes = [imageNode('g'), editNode('e')];
+    const res = validateEdge(nodes, [], edge('g', 'e', 'ref-image'));
+    expect(res.ok).toBe(true);
+  });
+
+  it('ref-image 是多值端口:image-edit 可收两条不同来源的参考图边', () => {
+    const nodes = [assetNode('a'), assetNode('b'), editNode('e')];
+    const edges = [edge('a', 'e', 'ref-image')];
+    const res = validateEdge(nodes, edges, edge('b', 'e', 'ref-image'));
+    expect(res.ok).toBe(true);
+  });
+
+  it('asset(视频)→ image-edit ref-image 被拒(媒体不匹配:ref-image 只要图片)', () => {
+    const nodes = [assetNode('v', 'video'), editNode('e')];
+    const res = validateEdge(nodes, [], edge('v', 'e', 'ref-image'));
+    expect(res.ok).toBe(false);
+  });
+
+  it('allowedPortLabels:asset(图片)→ image-edit 含 input 与 ref-image', () => {
+    const labels = allowedPortLabels(assetNode('a'), 'image-edit');
+    expect(labels).toContain('input');
+    expect(labels).toContain('ref-image');
+  });
+});

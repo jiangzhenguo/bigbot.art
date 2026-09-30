@@ -11,6 +11,7 @@ import type {
   RuntimeProbe,
 } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
+import { ToolModelsSection } from './ToolModelsSection';
 import { useI18n, useT } from '../i18n';
 
 interface SettingsPageProps {
@@ -23,12 +24,13 @@ interface SettingsPageProps {
   backLabel: string;
 }
 
-type GroupKey = 'general' | 'llm' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
+type GroupKey = 'general' | 'llm' | 'toolModels' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
 
 /** 面包屑当前组名(与侧栏导航文案一致) */
 const GROUP_LABEL: Record<GroupKey, string> = {
   general: '通用',
   llm: 'LLM 来源',
+  toolModels: '工具模型',
   engines: '引擎(Provider)',
   queue: '队列与资源',
   storage: '存储与项目',
@@ -1151,6 +1153,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               {t('LLM 来源')}
             </a>
             <a
+              className={`side-link${group === 'toolModels' ? ' on' : ''}`}
+              data-panel="toolModels"
+              onClick={() => setGroup('toolModels')}
+            >
+              {t('工具模型')}
+            </a>
+            <a
               className={`side-link${group === 'engines' ? ' on' : ''}`}
               data-panel="engines"
               onClick={() => setGroup('engines')}
@@ -1793,6 +1802,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     document.body,
                   );
                 })()}
+            </div>
+
+            {/* 🆕 工具模型(2026-09-29 v1) */}
+            <div hidden={group !== 'toolModels'}>
+              <ToolModelsSection />
             </div>
 
             {/* 引擎 */}

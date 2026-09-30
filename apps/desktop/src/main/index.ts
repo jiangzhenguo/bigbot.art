@@ -206,6 +206,19 @@ const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
   accel,
   takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
+  // 🆕 工具模型(v1):图片节点缺省模型 + 看图端点覆盖,实时从 SettingsStore 读(改设置即生效,免重启)
+  getToolModels: () => settings.get().toolModels,
+  resolveVisionOverride: async () => {
+    const v = settings.get().toolModels?.vision;
+    if (!v) return undefined;
+    try {
+      const ep = await resolveLlmEndpoint(settings.get(), v);
+      return { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    } catch (e) {
+      console.warn(`[toolModels] 看图端点解析失败,回退 env 链: ${(e as Error).message}`);
+      return undefined;
+    }
+  },
   // 分镜表规划:工具调用(对话里让 Agent 出分镜表)→ agent.planStoryboard(真 LLM,失败回退确定性模板)
   // LLM 来源与 agent-plan 同口径:项目级覆盖 → 全局设置 → worker 默认
   planStoryboard: async (brief, opts) => {

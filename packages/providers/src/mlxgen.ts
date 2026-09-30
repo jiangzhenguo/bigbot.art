@@ -251,8 +251,13 @@ export class MlXGenProvider implements Provider {
     // 默认模型按 kind 分派(真实事故:Agent 建 image-edit 节点只写了 prompt,没写 model,
     // 缺省成 z-image 纯文生图模型,CLI auto 路由成 latent i2i 缺 --image-strength 直接 exit 2):
     //   文生图/img2img → z-image-turbo;指令编辑/inpaint/outpaint → Qwen Image Edit;超分 → SeedVR2
-    // 注意:instruction 的默认仍是 Qwen Image Edit(存量行为不变)。要用 Qwen-Image-2.1 参考编辑
-    // (1-10 张参考图 / 原生 RGBA)需在检查器把模型显式换成 Qwen/Qwen-Image-2.1(全量 bf16)
+    //
+    // ⚠️ 本表是**安全网**,不是产品默认值的权威来源:
+    //   决策 1(2026-09-29)已把「指令编辑」的产品默认定为 Qwen-Image-2.1(qwen21.edit,
+    //   1-10 张参考图;多图参考链路同日已接通),由 v1 设置页「工具模型」经
+    //   AppSettings.toolModels 注入 params.model 生效(docs/工具模型选择-产品设计与技术方案.md)。
+    //   届时本表的 instruction 值应同步改 2.1;在 v1 落地前,此处维持 Qwen Image Edit
+    //   —— 它是「绕过设置页直传」路径(Agent engine.submit 等)的兜底,不能悬空。
     const DEFAULT_MODEL_BY_KIND: Record<string, string> = {
       generate: 'AbstractFramework/z-image-turbo-8bit',
       img2img: 'AbstractFramework/z-image-turbo-8bit',
@@ -314,24 +319,44 @@ export class MlXGenProvider implements Provider {
       // 一旦它与图片数量不匹配(如 2 张图却落到单图 handler),改写链断裂,`--image` 被原样透传
       // 给裸 `mflux-generate-flux2`,argparse 直接报歧义退出:
       //   "ambiguous option: --image could match --image-path, --image-strength" → exit 2
-      // 故此处**按图片数量显式选择 i2i-mode**,绝不依赖 CLI 的 auto 推断。
+      // 故此处**显式选择 i2i-mode**(按模型能力行,见下),绝不依赖 CLI 的 auto 推断。
       const refPaths = (req.references ?? [])
         .filter((r) => r.role === 'ref-image' && r.localPath)
         .map((r) => String(r.localPath));
       if (refPaths.length > 0) {
-        if (!/flux.?2.*klein/i.test(model)) {
+        // 2026-09-29 缺陷 D 修复:模式**按模型能力行选**,不按图片数量猜 ——
+        // klein 有 flux2.multi-reference(多图无上限);2.1 的参考生成走 qwen21.edit
+        // (edit-reference,1-10 张),没有 multi-reference handler,多图推 multi-reference
+        // 会撞上「模式与能力不匹配 → 改写链断裂 → argparse exit 2」的老事故形态。
+        const isQwen21 = MlXGenProvider.isQwen21EditModel(repoModel);
+        if (!/flux.?2.*klein/i.test(model) && !isQwen21) {
           throw new Error(
             `带参考图的生成需要多参考模型(当前 ${model} 是纯文生图):` +
-              '请把节点模型改为 AbstractFramework/flux.2-klein-9b-8bit(约 18GB,设置页「模型」可下载),' +
+              '请把节点模型改为 AbstractFramework/flux.2-klein-9b-8bit(约 18GB,多参考无上限)或 ' +
+              'Qwen/Qwen-Image-2.1(1-10 张参考图;均在设置页「模型」可下载),' +
               '或断开参考图连线再提交',
           );
         }
-        // 单图 → edit(flux2.edit 能力行,单图 max_images=1);多图 → multi-reference(复数参数)
-        // 合法取值归一化后为 auto / latent-img2img / edit-reference / multi-reference,
-        // 别名 `edit` ≡ `edit-reference`(task_inference.py I2I_MODE_ALIASES);
-        // 两者都显式声明,避免 auto 推断把 2 张图塞进单图 handler
-        cmd.push('--i2i-mode', refPaths.length > 1 ? 'multi-reference' : 'edit');
-        for (const rp of refPaths) cmd.push('--image', rp);
+        if (isQwen21) {
+          if (refPaths.length > 10) {
+            throw new Error(
+              `Qwen-Image-2.1 参考生成最多支持 10 张参考图(当前 ${refPaths.length} 张);` +
+                '请断开多余的参考图连线,或改用 AbstractFramework/flux.2-klein-9b-8bit(无上限)',
+            );
+          }
+          // qwen21.edit 参数面:--image-paths(复数,nargs='+')+ 显式 --i2i-mode edit
+          // (与 instruction 分支同口径;CLI 在多张 --image-paths 时会自动推成 multi-reference,
+          //  而 2.1 没有该能力行 → 必须显式声明 edit,见下方 edit 分支的根因记录)
+          cmd.push('--i2i-mode', 'edit', '--image-paths');
+          for (const rp of refPaths) cmd.push(rp);
+        } else {
+          // klein:单图 → edit(flux2.edit 能力行,单图 max_images=1);多图 → multi-reference(复数参数)
+          // 合法取值归一化后为 auto / latent-img2img / edit-reference / multi-reference,
+          // 别名 `edit` ≡ `edit-reference`(task_inference.py I2I_MODE_ALIASES);
+          // 两者都显式声明,避免 auto 推断把 2 张图塞进单图 handler
+          cmd.push('--i2i-mode', refPaths.length > 1 ? 'multi-reference' : 'edit');
+          for (const rp of refPaths) cmd.push('--image', rp);
+        }
       }
       if (seeds.length > 0) {
         cmd.push('--seed');
@@ -450,11 +475,19 @@ export class MlXGenProvider implements Provider {
       if (kind === 'img2img') {
         // 实测防呆(2026-09 真实跑):Qwen Image Edit 无 latent I2I 能力,
         // mlxgen 直接 exit 2("Qwen Image Edit does not support latent image-to-image generation");
-        // 图生图须用 Z-Image Turbo(capabilities:z-image.latent / latent-img2img,本机已验证)
-        if (model in MlXGenProvider.BASE_MODEL_HINTS || /qwen.*image.*edit/i.test(model)) {
+        // 图生图须用 Z-Image Turbo / 2.1 / klein(均有 latent 能力行)。
+        //
+        // 2026-09-29 缺陷 A 修复:旧判定 `model in BASE_MODEL_HINTS` 把**路由提示登记表**
+        // 当成「无 latent 能力名单」用 —— 而 BASE_MODEL_HINTS 里登记的恰恰是 2.1 的三个标识
+        // (Qwen/Qwen-Image-2.1 / 本地目录名 / 历史 8bit),于是「实测有 qwen21.latent 的 2.1」
+        // 被误拒;且同一模型填本地路径(model 是目录,不在表里)又放行 —— 同模型两种结果。
+        // 现按**能力**判定:只有 Qwen Image Edit 被拒(真实跑 exit 2 的那一个,见上)。
+        const noLatent = /qwen.*image.*edit/i.test(model) || /qwen.*image.*edit/i.test(repoModel);
+        if (noLatent) {
           throw new Error(
             `图生图(img2img)模式不支持模型 ${model}(Qwen Image Edit 无 latent I2I 能力);` +
-              '请在检查器把模型改为 AbstractFramework/z-image-turbo-8bit,或改用「指令编辑」模式',
+              '请在检查器把模型改为 AbstractFramework/z-image-turbo-8bit 或 Qwen/Qwen-Image-2.1,' +
+              '或改用「指令编辑」模式',
           );
         }
         cmd.push('--i2i-mode', 'latent');

@@ -90,6 +90,57 @@ describe('submit · generate 参考图(多参考生成)', () => {
     expect(cmd).not.toContain('--image');
   });
 });
+describe('submit · generate 参考图 · Qwen-Image-2.1(缺陷 D,2026-09-29)', () => {
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image',
+      localPath: p,
+    }));
+
+  it('2.1 + 2 张参考图 → --i2i-mode edit + --image-paths(不是 multi-reference;2.1 没有该 handler)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: 'Qwen/Qwen-Image-2.1', prompt: '角色展示图' }),
+      references: refs(['/lib/r1.png', '/lib/r2.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    const ip = cmd.indexOf('--image-paths');
+    expect(ip).toBeGreaterThan(-1);
+    expect(cmd.slice(ip + 1, ip + 3)).toEqual(['/lib/r1.png', '/lib/r2.png']);
+    // 2.1 参数面不用逐张 --image(klein 的写法)
+    expect(cmd).not.toContain('--image');
+  });
+
+  it('2.1 + 单张参考图 → 同样 --image-paths(参数面一致,不因数量切换写法)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: 'Qwen/Qwen-Image-2.1', prompt: '换风格' }),
+      references: refs(['/lib/only.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    expect(cmd.slice(cmd.indexOf('--image-paths') + 1, cmd.indexOf('--image-paths') + 2)).toEqual(['/lib/only.png']);
+  });
+
+  it('2.1 + 11 张参考图 → 提交前拦截(上限 10),建议换 klein', async () => {
+    const p = makeProvider();
+    const many = Array.from({ length: 11 }, (_, i) => `/lib/r${i}.png`);
+    await expect(
+      p.submit({ ...req('generate', { model: 'Qwen/Qwen-Image-2.1' }), references: refs(many) }),
+    ).rejects.toThrow('最多支持 10 张');
+  });
+
+  it('2.1 本地目录路径 + 参考图 → 同口径(isQwen21EditModel 按 checkpoint 判,不认路径形式)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: 'Qwen-Image-2.1-bf16', prompt: 'x' }),
+      references: refs(['/lib/a.png', '/lib/b.png']),
+    });
+    expect(lastCmd(p)[lastCmd(p).indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+});
 
 describe('submit · generate(文生图)', () => {
   it('命令以 generate 开头,含模型/提示词/宽高/步数/引导/输出', async () => {
@@ -251,6 +302,20 @@ describe('submit · edit(编辑四模式)', () => {
     expect(cmd[cmd.indexOf('--image-strength') + 1]).toBe('0.50');
   });
 
+
+  it('img2img + Qwen-Image-2.1:放行(缺陷 A 修复;2.1 实测有 qwen21.latent,BASE_MODEL_HINTS 成员资格不再当能力判定)', async () => {
+    const p = makeProvider();
+    await p.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png', model: 'Qwen/Qwen-Image-2.1' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
+    expect(cmd).toContain('--image-strength');
+  });
+
+  it('img2img + 2.1 本地目录标识:同样放行(同模型两种写法一致)', async () => {
+    const p = makeProvider();
+    await p.submit(req('img2img', { prompt: '改写风格', inputPath: '/tmp/in.png', model: 'Qwen-Image-2.1-bf16' }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--i2i-mode') + 1]).toBe('latent');
+  });
   it('img2img + Qwen Image Edit 模型:提交前拒绝(mlxgen exit 2 防呆),提示换 Z-Image Turbo', async () => {
     const p = makeProvider();
     await expect(

@@ -25,18 +25,24 @@ type PortRow = [port: string, desc: string];
 type PortEntry = PortRow | PortRow[];
 
 /** 源节点 id 特例(演示节点/固定语义) */
-const BY_ID: Record<string, Record<string, PortRow>> = {
+const BY_ID: Record<string, Record<string, PortEntry>> = {
   // 演示画布里的角色资产:身份注入优先于通用参考图
   charAsset: {
     shot: ['ref-image', '参考图 · Ref2VA 身份注入'],
     image: ['ref-image', '参考图 · 角色一致性'],
-    edit: ['input', '输入图 · 原图编辑'],
+    edit: [
+      ['input', '输入图 · 原图编辑'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
   },
   // 环境资产:可作为首帧候选
   envAsset: {
     shot: ['first-frame', '首帧候选 · 场景参考'],
     image: ['ref-image', '风格参考 · 提示词注入'],
-    edit: ['input', '输入图 · 原图编辑'],
+    edit: [
+      ['input', '输入图 · 原图编辑'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
   },
 };
 
@@ -60,7 +66,10 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 直通'],
       ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
     ],
-    edit: ['input', '输入图 · 直通'],
+    edit: [
+      ['input', '输入图 · 直通'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
     stitch: ['piece', '拼接件 · 多图按画布位置排序'],
@@ -73,11 +82,17 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 直通'],
       ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
     ],
-    edit: ['input', '输入图 · 直通'],
+    edit: [
+      ['input', '输入图 · 直通'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
     stitch: ['piece', '拼接件 · 多图按画布位置排序'],
     split: ['input', '输入图 · 拆分源'],
+    // 🆕 参考图 → 多参考编辑(2026-09-29):Qwen-Image-2.1 的 `qwen21.edit` 支持 1-10 张参考图,
+    // 需与 shared 的 CONNECTOR_MAP 保持同构(两表分叉会造成「边画得出来但派生态不认」的闪烁事故)。
+    image: ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
     timeline: ['clip', '静帧片段 · 入轨'],
   },
   'image-upscale': {
@@ -85,7 +100,10 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 直通'],
       ['ref-image', '参考图 · Ref2VA 身份/场景锁定'],
     ],
-    edit: ['input', '输入图 · 直通'],
+    edit: [
+      ['input', '输入图 · 直通'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     crop: ['input', '输入图 · 原图裁切'],
     stitch: ['piece', '拼接件 · 多图按画布位置排序'],
     split: ['input', '输入图 · 拆分源'],
@@ -99,7 +117,10 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 裁切出的静帧直通'],
       ['ref-image', '参考图 · 裁切出的静帧作 Ref2VA'],
     ],
-    edit: ['input', '输入图 · 裁切出的静帧'],
+    edit: [
+      ['input', '输入图 · 裁切出的静帧'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
     stitch: ['piece', '拼接件 · 多图按画布位置排序'],
@@ -122,7 +143,10 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 裁切直通'],
       ['ref-image', '参考图 · 裁切结果作 Ref2VA'],
     ],
-    edit: ['input', '输入图 · 裁切结果'],
+    edit: [
+      ['input', '输入图 · 裁切结果'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     upscale: ['input', '输入图 · 超分源'],
     stitch: ['piece', '拼接件 · 多图按画布位置排序'],
     split: ['input', '输入图 · 拆分源'],
@@ -134,7 +158,10 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
       ['first-frame', '首帧 · 拼接直通'],
       ['ref-image', '参考图 · 拼接结果作 Ref2VA'],
     ],
-    edit: ['input', '输入图 · 拼接结果'],
+    edit: [
+      ['input', '输入图 · 拼接结果'],
+      ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+    ],
     upscale: ['input', '输入图 · 超分源'],
     crop: ['input', '输入图 · 原图裁切'],
     stitch: ['piece', '拼接件 · 拼接结果再拼接'],
@@ -283,7 +310,10 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
   // 长 kind(快照加载的节点无 tag,拖拽连线传入 kind)归一为节点库短 id
   dstTypeId = KIND_TO_TAGID[dstTypeId] ?? dstTypeId;
   const byId = BY_ID[src.id]?.[dstTypeId];
-  if (byId) return [{ port: byId[0], desc: byId[1] }];
+  if (byId) {
+    const rows: PortRow[] = Array.isArray(byId[0]) ? (byId as PortRow[]) : [byId as PortRow];
+    return rows.map(([port, desc]) => ({ port, desc }));
+  }
 
   // asset 按媒体类型细分(图片 / 视频 / 音频 / 文档)——资源节点只作输入源,端口语义随媒体类型变化
   if (src.kind === 'asset') {
@@ -295,11 +325,14 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
         { port: 'ref-image', desc: '参考图 · Ref2VA 身份/场景锁定' },
       ];
     }
-    const TABLES: Record<string, Record<string, PortRow>> = {
+    const TABLES: Record<string, Record<string, PortEntry>> = {
       image: {
         shot: ['ref-image', '参考图 · Ref2VA'],
         image: ['ref-image', '参考图'],
-        edit: ['input', '输入图 · 原图编辑'],
+        edit: [
+          ['input', '输入图 · 原图编辑'],
+          ['ref-image', '参考图 · 多参考编辑(2.1 支持 1-10 张)'],
+        ],
         upscale: ['input', '输入图 · 超分源'],
         crop: ['input', '输入图 · 原图裁切'],
         stitch: ['piece', '拼接件 · 多图按画布位置排序'],
@@ -329,7 +362,10 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
     // noUncheckedIndexedAccess 下索引访问均可能 undefined,空表兜底(查不到 → [])
     const table = TABLES[mt] ?? TABLES.image ?? {};
     const hit = table[dstTypeId];
-    if (hit) return [{ port: hit[0], desc: hit[1] }];
+    if (hit) {
+      const rows: PortRow[] = Array.isArray(hit[0]) ? (hit as PortRow[]) : [hit as PortRow];
+      return rows.map(([port, desc]) => ({ port, desc }));
+    }
     // 素材/文档 → 工作流入口槽位(设计稿表缺此项,按 §11 迁移映射表 7/9 号补齐)
     if (dstTypeId === 'wf-input') return [{ port: 'slot-<名称>', desc: '按槽位类型匹配槽位' }];
     return [];

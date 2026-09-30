@@ -39,6 +39,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const outputPatch = new Map<string, Record<string, string[]>>();
   const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
+  /** 🆕 参考图端口 ref-image(多值):image-edit 多参考编辑(Qwen-Image-2.1 `qwen21.edit` 支持 1-10 张) */
+  const editRefPatch = new Map<string, string[]>();
   /** 视频输入端口(video-upscale / frame-grab 的输入):只收视频来源(shot/video-upscale/视频 asset) */
   const videoFromPatch = new Map<string, { nodeId: string } | null>();
   /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
@@ -218,11 +220,19 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         break;
       }
       case 'image-edit': {
-        // 输入图端口 input:静帧产物直通 / 素材引用;无条件登记(内容比对由 JSON 兜底,保证幂等)
+        // 输入图端口 input(单值):静帧产物直通 / 素材引用
+        // 🆕 参考图端口 ref-image(多值):与 input 分开累积(2026-09-29 接线 2.1 多参考编辑,
+        //    此前该 case 不区分 label,任何入边都覆盖 inputImageFrom → 多图参考画得出边却只留最后一张)
         // ⚠️ 不再有 `shot` 分支:视频 → 图片编辑的直连已取消(图片编辑要静帧,
         //    视频须先经 frame-grab 落成图片)。frame-grab 产物已计入 IMAGE_KINDS,走下面这支。
         if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
-          imageFromPatch.set(e.to, { nodeId: e.from });
+          if (e.label === 'ref-image') {
+            const arr = editRefPatch.get(e.to) ?? [];
+            if (!arr.includes(e.from)) arr.push(e.from);
+            editRefPatch.set(e.to, arr);
+          } else {
+            imageFromPatch.set(e.to, { nodeId: e.from });
+          }
         }
         if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
           const cur = d.promptFrom as PromptSource | undefined;
@@ -362,6 +372,12 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       const target = imageFromPatch.get(n.id) ?? null;
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;
+    }
+    // 🆕 参考图端口 ref-image(多值,仅 image-edit):与边同步,删除边即撤销
+    if (n.kind === 'image-edit') {
+      const refs = editRefPatch.get(n.id) ?? [];
+      if (refs.length) data.refImageFrom = refs.map((id) => ({ nodeId: id }));
+      else delete data.refImageFrom;
     }
     // 视频输入端口(video-upscale / frame-grab):与边同步,删除边即撤销
     if (n.kind === 'video-upscale' || n.kind === 'frame-grab') {

@@ -293,6 +293,12 @@ export interface ImageEditParams {
   inputFrameSource?: { videoNodeId: string; at: 'first' | 'last' };
   /** 输入图来源(由图片产物/素材连线直通,渲染层写入;运行期与 inputAssetId 同优先级) */
   inputImageFrom?: { nodeId: string };
+  /**
+   * 🆕 参考图来源(ref-image 入边,多值,渲染层写入;删除边即撤销)。
+   * 供 Qwen-Image-2.1 的 `qwen21.edit` 多参考编辑(1-10 张)使用;
+   * 提交时解析为 RenderRequest.references(role='ref-image')。
+   */
+  refImageFrom?: Array<{ nodeId: string }>;
 }
 
 /** 图片裁切参数(image-crop 节点:不推理,按目标画幅 ffmpeg 居中/锚点裁剪) */
@@ -823,6 +829,24 @@ export interface AppSettings {
   accelPacks?: AccelPack[];
   /** 云端供应商目录(凭据存钥匙串,这里只有 hasKey 标记) */
   cloudProviders?: CloudProviderEntry[];
+  /** 🆕 工具模型绑定(设置页「工具模型」;缺省走 DEFAULT_TOOL_MODELS / vision env 回退链) */
+  toolModels?: ToolModelBinding;
+}
+
+/**
+ * 工具模型绑定 —— 按能力指定默认模型(2026-09-29 v1)。
+ * 解析逻辑与兜底表在 packages/shared/src/tool-models.ts。
+ */
+export interface ToolModelBinding {
+  /** 生成类能力的模型(repoId / 本地目录路径 / 别名);不填 = DEFAULT_TOOL_MODELS */
+  image?: Partial<Record<string, string>>;
+  /**
+   * 看图反推(vision.caption)的模型来源。
+   * 不填 = 既有回退链:BIGBOTART_VL_* env → 主 LLM env → 本地默认。
+   * ⚠️ 不是「继承 settings.llm」——主 LLM 往往无视觉能力,静默继承会把看图
+   *    指向一个看不懂图的端点(设计见方案文档 §3.1 / §4.2.1)。
+   */
+  vision?: LlmSource;
 }
 
 /** 资产导入结果 */

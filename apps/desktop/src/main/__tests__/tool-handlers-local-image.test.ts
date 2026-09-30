@@ -143,6 +143,67 @@ describe('resolveRefImagePaths(image-gen 参考图)', () => {
     const canvas = { nodes: [node('t', 'image-gen', {})], edges: [] };
     expect(resolveRefImagePaths(canvas, canvas.nodes[0]!, assets({}))).toEqual([]);
   });
+
+  it('image-edit 同样收集 ref-image(2.1 多参考编辑;此前只认 image-gen,Agent 连的参考图被丢弃)', async () => {
+    const { resolveRefImagePaths } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('a1', 'asset', { assetId: 'asset-1' }),
+        node('g1', 'image-gen', { resultPath: '/o/g1.png' }),
+        node('e1', 'image-edit', { mode: 'instruction' }),
+      ],
+      edges: [
+        edge('a1', 'e1', 'ref-image'),
+        edge('g1', 'e1', 'ref-image'),
+        edge('a1', 'e1', 'input'), // input 边不计入参考图
+      ],
+    };
+    expect(resolveRefImagePaths(canvas, canvas.nodes[2]!, assets({ 'asset-1': '/lib/p1.png' }))).toEqual([
+      '/lib/p1.png',
+      '/o/g1.png',
+    ]);
+  });
+});
+
+describe('buildImageSubmitParams · 工具模型缺省解析(2026-09-29 v1)', () => {
+  it('image-gen 未选模型 + 设置页指定 → 用设置值', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = { nodes: [node('g', 'image-gen', { prompt: '猫' })], edges: [] };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[0]!, assets({}), {
+      image: { 'image.generate': 'Qwen/Qwen-Image-2.1' },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.params.model).toBe('Qwen/Qwen-Image-2.1');
+  });
+
+  it('image-gen 未选模型 + 未配置 → 内置默认 z-image-turbo(存量行为)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = { nodes: [node('g', 'image-gen', { prompt: '猫' })], edges: [] };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[0]!, assets({}));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.params.model).toBe('AbstractFramework/z-image-turbo-8bit');
+  });
+
+  it('image-edit(instruction)未选模型 → 内置默认 2.1(决策 1)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [node('a1', 'asset', { assetId: 'asset-1' }), node('e', 'image-edit', { mode: 'instruction' })],
+      edges: [edge('a1', 'e', 'input')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({ 'asset-1': '/lib/p.png' }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.params.model).toBe('Qwen/Qwen-Image-2.1');
+  });
+
+  it('节点显式 model 永远优先于设置页与内置默认', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = { nodes: [node('g', 'image-gen', { prompt: '猫', model: 'AbstractFramework/flux.2-klein-9b-8bit' })], edges: [] };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[0]!, assets({}), {
+      image: { 'image.generate': 'Qwen/Qwen-Image-2.1' },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.params.model).toBe('AbstractFramework/flux.2-klein-9b-8bit');
+  });
 });
 
 describe('buildImageSubmitParams(image 类节点提交参数)', () => {
@@ -165,6 +226,34 @@ describe('buildImageSubmitParams(image 类节点提交参数)', () => {
     const { buildImageSubmitParams } = await import('../tool-handlers');
     const canvas = { nodes: [node('e', 'image-edit', { mode: 'instruction' })], edges: [] };
     const r = buildImageSubmitParams(canvas, canvas.nodes[0]!, assets({}));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('没有输入图');
+  });
+
+  it('2.1 指令编辑:无 input 但有 ref-image 参考图 → 放行(qwen21.edit 允许无底图)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('a1', 'asset', { assetId: 'asset-1' }),
+        node('e', 'image-edit', { mode: 'instruction', model: 'Qwen/Qwen-Image-2.1', prompt: '换成海报风格' }),
+      ],
+      edges: [edge('a1', 'e', 'ref-image')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({ 'asset-1': '/lib/p.png' }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.params.inputPath).toBeUndefined();
+  });
+
+  it('非 2.1 模型:无 input 只有 ref-image → 仍拦截(qwen.edit/flux2.edit 必须要底图)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('a1', 'asset', { assetId: 'asset-1' }),
+        node('e', 'image-edit', { mode: 'instruction', model: 'mlx-community/Qwen-Image-Edit-8bit' }),
+      ],
+      edges: [edge('a1', 'e', 'ref-image')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({ 'asset-1': '/lib/p.png' }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('没有输入图');
   });

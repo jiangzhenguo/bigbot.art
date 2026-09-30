@@ -919,8 +919,8 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .local-card{background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);padding:11px 13px;font-size:var(--text-xs);color:var(--fg-2);line-height:1.55}
 .pg-settings .panel{flex:1;overflow:auto;padding:26px 30px 60px;min-width:0}
 .pg-settings .panel-in{max-width:760px;display:flex;flex-direction:column;gap:18px}
-.pg-settings .group{border:1px solid var(--border-soft);border-radius:var(--radius-lg);background:var(--bg);overflow:hidden}
-.pg-settings .group>.gh{padding:13px 18px;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px;background:var(--surface-warm)}
+.pg-settings .group{border:1px solid var(--border-soft);border-radius:var(--radius-lg);background:var(--bg);overflow:visible}
+.pg-settings .group>.gh{padding:13px 18px;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px;background:var(--surface-warm);border-radius:calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0}
 .pg-settings .group>.gh b{font-size:var(--text-sm);font-weight:600}
 .pg-settings .srow{display:flex;align-items:center;gap:14px;padding:13px 18px;border-bottom:1px solid var(--border-soft);font-size:var(--text-sm)}
 .pg-settings .srow:last-child{border-bottom:0}
@@ -1134,6 +1134,22 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .vram-txt{font-size:10.5px;color:var(--muted)}
 .pg-settings .vram-txt b{color:var(--fg-2);font-weight:600}
 
+/* ── 工具模型分组(ToolModelsSection)── */
+.pg-settings .tm-intro{padding:12px 18px 2px;font-size:var(--text-xs);color:var(--muted);line-height:1.6}
+.pg-settings .tm-sec{display:flex;align-items:baseline;gap:8px;padding:15px 18px 9px;border-top:1px solid var(--border-soft)}
+.pg-settings .tm-intro+.tm-sec{border-top:0;padding-top:10px}
+.pg-settings .tm-sec .tm-note{font-size:10.5px;color:var(--muted)}
+.pg-settings .tm-field{margin-top:8px}
+.pg-settings .srow .combo{flex:1;min-width:0}
+/* 页面内联 select:与 .input-w 同口径(原生 select 未被全局重置,需显式纳入设计系统) */
+.pg-settings .sel{appearance:none;-webkit-appearance:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 26px 7px 10px;font-size:var(--text-xs);font-family:inherit;color:var(--fg);background-color:var(--surface-warm);background-image:linear-gradient(45deg,transparent 50%,var(--meta) 50%),linear-gradient(135deg,var(--meta) 50%,transparent 50%);background-position:calc(100% - 14px) 50%,calc(100% - 10px) 50%;background-size:4px 4px;background-repeat:no-repeat;cursor:pointer;transition:border-color var(--motion-fast),background-color var(--motion-fast)}
+.pg-settings .sel:hover{border-color:var(--meta);background-color:var(--bg)}
+.pg-settings .sel:focus-visible{box-shadow:var(--focus-ring);border-color:var(--accent)}
+/* combo-menu 里的自定义 repoId 输入(f-in 原生样式只在 .pg-canvas 作用域;设置页给同口径兜底) */
+.pg-settings .f-in{border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:11.5px;font-family:var(--font-mono);background:var(--bg);width:100%;transition:border-color var(--motion-fast)}
+.pg-settings .f-in:hover{border-color:var(--meta)}
+.pg-settings .f-in:focus-visible{box-shadow:var(--focus-ring);border-color:var(--accent)}
+
 /* 兜底:页面内任何 hidden 一律隐藏(弹层用条件渲染,无需 .ovl/.lm-pop 的 hidden 规则) */
 .pg-settings [hidden]{display:none!important}
 /* ═══ Shot 检查器(h3.c 完整表单 · 移植自 states.html §3/§4) ═══ */
@@ -1315,32 +1331,32 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp textarea.f-ta.short{min-height:48px}
 
 /* 模型下拉(combobox) */
-.pg-canvas .insp .combo{position:relative}
-.pg-canvas .insp .combo-btn{display:flex;width:100%;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg);cursor:pointer;text-align:left;transition:border-color var(--motion-fast)}
-.pg-canvas .insp .combo-btn:hover{border-color:var(--meta)}
-.pg-canvas .insp .combo-btn .ico{width:24px;height:24px;border-radius:7px;background:var(--surface);display:grid;place-items:center;color:var(--fg-2);flex:none;font-family:var(--font-mono);font-size:9.5px;font-weight:600;letter-spacing:.04em}
-.pg-canvas .insp .combo-btn .meta{display:flex;flex-direction:column;flex:1;min-width:0}
-.pg-canvas .insp .combo-btn .name{font-size:12.5px;font-weight:500;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pg-canvas .insp .combo-btn .desc{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.pg-canvas .insp .combo-btn .badge{font-size:9.5px;font-family:var(--font-mono);padding:2px 7px;border-radius:var(--radius-pill);border:1px solid var(--border);color:var(--meta);background:var(--bg);flex:none}
-.pg-canvas .insp .combo-btn .badge.ok{color:var(--success);border-color:color-mix(in oklab,var(--success) 35%,var(--border))}
-.pg-canvas .insp .combo-btn .badge.dl{color:var(--warn);border-color:color-mix(in oklab,var(--warn) 38%,var(--border))}
-.pg-canvas .insp .combo-btn .caret{margin-left:auto;color:var(--muted);flex:none}
-.pg-canvas .insp .combo-btn .caret svg{width:11px;height:11px}
-.pg-canvas .insp .combo-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);background:var(--bg);border:1px solid var(--border);border-radius:12px;box-shadow:0 14px 38px rgba(0,0,0,.14),0 2px 6px rgba(0,0,0,.05);padding:5px;z-index:10;max-height:280px;overflow:auto;display:none}
-.pg-canvas .insp .combo-menu.open{display:block}
-.pg-canvas .insp .combo-opt{display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer}
-.pg-canvas .insp .combo-opt:hover{background:var(--surface)}
-.pg-canvas .insp .combo-opt.sel{background:color-mix(in oklab,var(--accent) 9%,var(--surface))}
-.pg-canvas .insp .combo-opt .ico{width:22px;height:22px;border-radius:6px;background:var(--surface);display:grid;place-items:center;color:var(--fg-2);flex:none;font-family:var(--font-mono);font-size:8.5px;font-weight:600;letter-spacing:.04em}
-.pg-canvas .insp .combo-opt.sel .ico{background:var(--accent);color:#fff}
-.pg-canvas .insp .combo-opt .meta{flex:1;min-width:0}
-.pg-canvas .insp .combo-opt .name{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pg-canvas .insp .combo-opt .desc{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.pg-canvas .insp .combo-opt .badge{font-size:9.5px;font-family:var(--font-mono);padding:2px 7px;border-radius:var(--radius-pill);border:1px solid var(--border);color:var(--meta);background:var(--bg);flex:none}
-.pg-canvas .insp .combo-opt .badge.ok{color:var(--success);border-color:color-mix(in oklab,var(--success) 35%,var(--border))}
-.pg-canvas .insp .combo-opt .badge.dl{color:var(--warn);border-color:color-mix(in oklab,var(--warn) 38%,var(--border));cursor:pointer}
-.pg-canvas .insp .combo-foot{padding:6px 9px 4px;border-top:1px solid var(--border-soft);margin-top:5px;font-size:10.5px;color:var(--muted)}
+.combo{position:relative}
+.combo-btn{display:flex;width:100%;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg);cursor:pointer;text-align:left;transition:border-color var(--motion-fast)}
+.combo-btn:hover{border-color:var(--meta)}
+.combo-btn .ico{width:24px;height:24px;border-radius:7px;background:var(--surface);display:grid;place-items:center;color:var(--fg-2);flex:none;font-family:var(--font-mono);font-size:9.5px;font-weight:600;letter-spacing:.04em}
+.combo-btn .meta{display:flex;flex-direction:column;flex:1;min-width:0}
+.combo-btn .name{font-size:12.5px;font-weight:500;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.combo-btn .desc{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.combo-btn .badge{font-size:9.5px;font-family:var(--font-mono);padding:2px 7px;border-radius:var(--radius-pill);border:1px solid var(--border);color:var(--meta);background:var(--bg);flex:none}
+.combo-btn .badge.ok{color:var(--success);border-color:color-mix(in oklab,var(--success) 35%,var(--border))}
+.combo-btn .badge.dl{color:var(--warn);border-color:color-mix(in oklab,var(--warn) 38%,var(--border))}
+.combo-btn .caret{margin-left:auto;color:var(--muted);flex:none}
+.combo-btn .caret svg{width:11px;height:11px}
+.combo-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);background:var(--bg);border:1px solid var(--border);border-radius:12px;box-shadow:0 14px 38px rgba(0,0,0,.14),0 2px 6px rgba(0,0,0,.05);padding:5px;z-index:10;max-height:280px;overflow:auto;display:none}
+.combo-menu.open{display:block}
+.combo-opt{display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer}
+.combo-opt:hover{background:var(--surface)}
+.combo-opt.sel{background:color-mix(in oklab,var(--accent) 9%,var(--surface))}
+.combo-opt .ico{width:22px;height:22px;border-radius:6px;background:var(--surface);display:grid;place-items:center;color:var(--fg-2);flex:none;font-family:var(--font-mono);font-size:8.5px;font-weight:600;letter-spacing:.04em}
+.combo-opt.sel .ico{background:var(--accent);color:#fff}
+.combo-opt .meta{display:flex;flex-direction:column;flex:1;min-width:0}
+.combo-opt .name{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.combo-opt .desc{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.combo-opt .badge{font-size:9.5px;font-family:var(--font-mono);padding:2px 7px;border-radius:var(--radius-pill);border:1px solid var(--border);color:var(--meta);background:var(--bg);flex:none}
+.combo-opt .badge.ok{color:var(--success);border-color:color-mix(in oklab,var(--success) 35%,var(--border))}
+.combo-opt .badge.dl{color:var(--warn);border-color:color-mix(in oklab,var(--warn) 38%,var(--border));cursor:pointer}
+.combo-foot{padding:6px 9px 4px;border-top:1px solid var(--border-soft);margin-top:5px;font-size:10.5px;color:var(--muted)}
 
 /* 画幅预设 */
 .pg-canvas .insp .aspect{display:grid;grid-template-columns:repeat(6,1fr);gap:4px}

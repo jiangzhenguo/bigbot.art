@@ -8,6 +8,8 @@ import {
   rowNeedsImage,
   rowSeconds,
   tableToGfm,
+  capabilityOf,
+  resolveImageModel,
 } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
 import {
@@ -327,7 +329,6 @@ export default function CanvasPage({
   /** 正在重命名的节点 id(null = 无;节点头部显示内联输入框,Electron 不支持 window.prompt) */
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; n: number } | null>(null);
-  const [inspectTitle, setInspectTitle] = useState('镜头 02 · 男主踱步');
 
   /* ── 自增 id / 演示附件轮换 ──
      id 必须全局唯一:重复 id 会让 React key 冲突、拖拽时同号节点一起动、
@@ -381,6 +382,8 @@ export default function CanvasPage({
   /* Agent 对话面板:全部状态/副作用在 pages/agent/useAgentChat(本组件只持有返回值) */
   const selInfo = selected ? infoMap[selected] : undefined;
   const selNode = selected ? nodes.find((n) => n.id === selected) : undefined;
+  /** 检查器标题 = 当前选中节点的名字 + ID(派生值,跟随选中/重命名实时更新,不再写死) */
+  const inspectTitle = selNode ? `${selInfo?.t ?? selNode.title} · ${selNode.id}` : '未选择节点';
 
   const toastMsg = useCallback((msg: string) => {
     setToast({ msg, n: Date.now() });
@@ -1067,19 +1070,12 @@ export default function CanvasPage({
    */
   const selectNode = useCallback((id: string | null) => {
     setSelectedIds(id ? [id] : []);
-    if (!id) {
-      // 未选任何节点:检查器不应残留上一节点的标题
-      setInspectTitle('未选择节点');
-      return;
-    }
+    if (!id) return;
     const info = NODE_INFO_BASE[id];
     setInfoMap((m) => {
       if (m[id] || !info) return m;
       return { ...m, [id]: info };
     });
-    // 演示节点用 NODE_INFO_BASE 标题;新节点用自身 title
-    const node = nodesRef.current.find((n) => n.id === id);
-    setInspectTitle(info?.t ?? node?.title ?? id);
     setTab('insp');
   }, []);
 
@@ -1089,7 +1085,6 @@ export default function CanvasPage({
       const g = groupsRef.current.find((x) => x.id === groupId);
       if (!g) return;
       setSelectedIds([...g.members]);
-      setInspectTitle(`已选「${g.name}」· ${g.members.length} 个节点`);
       setTab('insp');
     },
     [],
@@ -2167,7 +2162,6 @@ export default function CanvasPage({
         if (!cur) return m;
         return { ...m, [id]: { ...cur, t: next } };
       });
-      setInspectTitle((cur) => (cur === n.title ? next : cur));
       toastMsg(`已重命名为「${next}」`);
     },
     [toastMsg, askPrompt, commitEdit],
@@ -2720,9 +2714,12 @@ export default function CanvasPage({
         })
         .filter(Boolean) as never[];
 
-      /* image-gen 的参考图:ref-image 入边 → references(多参考生成;mlxgen 对不支持的模型给指引报错)。
-         真实事故:连线在画布上可见但提交时被丢弃,参考图没进生成命令 */
-      if (n.kind === 'image-gen') {
+      /* image-gen / image-edit 的参考图:ref-image 入边 → references。
+         - image-gen:多参考生成(mlxgen 对不支持的模型给指引报错)。
+           真实事故:连线在画布上可见但提交时被丢弃,参考图没进生成命令
+         - image-edit:多参考编辑(Qwen-Image-2.1 `qwen21.edit`,1-10 张;2026-09-29 接线,
+           此前该分支只认 image-gen,image-edit 的参考图恒为空 → 2.1 被压成单图编辑) */
+      if (n.kind === 'image-gen' || n.kind === 'image-edit') {
         for (const e of edgesRef.current.filter((x) => x.to === nodeId && x.label === 'ref-image')) {
           const up = nodesRef.current.find((x) => x.id === e.from);
           const p = upstreamImagePath(up, e.label, assetCache.current);
@@ -2857,8 +2854,16 @@ export default function CanvasPage({
         if (maskAssetId) maskPath = assetCache.current[maskAssetId];
       }
       if (n.kind === 'image-edit' && !inputPath) {
-        toastMsg('图片编辑需要输入图:连一个 shot / 图片节点 / asset,或在检查器填 Asset ID');
-        return;
+        /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」
+           (Provider 侧 qwen21Refs = inputPath + ref-image 参考图,≥1 张即可);
+           其它模型(qwen.edit / flux2.edit)CLI 层面必须给 --image-path,维持原拦截。 */
+        const model = String(d.model ?? '');
+        const isQwen21 = /qwen.*2\.1/i.test(model);
+        const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
+        if (!(isQwen21 && hasRefImages)) {
+          toastMsg('图片编辑需要输入图:连一个 shot / 图片节点 / asset,或在检查器填 Asset ID;(Qwen-Image-2.1 指令编辑可只连参考图)');
+          return;
+        }
       }
 
       // 提示词端口 prompt:连线注入(自身 prompt 为空时才用,不覆盖用户输入)
@@ -2881,10 +2886,19 @@ export default function CanvasPage({
         }
       }
 
+      /* 🆕 缺省模型解析(2026-09-29 v1 工具模型):节点未显式选模型时,
+         按能力取「设置页工具模型 > DEFAULT_TOOL_MODELS」;显式值永远优先。 */
+      const toolModels = isImage ? await ensureToolModels() : undefined;
+      const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
+      const resolvedModel = isImage
+        ? String(d.model ?? '').trim() ||
+          resolveImageModel(toolModels, capabilityOf(String(n.kind ?? ''), String(d.mode ?? 'instruction'), hasRefImages))
+        : undefined;
+
       const params = isImage
         ? {
             kind: n.kind === 'image-upscale' ? 'upscale' : n.kind === 'image-edit' ? String(d.mode ?? 'instruction') : 'generate',
-            model: d.model,
+            model: resolvedModel,
             prompt: promptValue,
             width: d.width,
             height: d.height,
@@ -3065,7 +3079,8 @@ export default function CanvasPage({
             tag: NODE_TYPES.find((t) => t.id === 'image'),
             data: {
               engine: 'mlxgen',
-              model: 'AbstractFramework/z-image-turbo-8bit',
+              // 🆕 不写 model(2026-09-29 v1):留给 runNode 按「工具模型 > 内置默认」缺省解析,
+              // 否则批量铺出的节点全被写死,设置页默认值永远不生效
               prompt: z.text,
               width: size.width,
               height: size.height,
