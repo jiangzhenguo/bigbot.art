@@ -2,7 +2,7 @@
  * 节点映射测试 — image-crop 初始数据与 shared↔本地 转换
  */
 import { describe, it, expect } from 'vitest';
-import { makeInitialData, fromSharedNode, toSharedNodes, defaultDataFor, contentKey } from '../node-mapping.js';
+import { makeInitialData, fromSharedNode, toSharedNodes, defaultDataFor, contentKey, preserveMeasuredSize } from '../node-mapping.js';
 
 describe('makeInitialData · image-crop', () => {
   it('默认为 9:16 · center 锚点', () => {
@@ -82,5 +82,62 @@ describe('contentKey · 瞬态 UI 字段归一化', () => {
     const shared = toSharedNodes([local as never]);
     expect('extra' in (shared[0] as object)).toBe(false);
     expect(fromSharedNode(shared[0] as never).extra).toBeUndefined();
+  });
+
+  /* ═══ 2026-10 事故回归:「进画布连线先在中间、随后跳到节点顶部」═══
+     事故链:RO 测出 h → 连线在中点 → 写盘广播回推 applyCanvasSnapshot →
+     快照节点(无 h)与本地节点(有 h)contentKey 不等 → 判「内容变了」→
+     setNodes 整批替换 → h 全丢 → 端点退回兜底高度(节点顶部);
+     且 DOM 复用、尺寸未变,RO 不再触发,h 永久缺失。 */
+  it('实测高度 h 不参与内容比对(否则每次写盘回推都判内容变更)', () => {
+    const a = contentKey([{ ...base }], [], []);
+    const b = contentKey([{ ...base, h: 342 }], [], []);
+    expect(b).toBe(a);
+  });
+
+  it('快照还原节点经 preserveMeasuredSize 合回已测 h 后,与本地内容相等(端到端回归)', () => {
+    // 本地:已被 RO 测量(有 h);快照:无 h
+    const local = { ...base, h: 342, data: { prompt: 'x' } };
+    const restored = fromSharedNode(toSharedNodes([local as never])[0] as never);
+    expect(restored.h).toBeUndefined();
+    // 不修:contentKey 不等(有 h vs 无 h)→ applyCanvasSnapshot 判内容变更 → 整批替换
+    const merged = preserveMeasuredSize([restored], [local as never]);
+    expect(merged[0]!.h).toBe(342);
+    expect(contentKey(merged as never, [], [])).toBe(contentKey([local as never], [], []));
+    // 且快照还原本身与本地内容也判等(h 不算内容)
+    expect(contentKey([restored as never], [], [])).toBe(contentKey([local as never], [], []));
+  });
+});
+
+describe('preserveMeasuredSize · 已测高度按 id 合并', () => {
+  const base = { id: 'n1', title: '镜头', w: 250, x: 0, y: 0, kind: 'shot' as const };
+
+  it('按 id 合回 h;快照里没有的新节点保持未测(交由 RO 补测)', () => {
+    const loaded = [{ ...base }, { ...base, id: 'n2' }];
+    const prev = [{ ...base, h: 200 }, { ...base, id: 'gone', h: 300 }];
+    const out = preserveMeasuredSize(loaded as never, prev as never);
+    expect(out[0]!.h).toBe(200);
+    expect(out[1]!.h).toBeUndefined();
+  });
+
+  it('已带 h 的节点不被旧值覆盖(以最新测量为准)', () => {
+    const out = preserveMeasuredSize([{ ...base, h: 500 }] as never, [{ ...base, h: 200 }] as never);
+    expect(out[0]!.h).toBe(500);
+  });
+
+  it('空输入直通(挂载首轮 / 清空画布不炸)', () => {
+    expect(preserveMeasuredSize([], [{ ...base, h: 1 }] as never)).toEqual([]);
+    const loaded = [{ ...base }];
+    expect(preserveMeasuredSize(loaded as never, [])).toBe(loaded);
+  });
+
+  it('prev 全部未测时原样返回(不产新数组,避免无谓重渲染)', () => {
+    const loaded = [{ ...base }];
+    expect(preserveMeasuredSize(loaded as never, [{ ...base }] as never)).toBe(loaded);
+  });
+
+  it('非法 h(NaN / 非数字)不参与合并', () => {
+    const out = preserveMeasuredSize([{ ...base }] as never, [{ ...base, h: Number.NaN }] as never);
+    expect(out[0]!.h).toBeUndefined();
   });
 });

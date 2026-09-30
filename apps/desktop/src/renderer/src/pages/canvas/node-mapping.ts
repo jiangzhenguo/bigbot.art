@@ -44,9 +44,10 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
     case 'asset':
       return { assetId: '', mediaType: 'image' };
     case 'image-gen':
+      // 🆕 不写 model(2026-09-29 v1 工具模型):留给 runNode 缺省解析(工具模型 > 内置默认);
+      // 写死会让设置页默认值永远不生效(审计 §4.1.1 🟥)
       return {
         engine: 'mlxgen',
-        model: 'AbstractFramework/z-image-turbo-8bit',
         prompt: '',
         width: 1024,
         height: 1024,
@@ -55,11 +56,10 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
         seeds: [42],
       };
     case 'image-edit':
-      // 默认 8bit 量化仓库(短别名 'qwen-image-edit' 会被 mlxgen 解析成全量 57.7GB 仓库 → 未下载 exit 1;
-      // Provider 侧 MODEL_ALIASES 也为存量节点兜底归一化)
-      return { engine: 'mlxgen', model: 'mlx-community/Qwen-Image-Edit-8bit', prompt: '', mode: 'instruction' };
+      // 不写 model,同上交由缺省解析(instruction 默认 2.1)
+      return { engine: 'mlxgen', prompt: '', mode: 'instruction' };
     case 'image-upscale':
-      return { model: 'AbstractFramework/seedvr2-3b-8bit', scale: 2 };
+      return { scale: 2 };
     case 'video-upscale':
       // 默认 = POST_PROCESSING.md §9.1 标准配方(Real-ESRGAN ×2 真人模型 + GFPGAN 修脸强度 0.5)
       return {
@@ -142,7 +142,7 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
 /**
  * 归一化「瞬态 UI 标记」用于**内容比对**(保存基线 / 自身回推识别)。
  *
- * UI 瞬态字段(badge / running / progress / ghost / stale / agentOn / extra)不进快照,
+ * UI 瞬态字段(badge / running / progress / ghost / stale / agentOn / h)不进快照,
  * 若直接参与比对,会出现两个方向的错判(2026-09 实测):
  *  - 正方向:「生成中文案变了」被当作内容改动 → 每 800ms 写盘一次,主进程写盘广播又把
  *    store 里的旧节点(没有 badge)整体推回来 → **节点上的「生成中」标签被抹掉**
@@ -152,18 +152,43 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
  * 归一化 = 剔除上述瞬态键后做 JSON 串,语义仍是「用户内容一致」。
  */
 export function contentKey(nodes: CanvasNode[], edges: Edge[], groups: unknown): string {
-  // ⚠️ 这些是**不进快照**的纯 UI 瞬态字段,必须从比对里剔除(badge/running/progress/ghost/stale/agentOn)。
+  // ⚠️ 这些是**不进快照**的纯 UI 瞬态字段,必须从比对里剔除(badge/running/progress/ghost/stale/agentOn/h)。
+  // `h` 是 ResizeObserver 的实测高度(纯 UI 测量值):快照还原的节点没有它(见 fromSharedNode),
+  // 若不剔除,本地已测节点(有 h)与快照节点(无 h)的 contentKey 必然不等 → 每次写盘回推都判
+  // 「内容变了」→ setNodes 整批替换 → h 全丢 → 连线端点退回兜底高度 = 跳到节点顶部;
+  // 且 DOM 未换/尺寸未变,RO 不再触发,h 永久缺失(2026-10「进画布连线先在中间后跳到上边」事故)。
   // 注意 `extra` **不在**此列:它是节点卡上的「✓ 产物名」完成提示行,由 toSharedNodes 持久化,
   // 并**有意参与比对**(抹掉会丢反馈,见 node-mapping.test.ts)。曾因它「参与比对却不进快照」
   // 导致快照回推被判成内容变更、setNodes 整体替换把 resultPath 一并回退(2026-09-29 事故),
   // 修法是让它真正进快照(见 toSharedNodes/fromSharedNode),而非把它列为瞬态。
-  const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn'] as const;
+  const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn', 'h'] as const;
   const norm = nodes.map((n) => {
     const clean: Record<string, unknown> = { ...n };
     for (const k of TRANSIENT) delete clean[k];
     return sortKeys(clean);
   });
   return JSON.stringify([norm, edges, groups]);
+}
+
+/**
+ * 把当前画布已实测的节点高度 `h` 按 id 合并回「刚从快照还原」的节点数组。
+ *
+ * 背景(2026-10「连线跳到节点顶部」事故):`h` 是 ResizeObserver 的实测值,不进快照;
+ * applyCanvasSnapshot / refreshCanvasFromStore / 画布加载用 fromSharedNode 整批重建节点时
+ * `h` 全部丢失 → 连线端点退回兜底高度(y + 72/2 = 节点顶部);而整批替换后 DOM 元素
+ * 复用、尺寸未变,ResizeObserver 不会再触发,`h` 永久缺失,连线一直钉在节点上边。
+ *
+ * 这里按 id 找回已有测量值;新出现的节点(换画布/外部新建)无旧值可合,
+ * 交由 registerNodeRef 的 RO 首次回调补测,行为不变。
+ */
+export function preserveMeasuredSize(loaded: CanvasNode[], prev: CanvasNode[]): CanvasNode[] {
+  if (loaded.length === 0 || prev.length === 0) return loaded;
+  const hById = new Map<string, number>();
+  for (const n of prev) {
+    if (typeof n.h === 'number' && Number.isFinite(n.h)) hById.set(n.id, n.h);
+  }
+  if (hById.size === 0) return loaded;
+  return loaded.map((n) => (n.h === undefined && hById.has(n.id) ? { ...n, h: hById.get(n.id)! } : n));
 }
 
 /**

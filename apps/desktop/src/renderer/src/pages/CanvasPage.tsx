@@ -25,8 +25,10 @@ import {
   dedupeNodeIds,
   seedIdCounter,
   contentKey,
+  preserveMeasuredSize,
 } from './canvas/node-mapping';
 import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from './canvas/connectors';
+import { ensureToolModels } from './canvas/tool-models-store';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc, previewUrlOf } from './canvas/media';
@@ -1292,7 +1294,9 @@ export default function CanvasPage({
     // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
     // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
     const loaded = activeCanvas.nodes.map((n) => fromSharedNode(n as never));
-    const selfHeal = dedupeNodeIds(loaded, toLocalEdges(activeCanvas.edges as never));
+    // 快照还原不带实测高度 h(纯 UI 测量值):按 id 合回当前已测值,
+    // 否则连线端点退回兜底高度(跳到节点顶部)且 RO 不重测(2026-10 事故修复)
+    const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(activeCanvas.edges as never));
     setNodes(selfHeal.nodes);
     setEdges(selfHeal.edges);
     // 分组:旧项目文件无 groups → 空数组;脏 id/空组在这里一次性规整
@@ -1472,7 +1476,8 @@ export default function CanvasPage({
       if (!cur) return;
       setKnownVersion(cur.version ?? 0);
       const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
-      const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
+      // 同挂载加载:合并已测高度 h,防连线端点跳节点顶部(见 preserveMeasuredSize)
+      const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
       setNodes(selfHeal.nodes);
       setEdges(selfHeal.edges);
       const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
@@ -1497,7 +1502,8 @@ export default function CanvasPage({
    *  auto-save 依赖的 effect 再保存,造成 version 无限增长的写盘循环。 */
   const applyCanvasSnapshot = useCallback((cur: Pick<CanvasSnapshot, 'nodes' | 'edges' | 'version'> & { viewport?: CanvasSnapshot['viewport']; groups?: CanvasSnapshot['groups'] }) => {
     const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
-    const selfHeal = dedupeNodeIds(loaded, toLocalEdges(cur.edges as never[]));
+    // 合并已测高度 h:快照推送整批替换节点时 h 会丢,连线端点跳到节点顶部(2026-10 事故修复)
+    const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
     const version = cur.version ?? 0;
     // 分组:按**自愈后的**节点 id 规整(剔除已删节点/空组/重复归属)
     const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));

@@ -379,6 +379,8 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .nmeta{font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.45}
 .pg-canvas .nthumb{border-radius:var(--radius-sm);overflow:hidden;position:relative;background:var(--surface)}
 .pg-canvas .nthumb img{width:100%;aspect-ratio:16/9;object-fit:cover}
+/* 节点卡内媒体禁止原生拖出(拖图会抢节点的拖动手势;JSX 侧另有 draggable={false} 双保险) */
+.pg-canvas .node img,.pg-canvas .node video{-webkit-user-drag:none;user-select:none}
 /* fit 变体:按图片真实比例完整展示(高度随内容,contain 不裁切);image-gen / image-edit / image-upscale / asset 用 */
 .pg-canvas .nthumb.fit img{width:100%;height:auto;aspect-ratio:auto;object-fit:contain;background:var(--surface-warm)}
 .pg-canvas .nthumb .play{position:absolute;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.18);opacity:0;transition:opacity var(--motion-fast)}

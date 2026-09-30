@@ -66,9 +66,9 @@ export function isVideoPath(p: string | null | undefined): boolean {
 /**
  * 参考绑定槽位/资源卡的缩略图 —— **视频必须走 <video> 抽帧,不能塞进 <img>**。
  *
- * 真实事故(2026-09):检查器「参考绑定」只写 `<img src={thumbSrc(path)}>`,
+ * 真实事故(2026-09):检查器「参考绑定」只写 `<img draggable={false} src={thumbSrc(path)}>`,
  * 当 ref 是视频(asset 视频素材 / 上游镜头整段成片)时拿到的是
- * `bba-asset://asset-x.mp4`,而 `<img src=…mp4>` 是**必然 onerror**(浏览器不做视频解码),
+ * `bba-asset://asset-x.mp4`,而 `<img draggable={false} src=…mp4>` 是**必然 onerror**(浏览器不做视频解码),
  * 于是参考视频那一行左侧只剩一块空框。
  *
  * 注意**不能用 `isShotSrc`(有没有 path 字段)来判断是否为视频** —— 资产视频的 ref 只有
@@ -288,7 +288,7 @@ export function VideoPoster({
     // 抽帧中:给一块与视频容器同色的占位,避免布局跳动
     return <span style={{ display: 'block', width: '100%', height: '100%', background: '#000', ...style }} />;
   }
-  return <img src={poster} alt={alt ?? ''} style={style} />;
+  return <img draggable={false} src={poster} alt={alt ?? ''} style={style} />;
 }
 
 /**
