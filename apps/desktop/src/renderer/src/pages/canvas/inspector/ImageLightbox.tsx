@@ -65,6 +65,8 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
   const boxRef = useRef(box);
   boxRef.current = box;
   const panRef = useRef<{ id: number; x: number; y: number } | null>(null);
+  /** 本次指针序列是否真的拖动过(用于吞掉拖拽收尾的那个 click,避免拖完就关) */
+  const draggedRef = useRef(false);
   /** 最近一次手势时间:wheel 与 gesturechange 可能同时到达,只认先到的那个 */
   const gestureAtRef = useRef(0);
 
@@ -279,6 +281,7 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     if (!pannable || e.button !== 0) return;
     e.preventDefault();
     panRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    draggedRef.current = false;
     setPanning(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -289,6 +292,7 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     const d = dispOf(b);
     if (d.dw <= 0 || d.dh <= 0) return;
     const v = viewRef.current;
+    if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) > 2) draggedRef.current = true;
     const next = clampPanView(v.tx + (e.clientX - p.x) / d.dw, v.ty + (e.clientY - p.y) / d.dh, v.zoom, d.dw, d.dh, b.w, b.h);
     panRef.current = { id: p.id, x: e.clientX, y: e.clientY };
     setView({ ...v, tx: next.tx, ty: next.ty });
@@ -297,6 +301,22 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     if (!panRef.current) return;
     panRef.current = null;
     setPanning(false);
+  };
+
+  /**
+   * 点视口空白 = 关闭。
+   * 两道豁免:①点的是图片本身;②这一次点击是**拖拽平移的收尾**(pointerdown→move→up
+   * 之后浏览器仍会补一个 click —— 若不拦,拖完图一松手就把查看器关了)。
+   * ⚠️ 两条豁免分支都必须 **stopPropagation**:外层 `.ovl-lb` 上的 onClick 也是 onClose,
+   * 只 return 不做阻断的话事件继续冒泡,点图片照样会关掉查看器(实测踩中)。
+   */
+  const onViewportClick = (e: React.MouseEvent<HTMLDivElement>): void => {
+    if (e.target !== e.currentTarget || draggedRef.current) {
+      draggedRef.current = false;
+      e.stopPropagation();
+      return;
+    }
+    onClose();
   };
 
   /** 双击:适应 ↔ 2×(以指针为锚点,双击哪里放大哪里) */
@@ -367,7 +387,11 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
       <div
         ref={viewportRef}
         className={`ovl-lb-viewport${pannable ? ' pan' : ''}${panning ? ' grabbing' : ''}`}
-        onClick={(e) => e.stopPropagation()}
+        // 点视口空白处 = 关闭(与主流看图一致)。
+        // —— 不能用 e.stopPropagation() 让外层遮罩处理:视口是 inset:0 铺满整层的,
+        //    事件根本到不了外层,那样点空白就永远关不掉(实测踩中)。
+        // 点**图片**本身不关(图片自己 stopPropagation);刚拖拽完的一次 click 也不关。
+        onClick={onViewportClick}
         onDoubleClick={onDoubleClick}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
