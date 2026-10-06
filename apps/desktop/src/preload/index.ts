@@ -6,6 +6,7 @@ import type {
   BigBotArtApi,
   CanvasSnapshot,
   LlmSource,
+  MediaKind,
   RenderRequest,
 } from '@bigbotart/shared';
 
@@ -50,6 +51,8 @@ const api: BigBotArtApi = {
   setProjectLlm: (projectId: string, llm: LlmSource | null) => ipcRenderer.invoke('set-project-llm', projectId, llm),
   importAssets: (opts?: { paths?: string[]; projectId?: string }) => ipcRenderer.invoke('import-assets', opts),
   listAssets: (projectId?: string) => ipcRenderer.invoke('list-assets', projectId),
+  // 🆕 媒体信息按需探测(资源节点检查器;只读,不回写资产库)
+  probeMedia: (path: string, kind?: MediaKind) => ipcRenderer.invoke('probe-media', path, kind),
   deleteAsset: (id: string) => ipcRenderer.invoke('delete-asset', id),
   updateAsset: (id: string, patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) =>
     ipcRenderer.invoke('update-asset', id, patch),

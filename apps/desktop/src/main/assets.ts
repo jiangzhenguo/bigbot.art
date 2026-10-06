@@ -15,14 +15,10 @@ import {
 import { homedir } from 'node:os';
 import { join, basename, extname, resolve, dirname } from 'node:path';
 import { dialog, BrowserWindow } from 'electron';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { Asset, AssetCategory, AssetRef, AssetImportResult } from '@bigbotart/shared';
 import type { ProjectStore as MainProjectStore } from './store';
 import { WORKSPACES_DIR, workspaceAssetsFile } from './workspace-paths.js';
-
-/** ffprobe 探测用:异步 execFile(不阻塞主进程),8s 超时 */
-const execFileP = promisify(execFile);
+import { probeMediaInfo } from './media-probe.js';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 export const ASSETS_DIR = join(DATA_DIR, 'assets');
@@ -214,26 +210,28 @@ export function copyAttachmentsToProject<T extends { id: string; localPath: stri
   });
 }
 
-/** 提取媒体元数据(ffprobe 异步执行,不阻塞主进程;图片/视频取宽高与时长,音频取时长,失败不阻断) */
+/**
+ * 提取媒体元数据(ffprobe 异步执行,不阻塞主进程;失败不阻断导入)。
+ *
+ * 委托给 `media-probe.ts` 的统一解析器 —— 检查器里的「媒体信息」面板用的是同一份逻辑,
+ * 两处对同一个文件必须给出同一组数字(曾经视频探测有两条独立实现,字段各缺一半)。
+ * 这里只挑出入库该长期保存的几个字段写进 assets.json;帧数/编码/容器这些
+ * 展示用信息不入库,检查器按需重探即可。
+ */
 export async function probeMedia(
   path: string,
   kind: Asset['kind'],
-): Promise<Pick<Asset, 'width' | 'height' | 'durationSec'>> {
-  const out: Pick<Asset, 'width' | 'height' | 'durationSec'> = {};
+): Promise<Pick<Asset, 'width' | 'height' | 'durationSec' | 'fps' | 'sampleRate' | 'channels'>> {
+  const out: Pick<Asset, 'width' | 'height' | 'durationSec' | 'fps' | 'sampleRate' | 'channels'> = {};
   if (kind === 'document') return out;
-  try {
-    const r = await execFileP('ffprobe', [
-      '-v', 'error', '-print_format', 'json',
-      '-show_streams', '-show_format', path,
-    ], { timeout: 8000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
-    const j = JSON.parse(r.stdout);
-    const v = (j.streams ?? []).find((s: { codec_type?: string }) => s.codec_type === 'video');
-    if (v?.width) { out.width = v.width; out.height = v.height; }
-    const dur = j.format?.duration ?? v?.duration;
-    if (dur && Number.isFinite(Number(dur))) out.durationSec = Math.round(Number(dur) * 10) / 10;
-  } catch {
-    /* ffprobe 不可用/超时/解析失败:元数据留空(不阻塞主进程) */
-  }
+  const info = await probeMediaInfo(path, kind);
+  if (!info.ok) return out;
+  if (info.width) out.width = info.width;
+  if (info.height) out.height = info.height;
+  if (info.durationSec !== undefined) out.durationSec = info.durationSec;
+  if (info.fps !== undefined) out.fps = info.fps;
+  if (info.sampleRate !== undefined) out.sampleRate = info.sampleRate;
+  if (info.channels !== undefined) out.channels = info.channels;
   return out;
 }
 

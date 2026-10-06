@@ -1,3 +1,4 @@
+import { VIDEO_ASPECTS, VIDEO_TIERS, SHOT_SIZES as SHARED_SHOT_SIZES, type VideoAspect } from '@bigbotart/shared';
 import type { NodeTag, CanvasNode, Edge, NodeInfo } from './types';
 
 export const NODE_TYPES: NodeTag[] = [
@@ -46,13 +47,10 @@ export const COMPAT: Record<string, string[]> = {
   asset: ['shot', 'edit', 'upscale', 'timeline', 'wf-input', 'wf-output'],
 };
 
-/** 档位 × 画幅白名单(防呆) */
-export const RES: Record<string, Record<string, string>> = {
-  预览: { '16:9': '512×288', '9:16': '288×512', '1:1': '384×384' },
-  草稿: { '16:9': '960×540', '9:16': '540×960', '1:1': '720×720' },
-  默认: { '16:9': '1280×720', '9:16': '720×1280', '1:1': '960×960' },
-  参考: { '16:9': '1920×1080' },
-};
+/**
+ * 档位 → 预计耗时(纯展示;不参与任何尺寸计算)。
+ * 键是中文标签 —— 弹层 chips 直接用中文,这里配套。
+ */
 export const ETA: Record<string, string> = {
   预览: '≈2 分钟',
   草稿: '≈4 分钟',
@@ -60,37 +58,63 @@ export const ETA: Record<string, string> = {
   参考: '≈22 分钟',
 };
 
-/** 尺寸白名单提示行 */
+/**
+ * 尺寸提示行 —— **直接读 `SHOT_SIZES`**,不再维护第二张尺寸表。
+ *
+ * ⚠️ 事故(2026-10):这里曾有一张独立的 `RES` 中文表,与 `SHOT_SIZES` 并存,
+ * 于是同一个「默认档 16:9」弹层提示 1280×704、检查器显示另一个数,用户看到三个
+ * 互不相同的分辨率。现在数值只有 `SHOT_SIZES` 一个来源,提示行不可能再与落盘值分叉。
+ * 档位用 `tierKeyOf` 归一(兼容中文标签与英文 key),未知档位返回明确文案而非静默兜底。
+ */
 export function resLine(aspect: string, tier: string): string {
-  const r = (RES[tier] ?? {})[aspect];
-  if (!r) return '该组合不在白名单 · 已禁用（capabilities）';
-  return `输出 ${r} · 预计 ${ETA[tier]}（capabilities）`;
+  const key = tierKeyOf(tier);
+  const size = SHOT_SIZES[aspect as VideoAspect]?.[key];
+  if (!size) return '该组合不在白名单 · 已禁用（capabilities）';
+  const eta = ETA[tier] ?? ETA[key === 'default' ? '默认' : tier] ?? '';
+  return `输出 ${size.width}×${size.height} · 预计 ${eta}（capabilities）`;
 }
 
 /* ── Shot 检查器(h3.c 档位 × 画幅,与 packages/providers h3c-command ASPECT_SIZES 对齐) ── */
-export const SHOT_ASPECTS = ['16:9', '9:16', '1:1', 'custom'] as const;
-export const SHOT_TIERS = ['preview', 'draft', 'default', 'reference'] as const;
-/** 档位 × 画幅 → 宽高(全部 32 倍数合法档,H3_USAGE.md §4.2) */
-export const SHOT_SIZES: Record<'16:9' | '9:16' | '1:1', Record<(typeof SHOT_TIERS)[number], { width: number; height: number }>> = {
-  '16:9': {
-    preview: { width: 864, height: 480 },
-    draft: { width: 864, height: 480 },
-    default: { width: 1280, height: 704 },
-    reference: { width: 1536, height: 768 },
-  },
-  '9:16': {
-    preview: { width: 480, height: 864 },
-    draft: { width: 576, height: 1024 },
-    default: { width: 704, height: 1280 },
-    reference: { width: 768, height: 1536 },
-  },
-  '1:1': {
-    preview: { width: 544, height: 544 },
-    draft: { width: 544, height: 544 },
-    default: { width: 768, height: 768 },
-    reference: { width: 1024, height: 1024 },
-  },
+/** 可选画幅 —— 单一真源在 shared(VIDEO_ASPECTS);这里只补一个 `custom`(走自定义宽高) */
+export const SHOT_ASPECTS = [...VIDEO_ASPECTS, 'custom'] as const;
+export const SHOT_TIERS = VIDEO_TIERS;
+/**
+ * 档位 × 画幅 → 宽高 —— **直接从 shared 取**(2026-10 收敛,不再是副本)。
+ *
+ * 此前这里是 `h3c-command.ASPECT_SIZES` 的手抄副本,而两者的旧比例(16:9/9:16/1:1)
+ * 早就分叉了(9 档里 8 档不同,例:16:9/default 这里 1280×704、引擎 864×480)。
+ * 现在渲染层与主进程都直接用 shared 的 `SHOT_SIZES`,新增比例只改一处。
+ *
+ * ⚠️ providers 因包边界不能 import shared,仍保留自己那份 `ASPECT_SIZES`;
+ * 单测 `__tests__/shot-aspect.test.ts` 读两侧源码比对防分叉。
+ */
+export const SHOT_SIZES = SHARED_SHOT_SIZES;
+
+/**
+ * 弹层用的**中文档位标签 → 英文档位 key** 映射。
+ *
+ * ⚠️ 这层映射必须存在,否则取不到尺寸:`AddNodePopover` 的档位 chips 是
+ * 「预览/草稿/默认/参考」(中文,给人看的),而 `SHOT_SIZES` / `SHOT_TIER_PRESETS`
+ * 的键是 `preview/draft/default/reference`(英文,给机器用的)。
+ * 直接把中文当 key 去查表会得到 `undefined`,而 `undefined` 又会**静默**退回到
+ * `makeInitialData` 里那份硬编码尺寸(1280×720)—— 于是「弹层选 3:4 默认档,
+ * 节点却是 16:9 的 1280×720」,又一次显示与实际不符的真实事故(2026-10)。
+ * 故这里显式收口,且 `TIER_KEYS` 兜底保证任何未知标签都有确定语义。
+ */
+export const TIER_LABEL_TO_KEY: Record<string, (typeof VIDEO_TIERS)[number]> = {
+  预览: 'preview',
+  草稿: 'draft',
+  默认: 'default',
+  参考: 'reference',
 };
+
+/** 中文档位标签(或已是英文 key)→ 英文 key;未知标签一律回 'default' 而非 undefined */
+export function tierKeyOf(labelOrKey: string): (typeof VIDEO_TIERS)[number] {
+  if ((VIDEO_TIERS as readonly string[]).includes(labelOrKey)) {
+    return labelOrKey as (typeof VIDEO_TIERS)[number];
+  }
+  return TIER_LABEL_TO_KEY[labelOrKey] ?? 'default';
+}
 /** 档位预设(F/S/L/R + ETA)— H3_USAGE.md §4.3 四组 preset;etaMin 供加速后按步数比例重算预计时间 */
 export const SHOT_TIER_PRESETS: Record<(typeof SHOT_TIERS)[number], { label: string; steps: number; layers: number; reuse: number; frames: number; eta: string; etaMin: number; note: string }> = {
   preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', etaMin: 4, note: '极速草稿(reuse2 防呆安全)' },

@@ -3,6 +3,7 @@
  * 纯展示 + 受控回调,不触碰 window.bigbotart(容器层负责接线)。
  */
 import { ASPECTS, ratioOf } from './image-aspects';
+import { previewUrlOf } from '../media';
 
 export { ASPECTS, ratioOf } from './image-aspects';
 
@@ -159,6 +160,119 @@ export function UpstreamCard({
           <div className="usub">{sub}</div>
         </div>
         <span className="upill">{pill}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── 参考图来源解析(纯函数,供单测) ──
+/** 单张参考图的解析结果:可直接显示的 URL + 展示文案 */
+export interface RefImageItem {
+  nodeId: string;
+  /** 参考图节点的标题(缺失时回落为 id) */
+  title: string;
+  /** 可直接显示的 URL;null = 拿不到图(节点没跑/资产没加载) */
+  src: string | null;
+  /** 来源说明(asset 素材 / 产物直通 / 未就绪的具体原因) */
+  note: string;
+  /** 源节点是否还在画布上(被删掉的参考图要显式标注,而不是静默显示空框) */
+  missing: boolean;
+}
+
+/**
+ * 把 image-edit 的 `data.refImageFrom`(ref-image 入边派生态)解析成可渲染的参考图列表。
+ *
+ * ⚠️ 为什么要单独一条链路:ref-image 与 input 是**两个不同端口** ——
+ * input 是「被编辑的底图」,ref-image 是「参考」,语义互不相干。
+ * 早期实现把两者都塞进「输入图」那张卡(ref-image 只作为无底图时的兜底),
+ * 结果「连了参考图却在输入图卡里看到它」,用户分不清到底哪张是被编辑对象。
+ * 现在 ref-image 有自己独立的展示区,本函数是它的唯一数据源。
+ *
+ * 与 `upstreamImagePath` 同口径:asset 节点取 `assetCache[data.assetId]`,
+ * 其余图片节点取 `data.resultPath`。
+ */
+export function resolveRefImages(args: {
+  refImageFrom?: Array<{ nodeId?: string }>;
+  nodes: Array<{ id: string; title?: string; kind?: string; data?: Record<string, unknown> }>;
+  assetCache: Record<string, string>;
+}): RefImageItem[] {
+  const { refImageFrom, nodes, assetCache } = args;
+  const list = (refImageFrom ?? []).filter((r) => r?.nodeId);
+  return list.map((r) => {
+    const id = r.nodeId!;
+    const n = nodes.find((x) => x.id === id);
+    if (!n) {
+      // 源节点被删了:边没了但 data 还留着派生态的窗口期,必须说清楚而不是显示空框
+      return { nodeId: id, title: id, src: null, note: '源节点已删除', missing: true };
+    }
+    const d = (n.data ?? {}) as Record<string, unknown>;
+    const isAsset = n.kind === 'asset';
+    const assetId = String(d.assetId ?? '');
+    const path = isAsset ? (assetCache[assetId] ?? '') : String(d.resultPath ?? '');
+    const note = path
+      ? isAsset
+        ? 'asset · 素材直通'
+        : `${n.kind ?? '图片'} · 产物直通`
+      : isAsset
+        ? assetId
+          ? `资产未加载(${assetId})`
+          : '节点未绑定资产'
+        : '上游暂无产物';
+    return {
+      nodeId: id,
+      title: n.title || id,
+      src: path ? previewUrlOf(path) : null,
+      note,
+      missing: false,
+    };
+  });
+}
+
+/**
+ * 参考图展示区(image-edit 的 `ref-image` 端口专用,只读)。
+ *
+ * 与「输入图」卡**并列但语义独立**:这里展示的每一张都是「参考」,
+ * 不参与「被编辑对象」的判定。多图时以网格铺开,每张带序号与来源说明;
+ * 拿不到图的那一格显式标出原因(未跑/未加载/节点已删),不留白框。
+ */
+export function RefImagesCard({
+  items,
+  caption,
+}: {
+  items: RefImageItem[];
+  /** 右上角说明(如「作为参考 · 非被编辑对象」) */
+  caption?: string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="f-sec" data-od-id="ref-images-card">
+      <div className="f-sec-h">
+        <span className="lbl">参考图</span>
+        <span className="mut" style={{ fontSize: 10.5 }}>
+          {caption ?? '作为参考 · 非被编辑对象'}
+        </span>
+      </div>
+      <div className="refgrid">
+        {items.map((it, i) => (
+          <div className="refcell" key={`${it.nodeId}-${i}`} data-od-id="ref-cell">
+            <span className={`refthumb${it.src ? '' : ' empty'}`}>
+              {it.src ? <img src={it.src} alt={it.title} loading="lazy" /> : null}
+              <b className="refidx">{i + 1}</b>
+            </span>
+            <div className="refmeta">
+              <div className="reftitle" title={it.title}>
+                {it.title}
+              </div>
+              <div className={`refnote${it.missing || !it.src ? ' warn' : ''}`}>{it.note}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="seeds-hint" style={{ fontSize: 10.5 }}>
+        <span>
+          共 {items.length} 张 · 提交时按此顺序传给引擎(首张锚定几何)
+          {items.some((x) => !x.src) ? ' · 有参考图未就绪,提交可能失败' : ''}
+        </span>
       </div>
     </div>
   );

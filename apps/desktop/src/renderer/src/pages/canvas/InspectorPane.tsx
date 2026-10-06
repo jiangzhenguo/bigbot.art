@@ -98,7 +98,10 @@ export function InspectorPane({
           <div className="lbl" style={{ marginBottom: 8 }}>
             {inspectTitle}
           </div>
-          {selInfo && selInfo.img ? (
+          {/* 顶部整块预览:**asset(资源)节点除外** —— 资源检查器自己第一条就是素材预览
+              (见 AssetInspector 顶部注释),这里再画一遍会让同一张图在面板里出现两遍。
+              其余 kind 的检查器没有统一置顶预览,仍靠这块给出「选中了什么」的第一印象。 */}
+          {selInfo && selInfo.img && selNode.kind !== 'asset' ? (
             <div className="preview">
               <img src={selInfo.img} alt="选中节点预览" />
             </div>

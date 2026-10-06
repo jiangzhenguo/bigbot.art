@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { ImageLightbox } from './ImageLightbox';
 
 interface ImagePreviewProps {
   /** 可直接显示的 URL(bba-asset:// / bba-output://)或 null(未绑定) */
@@ -13,7 +14,9 @@ interface ImagePreviewProps {
 
 /**
  * 检查器图片预览:完整显示源图(object-fit: contain)+「⛶ 全屏」按钮。
- * 全屏 = 应用内覆盖层(复用 .ovl 遮罩):Esc / 点击遮罩 / ✕ 关闭,不影响画布状态。
+ * 全屏 = 应用内覆盖层(ImageLightbox):Esc / 点击背景 / ✕ 关闭,不影响画布状态;
+ * 覆盖层内支持放大缩小(按钮 / 滚轮 / Mac 触控板双指捏合 / 双击)与拖动平移,
+ * 详见 `ImageLightbox` 顶部注释。点击缩略图本身也进入全屏(与主流看图交互一致)。
  * 纯展示组件,不触碰 window.bigbotart。
  */
 export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: ImagePreviewProps) {
@@ -27,6 +30,11 @@ export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: Im
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [full]);
+
+  /* 源图被换掉(切 Take / 换节点)时关掉全屏层:否则悬着一层显示旧图的覆盖层 */
+  useEffect(() => {
+    setFull(false);
+  }, [src]);
 
   if (!src) {
     if (!emptyHint) return null;
@@ -53,46 +61,22 @@ export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: Im
         <img
           src={src}
           alt={alt}
-          style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'contain' }}
+          title="点击全屏查看(可放大 / 双指缩放)"
+          style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'contain', cursor: 'zoom-in' }}
+          onClick={() => setFull(true)}
         />
         <button
           type="button"
           className="btn btn-s btn-sm"
           data-od-id="image-preview-fullscreen"
           style={{ position: 'absolute', right: 6, bottom: 6 }}
-          title="全屏显示图片"
+          title="全屏显示图片(支持放大 / 双指缩放)"
           onClick={() => setFull(true)}
         >
           ⛶ 全屏
         </button>
       </div>
-      {full
-        ? createPortal(
-            <div className="ovl" data-od-id="image-preview-lightbox" onClick={() => setFull(false)}>
-              <button
-                type="button"
-                className="btn btn-s btn-sm"
-                style={{ position: 'absolute', top: 14, right: 14 }}
-                onClick={() => setFull(false)}
-              >
-                ✕ 关闭
-              </button>
-              <img
-                src={src}
-                alt={alt}
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  maxWidth: '90vw',
-                  maxHeight: '86vh',
-                  objectFit: 'contain',
-                  borderRadius: 'var(--radius-md)',
-                  boxShadow: 'var(--glass-shadow-lg)',
-                }}
-              />
-            </div>,
-            document.body,
-          )
-        : null}
+      {full ? createPortal(<ImageLightbox src={src} alt={alt} onClose={() => setFull(false)} />, document.body) : null}
     </div>
   );
 }

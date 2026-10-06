@@ -11,7 +11,8 @@ import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
 import { AccelStore } from './lora';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots } from './assets';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots } from './assets';
+import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
 import { extractFrame, cropImage } from './frames';
@@ -41,7 +42,7 @@ import {
   resolveLlmEndpoint,
   testConnection,
 } from './llm';
-import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent } from '@bigbotart/shared';
+import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind } from '@bigbotart/shared';
 import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
@@ -673,6 +674,20 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
     return assets.importFromDialog(opts?.projectId);
   });
   ipcMain.handle('list-assets', (_e, projectId?: string) => assets.list(projectId));
+  /**
+   * 媒体信息按需探测(资源节点检查器「媒体信息」面板)。
+   *
+   * 只读、无副作用(不回写资产库)——所以白名单比导入更宽:产物/导出/资产库/项目文件夹
+   * 全都能读(与 frames / vision 同口径的 ffmpegReadRoots)。
+   * 越界路径明确返回 `ok:false` 而不是静默给空结果(否则 UI 上「读不到」和「不支持」分不清)。
+   */
+  ipcMain.handle('probe-media', async (_e, rawPath: string, kind?: MediaKind): Promise<MediaInfo> => {
+    const roots = ffmpegReadRoots();
+    if (!rawPath || !roots.some((r) => isUnderRoot(rawPath, r))) {
+      return { ok: false, error: '路径不在允许目录(仅可探测应用数据 / 产物 / 导出目录内的媒体)', name: rawPath ?? '' };
+    }
+    return await probeMediaInfo(rawPath, kind);
+  });
   ipcMain.handle('delete-asset', (_e, id: string) => {
     const refs = collectAssetRefs(store, id);
     return { ...assets.delete(id), refs };

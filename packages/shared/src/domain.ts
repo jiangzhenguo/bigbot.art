@@ -625,6 +625,12 @@ export interface Asset {
   width?: number;
   height?: number;
   durationSec?: number;
+  /** 视频帧率(fps)—— 导入时 ffprobe 探测,历史资产缺省(检查器按需补探) */
+  fps?: number;
+  /** 视频内嵌音轨采样率(Hz) */
+  sampleRate?: number;
+  /** 视频内嵌音轨声道数 */
+  channels?: number;
   /** 归属项目;缺省 = 总资源库(全局共享) */
   projectId?: string;
   /** 分类 id(资产库分类字典);缺省 = 未分类 */
@@ -637,6 +643,62 @@ export interface Asset {
   /** 软删除标记(进回收站);list / list(projectId) 不再返回 */
   deletedAt?: string;
   createdAt: string;
+}
+
+/** 媒体类型(资源节点检查器「媒体信息」面板据此决定显示哪些字段) */
+export type MediaKind = 'image' | 'video' | 'audio' | 'document';
+
+/**
+ * 媒体基本信息探测结果(主进程 ffprobe → 资源节点检查器)。
+ *
+ * 为什么是**按需探测**而不是直接读资产字段:历史资产(2026-09 之前导入)的
+ * assets.json 里根本没有 fps / 采样率这些字段,改代码不会让它们长出来;
+ * 检查器选中节点时现探一次,新旧资产一视同仁。
+ *
+ * `ok:false` 时只有 `error` 有意义 —— 调用方应把它显示出来,而不是假装「无信息」
+ * (「文件不存在」和「ffprobe 没装」必须能被区分)。
+ */
+export interface MediaInfo {
+  ok: boolean;
+  /** 文件名(探测结果的展示标题;调用方也可忽略改用自己的标题) */
+  name?: string;
+  /** 真实媒体类型:以容器里实际存在的流为准,可能覆盖调用方按扩展名的推断 */
+  kind?: MediaKind;
+  /** 失败原因(ok=false 时有值) */
+  error?: string;
+
+  /* ── 通用 ── */
+  /** 文件大小(字节) */
+  sizeBytes?: number;
+  /** 时长(秒)—— 视频/音频 */
+  durationSec?: number;
+  /** 码率(kbps) */
+  bitrateKbps?: number;
+  /** 容器格式(ffprobe format_name,如 `mov,mp4,m4a,3gp,3g2,mj2`) */
+  container?: string;
+
+  /* ── 画面(图片 / 视频) ── */
+  width?: number;
+  height?: number;
+  /** 帧率(视频);图片为 undefined */
+  fps?: number;
+  /** 总帧数(容器未记录时为 undefined) */
+  frameCount?: number;
+  /** 视频编码(如 h264 / hevc);图片为 ffprobe 报的图片编码(如 png) */
+  videoCodec?: string;
+  /** 旋转角(竖拍视频为 90/270;展示用宽高已按此互换) */
+  rotation?: number;
+
+  /* ── 声音(音频资源 / 视频内嵌音轨) ── */
+  /** 视频是否带音轨(false 时下游参考视频不会带声音) */
+  hasAudio?: boolean;
+  audioCodec?: string;
+  /** 采样率(Hz) */
+  sampleRate?: number;
+  /** 声道数 */
+  channels?: number;
+  /** 声道布局(mono / stereo / 5.1 …) */
+  channelLayout?: string;
 }
 
 /** 资源分类(项目级或全局;删除时分类下资源转「未分类」,文件保留) */

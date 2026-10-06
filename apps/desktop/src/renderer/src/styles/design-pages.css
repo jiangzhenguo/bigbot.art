@@ -1079,6 +1079,21 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .ovl input,.lm-pop input{font:inherit;color:inherit;border:0;outline:none;background:none;width:100%}
 .ovl ::placeholder,.lm-pop ::placeholder{color:var(--meta)}
 .ovl{position:fixed;inset:0;z-index:200;display:grid;place-items:center;background:color-mix(in oklab,var(--fg) 18%,transparent)}
+/* ── 全屏看图(ImageLightbox):自绘暗底 + 缩放工具条 + 可平移视口
+ * 不复用 .ovl —— 它是 grid 居中容器,子元素占不满;这里需要「满屏视口盒 + 浮层控件」。
+ * z-index 高于 .ovl:.ovl-lb 可能由 .ovl 内部的图片再打开,必须盖住底层弹层。── */
+.ovl-lb{position:fixed;inset:0;z-index:260;background:color-mix(in oklab,#000 58%,transparent);overflow:hidden;cursor:zoom-out}
+.ovl-lb button{font:inherit;cursor:pointer;border:0;background:none;color:inherit;padding:0;text-align:left}
+.ovl-lb-viewport{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden;touch-action:none;cursor:zoom-out}
+.ovl-lb-viewport.pan{cursor:grab}
+.ovl-lb-viewport.grabbing{cursor:grabbing}
+.ovl-lb-viewport img{display:block;user-select:none;-webkit-user-drag:none}
+.ovl-lb-bar{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:2;display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:var(--radius-pill);background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow-lg),var(--glass-spec);border:1px solid var(--glass-border);color:var(--fg);cursor:default}
+.ovl-lb-bar button{min-width:30px;justify-content:center;text-align:center}
+.ovl-lb-bar button:disabled{opacity:.4;pointer-events:none}
+.ovl-lb-pct{min-width:46px;text-align:center;font-size:11.5px;color:var(--fg-2)}
+.ovl-lb-tip{font-size:10.5px;color:var(--muted);padding:0 4px;white-space:nowrap}
+.ovl-lb-close{position:absolute;top:14px;right:14px;z-index:2}
 .mcard{width:520px;max-width:calc(100vw - 48px);max-height:min(600px,calc(100vh - 64px));display:flex;flex-direction:column;border-radius:20px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow-lg),var(--glass-spec);border:1px solid var(--glass-border);overflow:hidden}
 .mhead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border-soft)}
 .mhead b{font-size:var(--text-sm)}
@@ -1325,6 +1340,14 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp .f-in:focus-visible{box-shadow:var(--focus-ring);border-color:var(--accent)}
 .pg-canvas .insp .f-in.full{width:100%}
 .pg-canvas .insp .f-in.med{width:84px}
+/* 输入框「值不合法」态(编辑节点的输入图 Asset ID 查不到资产)。
+   ⚠️ 必须写成 `.insp .f-in.f-in-bad` 三选择器:基础规则是 `.pg-canvas .insp .f-in`,
+   特异性同为 0,3,0,若只写 `.pg-canvas .f-in.f-in-bad` 且位置在前,会被基础规则的
+   border 覆盖 —— 表现为「类加上了但边框不变色」(实测踩中)。 */
+.pg-canvas .insp .f-in.f-in-bad{border-color:color-mix(in oklab, var(--danger) 55%, var(--border));background:color-mix(in oklab, var(--danger) 5%, var(--bg))}
+.pg-canvas .insp .f-in.f-in-bad:focus-visible{box-shadow:0 0 0 2px color-mix(in oklab, var(--danger) 28%, transparent);border-color:var(--danger)}
+/* 校验提示:红色文案(与 .f-hint 同排版,只换颜色) */
+.pg-canvas .insp .f-hint-bad{color:color-mix(in oklab, var(--danger) 82%, var(--fg))}
 .pg-canvas .insp textarea.f-ta{width:100%;min-height:76px;border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.55;background:var(--bg);transition:border-color var(--motion-fast);resize:vertical}
 .pg-canvas .insp textarea.f-ta:hover{border-color:var(--meta)}
 .pg-canvas .insp textarea.f-ta:focus-visible{box-shadow:var(--focus-ring);border-color:var(--accent)}
@@ -1461,6 +1484,20 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp .upstream .ulabel{font-size:11.5px;font-weight:500;color:var(--fg)}
 .pg-canvas .insp .upstream .usub{font-size:10px;color:var(--muted);font-family:var(--font-mono);margin-top:1px}
 .pg-canvas .insp .upstream .upill{margin-left:auto;font-size:10px;color:var(--muted);font-family:var(--font-mono);border:1px solid var(--border);border-radius:var(--radius-pill);padding:1px 8px;flex:none}
+
+/* ── 参考图展示区(ref-image 端口专用,与「输入图」卡语义独立) ──
+   两列网格:每格 = 缩略图 + 序号角标 + 标题/来源。拿不到图时该格留虚线空框,
+   但**必须同时给出原因文案**(见 .refnote.warn),不能只留白让用户猜。 */
+.pg-canvas .insp .refgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.pg-canvas .insp .refcell{display:flex;gap:8px;align-items:center;padding:7px 9px;border:1px solid var(--border-soft);border-radius:10px;background:var(--surface-warm);min-width:0}
+.pg-canvas .insp .refthumb{position:relative;width:46px;height:46px;border-radius:6px;overflow:hidden;border:1px solid var(--border-soft);flex:none;background:#fff;display:block}
+.pg-canvas .insp .refthumb.empty{border-style:dashed;background:var(--surface-warm)}
+.pg-canvas .insp .refthumb img{width:100%;height:100%;object-fit:cover;display:block}
+.pg-canvas .insp .refidx{position:absolute;left:2px;top:2px;font-size:9px;line-height:1;padding:2px 4px;border-radius:4px;background:rgba(0,0,0,.55);color:#fff;font-weight:600;font-family:var(--font-mono)}
+.pg-canvas .insp .refmeta{min-width:0;flex:1}
+.pg-canvas .insp .reftitle{font-size:11.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg-canvas .insp .refnote{font-size:9.5px;color:var(--muted);font-family:var(--font-mono);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pg-canvas .insp .refnote.warn{color:var(--warn)}
 
 /* 行动条(主行动):运行按钮加宽居中 + 最大宽度,与面板底部「仅重跑该节点」视觉成组 */
 .pg-canvas .insp .action-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;border-top:1px solid var(--border-soft);padding:10px 0 2px;margin-top:2px}

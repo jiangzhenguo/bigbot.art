@@ -10,11 +10,16 @@ import {
   tableToGfm,
   capabilityOf,
   resolveImageModel,
+  fitImageSizeToGrid,
+  classifyAspect,
 } from '@bigbotart/shared';
+import type { VideoAspect } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
 import {
   NODE_TYPES,
-  RES,
+  SHOT_SIZES,
+  SHOT_TIERS,
+  tierKeyOf,
   NODE_INFO_BASE,
 } from './canvas/constants';
 import {
@@ -360,8 +365,16 @@ export default function CanvasPage({
   const cascadePendingRef = useRef<Set<string>>(new Set());
   /** 最新接力触发函数(渲染时重绑,引用最新 runNode,避免 effect 闭包拿到旧版本) */
   const cascadeKickRef = useRef<(nodeId: string, jobs: RenderJob[], freshTail?: string) => void>(() => {});
-  const assetCache = useRef<Record<string, string>>({}); // assetId → localPath
+  /** 资产 id → 本地路径(assetId → localPath)。
+   *  ⚠️ 必须是**从 assetsList 派生的 state**,不能是 `useRef`(2026-10 事故修复):
+   *  用 ref 时「缓存已更新」不会触发重渲染,而下游读的却是 `assetCache` ——
+   *  两者一旦不同步,表现就是「清单刷新了、节点缩略图/检查器输入图还是空的」,
+   *  且没有任何重渲染能把它纠正回来。派生值天然与清单同源,这类 bug 整类消失。 */
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
+  const assetCache = useMemo(
+    () => Object.fromEntries(assetsList.map((a) => [a.id, a.localPath])),
+    [assetsList],
+  );
   const [categories, setCategories] = useState<AssetCategory[]>([]);
   /** 资产选择弹层(「更换资产…」/检查器选资产):null = 关闭,值 = 目标 asset 节点 id */
   const [assetPickFor, setAssetPickFor] = useState<string | null>(null);
@@ -1387,14 +1400,14 @@ export default function CanvasPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 资产本地路径缓存 + 分类字典(挂载时拉取;Agent 对话中注册的新附件由快照推送触发刷新) */
+  /** 资产清单 + 分类字典(挂载/切项目时拉取;Agent 对话中注册的新附件由快照推送触发刷新)。
+   *  assetCache 已改为从 assetsList 派生(见其声明处),这里只需写 state。 */
   const refreshAssets = useCallback(async () => {
     try {
       const [list, cats] = await Promise.all([
         window.bigbotart.listAssets(),
         window.bigbotart.listAssetCategories(),
       ]);
-      assetCache.current = Object.fromEntries(list.map((a) => [a.id, a.localPath]));
       setAssetsList(list);
       setCategories(cats);
     } catch {
@@ -1403,6 +1416,11 @@ export default function CanvasPage({
   }, []);
 
   useEffect(() => {
+    /* 切项目瞬间先清空清单:否则在新项目数据返回前,画布会用**上一个项目的资产**
+       去解析 asset 节点与检查器输入图,表现为「刚打开项目时图是错的/空的,过一会自己好了」。
+       清空是同步的、且必然触发一次重渲染,不会把旧数据留在屏上。 */
+    setAssetsList([]);
+    setCategories([]);
     void refreshAssets();
   }, [projectId, refreshAssets]);
 
@@ -1921,18 +1939,83 @@ export default function CanvasPage({
       const t = NODE_TYPES.find((x) => x.id === typeId);
       if (!src || !t) return;
       const id = makeNodeId('new');
-      const meta =
-        typeId === 'shot'
-          ? `h3.c · ${tier}档 · ${aspect} ${(RES[tier] ?? {})[aspect] ?? ''} · 自动连线继承绑定`
-          : t.sub;
       // 按 kind 初始化 data(写入 CanvasSnapshot;生成时走 RenderQueue)
       const initData = makeInitialData(t);
+
+      /*
+       * ── shot 的画幅:把弹层的选择**真正写进 data**(2026-10 P0 修复)──
+       *
+       * 旧实现(缺陷):弹层里选的「比例 × 档位」只被拼进 meta 提示字符串,
+       * 节点 data 拿的始终是 `makeInitialData` 里硬编码的 1280×720/default ——
+       * 于是「显示 9:16 预览档」而「实际 16:9 默认档」,用户看到的与跑的不是一回事。
+       *
+       * ⚠️ **分辨率一律由「档位」决定**(2026-10 修正):
+       * 弹层的「档位」(预览/草稿/默认/参考)是用户显式选的分辨率档,
+       * 它**始终**从 `SHOT_SIZES[比例][档位]` 取像素值 —— 任何"沿用上游图片分辨率"的
+       * 做法都是错的:那会让 4K 参考图把 5 秒预览档顶成 4K 出片,耗时与显存完全失控。
+       *
+       * 连接角色只影响**比例**(aspect),不影响档位分辨率:
+       *  - **首帧**(first-frame / first-last):比例沿用上游图片(首帧即视频第一帧,
+       *    比例不一致会被拉伸/裁切),但**像素数仍按所选档位**取该比例下的合法档;
+       *  - **参考图**(ref-image / Ref2VA):比例默认 4:3(参考图素材多为该比例,不锚定几何);
+       *  - 其余(text2video 等):用弹层选的比例。
+       * 三条路径最终都落到 `SHOT_SIZES` 的同一格,保证与检查器/引擎同表。
+       */
+      let specAspect: string = aspect;
+      if (t.kind === 'shot') {
+        // 上游尺寸:asset 节点取资产元数据宽高,其余图片节点取 data.width/height
+        const upstreamSize = (() => {
+          const sd = (src.data ?? {}) as Record<string, unknown>;
+          if (src.kind === 'asset') {
+            const aid = String(sd.assetId ?? '');
+            const a = aid ? assetsList.find((x) => x.id === aid) : undefined;
+            if (a?.width && a?.height) return { width: a.width, height: a.height };
+          }
+          const w = Number(sd.width ?? 0);
+          const h = Number(sd.height ?? 0);
+          return w > 0 && h > 0 ? { width: w, height: h } : undefined;
+        })();
+        // 连接角色 → 只决定 aspect(不碰分辨率)
+        const roleAspect = (() => {
+          if (port === 'first-frame') {
+            // 首帧:按上游图片比例归类到已知档;拿不到上游就保持弹层所选
+            const up = upstreamSize;
+            if (!up) return undefined;
+            const fit = fitImageSizeToGrid(up.width!, up.height!);
+            return classifyAspect(fit.width, fit.height);
+          }
+          if (port === 'ref-image') return '4:3';
+          return undefined;
+        })();
+        if (roleAspect && roleAspect !== 'custom') specAspect = roleAspect;
+      }
+      // 分辨率:统一按「比例 × 档位」取档位值(用户显式选的档位永远优先于任何图片尺寸)
+      // ⚠️ 档位必须经 tierKeyOf 归一:弹层传的是中文标签「默认」,而 SHOT_SIZES 的键是
+      // 英文 'default' —— 直接查会得 undefined 并**静默**退回旧硬编码尺寸(2026-10 事故)
+      const specTier = tierKeyOf(tier);
+      const specSize = t.kind === 'shot' ? SHOT_SIZES[specAspect as VideoAspect]?.[specTier] : undefined;
+
+      const meta =
+        typeId === 'shot'
+          ? `h3.c · ${tier}档 · ${specAspect} ${specSize ? `${specSize.width}×${specSize.height}` : ''} · 自动连线继承绑定`
+          : t.sub;
+      // shot 的画幅/尺寸真正落进 data(其余 kind 保持原样)
+      const dataWithSpec =
+        t.kind === 'shot'
+          ? {
+              ...initData,
+              aspect: specAspect,
+              ...(specSize ? { width: specSize.width, height: specSize.height } : {}),
+              tier: specTier,
+            }
+          : initData;
+
       // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
       const edgeLabel = deriveEdgeLabel(src, t, port);
       /* 🛡️ 与拖拽建边同口径的权威校验:「+」弹层只列出 resolvePortOptions 认为可连的类型,
          但那仍是渲染层那份表 —— shared 的 validateEdge 可能判它非法(两份表分叉)。
          这里在建节点**之前**拦下,避免留下一个「已新建但连不上」的孤儿节点。 */
-      const dstStub = { id, kind: t.kind, data: initData } as CanvasNode;
+      const dstStub = { id, kind: t.kind, data: dataWithSpec } as CanvasNode;
       const guard = guardEdge(src, dstStub, edgeLabel, [...nodesRef.current, dstStub], edgesRef.current);
       if (!guard.ok) {
         toastMsg(`无法创建连线:${guard.message}`);
@@ -1950,7 +2033,7 @@ export default function CanvasPage({
           kind: t.kind,
           tag: t,
           extra: meta,
-          data: initData,
+          data: dataWithSpec,
         } as CanvasNode,
       ]);
       setEdges((es) => [...es, { from: apFrom, to: id, cls: 'ghost', label: edgeLabel }]);
@@ -1958,7 +2041,8 @@ export default function CanvasPage({
       setInfoMap((m) => ({ ...m, [id]: { t: t.name, img: null, meta: [['来源', meta]] } }));
       closeAddPop();
     },
-    [apFrom, closeAddPop, commitEdit],
+    // assetsList 参与依赖:首帧模式要按 assetId 查资产宽高,清单更新后需拿到新引用
+    [apFrom, closeAddPop, commitEdit, assetsList],
   );
 
   /* 左侧面板:双击添加 + 拖拽添加
@@ -2179,7 +2263,7 @@ export default function CanvasPage({
       // 2) asset 节点:绑定资产的本地文件
       if (!path && n.kind === 'asset') {
         const assetId = typeof d.assetId === 'string' ? d.assetId : undefined;
-        if (assetId) path = assetCache.current[assetId];
+        if (assetId) path = assetCache[assetId];
       }
       // 3) shot 节点:Take 历史里最新成功产物的 resultPath(节点 data 可能缺)
       if (!path && n.kind === 'shot') path = takeResults[nodeId];
@@ -2195,7 +2279,7 @@ export default function CanvasPage({
         toastMsg(`无法在 Finder 中显示:${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [takeResults, toastMsg],
+    [takeResults, toastMsg, assetCache],
   );
 
   /**
@@ -2347,12 +2431,12 @@ export default function CanvasPage({
       // 图片裁切节点(image-crop):不推理,ffmpeg 按目标画幅裁剪 → 直接出产物 + 记 Take
       if (n.kind === 'image-crop') {
         let srcPath: string | undefined;
-        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        if (d.inputAssetId) srcPath = assetCache[String(d.inputAssetId)];
         const cropFrom = d.inputImageFrom as { nodeId?: string } | undefined;
         if (!srcPath && cropFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === cropFrom.nodeId);
           const inEdge = edgesRef.current.find((e) => e.from === cropFrom.nodeId && e.to === nodeId);
-          srcPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
+          srcPath = upstreamImagePath(up, inEdge?.label, assetCache);
         }
         if (!srcPath) {
           toastMsg('图片裁切需要输入图:连一个 图片生成/编辑/增强 节点或 asset,或在检查器填 Asset ID');
@@ -2401,11 +2485,11 @@ export default function CanvasPage({
       if (n.kind === 'frame-grab') {
         // 视频源:资产直取 / 连线上游产物(与 video-upscale 同口径,只收视频)
         let srcPath: string | undefined;
-        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        if (d.inputAssetId) srcPath = assetCache[String(d.inputAssetId)];
         const vFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
         if (!srcPath && vFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === vFrom.nodeId);
-          srcPath = upstreamVideoPath(up, assetCache.current);
+          srcPath = upstreamVideoPath(up, assetCache);
         }
         if (!srcPath) {
           toastMsg('视频裁切取帧需要视频输入:连一个 镜头 / 视频增强 / 视频素材(asset),或在检查器填 Asset ID');
@@ -2481,7 +2565,7 @@ export default function CanvasPage({
         for (const p of piecesFrom) {
           const up = nodesRef.current.find((x) => x.id === p.nodeId);
           const inEdge = edgesRef.current.find((e) => e.from === p.nodeId && e.to === nodeId);
-          const path = upstreamImagePath(up, inEdge?.label, assetCache.current);
+          const path = upstreamImagePath(up, inEdge?.label, assetCache);
           if (path) paths.push(path);
         }
         if (paths.length < 2) {
@@ -2529,12 +2613,12 @@ export default function CanvasPage({
       // 图片拆分节点(image-split):不推理,ffmpeg 把一张图等分多片 → 产物组 + 记 Take(一次运行一条 Take,pieces 记全部)
       if (n.kind === 'image-split') {
         let srcPath: string | undefined;
-        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        if (d.inputAssetId) srcPath = assetCache[String(d.inputAssetId)];
         const splitFrom = d.inputImageFrom as { nodeId?: string } | undefined;
         if (!srcPath && splitFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === splitFrom.nodeId);
           const inEdge = edgesRef.current.find((e) => e.from === splitFrom.nodeId && e.to === nodeId);
-          srcPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
+          srcPath = upstreamImagePath(up, inEdge?.label, assetCache);
         }
         if (!srcPath) {
           toastMsg('图片拆分需要输入图:连一个 图片节点 / asset,或在检查器填 Asset ID');
@@ -2591,18 +2675,18 @@ export default function CanvasPage({
           return;
         }
         let srcPath: string | undefined;
-        if (d.inputAssetId) srcPath = assetCache.current[String(d.inputAssetId)];
+        if (d.inputAssetId) srcPath = assetCache[String(d.inputAssetId)];
         const vidFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
         if (!srcPath && vidFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === vidFrom.nodeId);
-          srcPath = upstreamVideoPath(up, assetCache.current);
+          srcPath = upstreamVideoPath(up, assetCache);
         }
         if (!srcPath) {
           // 兜底:直接找 input 入边(旧数据可能缺派生态)
           const inEdge = edgesRef.current.find((e) => e.to === nodeId && (e.label ?? '') === 'input');
           if (inEdge) {
             const up = nodesRef.current.find((x) => x.id === inEdge.from);
-            srcPath = upstreamVideoPath(up, assetCache.current);
+            srcPath = upstreamVideoPath(up, assetCache);
           }
         }
         if (!srcPath) {
@@ -2697,7 +2781,7 @@ export default function CanvasPage({
       const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }> | undefined) ?? [];
       let references = refs
         .map((r) => {
-          const localPath = r.path ?? assetCache.current[r.assetId ?? ''];
+          const localPath = r.path ?? assetCache[r.assetId ?? ''];
           if (!localPath) return null;
           return {
             asset: {
@@ -2722,7 +2806,7 @@ export default function CanvasPage({
       if (n.kind === 'image-gen' || n.kind === 'image-edit') {
         for (const e of edgesRef.current.filter((x) => x.to === nodeId && x.label === 'ref-image')) {
           const up = nodesRef.current.find((x) => x.id === e.from);
-          const p = upstreamImagePath(up, e.label, assetCache.current);
+          const p = upstreamImagePath(up, e.label, assetCache);
           if (p) {
             references.push({
               asset: {
@@ -2842,16 +2926,16 @@ export default function CanvasPage({
             if (res.ok && res.path) inputPath = res.path;
           }
         }
-        if (!inputPath && d.inputAssetId) inputPath = assetCache.current[String(d.inputAssetId)];
+        if (!inputPath && d.inputAssetId) inputPath = assetCache[String(d.inputAssetId)];
         // 输入图端口 input 的连线来源(静帧直通 / 素材)——手填 inputAssetId 优先
         const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
         if (!inputPath && imgFrom?.nodeId) {
           const up = nodesRef.current.find((x) => x.id === imgFrom.nodeId);
           const inEdge = edgesRef.current.find((e) => e.from === imgFrom.nodeId && e.to === nodeId);
-          inputPath = upstreamImagePath(up, inEdge?.label, assetCache.current);
+          inputPath = upstreamImagePath(up, inEdge?.label, assetCache);
         }
         const maskAssetId = String(d.maskAssetId ?? '');
-        if (maskAssetId) maskPath = assetCache.current[maskAssetId];
+        if (maskAssetId) maskPath = assetCache[maskAssetId];
       }
       if (n.kind === 'image-edit' && !inputPath) {
         /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」
@@ -2960,7 +3044,10 @@ export default function CanvasPage({
         toastMsg(`提交失败:${msg}`);
       }
     },
-    [onNavigate, toastMsg, projectId, activeCanvasId, markDownstreamStale],
+    /* ⚠️ assetCache 必须进依赖:它现在是 state 派生值,**每次资产清单变化都是新对象**。
+       漏掉它 → runNode 闭包捕获旧缓存 → 「刚导入资产就点运行」会报「需要输入图」
+       (旧实现用 ref 读当前值,天然没有这个问题;改成 state 后必须显式声明)。 */
+    [onNavigate, toastMsg, projectId, activeCanvasId, markDownstreamStale, assetCache],
   );
 
   /* 接力触发(渲染时重绑,引用最新 runNode):上游成功后,把直接下游中「该跑」的依次送入队列。
@@ -3510,7 +3597,7 @@ export default function CanvasPage({
                 activeCanvasId={activeCanvasId}
                 jobs={jobs}
                 assetsList={assetsList}
-                assetCache={assetCache.current}
+                assetCache={assetCache}
                 runNode={(id) => void runNode(id)}
                 nodes={nodes}
                 onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}

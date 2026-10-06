@@ -6,6 +6,7 @@
  */
 import React, { useEffect, useState } from 'react';
 import type { Asset, AssetCategory, AssetRef } from '@bigbotart/shared';
+import { MediaInfoPanel } from '../canvas/inspector/MediaInfoPanel';
 
 interface AssetDetailProps {
   asset: Asset | null;
@@ -199,6 +200,14 @@ export function AssetDetail({
         {a.originNodeId ? <div className="kr"><span>来源节点</span><span className="mono">{a.originNodeId}</span></div> : null}
         <div className="kr"><span>创建</span><span className="mono">{formatDate(a.createdAt)}</span></div>
       </div>
+
+      {/* 媒体信息:按需 ffprobe(宽高/时长/帧率/采样率),与画布资源节点检查器同一组件同一口径 ——
+          资产记录里的字段是**导入那一刻**快照下来的,历史资产缺 fps/采样率,这里现探一次补齐 */}
+      {a.localPath ? (
+        <div style={{ marginTop: 10 }}>
+          <MediaInfoPanel path={a.localPath} kind={a.kind} />
+        </div>
+      ) : null}
 
       <div className="lbl" style={{ margin: '10px 0 6px' }}>
         绑定与引用 <span className="mut" style={{ fontWeight: 400 }}>· {refs.length ? `${refs.length} 处` : '未被引用'}</span>

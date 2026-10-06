@@ -102,6 +102,14 @@ export interface BigBotArtApi {
   importAssets(opts?: { paths?: string[]; projectId?: string }): Promise<import('./domain').AssetImportResult>;
   /** 列资产:projectId 给定 = 项目视图(该项目的资源);缺省 = 总资源库(全部) */
   listAssets(projectId?: string): Promise<import('./domain').Asset[]>;
+  /**
+   * 探测本地媒体的基本信息(ffprobe:图片宽高 / 视频时长·分辨率·帧率 / 音频时长·采样率)。
+   *
+   * 只读、按需 —— 检查器选中资源节点时调一次。**不回写资产库**,故可随时重探;
+   * 历史资产(导入时没探过 fps/采样率)也一视同仁能拿到完整信息。
+   * 路径必须在应用数据/产物/导出白名单内(与 frames / vision 同口径),否则返回 `ok:false`。
+   */
+  probeMedia(path: string, kind?: import('./domain').MediaKind): Promise<import('./domain').MediaInfo>;
   /** 软删除 → 回收站(文件移入 trash,7 天后清理);被画布引用时返回引用列表供前端展示警告 */
   deleteAsset(id: string): Promise<{ ok: boolean; error?: string; refs?: import('./domain').AssetRef[] }>;
   /** 资源更新:重命名 / 改分类(null=未分类) / 改归属(null=总资源库) / 改标签 */

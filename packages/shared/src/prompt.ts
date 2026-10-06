@@ -222,4 +222,194 @@ export const SB_SIZE: Record<string, { width: number; height: number }> = {
   '16:9': { width: 1024, height: 576 },
   '9:16': { width: 576, height: 1024 },
   '1:1': { width: 768, height: 768 },
+  // 2026-10 新增:4:3 / 3:4(严格比例 + 32 倍数,见 h3c-command.ts ASPECT_SIZES 的推导注释)
+  '4:3': { width: 1024, height: 768 },
+  '3:4': { width: 768, height: 1024 },
 };
+
+/**
+ * 视频(shot)可选画幅 —— **全链唯一真源**。
+ *
+ * 为什么放 shared:这个列表此前在四处各写一份(渲染层 `constants.ts` 的
+ * `SHOT_ASPECTS`、providers 的 `ASPECT_SIZES`、`SB_SIZE`、以及各处硬编码判断),
+ * 加一个比例要改 4-5 个文件、漏一处就出现「UI 能选、提交却报非法」。
+ * 现在渲染层与 providers 都从这里取,新增比例只改这一处 + 尺寸表。
+ */
+export const VIDEO_ASPECTS = ['16:9', '9:16', '1:1', '4:3', '3:4'] as const;
+export type VideoAspect = (typeof VIDEO_ASPECTS)[number];
+
+/** 视频质量档位(h3 的四档) */
+export const VIDEO_TIERS = ['preview', 'draft', 'default', 'reference'] as const;
+export type VideoTier = (typeof VIDEO_TIERS)[number];
+
+/**
+ * 比例 × 档位 → 宽高。**这是「档位决定分辨率」的唯一落点。**
+ *
+ * 全部为 32 倍数合法档(H3_USAGE.md §4.2)。4:3 / 3:4 于 2026-10 新增:
+ * 严格比例 + 32 倍数同时成立时档位离散(4:3 是 w=128k/h=96k),取值与同级
+ * 16:9 / 9:16 面积对齐,保证切比例不改变速度档位。
+ *
+ * ⚠️ 与 `packages/providers/src/h3c-command.ts` 的 `ASPECT_SIZES`、
+ * 渲染层 `constants.ts` 的 `SHOT_SIZES` 必须同值(后两者是历史副本;
+ * providers 因包边界不能 import shared,故仍保留自己那份 + 单测比对)。
+ */
+export const SHOT_SIZES: Record<VideoAspect, Record<VideoTier, { width: number; height: number }>> = {
+  '16:9': {
+    preview: { width: 864, height: 480 },
+    draft: { width: 864, height: 480 },
+    default: { width: 864, height: 480 },
+    reference: { width: 1280, height: 704 },
+  },
+  '9:16': {
+    preview: { width: 480, height: 864 },
+    draft: { width: 480, height: 864 },
+    default: { width: 576, height: 1024 },
+    reference: { width: 704, height: 1280 },
+  },
+  '1:1': {
+    preview: { width: 448, height: 448 },
+    draft: { width: 544, height: 544 },
+    default: { width: 544, height: 544 },
+    reference: { width: 768, height: 768 },
+  },
+  '4:3': {
+    preview: { width: 640, height: 480 },
+    draft: { width: 768, height: 576 },
+    default: { width: 896, height: 672 },
+    reference: { width: 1024, height: 768 },
+  },
+  '3:4': {
+    preview: { width: 480, height: 640 },
+    draft: { width: 576, height: 768 },
+    default: { width: 672, height: 896 },
+    reference: { width: 768, height: 1024 },
+  },
+};
+
+/** 画幅中文标签(检查器 chips / 提示文案共用) */
+export const VIDEO_ASPECT_LABEL: Record<VideoAspect, string> = {
+  '16:9': '16:9 横屏',
+  '9:16': '9:16 竖屏',
+  '1:1': '1:1 方',
+  '4:3': '4:3 横屏',
+  '3:4': '3:4 竖屏',
+};
+
+/**
+ * 把任意图片宽高**贴合**到 32 倍数(用于「首帧生成」沿用上游图片比例)。
+ *
+ * 语义 = 「保住比例,落到合法网格」,而不是两边各自四舍五入 ——
+ * 后者会漂移比例:1080×1920(严格 9:16)两边取整成 1088×1920 就变成 1.765,
+ * 肉眼是看不出来,但 h3 拿到的首帧与视频尺寸不一致就会被拉伸/裁切,
+ * 而这个函数的**全部意义**就是让两者严格一致。
+ *
+ * 做法:在 32 网格上直接搜最优的 (w,h) —— 以原比例为约束,
+ * 枚举「高度档位」h=32k(k 由小到大),令 w = round(h × ratio / 32) × 32,
+ * 取比例误差最小、同误差下面积最接近原图的解。网格是离散的,
+ * 因此不可能对所有输入都精确命中;但搜索能保证在不超面积上限的前提下
+ * **把比例误差压到该网格能达到的最小值**(实践中通常能精确命中常见比例)。
+ *
+ * 纯函数、可单测、无副作用。
+ */
+export function fitImageSizeToGrid(
+  width: number,
+  height: number,
+): { width: number; height: number } {
+  const w = Number(width);
+  const h = Number(height);
+  // 非法输入 → 退回 1:1 默认,不抛错(调用方在 UI 里,崩了比给个兜底更糟)
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return { width: 544, height: 544 };
+  }
+  const MAX_AREA = 768 * 1344;
+  const targetRatio = w / h;
+  const snap32 = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+
+  let best: { width: number; height: number } | null = null;
+  let bestErr = Infinity;
+  let bestAreaErr = Infinity;
+
+  /*
+   * 搜索空间:高度从「缩到上限内的最大高度」往下扫。
+   * 上限由面积约束给出 —— h 最大时 w 也必须够小,故 hMax = sqrt(MAX_AREA / ratio)。
+   * 步长取 32(网格本身的粒度),范围覆盖到很小的值,保证一定能找到解。
+   */
+  const hMax = Math.min(snap32(h), snap32(Math.sqrt(MAX_AREA / targetRatio)));
+  const hMin = 32;
+  // 直接按 32 步长枚举;网格粒度下这个循环最多几百次,纯计算无 IO,足够快
+  for (let hh = hMax; hh >= hMin; hh -= 32) {
+    const ww = snap32(hh * targetRatio);
+    if (ww * hh > MAX_AREA) continue;
+    const err = Math.abs(ww / hh - targetRatio) / targetRatio;
+    // 面积差距用于在比例并列时挑分辨率更接近原图的解
+    const areaErr = Math.abs(ww * hh - w * h) / (w * h);
+    if (err < bestErr - 1e-12 || (Math.abs(err - bestErr) <= 1e-12 && areaErr < bestAreaErr)) {
+      best = { width: ww, height: hh };
+      bestErr = err;
+      bestAreaErr = areaErr;
+    }
+  }
+
+  if (best) return best;
+  // 兜底(理论上不可达):给一个一定合法的最小档
+  return { width: 32, height: 32 };
+}
+
+/**
+ * 首帧 / 参考图生成时,**新建 shot 节点**该用什么**比例**(注意:只定比例,不定分辨率)。
+ *
+ * ⚠️ **分辨率一律由「档位」决定**(2026-10 修正,原实现是错的):
+ * 早期版本这里连 width/height 一起返回「上游图片的像素尺寸」,导致
+ * 4K 参考图会把「5 秒预览档」顶成 4K 出片 —— 耗时与显存完全失控,
+ * 用户选的档位形同虚设。正确语义是:
+ *   - **档位(预览/草稿/默认/参考)= 用户显式选的分辨率**,任何情况下不被图片顶掉;
+ *   - **连接角色只影响比例**。
+ * 故本函数只返回 aspect,像素值一律由调用方查 `SHOT_SIZES[aspect][tier]`。
+ *
+ * 规则:
+ *  - **首帧**(`first-frame` / `first-last`,上游给的是静帧)⇒ 比例**沿用上游图片**
+ *    (首帧也就是视频第一帧,比例不一致会被拉伸/裁切)。
+ *  - **参考图**(`ref-image` / Ref2VA,靠参考图锁定身份/场景,不锚定几何)⇒ 默认 **4:3**。
+ *  - 其余模式(text2video / ref-video / audio-ref …)⇒ 返回 null = 不干预,用弹层所选。
+ */
+export function defaultShotAspectForRole(
+  role: 'first-frame' | 'ref-image' | string | undefined,
+  upstream?: { width?: number; height?: number },
+): VideoAspect | null {
+  if (role === 'first-frame') {
+    const w = Number(upstream?.width ?? 0);
+    const h = Number(upstream?.height ?? 0);
+    if (w > 0 && h > 0) {
+      // 用贴合后的尺寸归类,避免 1080×1920 这类非 32 倍数图片被归到 custom
+      const fit = fitImageSizeToGrid(w, h);
+      const a = classifyAspect(fit.width, fit.height);
+      return a === 'custom' ? null : a;
+    }
+    return null;
+  }
+  if (role === 'ref-image') return '4:3';
+  return null;
+}
+
+/**
+ * 把具体宽高归类到已知比例(仅用于**显示标签**;数值仍是权威)。
+ *
+ * 用相对误差判定而不是精确相等:首帧贴合后的尺寸可能不落在任何预设档
+ * (例如 1536×1152 是严格 4:3,但不在 4:3 档位表里),此时应显示「4:3」而不是
+ * 「自定义」—— 用户关心的是构图比例,不是它是否等于某个预设像素值。
+ * 容差 1% 足以吸收 32 倍数贴合带来的微小偏差,又不会把 16:9(1.778) 与
+ * 3:2(1.5) 这类明显不同的比例混为一谈。
+ */
+export function classifyAspect(width: number, height: number): VideoAspect | 'custom' {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 'custom';
+  const r = w / h;
+  let best: { a: VideoAspect; err: number } | null = null;
+  for (const a of VIDEO_ASPECTS) {
+    const [n, d] = a.split(':').map(Number) as [number, number];
+    const err = Math.abs(r - n / d) / (n / d);
+    if (err < 0.01 && (!best || err < best.err)) best = { a, err };
+  }
+  return best?.a ?? 'custom';
+}

@@ -225,6 +225,9 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         //    此前该 case 不区分 label,任何入边都覆盖 inputImageFrom → 多图参考画得出边却只留最后一张)
         // ⚠️ 不再有 `shot` 分支:视频 → 图片编辑的直连已取消(图片编辑要静帧,
         //    视频须先经 frame-grab 落成图片)。frame-grab 产物已计入 IMAGE_KINDS,走下面这支。
+        // ⚠️ 派生态 inputImageFrom **不是**检查器显示的充分条件:`data.inputAssetId` 一旦有值,
+        //    解析侧(CanvasPage.runNode 与 ImageEditInspector.resolveEditInputImage)会**优先**用它,
+        //    填了个查不到的 ID 就等于把连线信息挤掉(2026-10 事故:来源卡在、图是空的)。
         if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
           if (e.label === 'ref-image') {
             const arr = editRefPatch.get(e.to) ?? [];

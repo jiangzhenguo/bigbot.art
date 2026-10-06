@@ -16,7 +16,7 @@ import { ModelCombo, matchModel } from './ModelCombo';
 import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
 import { getToolModelsSync } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
-import { UpstreamCard, ImageStrengthField, OutpaintPads, MaskField, ActionBar } from './image-ui';
+import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutpaintPads, MaskField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
 
 export interface ImageEditInspectorProps {
@@ -26,6 +26,8 @@ export interface ImageEditInspectorProps {
   projectId: string | null;
   nodes: CanvasNode[];
   assetCache: Record<string, string>;
+  /** 全量资产清单(校验手填 Asset ID 是否真实存在;缺省 = 跳过敏校验) */
+  assetsList?: Array<{ id: string }>;
   runNode: (nodeId: string) => void;
   toastMsg: (m: string) => void;
   onSelectTake?: (t: { id: string; attempt: number; status: string; resultPath?: string }) => void;
@@ -82,8 +84,151 @@ export function modeSwitchDecision(currentModel: string, targetMode: string): { 
   return null;
 }
 
+/** 输入图来源解析结果(检查器顶部的来源卡 + 大图预览都用它) */
+export interface EditInputImage {
+  /** 可直接显示的 URL;null = 拿不到图(此时只显示来源卡,不渲染大图) */
+  src: string | null;
+  label: string;
+  sub: string;
+  pill: string;
+}
+
+/**
+ * 解析编辑节点的输入图(纯函数,供单测)。
+ *
+ * 优先级:Asset 直绑(表单填的 inputAssetId)> shot 抽帧 > 上游直通。
+ *
+ * ⚠️ **上游有两种形态,都必须能出图**(2026-09 修复「输入节点图片没显示」):
+ *   - **asset 节点**:图在资产库里,路径要从 `assetCache` 按 `data.assetId` 取 ——
+ *     它**根本没有** `data.resultPath`。旧实现一律读 resultPath,拿到空串后
+ *     `src` 变成 null,于是来源卡写着「asset · 产物直通」却一个图都不显示;
+ *   - **其它图片节点**(image-gen / image-crop / frame-grab …):走 `data.resultPath`。
+ * 与 CanvasPage 的 `upstreamImagePath` / `upstreamVideoPath` 同口径。
+ *
+ * 第三级优先级的三个「拿不到图」分支必须给出**互不混淆**的 sub 文案:
+ * ① 上游节点在画布上找不到(已删除)→ label 回落成裸 id;② asset 上游但 assetCache
+ * 查不到 → 「资产未加载」(资产记录丢失 / 缓存未刷新,两者对用户都是「去资源库看看」);
+ * ③ 非 asset 上游但没有 resultPath → 「上游暂无产物」(还没跑)。
+ *
+ * ⚠️ 本函数**只解析 input 端口**(被编辑的底图)。参考图(ref-image)有独立的
+ * `resolveRefImages` + `RefImagesCard` 展示区 —— 两个端口语义不同,不能混在一张卡里。
+ * 仅参考图时这里返回「无底图」并指路下方参考图区,不再借用参考图的图充数。
+ */
+export function resolveEditInputImage(args: {
+  inputAssetId: string;
+  frameSrc?: { videoNodeId?: string; at?: 'first' | 'last' };
+  imgFrom?: { nodeId?: string };
+  /** 参考图来源(ref-image 入边,多值)。无底图时用它兜底显示,避免谎报「无输入」 */
+  refImageFrom?: Array<{ nodeId?: string }>;
+  nodes: CanvasNode[];
+  assetCache: Record<string, string>;
+}): EditInputImage {
+  const { inputAssetId, frameSrc, imgFrom, refImageFrom, nodes, assetCache } = args;
+
+  if (inputAssetId && assetCache[inputAssetId]) {
+    return { src: previewUrlOf(assetCache[inputAssetId]), label: 'Asset 直绑', sub: inputAssetId, pill: 'Asset 直绑' };
+  }
+  if (frameSrc?.videoNodeId) {
+    const vn = nodes.find((n) => n.id === frameSrc.videoNodeId);
+    return { src: null, label: vn?.title ?? 'shot 节点', sub: `取帧 · ${frameSrc.at === 'last' ? '尾帧' : '首帧'}`, pill: '抽帧' };
+  }
+  if (imgFrom?.nodeId) {
+    const upNode = nodes.find((n) => n.id === imgFrom.nodeId);
+    const pd = (upNode?.data ?? {}) as Record<string, unknown>;
+    const isAssetUp = upNode?.kind === 'asset';
+    const assetId = String(pd.assetId ?? '');
+    const path = isAssetUp ? (assetCache[assetId] ?? '') : String(pd.resultPath ?? '');
+    /* 拿不到图时**必须说清是哪一种拿不到**(2026-10 事故:来源卡写着「asset · 资产直通」、
+       大图却是空的,用户无法区分「连线没接上」与「资产没加载」/「资产记录丢了」,
+       排查时只能靠猜)。与 NodeBody 的「资产未加载 …」占位文案同口径。 */
+    const sub = !path
+      ? isAssetUp
+        ? `asset · 资产未加载${assetId ? `(${assetId})` : '(节点未绑定资产)'}`
+        : `${upNode?.kind ?? '图片'} · 上游暂无产物`
+      : isAssetUp
+        ? 'asset · 资产直通'
+        : `${upNode?.kind ?? '图片'} · 产物直通`;
+    return {
+      src: path ? previewUrlOf(path) : null,
+      label: upNode?.title ?? imgFrom.nodeId,
+      sub,
+      pill: isAssetUp ? 'asset' : '直通',
+    };
+  }
+  /* 仅参考图、无底图(Qwen-Image-2.1 的 qwen21.edit 合法用法)。
+     ⚠️ 这里**只改文案,不借用参考图的图**:ref-image 有自己独立的展示区(RefImagesCard),
+     在「输入图」卡里显示参考图会让用户以为那张就是被编辑对象 —— 两个端口语义不同,
+     视觉上必须分开(2026-10 用户明确要求)。所以本卡如实说明「无底图」并指路下方参考图区。 */
+  if ((refImageFrom ?? []).some((r) => r?.nodeId)) {
+    return {
+      src: null,
+      label: '无底图',
+      sub: `未连 input 端口 · 见下方「参考图」区(${refImageFrom!.filter((r) => r?.nodeId).length} 张)`,
+      pill: '仅参考图',
+    };
+  }
+  return { src: null, label: '无输入', sub: '连一个 shot / 图片节点 / asset,或填输入图资产', pill: '待绑定' };
+}
+
+/**
+ * 「输入图 Asset ID」字段的状态判定(纯函数,供单测)。
+ *
+ * 这个字段的语义**不是**旧标签说的「与连线二选一」,而是 **填了就压过连线**:
+ * 提交侧 `CanvasPage.runNode` 的顺序是「取帧 → inputAssetId → 上游连线」,
+ * 输入框只要有值,连线解析根本不会执行。所以字段必须把这件事说清楚,
+ * 并在值**不可用**时当场报错 —— 否则表现是「连了线却不出图」且毫无线索。
+ *
+ * 三种状态:
+ *  - `empty`:没填。正常走连线 / 取帧。
+ *  - `invalid`:填了,但 `assetsList`(完整资产清单)里查无此 id —— 真错误。
+ *  - `ok`:填了且资产确实存在。
+ *
+ * ⚠️ 判据同时看两个数据源:`assetsList` 判「是否存在」,`assetCache` 判「路径是否就绪」。
+ * 刚粘贴 ID / 资产刚导入时可能「存在但缓存未就绪」,这**不算错**——
+ * 所以只要在 assetsList 里能查到就判 ok,不让异步时序误伤。
+ */
+export type AssetIdFieldState = 'empty' | 'invalid' | 'ok';
+
+export function assetIdFieldState(
+  inputAssetId: string,
+  assetsList: Array<{ id: string }>,
+  assetCache: Record<string, string>,
+): AssetIdFieldState {
+  const id = inputAssetId.trim();
+  if (!id) return 'empty';
+  // 资产清单里查得到 = 存在(即便缓存还没就绪也算合法,避免误伤异步加载)
+  if (assetsList.some((a) => a.id === id)) return 'ok';
+  // 缓存里已有路径 = 必然可用(清单可能尚未刷新)
+  if (assetCache[id]) return 'ok';
+  return 'invalid';
+}
+
+/**
+ * 两块卡片区的**显隐判定**(纯函数,供单测)。
+ *
+ * 2026-10 用户要求:没有内容就不占位。
+ *  - 输入图卡:没绑任何输入源 → 整块不渲染。空壳卡(「无输入」+ 空框)零信息量,
+ *    还把真正的操作项挤到下面。判据用「来源是否绑定」而非「src 是否有值」——
+ *    连了线但上游还没跑出产物时,来源信息本身有用(说明连的是谁、为何还没图),必须留着。
+ *  - 参考图卡:**多于一张**才渲染。单张没有「多张关联」可看,不值得占一整块。
+ */
+export function inspectorCardVisibility(args: {
+  inputAssetId: string;
+  frameSrc?: { videoNodeId?: string };
+  imgFrom?: { nodeId?: string };
+  refImageCount: number;
+}): { showInput: boolean; showRefImages: boolean } {
+  return {
+    // 三处都判 trim 后的内容:纯空白的 id / nodeId 是脏数据(用户粘贴时常带空白),
+    // 若按真值判断会让空壳卡复现 —— 与 assetIdFieldState 的 trim 口径保持一致
+    showInput:
+      !!args.inputAssetId.trim() || !!args.frameSrc?.videoNodeId?.trim() || !!args.imgFrom?.nodeId?.trim(),
+    showRefImages: args.refImageCount > 1,
+  };
+}
+
 export function ImageEditInspector(p: ImageEditInspectorProps) {
-  const { node, setData, jobs, projectId, nodes, assetCache, runNode, toastMsg, onSelectTake } = p;
+  const { node, setData, jobs, projectId, nodes, assetCache, assetsList = [], runNode, toastMsg, onSelectTake } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'instruction');
   // 未显式选模型时显示缺省解析结果(按当前 mode 对应的能力;2026-09-29 v1)
@@ -118,6 +263,10 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
     ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
   const imgFrom = d.inputImageFrom as { nodeId?: string } | undefined;
+  /** 参考图来源(ref-image 入边,多值):无底图时来源卡靠它兜底,不再谎报「无输入」 */
+  const refImageFrom = Array.isArray(d.refImageFrom)
+    ? (d.refImageFrom as Array<{ nodeId?: string }>)
+    : undefined;
   // 产物路径:节点 data 优先,缺失时回退 Take 历史里最新成功产物(2026-09-29 事故修复)
   const resultPath = useTakeResult(node.id, projectId, d.resultPath, jobs) ?? '';
   const hasTake = !!d.currentTakeId || !!resultPath;
@@ -144,22 +293,29 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   };
 
   // ── 输入图来源解析(Asset 直绑 > shot 抽帧 > 图片直通) ──
-  const up = (() => {
-    if (inputAssetId && assetCache[inputAssetId]) {
-      return { src: previewUrlOf(assetCache[inputAssetId]), label: 'Asset 直绑', sub: inputAssetId, pill: 'Asset 直绑' };
-    }
-    if (frameSrc?.videoNodeId) {
-      const vn = nodes.find((n) => n.id === frameSrc.videoNodeId);
-      return { src: null as string | null, label: vn?.title ?? 'shot 节点', sub: `取帧 · ${frameSrc.at === 'last' ? '尾帧' : '首帧'}`, pill: '抽帧' };
-    }
-    if (imgFrom?.nodeId) {
-      const upNode = nodes.find((n) => n.id === imgFrom.nodeId);
-      const pd = (upNode?.data ?? {}) as Record<string, unknown>;
-      const path = String(pd.resultPath ?? '');
-      return { src: path ? previewUrlOf(path) : null, label: upNode?.title ?? imgFrom.nodeId, sub: `${upNode?.kind ?? '图片'} · 产物直通`, pill: '直通' };
-    }
-    return { src: null as string | null, label: '无输入', sub: '连一个 shot / 图片节点 / asset,或填输入图资产', pill: '待绑定' };
-  })();
+  const up = resolveEditInputImage({
+    inputAssetId,
+    frameSrc,
+    imgFrom,
+    refImageFrom,
+    nodes,
+    assetCache,
+  });
+
+  /** 输入图 Asset ID 的合法性(查不到就标红提示,不再静默当没有) */
+  const assetIdState = assetIdFieldState(inputAssetId, assetsList, assetCache);
+
+  /** 参考图解析(ref-image 端口独立展示区用;与「输入图」互不影响) */
+  const refImages = resolveRefImages({ refImageFrom, nodes, assetCache });
+
+  /* ── 两块卡片的**显隐条件**(2026-10 用户要求:没有就不占位) ──
+     判据与理由见上方 inspectorCardVisibility 的文档注释 */
+  const { showInput: hasInputSource, showRefImages } = inspectorCardVisibility({
+    inputAssetId,
+    frameSrc,
+    imgFrom,
+    refImageCount: refImages.length,
+  });
 
   // 输入图自然尺寸(outpaint 导出尺寸推算用)
   const [inputDims, setInputDims] = useState<{ w?: number; h?: number }>({});
@@ -208,13 +364,11 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         }}
       />
 
-      {/* 预览置顶(与 image-gen / shot 检查器同口径):点中节点先看到「输入图 + 产物」,
-          再往下才是编辑模式/指令等参数。此前编辑模式芯片块压在预览之上,要滚动才看得到结果 */}
-      <UpstreamCard label={up.label} sub={up.sub} src={up.src} pill={up.pill} />
-      {/* 输入图大图预览(有源时;点 ⛶ 可全屏) */}
-      {up.src ? <ImagePreview src={up.src} alt="输入图预览" /> : null}
-
-      {/* 产物预览(与 image-gen 检查器同模式) */}
+      {/* 产物预览置顶(与 image-gen 检查器同模式)。
+          顺序上**产物在输入图之上**:用户点开编辑节点最关心「改成什么样了」,
+          产物才是结果;输入图(UpstreamCard + 大图)是它的上下文,排在后面。
+          状态条仍留在最顶部(GenStatePanel)—— 排队/生产/失败这些状态是行动依据,
+          不该被图片挤下去。 */}
       {resultPath ? (
         <div className="kv" data-od-id="edit-result-preview">
           <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
@@ -224,6 +378,22 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
           </div>
         </div>
       ) : null}
+
+      {/* 输入图:来源卡片 + 大图预览(有源时;点 ⛶ 可全屏)。
+          未出产物时它就是最上面的图,出了产物则退到产物下方作对照。
+          ⚠️ hasInputSource 为假 = 没绑任何输入源 → **整块不渲染**(见上方显隐条件注释) */}
+      {hasInputSource ? (
+        <>
+          <UpstreamCard label={up.label} sub={up.sub} src={up.src} pill={up.pill} />
+          {up.src ? <ImagePreview src={up.src} alt="输入图预览" /> : null}
+        </>
+      ) : null}
+
+      {/* 参考图:独立展示区(ref-image 端口专用)。
+          与「输入图」并列但语义独立 —— 输入图是**被编辑对象**,这里每张都是**参考**,
+          混在一张卡里会让人分不清哪张会被改(2026-10 用户要求拆开)。
+          ⚠️ 仅**多于一张**时渲染:单张没有「多张关联」可看(见上方显隐条件注释) */}
+      {showRefImages ? <RefImagesCard items={refImages} /> : null}
 
       {upstreamStale ? (
         <div className="stale-banner" data-od-id="stale-banner">
@@ -253,15 +423,31 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         </div>
       </div>
 
-      {/* 输入图 Asset ID(与连线二选一,保留原能力) */}
+      {/* 输入图 Asset ID —— **不是「二选一」,而是「填了就压过连线」**(提交侧顺序:
+          取帧 → inputAssetId → 上游连线)。故标题写「优先于输入端口连线」,
+          并在填了值且确实压过连线时直接点明,避免「连了线却不出图」无从排查。 */}
       <div className="f-sec" style={running ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
-        <div className="f-sec-h"><span className="lbl">输入图 Asset ID(与连线二选一)</span></div>
+        <div className="f-sec-h">
+          <span className="lbl">输入图 Asset ID</span>
+          <span className="mut" style={{ fontSize: 10.5 }}>填写后优先于输入端口连线</span>
+        </div>
         <input
-          className="f-in full mono"
-          placeholder="asset-…"
+          className={`f-in full mono${assetIdState === 'invalid' ? ' f-in-bad' : ''}`}
+          placeholder="asset-…(留空则用连线)"
           value={inputAssetId}
+          aria-invalid={assetIdState === 'invalid'}
           onChange={(e) => setData({ inputAssetId: e.target.value })}
         />
+        {assetIdState === 'invalid' ? (
+          <div className="f-hint f-hint-bad" data-od-id="input-asset-id-invalid">
+            资产库里没有这个 ID · 请从资产中心复制,或清空此框改用连线
+            {imgFrom?.nodeId ? '(清空后即走已连的输入端口)' : ''}
+          </div>
+        ) : assetIdState === 'ok' && imgFrom?.nodeId ? (
+          <div className="f-hint" data-od-id="input-asset-id-overrides">
+            当前用此资产作输入图 · 已连的输入端口被忽略(清空此框即可恢复用连线)
+          </div>
+        ) : null}
       </div>
 
       {frameSrc?.videoNodeId ? (
@@ -365,7 +551,10 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
         rows={[
           ['引擎', 'mlxgen · generate 子命令'],
           ['路由', mode === 'instruction' ? 'edit-reference(自动)' : mode === 'img2img' ? 'latent img2img' : mode === 'inpaint' ? 'masked-edit' : 'outpaint'],
-          ['输入', inputAssetId ? 'Asset 直绑' : frameSrc ? 'shot 抽帧' : imgFrom ? '上游直通' : '待绑定'],
+          /* 卡片隐藏时这行是唯一的输入状态出口,故即使「未绑定」也要如实给出
+             (单张参考图尤其需要它 —— 参考图卡按「多于一张」才渲染,否则那张图就没有任何提示) */
+          ['输入', inputAssetId ? 'Asset 直绑' : frameSrc ? 'shot 抽帧' : imgFrom ? '上游直通' : refImages.length ? '无底图' : '未绑定'],
+          ...(refImages.length ? [['参考图', `${refImages.length} 张 · 非被编辑对象`] as [string, string]] : []),
         ]}
       />
 

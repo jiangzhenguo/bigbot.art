@@ -25,6 +25,9 @@ import {
   referenceMediaIssues,
   capabilityOf,
   resolveImageModel,
+  defaultShotAspectForRole,
+  SHOT_SIZES,
+  type VideoAspect,
   type DerivedRef,
   type PromptSource,
   type ToolModelBinding,
@@ -647,6 +650,47 @@ export class ToolHandlers {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
+
+      /*
+       * ── shot 画幅缺省(2026-10,与渲染层「+」弹层同口径)──
+       *
+       * ⚠️ **分辨率一律由档位决定,绝不用图片尺寸**(2026-10 修正):
+       * 曾经这里会把上游图片的宽高直接当视频尺寸写进 data —— 那等于让 4K 参考图
+       * 把「预览档」顶成 4K 出片,用户选的档位失效、耗时与显存失控。
+       * 现在:本函数只补**比例**(aspect),像素值一律查 `SHOT_SIZES[aspect][tier]`。
+       *
+       * 只在 data **缺 width/height** 时补,且档位取 data.tier(缺省 default)。
+       */
+      if (kind === 'shot') {
+        const dd = data as Record<string, unknown>;
+        const explicitW = Number(dd.width ?? 0);
+        const explicitH = Number(dd.height ?? 0);
+        if (explicitW <= 0 || explicitH <= 0) {
+          const tier = (String(dd.tier ?? 'default') || 'default') as 'preview' | 'draft' | 'default' | 'reference';
+          // 角色:Agent 可能已表达首帧/参考意图(data.mode)或经 refs;拿不到就不干预
+          const role = String(dd.mode ?? '');
+          const upstreamSize = (() => {
+            const upId = (a as { from?: string }).from;
+            const up = upId ? cur.nodes.find((n) => n.id === upId) : undefined;
+            if (!up) return undefined;
+            const ud = (up.data ?? {}) as Record<string, unknown>;
+            if (up.kind === 'asset') {
+              const asset = this.assets.get(String(ud.assetId ?? ''));
+              if (asset?.width && asset?.height) return { width: asset.width, height: asset.height };
+            }
+            const w = Number(ud.width ?? 0);
+            const h = Number(ud.height ?? 0);
+            return w > 0 && h > 0 ? { width: w, height: h } : undefined;
+          })();
+          const roleAspect = defaultShotAspectForRole(role, upstreamSize);
+          const aspect = roleAspect ?? (String(dd.aspect ?? '') || '16:9');
+          const size = SHOT_SIZES[aspect as VideoAspect]?.[tier];
+          if (size) {
+            data = { engine: 'h3c', aspect, width: size.width, height: size.height, tier, ...dd } as Record<string, unknown>;
+          }
+        }
+      }
+
       const now = new Date().toISOString();
       const node: CanvasNode = {
         id: nid(kind), kind: kind as CanvasNode['kind'], label,

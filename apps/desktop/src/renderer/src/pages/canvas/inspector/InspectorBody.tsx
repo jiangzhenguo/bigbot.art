@@ -12,6 +12,8 @@ import { CropTakePreview } from './CropTakePreview';
 import { previewUrlOf } from '../media';
 import { ImageGenInspector } from './ImageGenInspector';
 import { ImageEditInspector } from './ImageEditInspector';
+import { MediaInfoPanel } from './MediaInfoPanel';
+import { AssetInspector } from './AssetInspector';
 
 export interface InspectorBodyProps {
   node: CanvasNode | undefined;
@@ -133,109 +135,15 @@ export function InspectorBody({
       );
     }
     case 'asset': {
-      const mediaType = String(d.mediaType ?? 'image');
-      const assetId = String(d.assetId ?? '');
-      // 已绑定资产 = 媒体类型锁定(资源节点「不可自变」);未绑定时才允许选类型
-      const locked = !!assetId;
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Lbl>媒体类型{locked ? ' · 已绑定锁定' : ''}</Lbl>
-            <div className="row g6">
-              {(['image', 'video', 'audio', 'document'] as const).map((t) => (
-                <span
-                  key={t}
-                  className={`chip${mediaType === t ? ' on' : ''}${locked ? ' dis' : ''}`}
-                  onClick={() => {
-                    if (locked) {
-                      toastMsg('已绑定资产,媒体类型锁定 · 右键「更换资产…」换绑');
-                      return;
-                    }
-                    setData({ mediaType: t });
-                  }}
-                >
-                  {t === 'image' ? '图片' : t === 'video' ? '视频' : t === 'audio' ? '音频' : '文档'}
-                </span>
-              ))}
-            </div>
-          </div>
-          <TextAreaField
-            label="资产 ID(从资产中心复制)"
-            value={assetId}
-            rows={1}
-            placeholder="asset-xxxxxxxxxxxx-xxxx"
-            onChange={(v) => setData({ assetId: v })}
-          />
-          <div className="row g6">
-            <button
-              className="btn btn-s btn-sm"
-              onClick={() => node && onOpenAssetPicker && onOpenAssetPicker(node.id)}
-            >
-              从资源库选择…
-            </button>
-            <button
-              className="btn btn-s btn-sm"
-              onClick={() => {
-                void window.bigbotart.listAssets().then((all) => {
-                  const opts = all.filter((a) => a.kind === mediaType);
-                  if (!opts.length) {
-                    toastMsg(`资产库里没有 ${mediaType} 类资产`);
-                    return;
-                  }
-                  const first = opts[0]!;
-                  setData({ assetId: first.id });
-                  toastMsg(`已绑定最新 ${mediaType} 资产:${first.name}`);
-                });
-              }}
-            >
-              绑定最新 {mediaType} 资产
-            </button>
-          </div>
-          {/* 素材预览:按媒体类型给对应播放器(此前只支持图片,视频/音频节点看不到预览) */}
-          {(() => {
-            const src = assetId ? assetCache[assetId] : undefined;
-            const url = src ? previewUrlOf(src) : null;
-            if (mediaType === 'image') {
-              return <ImagePreview src={url} label="素材预览" emptyHint="未绑定资产 · 绑定后显示完整图片" />;
-            }
-            if (!url) {
-              return (
-                <div className="mut" style={{ fontSize: 11 }}>
-                  {assetId ? `资产未加载 · ${assetId.slice(0, 16)}…` : '未绑定资产 · 绑定后显示预览'}
-                </div>
-              );
-            }
-            if (mediaType === 'video') {
-              return (
-                <div>
-                  <Lbl>素材预览</Lbl>
-                  <video
-                    key={url}
-                    src={url}
-                    controls
-                    muted
-                    loop
-                    playsInline
-                    preload="metadata"
-                    style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000', display: 'block' }}
-                  />
-                </div>
-              );
-            }
-            if (mediaType === 'audio') {
-              return (
-                <div>
-                  <Lbl>素材预览</Lbl>
-                  <audio key={url} src={url} controls preload="metadata" style={{ width: '100%' }} />
-                </div>
-              );
-            }
-            return (
-              <div className="mut" style={{ fontSize: 11 }}>文档类资产无内联预览 · 双击资源节点或「在资源中心打开」查看</div>
-            );
-          })()}
-          {info?.meta ? <KVSection rows={info.meta} /> : null}
-        </div>
+        <AssetInspector
+          node={node}
+          setData={setData}
+          toastMsg={toastMsg}
+          assetCache={assetCache}
+          onOpenAssetPicker={onOpenAssetPicker}
+          meta={info?.meta}
+        />
       );
     }
     case 'image-gen': {
@@ -260,6 +168,7 @@ export function InspectorBody({
           projectId={projectId}
           nodes={nodes ?? []}
           assetCache={assetCache}
+          assetsList={assetsList}
           runNode={runNode}
           toastMsg={toastMsg}
           onSelectTake={selectImageTake}

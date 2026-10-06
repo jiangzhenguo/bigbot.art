@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { RenderJob, Asset, ShotTakeHistory, AccelPack } from '@bigbotart/shared';
+import { VIDEO_ASPECTS, VIDEO_ASPECT_LABEL, type VideoAspect } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import {
   SHOT_ASPECTS,
@@ -8,6 +9,7 @@ import {
   SHOT_TIER_PRESETS,
   SHOT_MODE_LABEL,
   SHOT_REF_ROLES,
+  tierKeyOf,
   h3AlignFrames,
   h3FramesForSeconds,
   h3OutputSeconds,
@@ -50,8 +52,18 @@ export function ShotInspector({
 }: ShotInspectorProps) {
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'text2video');
-  const tier = (String(d.tier ?? 'default') as (typeof SHOT_TIERS)[number]) in SHOT_TIER_PRESETS ? (String(d.tier ?? 'default') as (typeof SHOT_TIERS)[number]) : 'default';
-  const aspect = (String(d.aspect ?? '16:9') as (typeof SHOT_ASPECTS)[number]) in SHOT_SIZES || String(d.aspect ?? '16:9') === 'custom' ? (String(d.aspect ?? '16:9') as (typeof SHOT_ASPECTS)[number]) : '16:9';
+  /*
+   * 档位归一:`data.tier` 可能是英文 key(正常),也可能是**中文标签** ——
+   * 2026-10 的一次缺陷让 `createFromPop` 把弹层的中文「默认」直接写进了 data.tier,
+   * 存量节点里就留着这种值。用 `tierKeyOf` 一并接住,否则这些节点会显示成空档位,
+   * 用户点开检查器看不到自己选的是哪一档。
+   */
+  const tier = tierKeyOf(String(d.tier ?? 'default'));
+  const aspect = (() => {
+    const raw = String(d.aspect ?? '16:9');
+    if (raw === 'custom') return 'custom' as const;
+    return (VIDEO_ASPECTS as readonly string[]).includes(raw) ? (raw as VideoAspect) : '16:9';
+  })();
   const prompt = String(d.prompt ?? '');
   const seconds = Number(d.seconds ?? 0);
   const customWidth = Number(d.customWidth ?? 544);
@@ -79,7 +91,7 @@ export function ShotInspector({
   // 推导值(比例 × 档位 / 自定义,32 倍数对齐)
   const derived = isCustom
     ? { width: clamp32(customWidth), height: clamp32(customHeight) }
-    : (SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default);
+    : SHOT_SIZES[aspect][tier];
   // 节点 data 为权威:有 width/height 就尊重(选择 chips 已同步写入);否则回退推导
   const width = Number(d.width ?? derived.width);
   const height = Number(d.height ?? derived.height);
@@ -221,7 +233,8 @@ export function ShotInspector({
     void runNode(node.id);
   };
 
-  const aspectLabel = (a: string) => (a === '16:9' ? '16:9 横屏' : a === '9:16' ? '9:16 竖屏' : a === '1:1' ? '1:1 方' : '自定义');
+  const aspectLabel = (a: string) =>
+    a === 'custom' ? '自定义' : (VIDEO_ASPECT_LABEL[a as VideoAspect] ?? a);
   const resText = `${width}×${height} · ${aspectLabel(aspect)}`;
 
   return (
@@ -342,11 +355,11 @@ export function ShotInspector({
                     return;
                   }
                   // 选比例 → 立即按当前档位写入节点参数
-                  const sz = SHOT_SIZES[a as '16:9' | '9:16' | '1:1'][tier] ?? SHOT_SIZES['16:9'].default;
+                  const sz = SHOT_SIZES[a as VideoAspect][tier];
                   setSpec({ aspect: a, width: sz.width, height: sz.height });
                 }}
               >
-                {a === '16:9' ? '16:9' : a === '9:16' ? '9:16' : a === '1:1' ? '1:1' : '自定义'}
+                {a === 'custom' ? '自定义' : a}
               </span>
             ))}
           </div>
@@ -363,7 +376,7 @@ export function ShotInspector({
                   const p = SHOT_TIER_PRESETS[t];
                   const sz = isCustom
                     ? { width: clamp32(customWidth), height: clamp32(customHeight) }
-                    : SHOT_SIZES[aspect as '16:9' | '9:16' | '1:1'][t] ?? SHOT_SIZES['16:9'].default;
+                    : SHOT_SIZES[aspect as VideoAspect][t];
                   setSpec({
                     tier: t,
                     steps: p.steps,

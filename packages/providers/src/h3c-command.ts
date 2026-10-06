@@ -44,8 +44,26 @@ export const TIER_PRESETS: Record<QualityTier, { label: string; width: number; h
   reference:{ label: '参考质量', width: 768, height: 768, frames: 124, steps: 30, layers: 50, reuse: 1, etaMin: 30, note: 'high quality · ~30-50 分钟,gold 档' },
 };
 
-/** 比例 → 不同 tier 下的实际宽高(全部 32 倍数,来自 H3_USAGE.md §4.2 合法档) */
-export const ASPECT_SIZES: Record<'16:9' | '9:16' | '1:1', Record<QualityTier, { width: number; height: number }>> = {
+/** 已知比例集合(h3 合法档;`custom` 不在此列 —— 它走 customWidth/customHeight) */
+export type KnownAspect = '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
+
+/**
+ * 比例 → 不同 tier 下的实际宽高(全部 32 倍数,来自 H3_USAGE.md §4.2 合法档)。
+ *
+ * 4:3 / 3:4 是 2026-10 新增的:此前视频只有 16:9 / 9:16 / 1:1 三种,而
+ * 「参考图生成(Ref2VA)」的常见参考图本身是 4:3(相机/多数图片素材比例),
+ * 没有对应档位就只能退化成 1:1 或 16:9,构图被裁。
+ *
+ * ⚠️ **严格比例 + 严格 32 倍数同时成立时,档位是离散的**:
+ * 设 w=32a、h=32b,要求 w/h=4/3 ⇒ a/b=4/3 ⇒ a=4k, b=3k ⇒
+ *   - 4:3:w=128k, h=96k
+ *   - 3:4:w=96k,  h=128k
+ * 下面的取值即按此网格挑选,**与同级 16:9 / 9:16 档位的面积尽量对齐**
+ * (preview/draft/default 取 0.31–0.44MP,reference 取 0.79–1.0MP),
+ * 保证切比例不会意外改变速度档位。
+ * 校验见 `h3c-command.test.ts` 的「比例档位合法性」组(宽高 32 倍数 + 比例精确)。
+ */
+export const ASPECT_SIZES: Record<KnownAspect, Record<QualityTier, { width: number; height: number }>> = {
   '16:9': {
     preview:   { width: 864, height: 480 },
     draft:     { width: 864, height: 480 },
@@ -64,11 +82,25 @@ export const ASPECT_SIZES: Record<'16:9' | '9:16' | '1:1', Record<QualityTier, {
     default:   { width: 544, height: 544 },
     reference: { width: 768, height: 768 },
   },
+  // 128k × 96k(k=3/4/5 对应 0.31/0.44/0.60 MP;reference 取 k=8 = 0.79MP)
+  '4:3': {
+    preview:   { width: 640, height: 480 },
+    draft:     { width: 768, height: 576 },
+    default:   { width: 896, height: 672 },
+    reference: { width: 1024, height: 768 },
+  },
+  // 96k × 128k(与 4:3 严格旋转对称,同一 k 网格)
+  '3:4': {
+    preview:   { width: 480, height: 640 },
+    draft:     { width: 576, height: 768 },
+    default:   { width: 672, height: 896 },
+    reference: { width: 768, height: 1024 },
+  },
 };
 
 /** 比例 × 档位 → 具体宽高(custom 返回 null,让 UI 用 customWidth/customHeight) */
 export function resolveDimensions(
-  aspect: '16:9' | '9:16' | '1:1' | 'custom',
+  aspect: KnownAspect | 'custom',
   tier: QualityTier,
   customWidth?: number,
   customHeight?: number,

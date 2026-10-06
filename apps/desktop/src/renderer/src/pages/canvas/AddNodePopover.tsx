@@ -8,7 +8,8 @@
  */
 import React, { useEffect, useState } from 'react';
 import type { Edge, CanvasNode } from './types';
-import { NODE_TYPES, RES, resLine } from './constants';
+import { NODE_TYPES, SHOT_SIZES, tierKeyOf, resLine } from './constants';
+import { VIDEO_ASPECTS, fitImageSizeToGrid, classifyAspect } from '@bigbotart/shared';
 import { resolvePortOptions, hasConnector, PORT_LABEL } from './connectors';
 
 interface AddNodePopoverProps {
@@ -65,11 +66,29 @@ export function AddNodePopover({
   /* 当前选中类型的全部端口选项 + 当前选择(多端口时 UI 可选) */
   const portOpts = src && sel ? resolvePortOptions(src, sel) : [];
   const chosenPort = portOpts[Math.min(portIdx, portOpts.length - 1)] ?? null;
+
+  /*
+   * 提示行用的比例必须与**实际落盘的比例**一致:
+   * 首帧角色下比例由上游图片决定(见 CanvasPage.createFromPop),若这里仍用弹层本地
+   * `aspect`,就会出现「提示写 16:9、节点实际是 4:3」的又一次显示/实际不符。
+   * 归类用与创建侧同一对纯函数(fitImageSizeToGrid + classifyAspect),口径必然一致;
+   * 上游拿不到尺寸时退回弹层所选 —— 创建侧同样退回,两边仍然一致。
+   */
+  const upstreamAspect = ((): string | null => {
+    if (!src) return null;
+    const sd = (src.data ?? {}) as Record<string, unknown>;
+    const w = Number(sd.width ?? 0);
+    const h = Number(sd.height ?? 0);
+    if (w <= 0 || h <= 0) return null;
+    const fit = fitImageSizeToGrid(w, h);
+    const a = classifyAspect(fit.width, fit.height);
+    return a === 'custom' ? null : a;
+  })();
+  const effectiveAspect = chosenPort?.port === 'first-frame' && upstreamAspect ? upstreamAspect : aspect;
+  const resHint = resLine(effectiveAspect, tier);
   const tip = sel
     ? `自动连线：${srcLabel} → ${NODE_TYPES.find((t) => t.id === sel)?.name ?? ''}${chosenPort ? ` · 落 ${chosenPort.port} 端口` : ''}`
     : '选中后自动连线并继承绑定';
-  const resHint = resLine(aspect, tier);
-
   return (
     <div
       className={`add-pop${open ? ' open' : ''}`}
@@ -195,26 +214,34 @@ export function AddNodePopover({
           </div>
         ) : (
           <>
-            <div className="ap-prow">
-              <span className="lbl">比例</span>
-              {['16:9', '9:16', '1:1'].map((a) => (
-                <span
-                  key={a}
-                  className={`chip${aspect === a ? ' on' : ''}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setAspect(a);
-                    setTier((t) => (t !== '默认' && !((RES[t] ?? {})[a] ?? null) ? '默认' : t));
-                  }}
-                >
-                  {a}
-                </span>
-              ))}
-            </div>
+            {/* 比例:首帧角色下由上游图片决定,故不给选择(只提示);其余可自由选 */}
+            {chosenPort?.port === 'first-frame' ? (
+              <div className="ap-res mono" style={{ borderTop: 'none', paddingTop: 2 }}>
+                首帧生成：比例沿用上游图片
+              </div>
+            ) : (
+              <div className="ap-prow">
+                <span className="lbl">比例</span>
+                {VIDEO_ASPECTS.map((a) => (
+                  <span
+                    key={a}
+                    className={`chip${aspect === a ? ' on' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAspect(a);
+                      setTier((t) => (t !== '默认' && !SHOT_SIZES[a]?.[tierKeyOf(t)] ? '默认' : t));
+                    }}
+                  >
+                    {a}
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* 档位:**始终可选** —— 它决定最终分辨率(任何角色都不覆盖档位) */}
             <div className="ap-prow">
               <span className="lbl">档位</span>
               {['预览', '草稿', '默认', '参考'].map((t) => {
-                const ok = !!((RES[t] ?? {})[aspect] ?? null);
+                const ok = !!SHOT_SIZES[effectiveAspect as keyof typeof SHOT_SIZES]?.[tierKeyOf(t)];
                 return (
                   <span
                     key={t}
