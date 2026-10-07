@@ -114,6 +114,128 @@ export function composeTruncatedReply(reply: string): string {
   return `${reply}\n\n⚠️(以上回复被截断:模型输出达到 token 上限,内容可能不完整。)`;
 }
 
+/* ══ 「假成功」第三变体:承诺了动作却没发工具调用(2026-10-07 真实事故) ══
+ *
+ * 事故形态:用户说「生成」,模型回了「已提交生成,完成后画布会自动刷新。」——
+ * 但**一个工具调用都没发**。三条独立证据:
+ *   ① 真提交耗时 23.15s,这一轮 1.6s 就返回(连一次工具往返都不够);
+ *   ② recall 里这条 assistant 前后**没有任何 tool 记录**;
+ *   ③ takes.json 里没有对应 take(真提交哪怕失败也会先落一条 queued)。
+ * 结果:节点 prompt 齐全、resultPath 空,用户以为在生成、实际什么都没发生。
+ *
+ * 与已有防护的关系(同一「假成功」家族的第 3 个变体,前两个已修):
+ *   ① `stopReason === 'length'` → composeTruncatedReply(输出被腰斩);
+ *   ② 批次1 的「假失败」→ 任务化 + 静默看门狗;
+ *   ③ **本变体** → 模型正常说完一句话(stopReason === 'stop'),但话的内容是「我做了 X」,
+ *      而 X 从没发生过。旧代码对此毫无校验,文本被原样当成交付返回。
+ *
+ * 为什么小模型特别容易触发:上一轮它以「要现在提交生成吗?」结尾,用户回一个裸的
+ * 「生成」,模型被自己上一轮的问答模板带偏,直接续写「确认后」的答复话术,跳过执行。
+ */
+
+/**
+ * 完成声明里的**动作动词**。这些动词是「执行了什么」而非「讨论什么」。
+ */
+const DONE_ACTION_RE =
+  '(提交|生成|重跑|重新生成|重新提交|重提交|创建|新建|连接|删除|移除|导出|更新|修改|导入|上传|增强|裁切|拼接|拆分|放大|执行)';
+
+/**
+ * 动作完成声明:模型宣称**做完了**某件事。
+ * 命中即代表这句话是「执行结果」而非「讨论/计划/提问」,必须有工具调用支撑。
+ *
+ * 两种句式(**必须同时覆盖**,少一个就会漏掉事故里的某次谎报):
+ *   ① 「已提交…」= 副词 + 动词。最可靠的形态,几乎不会误伤。
+ *   ② 「重提交 new24-ix8p(背视图)。」= 动词直接开头。事故里用户追问「没触发啊」时,
+ *      模型正是这么答的 —— 「重提交」没有「已」字,只匹配①会漏掉这次谎报。
+ *
+ * ② 的误伤风险高得多,所以要求**动词后面紧跟具体宾语**(节点 id / 「任务」/「了」),
+ * 而不是光看动词。反例(全是正常对话,绝不能拦):
+ *   「生成背视图需要先有一张正面参考图」→ 动词后是「需要」,是说明不是声明;
+ *   「删除节点是不可逆的」            → 后面在讲性质;
+ *   「更新提示词后需要重新提交」       → 后面是「后需要」,是流程说明;
+ *   「连接这两个节点即可」            → 指示性说法(「即可」),不是已完成。
+ * 正例:「重提交 new24-ix8p」「生成完成」「创建了节点」。
+ */
+const DONE_CLAIM_RE = new RegExp(
+  `(?:(已|刚刚|已经)${DONE_ACTION_RE})` + // ① 已提交 / 刚刚生成
+    `|(?:^|[。!！,，;；\\s])${DONE_ACTION_RE}` + // ② 句首动词 …
+    `(?=\\s*[a-zA-Z0-9_-]|\\s*(了|任务|完成|成功|好|完毕|节点|图片|视频|时间线))`, // … + 具体宾语
+);
+
+/**
+ * 说明/指示语气:动词后面跟着这些词时是在**解释流程或讲性质**,不是宣称做完。
+ * ② 句式尤其需要它兜底(「生成背视图**需要**…」「连接这两个节点**即可**」)。
+ */
+const EXPLANATORY_RE =
+  /(需要|必须先|要先|是不可逆|无法撤销|即可|就可以|可以再|会生成|将会|之后|以后|的话|时,|时需|前需要)/;
+
+/**
+ * 「提交类」完成声明的窄匹配:仅在**已经真的提交成功过**时用于免检(见主循环注释)。
+ * 只认提交/生成这两个动词,不沿用宽泛的 DONE_ACTION_RE —— 避免把「已删除节点 xxx」
+ * 这类**尚未发生**的动作也一起放行。
+ */
+const DONE_SUBMIT_RE = /(提交|生成)/;
+
+/** 征询/计划语气:出现这些说明是在问或准备做,不是在宣称做完 */
+const INTERROGATIVE_RE = /(吗|呢|是否|要不要|需要我|是否要|可以吗|请确认|要我|建议|计划|打算|准备)\s*[?？]?/;
+
+/** 否定/条件语气:「没法提交」「提交失败」「如果提交」都不算完成声明 */
+const NEGATED_RE = /(失败|不成功|无法|没法|未能|没能|不能|出错|报错|取消|未提交|未生成|没有提交|还没)/;
+
+/**
+ * 判定「模型声称已完成某动作、但本轮没有任何工具调用支撑」。
+ *
+ * @param reply    本轮模型文本(已剥 thinking)
+ * @param hadCalls 本轮是否真的执行过工具调用
+ * @returns 命中时应重试/警示;返回 false 表示正常收尾
+ */
+export function isUnbackedCompletionClaim(reply: string, hadCalls: boolean): boolean {
+  if (hadCalls) return false;
+  const body = reply.trim();
+  if (!body) return false;
+  if (!DONE_CLAIM_RE.test(body)) return false;
+  if (NEGATED_RE.test(body)) return false;
+  // 说明/指示语气优先:「生成背视图需要先有参考图」「连接这两个节点即可」
+  if (EXPLANATORY_RE.test(body)) return false;
+  // 征询语气优先:整句里只要有问句特征就不当作完成声明(「已提交了吗?」这类)
+  if (INTERROGATIVE_RE.test(body)) return false;
+  return true;
+}
+
+/**
+ * 承诺未兑现时的**纠正指令**:塞回对话让模型立即补上真正的工具调用。
+ *
+ * 要点(踩过的坑):
+ *   · 必须**指名道姓**要它调 engine.submit —— 只说「请真正执行」模型会复述确认;
+ *   · 必须点名它谎报的那句话,否则模型不知道自己错在哪;
+ *   · 明确告知「不要重新提问、不要重新写提示词」—— 提示词上一轮已经写好了,
+ *     让它再写一遍既浪费 token 又可能改坏内容。
+ */
+export function unbackedClaimNudge(reply: string): string {
+  const quoted = reply.trim().slice(0, 120);
+  return (
+    `(系统)你刚才回复了「${quoted}」,但**本轮没有发出任何工具调用**,该动作并未真正发生。\n` +
+    '禁止再声称已完成。请立即:① 若需要提交生成,直接调用 engine.submit(nodeId=…);' +
+    '② 若需要改参数,直接调用 canvas.update_node。\n' +
+    '不要重复提问、不要重新写提示词(上一轮已写好)、不要复述本提示。只发工具调用。'
+  );
+}
+
+/**
+ * 重试后仍然没有工具调用时的收尾文案:保留模型的话但**打上未执行标记**,
+ * 绝不让它继续冒充成功。与 composeTruncatedReply 同口径。
+ */
+export function composeUnbackedClaimReply(reply: string): string {
+  const body = reply.trim();
+  const warn =
+    '\n\n⚠️(以上动作**未实际执行**:模型声称已完成,但重试后仍未发出任何工具调用。' +
+    '画布与队列都没有变化,请手动重试或换一种说法再让它执行一次。)';
+  if (!body) {
+    return '⚠️ 本轮模型声称已执行某操作,但**没有发出任何工具调用**,该操作并未发生。\n请重试,或直接说明要操作哪个节点。';
+  }
+  return `${reply}${warn}`;
+}
+
 /**
  * 组装喂给模型的工具结果文本。
  *
@@ -342,6 +464,12 @@ export class PiChatSession {
     let submitted = false;
     /** 提交成功后的只读轮询累计次数(超过 POST_SUBMIT_POLL_LIMIT 即判定空转) */
     let postSubmitPolls = 0;
+    /**
+     * 「承诺未兑现」已重试次数(见 isUnbackedCompletionClaim)。
+     * 只给**一次**纠正机会:模型若在被明确点名后仍只说不做,再喂回去只会无限烧 token,
+     * 此时改用 composeUnbackedClaimReply 打上未执行标记收尾 —— 宁可如实说失败,不要假成功。
+     */
+    let unbackedRetries = 0;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (signal.aborted) return { reply: '', toolCalls, aborted: true };
@@ -465,6 +593,36 @@ export class PiChatSession {
         // 这是「假成功」,与批次1 修的「假失败」是同一类问题的镜像:都不能静默吞掉。
         if (assistant.stopReason === 'length') {
           return { reply: composeTruncatedReply(reply), thinking, toolCalls };
+        }
+        /* 「承诺未兑现」闸(2026-10-07 事故,见 isUnbackedCompletionClaim 顶部注释):
+           stopReason 正常、话说得很完整,但内容是「已提交生成」而本轮**没有任何工具调用**。
+           旧代码把这种文本原样当成功交付,用户以为在生成、实际画布与队列毫无变化。
+           处理:给一次纠正机会把话塞回去;再犯就以「未执行」标记收尾,不再冒充成功。
+
+           ⚠️ 判据是「本轮有没有调用」,不是「整轮对话累计有没有」——
+           若用累计值,事故现场的「上一轮写了 prompt、这一轮谎称提交」会被放行。
+
+           ⚠️ 但当**某个动作已经真的成功过**(submitted=已成功 engine.submit)时,
+           后续轮次的「已提交生成 xxx」是对**既有事实的复述**(收尾致辞),不是谎报。
+           真实回归:纠正成功后第 3 轮说「已提交生成 new24-ix8p。」本是正常收尾,
+           若继续按「本轮无调用」判,会把一次**成功**提交污蔑成「未实际执行」——
+           比原 bug 更糟(用户会去重复提交)。故已提交成功即对提交类声明免检。 */
+        if (submitted && DONE_SUBMIT_RE.test(reply)) {
+          return { reply, thinking, toolCalls };
+        }
+        if (isUnbackedCompletionClaim(reply, false)) {
+          if (unbackedRetries < 1 && !signal.aborted) {
+            unbackedRetries += 1;
+            console.error('[pi-chat] 声称已完成但无工具调用,已回灌纠正指令重试一次');
+            messages.push({
+              role: 'user',
+              content: unbackedClaimNudge(reply),
+              timestamp: Date.now(),
+            } as Message);
+            continue;
+          }
+          console.error('[pi-chat] 承诺未兑现且重试后仍未调用工具,标记为未执行收尾');
+          return { reply: composeUnbackedClaimReply(reply), thinking, toolCalls };
         }
         return { reply, thinking, toolCalls };
       }
