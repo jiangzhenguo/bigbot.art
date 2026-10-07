@@ -291,11 +291,17 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .pal-it b{display:block;font-size:var(--text-xs);font-weight:600}
 .pg-canvas .pal-it span{display:block;font-size:11px;color:var(--muted);line-height:1.35;margin-top:1px}
 .pg-canvas .pal-it .p1{margin-left:auto;font-size:10px;color:var(--meta);font-family:var(--font-mono)}
-.pg-canvas .stage{flex:1;position:relative;overflow:hidden;background:var(--bg);background-image:radial-gradient(color-mix(in oklab,var(--fg) 12%,transparent) 1px,transparent 1px);background-size:24px 24px;cursor:grab}
+/* ⚠️ 光标语义(2026-10 改):左键拖空白**不再**平移画布,平移走触控板双指滑动
+   (鼠标用户用中键拖动 / 空格+拖动)→ 默认光标不能再是 grab,否则是在骗用户。
+   grab 只在真的处于平移中(panning,含空格/中键按住)时出现。 */
+.pg-canvas .stage{flex:1;position:relative;overflow:hidden;background:var(--bg);background-image:radial-gradient(color-mix(in oklab,var(--fg) 12%,transparent) 1px,transparent 1px);background-size:24px 24px;cursor:default}
 .pg-canvas .stage.panning{cursor:grabbing}
-/* 框选模式:光标变十字(拖空白处框选);平移保底通道(中键/空格)仍是抓手 */
+/* 框选模式:光标变十字(拖空白处框选) */
 .pg-canvas .stage.marquee{cursor:crosshair}
 .pg-canvas .stage.marquee.panning{cursor:grabbing}
+/* 空格按住 = 临时抓手(平移保底通道之一):光标必须立刻变,否则用户不知道按下去有用 */
+.pg-canvas .stage.space-pan{cursor:grab}
+.pg-canvas .stage.space-pan.panning{cursor:grabbing}
 /* 视口容器:.world 自身只做 transform(平移/缩放)。
    合成层提示 —— 把「每帧重排 + 重绘整棵子树(节点 DOM + 连线 SVG)」降级为
    「合成器直接平移已有纹理」,这是画布拖动/缩放卡顿的第一来源。

@@ -66,6 +66,88 @@ describe('StageView — .world 不再受 React style 控制', () => {
   });
 });
 
+describe('画布鼠标/触控板交互契约(2026-10:双指滑动平移,单击滑动不再拖动)', () => {
+  const src = readPage();
+  const stage = read('StageView.tsx');
+
+  it('StageView 把 wheel 交给 onWheelPan,且用 wheelIntent 判定意图', () => {
+    const i = stage.indexOf('onWheel={(e) => {');
+    expect(i).toBeGreaterThan(-1);
+    const seg = stage.slice(i, i + 300);
+    expect(seg).toMatch(/wheelIntent\(e\)/);
+    expect(seg).toMatch(/onWheelPan\(/);
+  });
+
+  it('onWheelPan 有平移分支,且平移走 applyViewLive(直写 DOM,不 setState)', () => {
+    const i = src.indexOf('const onWheelPan = useCallback');
+    expect(i).toBeGreaterThan(-1);
+    const seg = src.slice(i, i + 2400);
+    expect(seg).toMatch(/panOffset\(/);
+    expect(seg).toMatch(/applyViewLive\(/);
+    expect(seg).not.toMatch(/setView\(/);
+  });
+
+  /* 🚨 本次需求的核心:左键拖空白**不再**平移画布。
+     保底通道只剩「中键拖动」与「空格+拖动」—— 两者都必须还在,
+     否则鼠标用户(没有触控板)就彻底没法平移了。 */
+  it('左键拖空白不再平移:onStagePointerDown 的非框选分支不得调用 beginPan', () => {
+    const i = src.indexOf('const onStagePointerDown = useCallback');
+    expect(i).toBeGreaterThan(-1);
+    const seg = src.slice(i, i + 1200);
+    // 中键 / 空格这条保底分支仍然 beginPan
+    expect(seg).toMatch(/e\.button === 1 \|\| spacePan/);
+    expect(seg).toMatch(/beginPan\(e\)/);
+    // 框选模式下走框选
+    expect(seg).toMatch(/if \(marqueeMode\)/);
+    expect(seg).toMatch(/beginMarquee\(e\)/);
+    /* 关键:默认分支(beginMarquee 的 return 之后)不能再有裸的 beginPan(e)。
+       做法:数一数整段里 beginPan(e) 的出现次数 —— 只允许保底分支那一次。 */
+    const bare = seg.match(/^\s*beginPan\(e\);\s*$/gm) ?? [];
+    expect(bare).toHaveLength(1);
+  });
+
+  it('双指滑动支持横向(deltaX)—— 只认 deltaY 会让横滑彻底没反应', () => {
+    const i = src.indexOf('const onWheelPan = useCallback');
+    const seg = src.slice(i, i + 2400);
+    expect(seg).toMatch(/panOffset\(deltaX, deltaY\)/);
+  });
+
+  it('缩放锚点用最近一次指针位置,缺失时回落到舞台中心(不以 0,0 为锚点甩飞画布)', () => {
+    const i = src.indexOf('const onWheelPan = useCallback');
+    const seg = src.slice(i, i + 2400);
+    expect(seg).toMatch(/lastPointerRef\.current/);
+    expect(seg).toMatch(/rect\.width \/ 2/);
+    expect(seg).toMatch(/rect\.height \/ 2/);
+  });
+
+  it('双指滑动的落盘收尾同样走 commitView(否则滑动后视角不持久化)', () => {
+    const i = src.indexOf('const onWheelPan = useCallback');
+    const seg = src.slice(i, i + 2400);
+    // 平移分支里必须有 commitView 的防抖收尾
+    const panSeg = seg.slice(0, seg.indexOf('缩放分支'));
+    expect(panSeg).toMatch(/commitView\(/);
+  });
+
+  /* 光标也是一种契约:默认光标若是 grab,就是在骗用户「拖空白能平移」。 */
+  it('默认光标不再是 grab;grab 只出现在空格抓手态', () => {
+    const css = readCss();
+    const stageRule = css.split('\n').find((l) => l.includes('.pg-canvas .stage{')) ?? '';
+    expect(stageRule).toContain('cursor:default');
+    expect(stageRule).not.toContain('cursor:grab');
+    expect(css).toMatch(/\.pg-canvas \.stage\.space-pan\{cursor:grab\}/);
+  });
+
+  it('空格按下时挂 space-pan 类(抓手光标反馈),抬起/失焦都要清掉', () => {
+    expect(stage).toMatch(/spacePanning \? ' space-pan' : ''/);
+    expect(src).toMatch(/setSpacePanning\(true\)/);
+    // keyup 与 blur 两条路径都要复位
+    const up = src.indexOf('const onKeyUp = (e: KeyboardEvent) => {');
+    expect(src.slice(up, up + 200)).toMatch(/setSpacePanning\(false\)/);
+    const blur = src.indexOf('const onBlur = () => {');
+    expect(src.slice(blur, blur + 200)).toMatch(/setSpacePanning\(false\)/);
+  });
+});
+
 describe('CanvasPage — 高频视口路径不得 setState', () => {
   const src = readPage();
 
@@ -86,9 +168,9 @@ describe('CanvasPage — 高频视口路径不得 setState', () => {
   });
 
   it('滚轮缩放走 applyViewLive,收尾用 200ms 防抖 + commitView', () => {
-    const i = src.indexOf('const onWheel = (e: WheelEvent) => {');
+    const i = src.indexOf('const onWheelPan = useCallback');
     expect(i).toBeGreaterThan(-1);
-    const seg = src.slice(i, i + 1400);
+    const seg = src.slice(i, i + 2400);
     expect(seg).toMatch(/applyViewLive\(/);
     expect(seg).not.toMatch(/setView\(/);
     expect(seg).toMatch(/commitView\(/);

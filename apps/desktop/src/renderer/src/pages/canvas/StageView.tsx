@@ -12,6 +12,7 @@ import { NodeCard } from './NodeCard';
 import { minimapLayout, minimapToWorld } from './minimap';
 import { boundingRect, type NodeGroup, type Rect } from './selection';
 import { refNodesSignature } from './storyboard';
+import { wheelIntent } from './wheel-intent';
 
 export interface EdgePathRender {
   key: string;
@@ -48,6 +49,8 @@ interface StageViewProps {
   groups: NodeGroup[];
   /** 框选模式开关开启时,空白处拖拽走框选(否则平移) */
   marqueeMode: boolean;
+  /** 空格按下中(光标切成抓手,提示「现在可以拖动平移」) */
+  spacePanning: boolean;
   /** 取消进行中的框选(清 selRectRef + 隐藏矩形);返回 true = 确实取消了一次进行中的框选。
    *  用于把「清空选区」的时机从 click 提前到 pointerdown(见下方注释) */
   onCancelMarquee: () => boolean;
@@ -78,9 +81,16 @@ interface StageViewProps {
   onStagePointerDown: (e: React.PointerEvent) => void;
   onStageClick: () => void;
   onWorldClick: () => void;
+  /** 双击空白区域(复位视图;由 CanvasPage 实现) */
+  onWorldDoubleClick: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent) => void;
   onBeginPan: (e: React.PointerEvent) => void;
+  /**
+   * 触控板双指滑动(wheel 且未按修饰键)→ 平移画布。
+   * `zoomable` = 该事件应走缩放(鼠标滚轮 / Ctrl+滚轮 / ⌘+滚轮),由 StageView 判定后传入。
+   */
+  onWheelPan: (dx: number, dy: number, zoomable: boolean) => void;
   /** 节点主体按下(拖动整块选区;Shift = 切换选中) */
   onNodeSelect: (n: CanvasNode, e: React.PointerEvent) => void;
   onNodeContextMenu: (e: React.MouseEvent, n: CanvasNode) => void;
@@ -104,6 +114,7 @@ export function StageView({
   selectionRect,
   groups,
   marqueeMode,
+  spacePanning,
   onCancelMarquee,
   flashId,
   draggingIds,
@@ -124,9 +135,11 @@ export function StageView({
   onStagePointerDown,
   onStageClick,
   onWorldClick,
+  onWorldDoubleClick,
   onDragOver,
   onDrop,
   onBeginPan,
+  onWheelPan,
   onNodeSelect,
   onNodeContextMenu,
   onNodeHeaderPointerDown,
@@ -214,7 +227,7 @@ export function StageView({
 
   return (
     <section
-      className={`stage${panning ? ' panning' : ''}${marqueeMode ? ' marquee' : ''}`}
+      className={`stage${panning ? ' panning' : ''}${marqueeMode ? ' marquee' : ''}${spacePanning ? ' space-pan' : ''}`}
       data-od-id="canvas-stage"
       ref={(el) => {
         stageRef.current = el;
@@ -238,6 +251,14 @@ export function StageView({
            视口变换由 .world 的 CSS 变量(--vx/--vy/--vz)驱动,CanvasPage 在
            平移/缩放时直接 setProperty 写 DOM —— 若在这里绑 React style,
            每次 setState 都会覆盖掉命令式写入的值,优化即刻失效。 */
+        /* 双指滑动 / 滚轮(2026-10 改):
+             · 触控板双指滑动 = 平移画布(与 Figma / 浏览器一致);
+             · Ctrl/⌘ + 滑动 = 缩放(触控板捏合在 Chromium 里就是 ctrl+wheel);
+             · 鼠标滚轮 = 缩放(鼠标用户没有第二根手指,保留滚轮缩放才有得用)。
+           本组件只负责判定「这次是滑动还是缩放」,真正做什么由 CanvasPage 决定。 */
+        onWheel={(e) => {
+          onWheelPan(e.deltaX, e.deltaY, wheelIntent(e) === 'zoom');
+        }}
         onClick={(e) => {
           if (e.target === e.currentTarget) onWorldClick();
         }}
@@ -252,6 +273,7 @@ export function StageView({
           if (cancelMarquee()) return;
           onWorldClick();
         }}
+        onDoubleClick={onWorldDoubleClick}
       >
         {/* 组框:画在节点下方(z-index 由 CSS 控制);只有标题条可点(避免挡住节点拖动) */}
         {groupBoxes.map(({ g, box }) => (

@@ -24,8 +24,8 @@ export interface FrameSample {
 /** 正在进行中的操作类别(用于把长帧归因到具体交互) */
 export type PerfPhase =
   | 'idle'
-  | 'pan'          // 拖空白平移
-  | 'zoom'         // 滚轮缩放
+  | 'pan'          // 平移画布(双指滑动 / 中键 / 空格+拖动)
+  | 'zoom'         // 缩放(Ctrl/⌘+滑动 或 鼠标滚轮)
   | 'drag-node'    // 拖动节点
   | 'marquee'      // 框选
   | 'connect'      // 拖拽建边

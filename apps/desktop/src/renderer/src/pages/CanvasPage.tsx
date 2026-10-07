@@ -56,6 +56,7 @@ import {
   type NodeGroup,
   type Rect,
 } from './canvas/selection';
+import { panOffset, wheelIntent, zoomFactorFor } from './canvas/wheel-intent';
 import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
@@ -300,7 +301,7 @@ export default function CanvasPage({
   const selected = selectedIds.length === 1 ? selectedIds[0]! : null;
   const selectedIdsRef = useRef<string[]>([]);
   selectedIdsRef.current = selectedIds;
-  /** 「框选」模式开关:开 = 拖空白框选;关 = 拖空白平移(方案 A + 开关模式) */
+  /** 「框选」模式开关:开 = 拖空白框选;关 = 拖空白无动作(平移走双指滑动/中键/空格) */
   const [marqueeMode, setMarqueeMode] = useState(false);
   /** 正在拖拽的框选矩形(world 坐标;ref 供每帧读取,state 供渲染) */
   const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
@@ -826,12 +827,15 @@ export default function CanvasPage({
     };
   }, [hitTestNode, commitConnectEdge, markViewportAnimating]);
 
-  /* ── 空白处拖拽:框选(marqueeMode)或平移 ──
-   * 方案 A + 开关模式:开关开启 → 拖空白框选;关闭 → 拖空白平移(原行为)。
-   * 平移另有保底通道:中键拖动 / 空格+拖动(见下方 onStagePointerDown),开关关着也不憋屈。 */
+  /* ── 空白处拖拽:框选(marqueeMode)──
+   * 2026-10 改:开关**只**管框选 —— 关闭时拖空白不再平移画布(左键拖空白太容易误操作),
+   * 平移统一走「触控板双指滑动」(见 onWheelPan);鼠标用户另有两条保底通道:
+   * 中键拖动 / 空格+拖动(见下方 onStagePointerDown),没有触控板也不憋屈。 */
   const panStartRef = useRef({ sx: 0, sy: 0, vx: 0, vy: 0 });
   /** 空格按下中(临时切换为平移:与 Photoshop/Figma 一致,空格是通用抓手) */
   const spaceDownRef = useRef(false);
+  /** 空格按下的**渲染态**(仅用于把光标切成抓手;平移判定仍以 spaceDownRef 为准) */
+  const [spacePanning, setSpacePanning] = useState(false);
   const beginPan = (e: React.PointerEvent) => {
     panStartRef.current = {
       sx: e.clientX,
@@ -954,37 +958,75 @@ export default function CanvasPage({
         beginMarquee(e);
         return;
       }
-      beginPan(e);
+      /* 默认(框选开关关闭):**拖空白不再平移画布**(2026-10 改)。
+         平移改由「触控板双指滑动」承担;左键拖空白保留给未来的框选/套索,
+         也避免用户想框选时不小心把画布甩走。需要鼠标平移时有两条保底通道:
+         中键拖动 / 空格+拖动(见上方分支)。 */
     },
     [marqueeMode, beginMarquee],
   );
 
-  /* ── 滚轮:以指针为中心缩放(P3:直写 DOM,不 setState) ── */
+  /* ── 滚轮 / 触控板双指滑动(2026-10 改)──
+   * 语义:
+   *   · **触控板双指滑动** → 平移画布(与 Figma / 浏览器一致),这是本次改动的核心;
+   *   · **Ctrl/⌘ + 滑动** → 缩放 —— Chromium 把触控板「捏合」直接合成成 ctrl+wheel,
+   *     所以捏合缩放天然落在这条分支上,不必额外做多指手势;
+   *   · **鼠标滚轮** → 缩放 —— 鼠标没有第二根手指,滚轮若不缩放,鼠标用户就再也缩不了了;
+   *     StageView 用 `deltaMode !== 0`(行/页模式 = 传统滚轮)把它与触控板的像素滚动区分开。
+   *
+   * 两条分支都**只写 DOM 不 setState**(P3):触控板滑动是高频连续事件,setState 会逐帧
+   * 触发整树 reconcile;拖动期间视口只活在 viewRef/DOM 里,停手后才 commitView 回 state。
+   */
+  /** 视口落盘防抖定时器(平移/缩放共用) */
   const wheelSyncTimer = useRef<number | null>(null);
   /** 缩放阶段收尾定时器(性能面板归因用;与 wheelSyncTimer 同节奏) */
   const zoomPhaseTimer = useRef<number | null>(null);
-  useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const onWheel = (e: WheelEvent) => {
-      // 弹窗/菜单内的滚轮用于滚动它自己的内容(如「+」弹窗的类型列表),不缩放画布
-      const target = e.target as HTMLElement | null;
-      if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
-      e.preventDefault();
-      // 缩放阶段:滚轮是离散事件流(没有干净的 end),用幂等占位 + 防抖释放,
-      // 不能跟 beginPhase 混用 —— 那个是压栈语义,每次滚轮都 push 会算错
+  /** 平移阶段收尾定时器(与 wheelSyncTimer / zoomPhaseTimer 同节奏) */
+  const panWheelTimer = useRef<number | null>(null);
+  /** 最近一次指针屏幕坐标(缩放锚点用;触控板滑动不产生 pointermove,故只能是「最近记录」) */
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const onWheelPan = useCallback(
+    (deltaX: number, deltaY: number, zoomable: boolean) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+
+      if (!zoomable) {
+        /* 双指滑动 = 平移:偏移量与缩放无关(视口变换是 translate(x,y) scale(z),
+           平移量在 scale 之前,故 1px 滑动就是 1px 位移 —— 不要再除以 z)。 */
+        perfMonitor.holdPhase('pan');
+        if (panWheelTimer.current !== null) window.clearTimeout(panWheelTimer.current);
+        panWheelTimer.current = window.setTimeout(() => {
+          panWheelTimer.current = null;
+          perfMonitor.releasePhase();
+        }, 220);
+        const v = viewRef.current;
+        const { dx, dy } = panOffset(deltaX, deltaY);
+        applyViewLive({ ...v, x: v.x + dx, y: v.y + dy });
+        if (wheelSyncTimer.current !== null) window.clearTimeout(wheelSyncTimer.current);
+        wheelSyncTimer.current = window.setTimeout(() => {
+          wheelSyncTimer.current = null;
+          commitView({ ...viewRef.current });
+        }, 200);
+        return;
+      }
+
+      /* 缩放分支:滚轮是离散事件流(没有干净的 end),用幂等占位 + 防抖释放,
+         不能跟 beginPhase 混用 —— 那个是压栈语义,每次滚轮都 push 会算错 */
       perfMonitor.holdPhase('zoom');
       if (zoomPhaseTimer.current !== null) window.clearTimeout(zoomPhaseTimer.current);
       zoomPhaseTimer.current = window.setTimeout(() => {
         zoomPhaseTimer.current = null;
         perfMonitor.releasePhase();
       }, 220);
+      // 指针位置:优先用最近一次 pointermove 记录的光标(触控板滑动不更新光标),
+      // 没记录过则回落到舞台中心,避免「以 (0,0) 为锚点缩放」把画布甩飞
       const rect = stage.getBoundingClientRect();
+      const last = lastPointerRef.current;
+      const mx = last ? last.x - rect.left : rect.width / 2;
+      const my = last ? last.y - rect.top : rect.height / 2;
       const v = viewRef.current;
-      const factor = Math.exp(-e.deltaY * 0.0016);
+      const factor = zoomFactorFor(deltaY);
       const nz = Math.min(1.3, Math.max(0.4, v.z * factor));
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
       const k = nz / v.z;
       // 缩放同样只写 DOM —— 滚轮是高频连续事件,setState 会逐帧触发整树 reconcile
       applyViewLive({ z: nz, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k });
@@ -995,13 +1037,38 @@ export default function CanvasPage({
         wheelSyncTimer.current = null;
         commitView({ ...viewRef.current });
       }, 200);
+    },
+    [applyViewLive, commitView],
+  );
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    /* 记录最近一次指针位置(缩放锚点)。用 pointermove 而非 wheel 的 clientX:
+       触控板双指滑动不移动光标,wheel 事件的 clientX 会停在旧位置甚至为 0。 */
+    const onPointerMove = (e: PointerEvent) => {
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+    };
+    /* 兜底:落在弹窗/菜单内的滚轮仍交给它们自己滚动(如「+」弹窗的类型列表)。
+       正常情况下弹层的 wheel 已被 stopPropagation 拦在 StageView 之外,
+       这里再挡一道,防止以后新增弹层忘了拦。 */
+    const onWheel = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('.add-pop, .pop, .ctx, .ap-list, .ap-conn')) return;
+      e.preventDefault();
+      const zoomable = wheelIntent(e) === 'zoom';
+      onWheelPan(e.deltaX, e.deltaY, zoomable);
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
+    stage.addEventListener('pointermove', onPointerMove);
     return () => {
       stage.removeEventListener('wheel', onWheel);
+      stage.removeEventListener('pointermove', onPointerMove);
       if (wheelSyncTimer.current !== null) window.clearTimeout(wheelSyncTimer.current);
+      if (panWheelTimer.current !== null) window.clearTimeout(panWheelTimer.current);
+      if (zoomPhaseTimer.current !== null) window.clearTimeout(zoomPhaseTimer.current);
     };
-  }, [applyViewLive]);
+  }, [onWheelPan]);
 
   /* ── Agent 面板宽度 ── */
   const agentMax = useCallback(
@@ -2330,7 +2397,12 @@ export default function CanvasPage({
         !!active && (/^(INPUT|TEXTAREA)$/.test(active.tagName) || active.isContentEditable);
       // 空格按下 = 临时抓手(平移);输入框内不抢(空格要打出来)
       if (e.code === 'Space' && !typing && !e.metaKey && !e.ctrlKey) {
-        spaceDownRef.current = true;
+        if (!spaceDownRef.current) {
+          spaceDownRef.current = true;
+          // 光标反馈:空格是鼠标用户的唯一「随时可用」平移通道(另一个是中键),
+          // 不给出抓手光标的话用户根本不知道按下去有用
+          setSpacePanning(true);
+        }
         e.preventDefault();
         return;
       }
@@ -2384,11 +2456,15 @@ export default function CanvasPage({
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') spaceDownRef.current = false;
+      if (e.code === 'Space') {
+        spaceDownRef.current = false;
+        setSpacePanning(false);
+      }
     };
     // 失焦时清空格状态(否则切窗口回来以为自己还按着空格 → 拖拽全变平移)
     const onBlur = () => {
       spaceDownRef.current = false;
+      setSpacePanning(false);
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('keyup', onKeyUp);
@@ -3436,7 +3512,11 @@ export default function CanvasPage({
           marqueeMode={marqueeMode}
           onToggleMarquee={() => {
             setMarqueeMode((v) => {
-              toastMsg(v ? '已关闭框选 · 拖空白处恢复为平移画布' : '框选模式已开启 · 在空白处拖拽即可框选节点');
+              toastMsg(
+                v
+                  ? '框选模式已关闭 · 双指滑动平移画布(空格/中键拖动亦可)'
+                  : '框选模式已开启 · 在空白处拖拽即可框选节点',
+              );
               return !v;
             });
           }}
@@ -3474,6 +3554,7 @@ export default function CanvasPage({
             selectionRect={selectionRect}
             groups={groups}
             marqueeMode={marqueeMode}
+            spacePanning={spacePanning}
             onCancelMarquee={() => {
               if (!selRectRef.current) return false;
               selRectRef.current = null;
@@ -3510,6 +3591,7 @@ export default function CanvasPage({
               // 同上:清选区不在这里做(见 onStageClick 注释)
               closeAddPop();
             }}
+            onWorldDoubleClick={() => commitView({ ...DEFAULT_VIEW })}
             onDragOver={(e) => {
               if (e.dataTransfer.types.includes('application/x-bigbotart-palette')) {
                 e.preventDefault();
@@ -3523,6 +3605,7 @@ export default function CanvasPage({
               dropFromPalette(typeId, e.clientX, e.clientY);
             }}
             onBeginPan={beginPan}
+            onWheelPan={onWheelPan}
             onNodeSelect={handleNodeSelect}
             onNodeContextMenu={handleNodeContextMenu}
             onNodeHeaderPointerDown={handleNodeHeaderPointerDown}
