@@ -752,12 +752,47 @@ export interface Project {
   story?: string;
   /** 项目级 LLM 覆盖 */
   llmOverride?: LlmSource;
+  /**
+   * 封面来源:
+   *  - `'auto'`(缺省)= 自动跟随「画布第一个产图节点」的产物(图片优先,视频抽首帧兜底)
+   *  - `'manual'` = 用户手动上传的封面,存 `coverAssetId`;新生成产物不再改封面
+   *
+   * 缺省(老项目文件无此字段)一律按 `'auto'` 处理 —— 历史项目升级后立刻拿到真封面,
+   * 而不是继续显示占位图。
+   */
+  coverMode?: 'auto' | 'manual';
+  /**
+   * 手动封面的**资产 id**(仅 `coverMode='manual'` 时有意义)。
+   *
+   * 为什么不直接存路径:本应用的图片要经 `bba-asset://` 协议显示,而该协议只认资产库
+   * 文件名(`asset-*.<ext>`,见 main/index.ts 的协议白名单)。上传的封面照常登记为一条
+   * **项目资源**,渲染层用现成的 `thumbSrc(asset.localPath)` 就能显示,零新增协议白名单。
+   */
+  coverAssetId?: string;
   createdAt: string;
   updatedAt: string;
   /** 项目下的画布 id 列表(新模型:一个项目可有多画布,M1+;空数组表示还没画布) */
   canvasIds: string[];
   /** 当前活动画布 id(进入项目时默认打开的画布) */
   activeCanvasId: string;
+}
+
+/**
+ * 项目封面解析结果 —— **主进程算好给渲染层**(谁也别在前端拼路径判存在性)。
+ *
+ * 主进程才有磁盘视野(`existsSync`)与画布快照,渲染层只需按 `path` + `isVideo` 渲染。
+ */
+export interface ProjectCover {
+  projectId: string;
+  mode: 'auto' | 'manual';
+  /** 绝对本地路径;null = 该项目还没有任何可用封面(渲染层显示占位图) */
+  path: string | null;
+  /** 是否视频(渲染层要抽首帧,不能直接塞 <img>) */
+  isVideo: boolean;
+  /** 自动封面取自哪个节点(UI 提示用;手动封面为 null) */
+  sourceNodeId: string | null;
+  /** 手动封面失效等异常说明;正常为 null */
+  error?: string | null;
 }
 
 /** 画布视口(平移 + 缩放):随画布快照持久化,退出/重进恢复上次看到的位置 */

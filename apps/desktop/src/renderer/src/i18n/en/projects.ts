@@ -12,6 +12,15 @@ export default {
   '打开': 'Open',
   '重命名': 'Rename',
   '重命名项目': 'Rename Project',
+  /* 项目封面(真实产物取代静态占位图) */
+  '暂无封面': 'No cover yet',
+  '编辑封面': 'Edit cover',
+  '处理中…': 'Working…',
+  '恢复自动': 'Reset to auto',
+  '手动': 'Manual',
+  '自动封面': 'Auto cover',
+  '手动封面': 'Manual cover',
+  '设置封面失败:{msg}': 'Failed to set cover: {msg}',
   '确定删除项目「{name}」吗?此操作不可恢复。': 'Delete project "{name}"? This cannot be undone.',
   /* 新建项目对话框 */
   '项目名称': 'Project Name',

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { baseStyles, btnStyles, cardStyles, colors, spacing, textSizes } from '../styles/design';
 import { usePrompt } from '../components/usePrompt';
+import { useProjectCovers, ProjectCoverImage } from '../components/ProjectCover';
 import { useT } from '../i18n';
 import PageTopBar from '../components/PageTopBar';
 
@@ -27,6 +28,10 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewModal, setShowNewModal] = useState(false);
   const [newName, setNewName] = useState('');
+  /** 正在换封面的项目 id(按钮置灰/文案切换) */
+  const [coverBusyId, setCoverBusyId] = useState<string | null>(null);
+  /** 项目封面(真实产物;取代此前的静态 env-dusk.jpg) */
+  const { covers, refresh: refreshCovers } = useProjectCovers();
   const { ask: askPrompt, dialog: promptDialog } = usePrompt();
   const t = useT();
 
@@ -51,6 +56,41 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
   const handleDelete = (id: string, name: string) => {
     if (confirm(t('确定删除项目「{name}」吗?此操作不可恢复。', { name }))) {
       onDeleteProject(id);
+    }
+  };
+
+  /** 换封面:本地选图 → 主进程拷进项目资源库并登记为手动封面(取消静默) */
+  const handleEditCover = async (id: string, name: string) => {
+    setCoverBusyId(id);
+    try {
+      const res = await window.bigbotart.uploadProjectCover(id);
+      if (res.canceled) return;
+      if (!res.ok) {
+        alert(t('设置封面失败:{msg}', { msg: res.error ?? t('未知错误') }));
+        return;
+      }
+      refreshCovers();
+    } catch (e) {
+      alert(t('设置封面失败:{msg}', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setCoverBusyId(null);
+    }
+  };
+
+  /** 清除手动封面 → 回到自动(跟随第一个产图节点) */
+  const handleResetCover = async (id: string, _name: string) => {
+    setCoverBusyId(id);
+    try {
+      const res = await window.bigbotart.clearProjectCover(id);
+      if (!res.ok) {
+        alert(t('设置封面失败:{msg}', { msg: res.error ?? t('未知错误') }));
+        return;
+      }
+      refreshCovers();
+    } catch (e) {
+      alert(t('设置封面失败:{msg}', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setCoverBusyId(null);
     }
   };
 
@@ -95,25 +135,60 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: spacing[4], marginTop: spacing[2] }}>
-              {filteredProjects.map((p) => (
+              {filteredProjects.map((p) => {
+                const cover = covers[p.id];
+                return (
                 <div key={p.id} className="proj-card" style={{ ...cardStyles.base, padding: spacing[4], display: 'flex', flexDirection: 'column', gap: spacing[3], cursor: 'pointer', position: 'relative' }} onClick={() => onSelectProject(p.id)}>
                   <div style={{ width: '100%', height: '120px', borderRadius: '8px', overflow: 'hidden', background: colors.surface, position: 'relative' }}>
-                    <img src="./assets/env-dusk.jpg" alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    {/* 真封面(项目第一个出图节点的产物 / 用户上传);无则占位 */}
+                    <ProjectCoverImage
+                      cover={cover}
+                      alt={t('{name}封面', { name: p.name })}
+                      placeholder={
+                        <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: colors.muted, fontSize: textSizes.xs }}>
+                          {t('暂无封面')}
+                        </div>
+                      }
+                    />
+                    {cover?.mode === 'manual' && (
+                      <span style={{ position: 'absolute', left: spacing[2], bottom: spacing[2], padding: '1px 6px', borderRadius: '4px', fontSize: '10px', background: 'rgba(0,0,0,.55)', color: '#fff' }}>
+                        {t('手动')}
+                      </span>
+                    )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <b style={{ display: 'block', fontSize: textSizes.sm, marginBottom: spacing[1] }}>{p.name}</b>
                     <div style={{ display: 'flex', alignItems: 'center', gap: spacing[2], fontSize: '11px', color: colors.muted }}>
                       <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: colors.success }}></span>
                       <span>{formatDate(p.createdAt)}</span>
+                      {cover?.path && <span style={{ marginLeft: 'auto' }}>{cover.mode === 'manual' ? t('手动封面') : t('自动封面')}</span>}
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: spacing[2], marginTop: 'auto', paddingTop: spacing[2], borderTop: `1px solid ${colors.borderSoft}` }}>
                     <button onClick={(e) => { e.stopPropagation(); onSelectProject(p.id); }} style={{ ...btnStyles.base, ...btnStyles.secondary, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('打开')}</button>
+                    <button
+                      data-od-id="project-cover-edit"
+                      disabled={coverBusyId === p.id}
+                      onClick={(e) => { e.stopPropagation(); void handleEditCover(p.id, p.name); }}
+                      style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}
+                    >
+                      {coverBusyId === p.id ? t('处理中…') : t('编辑封面')}
+                    </button>
+                    {cover?.mode === 'manual' ? (
+                      <button
+                        disabled={coverBusyId === p.id}
+                        onClick={(e) => { e.stopPropagation(); void handleResetCover(p.id, p.name); }}
+                        style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}
+                      >
+                        {t('恢复自动')}
+                      </button>
+                    ) : null}
                     <button onClick={(e) => { e.stopPropagation(); handleRename(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('重命名')}</button>
                     <button onClick={(e) => { e.stopPropagation(); handleDelete(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.danger, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('删除')}</button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
