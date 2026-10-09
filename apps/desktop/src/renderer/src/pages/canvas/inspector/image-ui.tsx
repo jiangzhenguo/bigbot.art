@@ -1,9 +1,14 @@
 /**
- * 图片节点检查器通用表单块 — 画幅预设 / 多 seed 编辑器 / 采样滑块 / 上游来源卡 / 图像强度 / 扩图四边 / 行动条
+ * 图片节点检查器通用表单块 — 画幅预设 / 多 seed 编辑器 / 采样滑块 / 上游来源卡 / 图像强度 / 输出尺寸 / 扩图四边 / 行动条
  * 纯展示 + 受控回调,不触碰 window.bigbotart(容器层负责接线)。
  */
+import { useEffect, useRef, useState } from 'react';
 import { ASPECTS, ratioOf } from './image-aspects';
 import { previewUrlOf } from '../media';
+import {
+  OUTPUT_SIZE_PRESETS,
+  parseSizeInput,
+} from './ImageEditInspector';
 
 export { ASPECTS, ratioOf } from './image-aspects';
 
@@ -313,6 +318,185 @@ export function ImageStrengthField({
   );
 }
 
+// ── 像素面积预算(output-resolution,仅 Qwen-Image-2.1 参考编辑)──
+/**
+ * `--output-resolution` 档位选择。
+ *
+ * ⚠️ **这个控件改的是清晰度,不是宽高比** —— 输出比例由**最后一张**参考图决定
+ * (见 providers/mlxgen.ts 的 isQwen21Edit 注释)。控件里必须显式写出这件事,
+ * 否则用户会以为调大它就能把竖版输出变横版(实测踩过:输入图 16:9 而参考图 3:4,
+ * 输出跟着参考图变 896×1184,提示词里「保持四宫格布局」因此失效)。
+ *
+ * `predicted` = 按「最后一张参考图」比例 + 当前预算算出的预测尺寸;拿不到比例时为 null。
+ */
+export function OutputResolutionField({
+  value,
+  stops,
+  predicted,
+  onChange,
+  disabled,
+}: {
+  value: number;
+  stops: readonly number[];
+  /** 预测输出尺寸(可能为 null = 拿不到最后一张参考图的比例) */
+  predicted: { w: number; h: number } | null;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+}) {
+  /* 存量节点可能存了档位之外的值(手工填 / 历史值):一并列进选项,避免显示成空 */
+  const options = stops.includes(value) ? stops : [...stops, value].sort((a, b) => a - b);
+  return (
+    <div className="f-sec" data-od-id="field-output-resolution" style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
+      <div className="f-sec-h">
+        <span className="lbl">像素预算</span>
+        <span className="mut" style={{ fontSize: 10.5 }}>→ <code>--output-resolution</code></span>
+      </div>
+      <div className="row g6" style={{ flexWrap: 'wrap' }}>
+        {options.map((s) => (
+          <span key={s} className={`chip${value === s ? ' on' : ''}`} onClick={() => onChange(s)}>
+            {s}
+            <span className="small mono">{s === 1024 ? 'default' : s > 1024 ? '高清' : '省算力'}</span>
+          </span>
+        ))}
+      </div>
+      {predicted ? (
+        <div className="gs-sub" style={{ fontSize: 10.5 }} data-od-id="output-resolution-predicted">
+          预计输出 <b className="mono">{predicted.w}×{predicted.h}</b> · 比例跟随<b>最后一张</b>参考图
+        </div>
+      ) : (
+        <div className="gs-sub" style={{ fontSize: 10.5 }}>
+          比例跟随<b>最后一张</b>参考图(现在拿不到它的尺寸,无法预测输出大小)
+        </div>
+      )}
+      <div className="gs-sub" style={{ fontSize: 10.5 }}>
+        ⚠️ 只改清晰度,<b>改不了宽高比</b> · 想锁比例请让最后一张参考图是目标比例(可加「图片裁切」节点)
+      </div>
+    </div>
+  );
+}
+
+// ── 输出尺寸(显式 --width/--height,仅 Qwen-Image-2.1 参考编辑)──
+/**
+ * 输出尺寸控件:预设比例档位 + 自定义宽高输入。
+ *
+ * 语义(2026-10-08 读 mlx-gen 源码 + 真跑实测):
+ *  - 编辑**可以**指定任意尺寸,**宽高比不受参考图约束**(实测参考图 3:4 → 输出 16:9 成功);
+ *  - 「跟随参考图」= 不传 `--width/--height`,由引擎按最后一张参考图比例推导;
+ *  - 硬约束只有一条:≥32 且 **32 的倍数**,否则 CLI 直接 exit。
+ *
+ * UI 上必须把「跟随参考图(默认)」与「指定尺寸」做成**互斥两态** ——
+ * 否则用户不清楚自己到底是在用默认还是在覆盖。
+ */
+export function OutputSizeField({
+  width,
+  height,
+  autoSize,
+  predicted,
+  presetLabel,
+  onPickPreset,
+  onManual,
+  onUseAuto,
+  disabled,
+}: {
+  width?: number;
+  height?: number;
+  /** true = 不传尺寸、跟随最后一张参考图比例 */
+  autoSize: boolean;
+  /** 跟随参考图时预测出的尺寸(拿不到比例为 null) */
+  predicted: { w: number; h: number } | null;
+  /** 命中的预设标签;null = 自定义 */
+  presetLabel: string | null;
+  onPickPreset: (p: { w: number; h: number }) => void;
+  onManual: (w: number, h: number) => void;
+  onUseAuto: () => void;
+  disabled?: boolean;
+}) {
+  const [wRaw, setWRaw] = useState(width != null ? String(width) : '');
+  const [hRaw, setHRaw] = useState(height != null ? String(height) : '');
+  useEffect(() => {
+    setWRaw(width != null ? String(width) : '');
+    setHRaw(height != null ? String(height) : '');
+  }, [width, height]);
+
+  const wNum = parseSizeInput(wRaw);
+  const hNum = parseSizeInput(hRaw);
+  /** 填了但非法 → 明确报错(不静默规整,避免「显示 720 实跑别的」的静默不一致) */
+  const wBad = wRaw.trim() !== '' && wNum === null;
+  const hBad = hRaw.trim() !== '' && hNum === null;
+  const canApply = wNum !== null && hNum !== null && (wNum !== width || hNum !== height);
+
+  return (
+    <div className="f-sec" data-od-id="field-output-size" style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
+      <div className="f-sec-h">
+        <span className="lbl">输出尺寸</span>
+        <span className="mut" style={{ fontSize: 10.5 }}>→ <code>--width</code> / <code>--height</code></span>
+      </div>
+
+      <div className="row g6" style={{ flexWrap: 'wrap' }}>
+        <span className={`chip${autoSize ? ' on' : ''}`} onClick={onUseAuto} data-od-id="size-auto">
+          跟随参考图
+          <span className="small mono">{predicted ? `${predicted.w}×${predicted.h}` : 'auto'}</span>
+        </span>
+        {OUTPUT_SIZE_PRESETS.map((p) => (
+          <span
+            key={p.label}
+            className={`chip${!autoSize && presetLabel === p.label ? ' on' : ''}`}
+            onClick={() => onPickPreset(p)}
+          >
+            {p.label}
+            <span className="small mono">{p.w}×{p.h}</span>
+          </span>
+        ))}
+      </div>
+
+      <div className="f-row" style={{ marginTop: 6 }}>
+        <span className="f-lbl">自定义</span>
+        <input
+          className={`f-in mono${wBad ? ' f-in-bad' : ''}`}
+          style={{ width: 76 }}
+          placeholder="宽"
+          value={wRaw}
+          aria-invalid={wBad}
+          data-od-id="size-width"
+          onChange={(e) => setWRaw(e.target.value)}
+        />
+        <span className="mut">×</span>
+        <input
+          className={`f-in mono${hBad ? ' f-in-bad' : ''}`}
+          style={{ width: 76 }}
+          placeholder="高"
+          value={hRaw}
+          aria-invalid={hBad}
+          data-od-id="size-height"
+          onChange={(e) => setHRaw(e.target.value)}
+        />
+        <button
+          className="btn btn-s btn-sm"
+          type="button"
+          disabled={!canApply}
+          data-od-id="size-apply"
+          onClick={() => { if (wNum !== null && hNum !== null) onManual(wNum, hNum); }}
+        >
+          应用
+        </button>
+      </div>
+
+      {wBad || hBad ? (
+        <div className="f-hint f-hint-bad" data-od-id="size-invalid">
+          宽高必须是 <b>32 的倍数</b>且 ≥32(如 1280、704、864)。写成 720 这类非 32 倍数会被引擎拒绝。
+        </div>
+      ) : (
+        <div className="gs-sub" style={{ fontSize: 10.5 }}>
+          {autoSize
+            ? '不传尺寸,由引擎按最后一张参考图比例自动推导'
+            : `指定 ${width}×${height} · 不再跟随参考图比例`}
+          {' · '}手动填写须为 <b>32 的倍数</b>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Outpaint 四边 padding(像素,步长 8)+ 导出尺寸示意 ──
 export function OutpaintPads({
   sides,
@@ -408,7 +592,6 @@ export function OutpaintPads({
 
 // ── 遮罩编辑器(inpaint):框选矩形 / 拖入 PNG / 保存为遮罩资产 ──
 // 遮罩生成不依赖底图像素:黑底 + 白矩形(白=重绘,黑=保留),天然无 CORS 风险。
-import React, { useRef, useState } from 'react';
 
 export function MaskField({
   baseSrc,

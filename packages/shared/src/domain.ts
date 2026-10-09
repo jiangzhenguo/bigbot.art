@@ -286,6 +286,27 @@ export interface ImageEditParams {
   maskAssetId?: string;
   /** 🆕 图像强度(0-1,img2img latent 用;→ `--image-strength`,0 不传/忽略) */
   imageStrength?: number;
+  /**
+   * 🆕 **像素面积预算**(→ `--output-resolution`,默认 1024;仅 Qwen-Image-2.1 参考编辑用)。
+   *
+   * 参考图会被缩放到该预算内,**未显式给 width/height 时**输出尺寸也据此推导:
+   * `w = √(res² × ratio)` 取 32 的倍数,其中 `ratio` 取自**最后一张**参考图
+   * (不是第一张,见 providers/mlxgen.ts 的 isQwen21Edit 注释)。
+   * 给了显式 `width`/`height` 后,它只影响参考图缩放,不再决定输出尺寸。
+   */
+  outputResolution?: number;
+  /**
+   * 🆕 **显式输出宽高**(→ `--width` / `--height`;仅 Qwen-Image-2.1 参考编辑用)。
+   *
+   * 编辑**可以**指定任意尺寸,宽高比不受参考图约束(实测:参考图 3:4 也能输出 16:9)。
+   * 硬约束:`≥32` **且必须是 32 的倍数**,否则 CLI 直接 exit
+   * (`Qwen-Image-2.1 dimensions must be positive multiples of 32.`)。
+   *
+   * ⚠️ **必须成对给**:只给一个时另一个会走「按最后一张参考图比例推导」的默认路径,
+   * 拼出用户没预期的比例 —— provider 侧因此只在两个都有效时才传。
+   */
+  width?: number;
+  height?: number;
   outpaintSides?: { top: number; bottom: number; left: number; right: number };
   /** 🆕 提示词来源追溯 */
   promptFrom?: PromptSource;

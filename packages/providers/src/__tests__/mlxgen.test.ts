@@ -795,6 +795,67 @@ describe('submit · Qwen-Image-2.1 参考编辑(qwen21.edit,2026-09-28 引擎新
     expect(cmd[cmd.indexOf('--model') + 1]).toBe('Qwen-Image-2.1-bf16');
   });
 
+  /* ── 输出尺寸必须真的进命令行(2026-10 真实事故回归) ──
+     事故形态:检查器有「输出尺寸」控件、data.width/height 确实写了、渲染层 runNode 也
+     一路传到了 params,但本 isQwen21Edit 分支**从不 push `--width/--height`** ——
+     命令里根本没有这两个参数,引擎于是走「跟随最后一张参考图比例」的默认:
+     用户设 1280×704,实得 896×1184(参考图 3:4 的比例)。
+     检查器单测与 provider 单测当时都"通过",因为**没有任何断言盯这条路由上的尺寸参数**。
+     引擎侧已另用真跑验证(官方文档 docs/character-four-view-operations.md §2.1):
+     参考图 896×1184 竖版,请求 1280×704 → 实得 1280×704(qwen21.edit 不做源图比例改写)。 */
+  it('⚠️ 显式 width/height 必须真的进命令(事故回归:此前被整段吞掉)', async () => {
+    const p = makeProvider();
+    await p.submit(
+      req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png', width: 1280, height: 704 }),
+    );
+    const cmd = lastCmd(p);
+    expect(cmd).toContain('--width');
+    expect(cmd[cmd.indexOf('--width') + 1]).toBe('1280');
+    expect(cmd).toContain('--height');
+    expect(cmd[cmd.indexOf('--height') + 1]).toBe('704');
+  });
+
+  it('未传尺寸 → 不带 --width/--height(保持「跟随最后一张参考图」的引擎默认)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png' }));
+    const cmd = lastCmd(p);
+    expect(cmd).not.toContain('--width');
+    expect(cmd).not.toContain('--height');
+  });
+
+  it('只给一个尺寸 → 两个都不传(防拼出用户没预期的比例)', async () => {
+    // 引擎侧:--width 有而 --height 无时,height 走「output-resolution + 参考图比例」的推导,
+    // 会拼出用户没预期的比例;故与检查器 UI 的「必须成对」口径一致,单个有效值整体不传。
+    for (const partial of [{ width: 1280 }, { height: 704 }]) {
+      const p = makeProvider();
+      await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png', ...partial }));
+      const cmd = lastCmd(p);
+      expect(cmd, JSON.stringify(partial)).not.toContain('--width');
+      expect(cmd, JSON.stringify(partial)).not.toContain('--height');
+    }
+  });
+
+  it('非法尺寸(<32 / NaN)不传,交给引擎默认(不构造注定 exit 的命令)', async () => {
+    // 引擎硬约束:width/height ≥ 32 且必须是 32 的倍数,否则
+    // `Qwen-Image-2.1 dimensions must be positive multiples of 32.` 直接退出。
+    for (const bad of [{ width: 16, height: 704 }, { width: 1280, height: 0 }, { width: NaN, height: 704 }]) {
+      const p = makeProvider();
+      await p.submit(req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png', ...bad }));
+      expect(lastCmd(p), JSON.stringify(bad)).not.toContain('--width');
+    }
+  });
+
+  it('尺寸与像素预算可共存(尺寸决定输出画布,预算决定参考图缩放)', async () => {
+    const p = makeProvider();
+    await p.submit(
+      req('instruction', { model: Q21BF16, prompt: 'x', inputPath: '/in/base.png', width: 1280, height: 704, outputResolution: 2048 }),
+    );
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--width') + 1]).toBe('1280');
+    expect(cmd[cmd.indexOf('--height') + 1]).toBe('704');
+    expect(cmd[cmd.indexOf('--output-resolution') + 1]).toBe('2048');
+  });
+
   it('已移除的 8bit 仓库名不会被当成可编辑 checkpoint(按名字判,不因别名归一化误放行)', async () => {
     const p = makeProvider();
     // 8bit 导出无 vision tower:latentOnly 判为纯文生图族 → 沿用既有「不支持指令编辑」报错。

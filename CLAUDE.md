@@ -93,7 +93,7 @@ pnpm workspace,根 `package.json` 的 `workspaces` 字段覆盖 `packages/*` 和
     否则 40 步默认会静默回落成 24)。
   - **2.1 编辑路由参数面(`submit()` 的 `isQwen21Edit` 分支)**:参考图走 **`--image-paths p1 p2 ...`**
     (`nargs='+'`,一次给多张),与 flux2/qwen-edit 的重复 `--image` 写法完全不同;input 连线图 +
-    `ref-image` 连线合并进同一列表(order 即语义:首张锚定几何);**必须显式带 `--i2i-mode edit`** ——
+    `ref-image` 连线合并进同一列表;**必须显式带 `--i2i-mode edit`** ——
     CLI 在「多张参考图」时会把模式自动推成 `multi-reference`,而 2.1 的能力行是 edit-reference,
     撞通用校验直接 exit 2(单张碰巧推对、**多参考必炸**,2026-09-28 真跑踩中);**禁用 `--image-strength`**;
     **输出必须 `.png/.webp/.tif/.tiff`**(RGBA 硬约束);`--scheduler` 只能 linear;**最少 2 步**;默认 40 步;

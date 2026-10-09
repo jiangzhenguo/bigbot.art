@@ -388,8 +388,16 @@ export class MlXGenProvider implements Provider {
       const isQwen21Edit = MlXGenProvider.isQwen21EditModel(repoModel) && kind === 'instruction';
       if (isQwen21Edit) {
         // 参考图:input 连线的输入图 + ref-image 连线的参考图,统一进 --image-paths。
-        // 2.1 编辑的「底图」和「参考图」在 CLI 侧是同一个参数(参考图列表),
-        // 顺序即语义:第一张锚定几何,后续提供风格/材质线索(见 mlx-gen docs/image-edit-modes.md)
+        // 2.1 编辑的「底图」和「参考图」在 CLI 侧是同一个参数(参考图列表)。
+        //
+        // ⚠️ **不传显式尺寸时,输出几何由「最后一张」决定,不是第一张**(2026-10-08 读源码更正;
+        //    旧注释写的「第一张锚定几何」是错的 —— 那句属于**通用 multi-reference 路由**
+        //    (flux2 / qwen-edit),qwen21 的 edit-reference 路由根本不看第一张)。
+        //    源码 qwen_image_21_edit.py:`ratio = images[-1].width / images[-1].height`
+        //    → `dimensions(output_resolution, ratio)` 推出默认宽高。
+        //    真实影响:input 是 1280×720 而最后一张 ref-image 是 896×1184 时,默认输出跟着
+        //    变竖版 896×1184(与实测完全吻合)。**传了 --width/--height 则覆盖该默认**,
+        //    输出几何不再受参考图比例约束(见本分支末尾的尺寸段)。
         const qwen21Refs: string[] = [];
         if (p.inputPath) qwen21Refs.push(String(p.inputPath));
         for (const r of req.references ?? []) {
@@ -438,10 +446,33 @@ export class MlXGenProvider implements Provider {
           for (const s of seeds) cmd.push(String(s));
           if (seeds.length > 1) outPath = `${outBase}_seed_${seeds[0]}.png`;
         }
+        // ⚠️ 输出尺寸(`--width` / `--height`)—— **2026-10 修复:此前这里根本没有这段代码**。
+        //
+        // 真实故障:检查器「输出尺寸」控件写了 `data.width/height`,渲染层 `runNode` 也一路
+        // 传到了 `params`,但本分支**从不 push `--width/--height`** → 命令里没有这两个参数
+        // → 引擎走「跟随最后一张参考图比例」的默认 → 用户设 1280×704,实得 896×1184
+        // (即参考图 3:4 的比例)。检查器与 Provider 单测都各自"通过",因为没人断言
+        // **这条路由**上出现过 `--width`。
+        // 实证:旧代码对同一输入生成的命令是
+        //   ["generate","--model",…,"--i2i-mode","edit","--steps","30","--output",…]
+        //                                          ^^^^^^^^^^^^^^^^^^^ 完全没有尺寸参数
+        // 修复后:["…","--i2i-mode","edit","--width","1280","--height","704","--steps","30",…]
+        //
+        // 引擎行为(官方文档 docs/character-four-view-operations.md §2.1,本机真跑复验):
+        //   qwen21.edit 直给尺寸,**不做源图比例改写**(该路由不向 Config 传 image_path,
+        //   内部恒走 exact-resize);1024×256 / 1536×512 / 2048×512 均如实输出。
+        // 约束只有一条(CLI `QwenImage21LatentCreator.validate`):
+        //   width/height ≥ 32 **且必须是 32 的倍数**,否则直接 exit。
+        // ⚠️ 两个值必须**成对**给:只给一个时另一个会走「按参考图比例推导」的默认,
+        //   拼出用户没预期的比例;故只有一个有效时整体不传。
+        const editW = Number(p.width);
+        const editH = Number(p.height);
+        if (Number.isFinite(editW) && Number.isFinite(editH) && editW >= 32 && editH >= 32) {
+          cmd.push('--width', String(Math.round(editW)), '--height', String(Math.round(editH)));
+        }
         // RGBA 硬约束:输出必须保留 alpha 的后缀(2.1 编辑会生成透明像素)
         outPath = `${outBase}.png`;
-        cmd.push('--output', outPath);
-        (this as unknown as Record<string, unknown>).lastCmd = cmd;
+        cmd.push('--output', outPath);        (this as unknown as Record<string, unknown>).lastCmd = cmd;
         this.outPaths.set(taskId, outPath);
         if (!this.dryRun) this.spawnRun(taskId, cmd);
         return { providerTaskId: taskId };

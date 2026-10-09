@@ -16,7 +16,7 @@ import { ModelCombo, matchModel } from './ModelCombo';
 import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
 import { getToolModelsSync } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
-import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutpaintPads, MaskField, ActionBar } from './image-ui';
+import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutputResolutionField, OutputSizeField, OutpaintPads, MaskField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
 
 export interface ImageEditInspectorProps {
@@ -58,6 +58,136 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
  * (renderer 不能 import providers —— 包边界)。单测 `__tests__/edit-steps-default.test.ts` 锁一致性。
  */
 export const DEFAULT_EDIT_STEPS = 30;
+
+/**
+ * 像素面积预算(`--output-resolution`)的默认值 —— 与 mlx-gen CLI 一致。
+ *
+ * ⚠️ 改动本值时必须同步 `packages/providers/src/mlxgen.ts`(renderer 不 import providers
+ * —— 包边界)与 mlx-gen 的 argparse 默认;单测 `__tests__/edit-output-resolution.test.ts` 锁一致性。
+ */
+export const DEFAULT_OUTPUT_RESOLUTION = 1024;
+
+/** 可选档位(32 的倍数才合法 —— CLI 会校验 `resolution % 32 == 0`) */
+export const OUTPUT_RESOLUTION_STOPS = [512, 768, 1024, 1536, 2048] as const;
+
+/**
+ * 是否显示「像素预算」控件(纯函数,供单测)。
+ *
+ * 只有 **Qwen-Image-2.1 的参考编辑**认这个参数:
+ *  - 其它编辑模型(Qwen Image Edit / flux2 / z-image)走各自的 CLI 路由,根本不接受
+ *    `--output-resolution`,显示了只会误导用户以为调了有用;
+ *  - 也只在 `instruction` 模式(qwen21.edit 路由)下有意义。
+ *
+ * 判定按 **repoId 正则**而非模型族:与 provider 的 `isQwen21EditModel` 同口径
+ * (本地目录路径 / 短别名 / 8bit 历史标识都要能命中)。
+ */
+export function shouldShowOutputResolution(model: string, mode: string): boolean {
+  if (mode !== 'instruction') return false;
+  const repo = matchModel(model)?.repoId ?? model;
+  return /qwen.*2\.1/i.test(repo);
+}
+
+/**
+ * 像素预算 → **预测的输出尺寸**(纯函数,供单测与 UI 提示)。
+ *
+ * 复刻 mlx-gen `QwenImage21LatentCreator.dimensions()`:
+ *   w = √(res² × ratio),h = w / ratio,各自取 32 的倍数(向下取整到倍数后至少 32)。
+ *
+ * ⚠️ `ratio` 必须是**最后一张**参考图的宽高比 —— 这是本次修正的核心事实,
+ * 详见 `packages/providers/src/mlxgen.ts` 的 isQwen21Edit 段注释。
+ * 拿不到 ratio 时返回 null(UI 不显示预测,而不是编一个数字)。
+ */
+export function predictOutputSize(
+  outputResolution: number,
+  ratio: number | null | undefined,
+): { w: number; h: number } | null {
+  if (!Number.isFinite(outputResolution) || outputResolution < 32) return null;
+  if (ratio == null || !Number.isFinite(ratio) || ratio <= 0) return null;
+  const w = Math.sqrt(outputResolution * outputResolution * ratio);
+  const roundTo32 = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+  return { w: roundTo32(w), h: roundTo32(w / ratio) };
+}
+
+/**
+ * 「最后一张参考图」是谁(纯函数,供单测)。
+ *
+ * **必须与 provider 的 `--image-paths` 组装顺序逐字对齐**,否则检查器预测的尺寸
+ * 和实跑出来的对不上,反而误导用户。provider 侧(`mlxgen.ts` 的 isQwen21Edit 分支):
+ *   `qwen21Refs = [inputPath, ...references]`  —— 输入图在前,参考图在后。
+ * 所以:
+ *   - 有 ref-image → **最后一张是最后一个参考图**;
+ *   - 没有 ref-image 但只有 input → 最后一张就是**输入图本身**(此时比例=输入图比例)。
+ * 两者都没有 → null(提交会被拦,这里不预测)。
+ */
+export function lastGeometrySource(args: {
+  hasInput: boolean;
+  refNodeIds: string[];
+}): { kind: 'input' } | { kind: 'ref'; nodeId: string } | null {
+  const refs = args.refNodeIds.filter(Boolean);
+  if (refs.length > 0) return { kind: 'ref', nodeId: refs[refs.length - 1]! };
+  if (args.hasInput) return { kind: 'input' };
+  return null;
+}
+
+/* ══ 显式输出尺寸(2026-10-08 新增能力) ══
+ *
+ * 读 mlx-gen 源码 + 真跑实测确认:**qwen21.edit 路由接受显式 `--width/--height`**,
+ * 且**宽高比不受参考图约束** —— 参考图 3:4 也能输出 16:9。实测:
+ *   显式 `--width 1280 --height 704` → 输出 1280×704;
+ *   不传                          → 1376×768(按最后一张参考图的 3:4 推导)。
+ * 唯一硬约束(`QwenImage21LatentCreator.validate`):≥32 且 **32 的倍数**。
+ */
+
+/** 尺寸档位(全部 32 的倍数;含常用 16:9 / 9:16 / 1:1 / 4:3 / 3:4) */
+export const OUTPUT_SIZE_PRESETS: Array<{ label: string; w: number; h: number }> = [
+  { label: '16:9', w: 1280, h: 704 },
+  { label: '9:16', w: 704, h: 1280 },
+  { label: '1:1', w: 1024, h: 1024 },
+  { label: '4:3', w: 1152, h: 864 },
+  { label: '3:4', w: 864, h: 1152 },
+];
+
+/** 尺寸是否合法(CLI 硬约束:≥32 且 32 的倍数) */
+export function isValidOutputSize(w: number, h: number): boolean {
+  return (
+    Number.isInteger(w) &&
+    Number.isInteger(h) &&
+    w >= 32 &&
+    h >= 32 &&
+    w % 32 === 0 &&
+    h % 32 === 0
+  );
+}
+
+/** 把任意数值规整到最近合法的 32 倍数(≥32);用于「一键对齐」而不阻断输入 */
+export function snapTo32(v: number): number {
+  if (!Number.isFinite(v)) return 32;
+  return Math.max(32, Math.round(v / 32) * 32);
+}
+
+/**
+ * 尺寸档位命中的预设标签(纯函数,供单测)。
+ * 返回 null = 当前尺寸不在预设里(用户手填了自定义值)→ UI 高亮「自定义」。
+ */
+export function matchSizePreset(w: number, h: number): string | null {
+  const hit = OUTPUT_SIZE_PRESETS.find((p) => p.w === w && p.h === h);
+  return hit ? hit.label : null;
+}
+
+/**
+ * 解析「自定义尺寸输入」的提交值(纯函数,供单测)。
+ *
+ * 设计原则:**非法值不写进 data,返回 null 让调用方拒绝**。
+ * 若默默规整(如 720 → 704),用户以为自己填了 720、实跑 704,又是一个
+ * 「界面显示 A、实跑 B」的静默不一致(本项目已踩过 steps 的同类坑)。
+ */
+export function parseSizeInput(raw: string): number | null {
+  const t = raw.trim();
+  if (!t) return null;
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return isValidOutputSize(n, n) ? n : null;
+}
 
 /**
  * 各编辑模式可用的已知模型 + 推荐默认(2026-09 mlxgen capabilities 实测,矩阵见
@@ -238,6 +368,20 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   const maskAssetId = String(d.maskAssetId ?? '');
   const imageStrength = Number(d.imageStrength ?? 0.5);
   const steps = Number(d.steps ?? DEFAULT_EDIT_STEPS);
+  /** 像素面积预算(仅 2.1 参考编辑有意义;未设置时用 CLI 默认 1024,不写回 data) */
+  const outputResolution = Number(d.outputResolution ?? DEFAULT_OUTPUT_RESOLUTION);
+  /* 显式输出尺寸(→ --width/--height)。**必须成对**才生效,与 provider 同口径:
+     只给一个时另一个会走「按参考图比例推导」,拼出用户没预期的比例,故视为未指定。
+     ⚠️ 「跟随参考图」写入的是 **null**(不是 undefined):setData 是 `{...data, ...patch}`
+     的浅合并,**传 undefined 只会把键留下并置为 undefined**,JSON 里虽会被丢掉,
+     但内存态留着一个值为 undefined 的键,后续读取方容易误判。null 是显式哨兵,一眼可辨。 */
+  const numOrNull = (v: unknown): number | null => {
+    const n = Number(v);
+    return v != null && v !== '' && Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const explicitW = numOrNull(d.width) ?? undefined;
+  const explicitH = numOrNull(d.height) ?? undefined;
+  const explicitSize = explicitW !== undefined && explicitH !== undefined;
   /** data 里是否有显式步数(未设置时下面 effect 会补写,补写前提交侧会走 provider 兜底) */
   const hasExplicitSteps = d.steps !== undefined && Number.isFinite(Number(d.steps));
   /* 补写默认步数:仅在缺失时执行一次(用户拖动滑块后 data.steps 存在,不再覆盖)。
@@ -327,6 +471,30 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
     img.src = up.src;
     return () => { img.onload = null; img.onerror = null; };
   }, [up.src]);
+
+  /* 「最后一张参考图」的自然尺寸 —— 输出几何由它决定(见 lastGeometrySource 注释)。
+     必须单独量:它通常**不是** `up.src`(输入图),用输入图的比例去预测会算错。 */
+  const lastGeom = lastGeometrySource({ hasInput: hasInputSource, refNodeIds: refImages.map((r) => r.nodeId) });
+  const lastGeomSrc = lastGeom?.kind === 'ref'
+    ? (refImages.find((r) => r.nodeId === lastGeom.nodeId)?.src ?? null)
+    : lastGeom?.kind === 'input'
+      ? up.src
+      : null;
+  const [lastGeomDims, setLastGeomDims] = useState<{ w?: number; h?: number }>({});
+  useEffect(() => {
+    if (!lastGeomSrc) { setLastGeomDims({}); return; }
+    const img = new Image();
+    img.onload = () => setLastGeomDims({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => setLastGeomDims({});
+    img.src = lastGeomSrc;
+    return () => { img.onload = null; img.onerror = null; };
+  }, [lastGeomSrc]);
+
+  /** 跟随参考图时预测的输出尺寸(拿不到最后一张的比例时为 null,UI 显示 auto) */
+  const predictedAutoSize = predictOutputSize(
+    outputResolution,
+    lastGeomDims.w && lastGeomDims.h ? lastGeomDims.w / lastGeomDims.h : null,
+  );
 
   const upstreamStale = imgFrom?.nodeId ? !!nodes.find((n) => n.id === imgFrom.nodeId)?.stale : false;
 
@@ -481,6 +649,35 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
 
         {mode === 'img2img' ? (
           <ImageStrengthField value={imageStrength} onChange={(v) => setData({ imageStrength: v })} />
+        ) : null}
+
+        {/* 像素预算:仅 Qwen-Image-2.1 参考编辑认识该参数(见 shouldShowOutputResolution)。
+            语义:未指定输出尺寸时作为推导基准,同时决定参考图被缩放到多大。 */}
+        {shouldShowOutputResolution(model, mode) ? (
+          <OutputResolutionField
+            value={outputResolution}
+            stops={OUTPUT_RESOLUTION_STOPS}
+            predicted={explicitSize ? { w: explicitW, h: explicitH } : predictedAutoSize}
+            onChange={(v) => setData({ outputResolution: v })}
+            disabled={running}
+          />
+        ) : null}
+
+        {/* 输出尺寸:显式指定 --width/--height(2026-10-08 新增)。
+            编辑可以输出任意尺寸,宽高比**不受参考图约束**(实测参考图 3:4 → 16:9 成功)。 */}
+        {shouldShowOutputResolution(model, mode) ? (
+          <OutputSizeField
+            width={explicitW}
+            height={explicitH}
+            autoSize={!explicitSize}
+            predicted={predictedAutoSize}
+            presetLabel={matchSizePreset(explicitW ?? 0, explicitH ?? 0)}
+            onPickPreset={(s) => setData({ width: s.w, height: s.h })}
+            onManual={(w, h) => setData({ width: w, height: h })}
+            /* 「跟随参考图」= 写 null 哨兵(见上方 numOrNull 注释:不能传 undefined) */
+            onUseAuto={() => setData({ width: null, height: null })}
+            disabled={running}
+          />
         ) : null}
 
         {mode === 'inpaint' ? (
