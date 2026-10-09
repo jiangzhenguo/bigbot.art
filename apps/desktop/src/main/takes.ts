@@ -161,4 +161,23 @@ export class TakeStore {
     this.save(projectId);
     return { ok: true };
   }
+
+  /**
+   * 整体写入某项目的 Take 历史(项目包导入专用)。
+   *
+   * 导入是「铺一个全新项目」:逐条 `append` 会重新编号 attempt 并丢掉 id/createdAt/
+   * 终态(产物路径也全丢),历史就废了。这里直接替换整个容器,保留包里的原记录。
+   * `status` 的兜底:包里可能留有 `queued`/`running`(导出时任务还在跑),
+   * 而那个任务**只存在于导出端的进程里**,导入端永远等不到它的终态 ——
+   * 一律改判 `failed` 并注明原因,否则会永久显示「排队中」(与启动期孤儿 Take 清理同口径)。
+   */
+  replaceAll(projectId: string, takes: Take[]): void {
+    const doc = this.load(projectId);
+    doc.takes = takes.map((t) =>
+      t.status === 'queued' || t.status === 'running'
+        ? { ...t, status: 'failed' as const, error: t.error ?? '导入项目包时该任务未完成(导出端已中断)' }
+        : { ...t },
+    );
+    this.save(projectId);
+  }
 }

@@ -224,6 +224,37 @@ export default function App() {
     }
   };
 
+  /**
+   * 导入 .bba 项目包 → 新建项目并进入它的画布。
+   *
+   * 主进程负责解包落盘(项目/画布/Take/记忆/附件);渲染层只做三件事:
+   * 刷新项目列表、选中新项目、就地把新项目的画布装进状态再跳画布。
+   * ⚠️ 弹对话框 + 解包是**秒级到分钟级**的操作(大附件包),期间不能改导航状态,
+   * 否则用户会先看到一个空画布。
+   */
+  const handleImportProject = async () => {
+    try {
+      const res = await window.bigbotart.importProjectPackage();
+      if (res.canceled) return;
+      if (!res.ok || !res.project) {
+        alert(`导入失败: ${res.error ?? '未知错误'}`);
+        return;
+      }
+      await loadProjects();
+      const pid = res.project.id;
+      setProjectId(pid);
+      await loadCanvasesForProject(pid);
+      setCurrentPage('canvas');
+      // 非致命问题(缺产物/附件缺失)必须让用户看见 —— 否则「导入了但节点是空的」无从解释
+      if (res.warnings?.length) {
+        alert(`项目「${res.project.name}」已导入,但有 ${res.warnings.length} 项提醒:\n\n${res.warnings.join('\n')}`);
+      }
+    } catch (e) {
+      console.error('导入项目包失败', e);
+      alert(`导入失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const handleRenameProject = async (id: string, name: string) => {
     try {
       await window.bigbotart.renameProject(id, name);
@@ -325,6 +356,7 @@ export default function App() {
             onSelectProject={handleSelectProject}
             onDeleteProject={handleDeleteProject}
             onRenameProject={handleRenameProject}
+            onImportProject={handleImportProject}
             engineStatus={engineStatus}
           />
         </ErrorBoundary>

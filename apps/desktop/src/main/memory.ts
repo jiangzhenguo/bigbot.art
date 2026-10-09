@@ -70,6 +70,18 @@ export class MemoryStore {
     return m;
   }
 
+  /**
+   * 整体写入某项目的记忆(项目包导入专用)。
+   *
+   * `projectId` 以入参为准强制覆盖:包里的记忆来自导出端项目 id,直接落盘会写进
+   * **原项目的工作空间**,把导入端既有项目的记忆覆盖掉(跨机时则是写进一个不存在的 pid)。
+   * 调用方已按新画布 id 重映射过 canvasMemory/recall.canvasId,这里只兜 projectId 这一层。
+   */
+  replace(projectId: string, memory: ProjectMemory): void {
+    this.cache.set(projectId, { ...memory, projectId });
+    this.persist(projectId);
+  }
+
   private persist(projectId: string): void {
     const m = this.cache.get(projectId);
     if (m) {

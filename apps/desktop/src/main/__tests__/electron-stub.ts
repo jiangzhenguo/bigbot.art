@@ -6,6 +6,7 @@
  */
 export const dialog = {
   showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+  showSaveDialog: async () => ({ canceled: true, filePath: undefined }),
   showMessageBox: async () => ({ response: 0 }),
 };
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { AppSettings, Asset, LlmSource, RenderJob, Skill } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import { useRenderQueue } from './useRenderQueue';
+import { useProjectCovers, ProjectCoverImage } from '../components/ProjectCover';
 import { useT } from '../i18n';
 import { llmDisplayName } from './agent/llm-display';
 import brandIcon from '../assets/icon.png';
@@ -32,6 +33,8 @@ interface HomePageProps {
   onSelectProject: (id: string) => void;
   onDeleteProject: (id: string) => void;
   onRenameProject: (id: string, name: string) => void;
+  /** 导入 .bba 项目包 → 新建项目并进入它的画布(id 由主进程分配) */
+  onImportProject?: () => void;
   engineStatus: {
     h3c: { ready: boolean; text: string };
     mlxgen: { ready: boolean; text: string };
@@ -58,10 +61,53 @@ function thumbOf(a: { kind: string; localPath: string }): string | null {
 
 const PROJ_THUMBS = ['./assets/shot-01.jpg', './assets/eclipse.jpg', './assets/prop-bottle.jpg', './assets/ink.jpg'];
 
+/**
+ * 无封面时的占位图。
+ *
+ * 保留静态图不是偷懒:空项目(还没出过任何图)总要显示点什么,而这里**必须**
+ * 与「有真封面」在视觉上可区分 —— 所以叠一个淡淡的「暂无封面」角标,否则用户依旧
+ * 分不清哪张是真图(那正是这次要修的问题)。
+ */
+function CoverPlaceholder({ index }: { index: number }) {
+  const t = useT();
+  const src = PROJ_THUMBS[index % PROJ_THUMBS.length] ?? './assets/shot-01.jpg';
+  return (
+    <span style={{ position: 'relative', display: 'block', width: '100%', height: '100%' }}>
+      <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.35 }} />
+      <span
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'grid',
+          placeItems: 'center',
+          fontSize: '9px',
+          color: 'var(--fg)',
+          letterSpacing: '.02em',
+        }}
+      >
+        {t('暂无封面')}
+      </span>
+    </span>
+  );
+}
+
 function formatDate(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 文件体积人类可读(导出结果提示用) */
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
 /** 引擎 provider 展示名(队列状态文案用) */
@@ -110,6 +156,7 @@ export default function HomePage({
   onSelectProject,
   onDeleteProject,
   onRenameProject,
+  onImportProject,
   engineStatus,
 }: HomePageProps) {
   const t = useT();
@@ -125,6 +172,20 @@ export default function HomePage({
   /* ── 真实附件(importAssets 从磁盘导入进资产库) ── */
   const [attachments, setAttachments] = useState<Asset[]>([]);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  /** 正在导出的项目 id(按钮转圈 + 防重复点击) */
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  /** 导出结果轻提示(几秒后自动消失) */
+  const [toast, setToast] = useState<string | null>(null);
+  /** 正在换封面的项目 id(按钮转圈) */
+  const [coverBusyId, setCoverBusyId] = useState<string | null>(null);
+  /** 项目封面(真实产物;取代此前的静态轮播图) */
+  const { covers, refresh: refreshCovers } = useProjectCovers();
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   /* 挂载时拉取设置与技能列表 */
   useEffect(() => {
@@ -275,6 +336,74 @@ export default function HomePage({
     }
   };
 
+  /**
+   * 导出项目为 .bba 包(结构 + Take 历史 + 记忆 + 附件实体;不含生成产物)。
+   * 目标路径由主进程弹保存对话框;取消不算失败,静默返回。
+   */
+  const handleExport = async (id: string, name: string) => {
+    setExportingId(id);
+    try {
+      const res = await window.bigbotart.exportProjectPackage({ projectId: id });
+      if (res.canceled) return;
+      if (!res.ok) {
+        alert(t('导出失败:{msg}', { msg: res.error ?? t('未知错误') }));
+        return;
+      }
+      setToast(
+        t('已导出「{name}」:{n} 节点 · {m} 个附件 · {size}', {
+          name,
+          n: res.stats?.nodes ?? 0,
+          m: res.stats?.mediaFiles ?? 0,
+          size: formatBytes(res.bytes ?? 0),
+        }),
+      );
+    } catch (e) {
+      alert(t('导出失败:{msg}', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setExportingId(null);
+    }
+  };
+
+  /**
+   * 换封面:从本地选一张图 → 主进程拷进项目资源库并登记为手动封面。
+   * 取消不算失败,静默返回。
+   */
+  const handleEditCover = async (id: string, name: string) => {
+    setCoverBusyId(id);
+    try {
+      const res = await window.bigbotart.uploadProjectCover(id);
+      if (res.canceled) return;
+      if (!res.ok) {
+        alert(t('设置封面失败:{msg}', { msg: res.error ?? t('未知错误') }));
+        return;
+      }
+      refreshCovers();
+      setToast(t('已更新「{name}」的封面', { name }));
+    } catch (e) {
+      alert(t('设置封面失败:{msg}', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setCoverBusyId(null);
+    }
+  };
+
+  /** 清除手动封面 → 回到自动(跟随第一个产图节点) */
+  const handleResetCover = async (id: string, name: string) => {
+    setCoverBusyId(id);
+    try {
+      const res = await window.bigbotart.clearProjectCover(id);
+      if (!res.ok) {
+        alert(t('设置封面失败:{msg}', { msg: res.error ?? t('未知错误') }));
+        return;
+      }
+      refreshCovers();
+      setToast(t('「{name}」的封面已恢复为自动', { name }));
+    } catch (e) {
+      alert(t('设置封面失败:{msg}', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setCoverBusyId(null);
+    }
+  };
+
   const renderSideLink = (item: { label: string; page: HomePageTarget }, icon: React.ReactNode) => (
     <a
       className={`side-link${item.page === 'home' ? ' on' : ''}`}
@@ -292,6 +421,31 @@ export default function HomePage({
   return (
     <div className="pg-home">
       {promptDialog}
+      {/* 导出结果轻提示(6s 自动消失;不阻塞,失败走 alert) */}
+      {toast && (
+        <div
+          role="status"
+          data-od-id="export-toast"
+          style={{
+            position: 'fixed',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 120,
+            maxWidth: '80vw',
+            padding: '10px 16px',
+            borderRadius: 10,
+            background: 'var(--glass-bg-strong)',
+            WebkitBackdropFilter: 'var(--glass-blur)',
+            backdropFilter: 'var(--glass-blur)',
+            border: '1px solid var(--glass-border)',
+            boxShadow: 'var(--glass-shadow), var(--glass-spec)',
+            fontSize: 'var(--text-xs)',
+          }}
+        >
+          {toast}
+        </div>
+      )}
       <div className="app" data-od-id="home-app">
         {/* 左导航 */}
         <aside className="side" data-od-id="home-nav">
@@ -537,9 +691,9 @@ export default function HomePage({
                 <b>{t('批量产品视频')}</b>
                 <span className="mut">{t('多角度图逐镜生成')}</span>
               </div>
-              <div className="card" data-od-id="alt-import">
-                <b>{t('导入 H3Mise 项目')}</b>
-                <span className="mut">{t('M3 · 迁移既有数据')}</span>
+              <div className="card" data-od-id="alt-import" onClick={() => onImportProject?.()} style={{ cursor: 'pointer' }}>
+                <b>{t('导入项目包(.bba)')}</b>
+                <span className="mut">{t('换机 / 协作 · 结构+历史+附件')}</span>
               </div>
             </div>
           </div>
@@ -590,8 +744,9 @@ export default function HomePage({
               </div>
             ) : (
               projects.map((p, i) => {
-                const thumb = PROJ_THUMBS[i % PROJ_THUMBS.length] ?? './assets/shot-01.jpg';
                 const showActions = hoverId === p.id;
+                const cover = covers[p.id];
+                const coverIsManual = cover?.mode === 'manual';
                 return (
                   <div
                     key={p.id}
@@ -601,8 +756,29 @@ export default function HomePage({
                     onMouseEnter={() => setHoverId(p.id)}
                     onMouseLeave={() => setHoverId(null)}
                   >
-                    <span className="thumb">
-                      <img src={thumb} alt={t('{name}封面', { name: p.name })} />
+                    <span className="thumb" title={cover?.path ? cover.path : t('暂无封面')}>
+                      {/* 真封面:自动 = 画布第一个产图节点的产物;手动 = 用户上传的图 */}
+                      <ProjectCoverImage
+                        cover={cover}
+                        alt={t('{name}封面', { name: p.name })}
+                        placeholder={<CoverPlaceholder index={i} />}
+                      />
+                      {coverIsManual && (
+                        <span
+                          style={{
+                            position: 'absolute',
+                            left: 3,
+                            bottom: 3,
+                            padding: '1px 5px',
+                            borderRadius: 4,
+                            fontSize: '9px',
+                            background: 'rgba(0,0,0,.55)',
+                            color: '#fff',
+                          }}
+                        >
+                          {t('手动')}
+                        </span>
+                      )}
                     </span>
                     <div className="grow">
                       <b>{p.name}</b>
@@ -627,6 +803,49 @@ export default function HomePage({
                         }}
                         onClick={(e) => e.stopPropagation()}
                       >
+                        <button
+                          className="ibtn"
+                          style={{ width: '24px', height: '24px' }}
+                          aria-label={t('编辑封面')}
+                          title={coverBusyId === p.id ? t('处理中…') : t('编辑封面')}
+                          disabled={coverBusyId === p.id}
+                          onClick={() => void handleEditCover(p.id, p.name)}
+                        >
+                          {/* 图片 + 画笔:与「重命名」的纯画笔区分开 */}
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                            <rect x="3" y="4" width="18" height="16" rx="2" />
+                            <circle cx="8.5" cy="9.5" r="1.5" />
+                            <path d="m4 17 4.5-4.5 3.5 3.5 3-3L20 17" />
+                          </svg>
+                        </button>
+                        {coverIsManual && (
+                          <button
+                            className="ibtn"
+                            style={{ width: '24px', height: '24px' }}
+                            aria-label={t('恢复自动封面')}
+                            title={t('恢复自动封面(跟随第一个出图节点)')}
+                            disabled={coverBusyId === p.id}
+                            onClick={() => void handleResetCover(p.id, p.name)}
+                          >
+                            {/* 回转箭头 */}
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                              <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
+                            </svg>
+                          </button>
+                        )}
+                        <button
+                          className="ibtn"
+                          style={{ width: '24px', height: '24px' }}
+                          aria-label={t('导出项目包')}
+                          title={exportingId === p.id ? t('导出中…') : t('导出项目包(.bba)')}
+                          disabled={exportingId === p.id}
+                          onClick={() => void handleExport(p.id, p.name)}
+                        >
+                          {/* 导出 = 向下箭头落入托盘:与「导入」的 + 号一眼区分 */}
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                            <path d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+                          </svg>
+                        </button>
                         <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
@@ -655,11 +874,16 @@ export default function HomePage({
                 );
               })
             )}
-            <div className="proj-card" style={{ borderStyle: 'dashed', justifyContent: 'center', color: 'var(--muted)' }}>
+            <div
+              className="proj-card"
+              data-od-id="project-import"
+              style={{ borderStyle: 'dashed', justifyContent: 'center', color: 'var(--muted)', cursor: 'pointer' }}
+              onClick={() => onImportProject?.()}
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                 <path d="M12 5v14M5 12h14" />
               </svg>
-              {t('从 H3Mise 导入项目…')}
+              {t('导入项目包(.bba)…')}
             </div>
           </div>
         </aside>

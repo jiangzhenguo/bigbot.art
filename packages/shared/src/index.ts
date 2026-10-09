@@ -97,6 +97,21 @@ export interface BigBotArtApi {
   deleteCanvas(projectId: string, canvasId: string): Promise<{ ok: boolean; error?: string }>;
   /** 切换活动画布;只改 active 指针,不返回画布内容(前端已持有完整列表) */
   switchActiveCanvas(projectId: string, canvasId: string): Promise<{ ok: boolean }>;
+  // 项目封面(首页/项目页卡片;取代此前写死的静态占位图)
+  /**
+   * 解析单项目封面。自动封面 = 画布「第一个产图节点」的产物(图片优先,视频抽首帧兜底);
+   * 手动封面 = 用户上传的图。路径由主进程校验磁盘存在性,渲染层直接渲染。
+   */
+  projectCover(projectId: string): Promise<import('./domain').ProjectCover>;
+  /** 批量解析全部项目封面(首页/项目页一次拉完,避免 N 次 IPC) */
+  projectCovers(): Promise<import('./domain').ProjectCover[]>;
+  /**
+   * 弹系统对话框选一张本地图片设为项目封面(拷贝进项目资源库后登记为 `coverAssetId`)。
+   * 取消返回 canceled=true。
+   */
+  uploadProjectCover(projectId: string): Promise<{ ok: boolean; canceled?: boolean; cover?: import('./domain').ProjectCover; error?: string }>;
+  /** 清除手动封面 → 回到自动(跟随首图节点) */
+  clearProjectCover(projectId: string): Promise<{ ok: boolean; cover?: import('./domain').ProjectCover; error?: string }>;
   // 资产中心
   /** 导入资产:paths 给定时走白名单 headless;缺省弹系统对话框。projectId 给定时归入项目视图 */
   importAssets(opts?: { paths?: string[]; projectId?: string }): Promise<import('./domain').AssetImportResult>;
@@ -155,6 +170,17 @@ export interface BigBotArtApi {
   // 时间线导出(FFmpeg)
   exportTimeline(req: import('./domain').TimelineExportRequest): Promise<{ ok: boolean; taskId?: string; error?: string }>;
   exportStatus(taskId: string): Promise<import('./domain').ExportTask>;
+  // 项目包导入/导出(.bba 单文件:结构 + Take 历史 + 记忆 + 附件实体;不含生成产物)
+  /**
+   * 导出项目为 .bba 包。不传 path 时主进程弹保存对话框(取消返回 canceled=true)。
+   * 写出的是 gzip(JSON);媒体按 base64 内联。
+   */
+  exportProjectPackage(req: import('./project-package').ProjectExportRequest): Promise<import('./project-package').ProjectExportResult>;
+  /**
+   * 从 .bba 包导入为**新项目**(原项目 id 一律重分配,不覆盖既有项目)。
+   * 读取端校验 format/version;版本高于本应用时明确拒绝而不是猜着读。
+   */
+  importProjectPackage(input?: { path?: string }): Promise<import('./project-package').ProjectImportResult>;
   /**
    * 视频取帧:抽首/尾帧/**指定时间点**帧 PNG。
    * mode='at' 时必须给 seconds(非负秒数);产物落 outputs/frames/。
@@ -325,3 +351,4 @@ export * from './connector-map.js';
 export * from './edge-validate.js';
 export * from './document.js';
 export * from './tool-models.js';
+export * from './project-package.js';

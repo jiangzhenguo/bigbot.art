@@ -278,6 +278,29 @@ export class ProjectStore {
     return { ok: true };
   }
 
+  /**
+   * 设置项目封面(手动上传 / 清除回自动)。
+   *
+   * `coverAssetId: null` 会**同时把 coverMode 归位到 auto** —— 否则会留下
+   * 「mode=manual 但没有 assetId」这种自相矛盾的状态,解析时又要多写一条兜底分支。
+   * 两个字段是一个整体,必须一起动。
+   */
+  setProjectCover(
+    id: string,
+    cover: { coverMode: 'auto' | 'manual'; coverAssetId: string | null },
+  ): { ok: boolean; error?: string } {
+    const p = this.docs.projects.find((x) => x.id === id);
+    if (!p) return { ok: false, error: '项目不存在' };
+    if (cover.coverMode === 'manual' && !cover.coverAssetId) {
+      return { ok: false, error: '手动封面必须给出 assetId' };
+    }
+    p.coverMode = cover.coverMode;
+    p.coverAssetId = cover.coverAssetId ?? undefined;
+    p.updatedAt = new Date().toISOString();
+    this.save();
+    return { ok: true };
+  }
+
   /** 创建一个新画布;若项目还没有画布,这个画布成为主画布 */
   createCanvas(projectId: string, name?: string): CanvasSnapshot {
     const pc = this.loadProjectCanvases(projectId);
@@ -332,6 +355,30 @@ export class ProjectStore {
     if (pc.activeCanvasId === canvasId) return { ok: true };
     pc.activeCanvasId = canvasId;
     this.saveProjectCanvases(pc);
+    return { ok: true };
+  }
+
+  /**
+   * 整体替换某项目的画布容器(项目包导入专用)。
+   *
+   * 与 `saveCanvasSnapshot` 的区别:那条是「按 id 合并单张」且有版本/空快照防护,
+   * 而导入是**要把一个全新项目的画布一次性铺满** —— 逐张走 saveCanvasSnapshot 会
+   * 碰上「version 落后」「空快照拒绝」两条防护(导入的快照本就是 version=1 且可能为空),
+   * 反而写不进去。这里显式绕过防护:调用方只允许对**刚 createProject 出来的空项目**使用。
+   */
+  replaceCanvases(projectId: string, pc: ProjectCanvases): { ok: boolean; error?: string } {
+    if (!this.docs.projects.some((p) => p.id === projectId)) return { ok: false, error: '项目不存在' };
+    if (pc.projectId !== projectId) return { ok: false, error: '画布容器与项目不匹配' };
+    const f = this.canvasesFile(projectId);
+    this.ensureDir(f);
+    writeFileSync(f, JSON.stringify(pc, null, 2));
+    const p = this.docs.projects.find((x) => x.id === projectId)!;
+    p.canvasIds = pc.canvases.map((c) => c.id);
+    p.activeCanvasId = pc.activeCanvasId || pc.canvases[0]?.id || MAIN_CANVAS_ID;
+    p.updatedAt = new Date().toISOString();
+    this.save();
+    // 广播首张画布:渲染层若已挂在该项目上(导入后立即跳转),凭此拿到内容
+    if (pc.canvases[0]) this.onCanvasSaved?.(pc.canvases[0]);
     return { ok: true };
   }
 }

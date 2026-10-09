@@ -2,7 +2,7 @@
  * Electron 主进程 — 窗口 + IPC + 服务编排
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
-import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage, dialog } from 'electron';
 import { join, resolve } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -15,6 +15,8 @@ import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileRespon
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
+import { exportProject, importProjectFromFile } from './project-package';
+import { coverOf, listProjectCovers, setCoverAsset, clearCover, isUsableCoverFile } from './project-cover';
 import { extractFrame, extractAudio, cropImage } from './frames';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideoPostTooling, cancelAllVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
@@ -42,7 +44,7 @@ import {
   resolveLlmEndpoint,
   testConnection,
 } from './llm';
-import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind } from '@bigbotart/shared';
+import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind, ProjectExportRequest, ProjectExportResult, ProjectImportResult, ProjectCover } from '@bigbotart/shared';
 import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
@@ -628,6 +630,46 @@ ipcMain.handle('list-projects', () => store.listProjects());
 ipcMain.handle('create-project', (_e, name: string) => store.createProject(name));
 ipcMain.handle('delete-project', (_e, id: string) => store.deleteProject(id));
 ipcMain.handle('rename-project', (_e, id: string, name: string) => store.renameProject(id, name));
+
+/* ── 项目封面(首页/项目页卡片;取代写死的静态占位图) ── */
+const coverDeps = { store, assets };
+ipcMain.handle('project-cover', (_e, projectId: string): ProjectCover => {
+  const p = store.getProject(projectId);
+  if (!p) return { projectId, mode: 'auto', path: null, isVideo: false, sourceNodeId: null, error: '项目不存在' };
+  return coverOf(p, coverDeps);
+});
+ipcMain.handle('project-covers', (): ProjectCover[] => listProjectCovers(coverDeps));
+ipcMain.handle('upload-project-cover', async (_e, projectId: string) => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const opts = {
+    title: '选择项目封面',
+    properties: ['openFile' as const],
+    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif'] }],
+  };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  if (r.canceled || r.filePaths.length === 0) return { ok: false, canceled: true };
+  const src = r.filePaths[0]!;
+  // 先验格式再拷贝:省得把一个 .mp4/空文件拷进资产库才发现不能用
+  const usable = isUsableCoverFile(src);
+  if (!usable.ok) return { ok: false, error: usable.error };
+  // 用户显式选了文件 → unrestricted 导入(与「导入资产」同口径),登记为**项目资源**
+  const imported = await assets.importFromPaths([src], { unrestricted: true, projectId });
+  const asset = imported.assets[0];
+  if (!asset) {
+    return { ok: false, error: imported.failed[0]?.error ?? '封面导入失败' };
+  }
+  const res = setCoverAsset(coverDeps, projectId, asset.id);
+  logger.log(
+    res.ok ? 'info' : 'warn',
+    `[project-cover] 上传封面 ${projectId} → ${res.ok ? asset.localPath : res.error}`,
+  );
+  return res;
+});
+ipcMain.handle('clear-project-cover', (_e, projectId: string) => {
+  const res = clearCover(coverDeps, projectId);
+  logger.log(res.ok ? 'info' : 'warn', `[project-cover] 清除手动封面 ${projectId} → ${res.ok ? '回到自动' : res.error}`);
+  return res;
+});
 ipcMain.handle('set-project-llm', (_e, projectId: string, llm: LlmSource | null) => store.setProjectLlm(projectId, llm));
 // 多画布
 ipcMain.handle('load-project-canvases', (_e, projectId: string) => store.loadProjectCanvases(projectId));
@@ -760,6 +802,61 @@ ipcMain.handle('export-timeline', (_e, req) => {
   }
 });
 ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId));
+
+// ---------- IPC:项目包导入/导出(.bba;取代原「H3Mise 项目导入」入口) ----------
+/** 导出:不传 path 则弹保存对话框(取消 = canceled,不是失败) */
+ipcMain.handle('export-project-package', async (_e, req: ProjectExportRequest): Promise<ProjectExportResult> => {
+  const res = await exportProject(req, {
+    store,
+    assets,
+    takes,
+    memory,
+    appVersion: app.getVersion(),
+    dataRoot: DATA_DIR,
+    showSaveDialog: async (defaultName) => {
+      const target = BrowserWindow.getAllWindows()[0];
+      const r = target
+        ? await dialog.showSaveDialog(target, {
+            title: '导出项目包',
+            defaultPath: defaultName,
+            filters: [{ name: 'BigBotArt 项目包', extensions: ['bba'] }],
+          })
+        : await dialog.showSaveDialog({
+            title: '导出项目包',
+            defaultPath: defaultName,
+            filters: [{ name: 'BigBotArt 项目包', extensions: ['bba'] }],
+          });
+      return r.canceled || !r.filePath ? null : r.filePath;
+    },
+  });
+  logger.log(
+    res.ok ? 'info' : res.canceled ? 'info' : 'warn',
+    `[project-package] 导出 ${req.projectId} → ${res.ok ? res.path : res.canceled ? '用户取消保存' : res.error}`,
+  );
+  return res;
+});
+/** 导入:不传 path 则弹打开对话框;一律建**新项目**,绝不覆盖既有项目 */
+ipcMain.handle('import-project-package', async (_e, input?: { path?: string }): Promise<ProjectImportResult> => {
+  let filePath = input?.path;
+  if (!filePath) {
+    const target = BrowserWindow.getAllWindows()[0];
+    const opts = {
+      title: '导入 BigBotArt 项目包',
+      properties: ['openFile' as const],
+      filters: [{ name: 'BigBotArt 项目包', extensions: ['bba'] }],
+    };
+    const r = target ? await dialog.showOpenDialog(target, opts) : await dialog.showOpenDialog(opts);
+    if (r.canceled || r.filePaths.length === 0) return { ok: false, canceled: true };
+    filePath = r.filePaths[0]!;
+  }
+  const res = importProjectFromFile(filePath, { store, assets, takes, memory });
+  logger.log(
+    res.ok ? 'info' : 'error',
+    `[project-package] 导入 ${filePath} → ${res.ok ? `新项目 ${res.project?.name}(${res.project?.id})` : res.error}` +
+      (res.warnings?.length ? ` · ${res.warnings.length} 条提醒` : ''),
+  );
+  return res;
+});
 
 // ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑 / Agent 指定时间点取帧) ----------
 ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last' | 'at', seconds?: number) =>

@@ -324,7 +324,18 @@ export class AssetStore {
   private assets: Asset[] = [];
   private categories: AssetCategory[] = [];
 
+  /**
+   * 🧪 仅供测试:取「index.ts 构造的那一份 AssetStore」单例。
+   *
+   * 集成测试(project-package-ipc.test.ts)要在**同一份** Store 上铺数据 ——
+   * 测试里另 new 一个实例会变成两个写入者共享一个 projects.json/assets.json,
+   * 直接复现本项目最难查的那类故障(在测试里表现为莫名其妙的假失败)。
+   * 生产代码路径不读这个字段。
+   */
+  static __lastInstance?: AssetStore;
+
   constructor() {
+    AssetStore.__lastInstance = this;
     mkdirSync(ASSETS_DIR, { recursive: true });
     mkdirSync(TRASH_DIR, { recursive: true });
     const data = this.readAll();
@@ -481,6 +492,52 @@ export class AssetStore {
     } catch (e) {
       return { ok: false, error: `写入失败:${(e as Error).message}` };
     }
+  }
+
+  /**
+   * 整体登记一批资源与分类(项目包导入专用)。
+   *
+   * 与 `importFromPaths` 的区别:那条会**重新 probe 媒体元数据、重新分配 id、重新落盘**,
+   * 而导入端拿到的是包里**带完整元数据与已落盘 localPath 的记录**,再 probe 一遍纯属浪费
+   * (且 ffprobe 会重新解一遍大视频)。这里直接登记:
+   *  - id 冲突时重新分配(并把新 id 回传,调用方据此改写画布节点里的 assetId 引用);
+   *  - projectId 一律覆盖为新项目 id(防止包里旧 pid 把资源挂到别的项目上)。
+   *
+   * @returns `idMap` 旧 id → 新 id(未冲突时同值),`added` 实际登记条数
+   */
+  importParsed(
+    projectId: string,
+    assets: Asset[],
+    categories: AssetCategory[] = [],
+  ): { added: number; idMap: Map<string, string> } {
+    const idMap = new Map<string, string>();
+    let added = 0;
+    // 分类先登记(id 冲突同样重分配),资源挂靠时要按新 id 改写 categoryId
+    const catMap = new Map<string, string>();
+    for (const c of categories) {
+      let nid = c.id;
+      while (this.categories.some((x) => x.id === nid)) {
+        nid = `cat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      }
+      catMap.set(c.id, nid);
+      this.categories.push({ ...c, id: nid, projectId });
+    }
+    for (const a of assets) {
+      let nid = a.id;
+      while (this.assets.some((x) => x.id === nid)) {
+        nid = `asset-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      }
+      idMap.set(a.id, nid);
+      this.assets.push({
+        ...a,
+        id: nid,
+        projectId,
+        categoryId: a.categoryId ? (catMap.get(a.categoryId) ?? a.categoryId) : undefined,
+      });
+      added += 1;
+    }
+    if (added || categories.length) this.save();
+    return { added, idMap };
   }
 
   /* ── 更新:重命名 / 改分类 / 改归属 / 改标签 ── */
