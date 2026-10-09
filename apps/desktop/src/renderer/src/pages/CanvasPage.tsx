@@ -1249,7 +1249,12 @@ export default function CanvasPage({
   const activeCanvasId = projectCanvases?.activeCanvasId ?? '';
   const activeCanvas = projectCanvases?.canvases.find((c) => c.id === activeCanvasId);
 
-  /** 构建当前画布快照(节点+边+视口+分组)——给保存/切换前 flush-save 用;可传覆盖(自愈回写) */
+  /** 构建当前画布快照(节点+边+视口+分组)——给保存/切换前 flush-save 用;可传覆盖(自愈回写)
+   *  ⚠️ 节点/边/版本必须读 ref 而非闭包 state(2026-10-08 「删除的节点复活」事故):
+   *  本函数会被 800ms 内容防抖、400ms 视口防抖、卸载 flush 等**延迟/并发**调用,
+   *  闭包捕获的是「调度那一刻」的旧 nodes/edges/knownVersion —— 延迟保存把删除前的旧内容
+   *  写回 store(等版本可通过防护、后到者赢),写盘广播再把旧快照推回本地 ⇒
+   *  已删节点+连线复活、提示词回滚丢失。groups/viewport 早已走 ref(见下),这里对齐同口径。 */
   const buildActiveSnapshot = useCallback(
     (ns?: CanvasNode[], es?: Edge[]): CanvasSnapshot | null => {
       if (!activeCanvas) return null;
@@ -1257,19 +1262,21 @@ export default function CanvasPage({
         id: activeCanvas.id,
         projectId: activeCanvas.projectId,
         name: activeCanvas.name,
-        nodes: toSharedNodes(ns ?? nodes) as never,
-        edges: toSharedEdges(es ?? edges) as never,
+        nodes: toSharedNodes(ns ?? nodesRef.current) as never,
+        edges: toSharedEdges(es ?? edgesRef.current) as never,
         // 分组:随快照持久化(取 ref,保证建组/解组后立刻写盘,不等下一次渲染)
         groups: groupsRef.current.map((g) => ({ ...g, members: [...g.members] })),
-        // 用已知版本(随推送/刷新前进),保证不落后于 store —— 落后会导致 saveCanvasSnapshot 版本防护拒绝覆盖
-        version: knownVersion || activeCanvas.version,
+        // 用已知版本(随推送/刷新前进,取 ref 防延迟调用持旧版本),保证不落后于 store
+        // —— 落后会导致 saveCanvasSnapshot 版本防护拒绝覆盖
+        version: knownVersionRef.current || activeCanvas.version,
         // 画布视口:退出/重进恢复上次看到的位置与缩放(取 ref,保证拖拽/滚轮进行中也写最新值)
         viewport: { ...viewRef.current },
         createdAt: activeCanvas.createdAt,
         updatedAt: new Date().toISOString(),
       };
     },
-    [activeCanvas, nodes, edges, knownVersion],
+    // 内容/版本全部走 ref,依赖只需 activeCanvas —— 不再随 nodes/edges 每次编辑重建闭包
+    [activeCanvas],
   );
 
   /** 最近一次确认与 store 一致的内容基线(JSON)—— 卸载/防抖保存前比对,无变化不写盘。
