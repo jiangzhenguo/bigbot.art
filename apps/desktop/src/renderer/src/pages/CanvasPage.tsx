@@ -3614,6 +3614,30 @@ export default function CanvasPage({
     },
     [closeAddPop, selectNode],
   );
+  /**
+   * 空白处右键 = **取消选择**。
+   *
+   * 为什么不是「右键弹空白菜单」:空白菜单在本应用没有任何条目 ——
+   * 节点菜单(复制/重命名/另存为/在 Finder 中显示/删除)全部依赖具体节点;
+   * 画布级动作(分组/全选/复位视图)已有 ⌘G ⌘A 与工具栏按钮。弹一个空菜单
+   * 只会挡住画布。所以右键空白走「取消选择」这条最有用的语义(与 Figma 一致):
+   * 用户不必为了取消选中再左键点一下空白(那还会顺带关掉「+」弹层)。
+   *
+   * 只清选区,不动历史栈 —— 选中态不是编辑内容,不进撤销/重做。
+   * 保留检查器当前 tab(与「点空白清空选区」的既有行为一致,避免面板跳变)。
+   */
+  const handleWorldContextMenu = useCallback((e: React.MouseEvent) => {
+    /* 先禁掉 Chromium 默认菜单,再判空选区 —— 顺序不能反:空选区时也要拦默认菜单,
+       否则「没选中任何东西时右键空白」会弹出浏览器自带的「重新加载 / 检查」菜单。
+       把它排在最前面,后面的 early return 就不可能绕过去。 */
+    e.preventDefault();
+    if (selectedIdsRef.current.length !== 0) {
+      setSelectedIds([]);
+      closeAddPop();
+      setCtx(null);
+    }
+  }, [closeAddPop]);
+
   const handleNodeHeaderPointerDown = useCallback(
     // 头部拖动与主体一致:都走「拖动整块选区」
     (e: React.PointerEvent, n: CanvasNode) => beginNodeDrag(n, e),
@@ -3745,6 +3769,7 @@ export default function CanvasPage({
               // 同上:清选区不在这里做(见 onStageClick 注释)
               closeAddPop();
             }}
+            onWorldContextMenu={handleWorldContextMenu}
             onWorldDoubleClick={() => commitView({ ...DEFAULT_VIEW })}
             onDragOver={(e) => {
               if (e.dataTransfer.types.includes('application/x-bigbotart-palette')) {

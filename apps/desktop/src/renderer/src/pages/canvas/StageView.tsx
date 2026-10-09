@@ -81,6 +81,13 @@ interface StageViewProps {
   onStagePointerDown: (e: React.PointerEvent) => void;
   onStageClick: () => void;
   onWorldClick: () => void;
+  /**
+   * 空白处右键(取消选择)。
+   * 挂在 .stage 上(不是 .world —— world 只有固定 1600×1000,点阵背景在 stage),
+   * 用与 onPointerDown 同款的空白命中判定过滤;命中节点时 NodeCard 的
+   * contextmenu 已 stopPropagation,组名/弹层/小地图同理,到不了这里。
+   */
+  onWorldContextMenu: (e: React.MouseEvent) => void;
   /** 双击空白区域(复位视图;由 CanvasPage 实现) */
   onWorldDoubleClick: () => void;
   onDragOver: (e: React.DragEvent) => void;
@@ -135,6 +142,7 @@ export function StageView({
   onStagePointerDown,
   onStageClick,
   onWorldClick,
+  onWorldContextMenu,
   onWorldDoubleClick,
   onDragOver,
   onDrop,
@@ -243,6 +251,19 @@ export function StageView({
       onDragOver={onDragOver}
       onDrop={onDrop}
       onClick={onStageClick}
+      onContextMenu={(e) => {
+        /* 右键空白 = 取消选择(Figma 惯例)。
+           ⚠️ 必须挂在 .stage 而不是 .world 上:.world 只有固定 1600×1000(见 CSS),
+           而点阵背景画在 .stage 上 —— 用户看到的「空白」大部分是 stage 自身
+           (平移之后、或世界矩形之外),挂在 world 上只在左上角那一小片有效
+           (2026-10-10「右键取消选择没了」事故:处理程序从未触发)。
+           命中判定与上面 onPointerDown 同一套:stage 自身 / .world / svg 都算空白;
+           节点、组框、弹层、小地图各自 stopPropagation 或命中失败,到不了这里。 */
+        const t = e.target as HTMLElement;
+        if (t !== e.currentTarget && !t.classList.contains('world') && t.tagName !== 'svg')
+          return;
+        onWorldContextMenu(e);
+      }}
     >
       <div
         className="world"
