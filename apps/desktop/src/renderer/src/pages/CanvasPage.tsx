@@ -3144,6 +3144,38 @@ export default function CanvasPage({
 
   /* ══ 顶部动作 ══ */
   const [rerunDone, setRerunDone] = useState(false);
+  /**
+   * 「受影响节点」计数 —— stale(依赖过期)或 agentOn(Agent 正在此节点重跑)。
+   *
+   * ⚠️ 必须用 **state 派生值**而不是像以前那样在两处各写一遍
+   * `nodesRef.current.filter(...)`:那一版有两个后果 ——
+   * ① 计数只在渲染时算,`setNodes` 改了 stale 但没触发重渲染时按钮上的数字会停旧;
+   * ② `rerunDone` 的复位判据拿不到「当时的条数」,只能拍脑袋定,见下。
+   */
+  const staleCount = useMemo(
+    () => nodes.filter((n) => n.stale || n.agentOn).length,
+    [nodes],
+  );
+
+  /**
+   * 复位「重跑已排队」。
+   *
+   * 事故形态(2026-10-08 用户反馈「跑一次后按钮永久置灰」):`setRerunDone(true)` 之后
+   * **没有任何地方复位**,`disabled={rerunDone}` 于是永久生效 —— 切画布、改上游重新标出
+   * stale、甚至 Agent 又标了一批,按钮都还是灰的且停留在旧数字,刷新页面才能恢复。
+   *
+   * 复位判据 = **受影响集合被清空**(`staleCount` 回到 0):此刻"已排队 ✓"已经没有意义
+   * (它描述的正是这批节点),清掉后按钮重新显示「仅重跑受影响（0）」的可用态。
+   * 不能用「排队后延时 N 秒」复位 —— 节点跑完才清 stale,而跑完耗时不可预测
+   * (h3 单条实测数分钟到数十分钟),任何定长延时都必然过早或过晚。
+   *
+   * 这里刻意只在「归零」这一个方向复位:staleCount 从 0 变正(新一轮编辑标出新 stale)
+   * 时**不复位**是安全的 —— 那种情况下它本就该是 false(上一轮归零时已清)。
+   */
+  useEffect(() => {
+    if (staleCount === 0) setRerunDone(false);
+  }, [staleCount]);
+
   const rerunAffected = () => {
     const ids = nodesRef.current.filter((n) => n.stale || n.agentOn).map((n) => n.id);
     if (ids.length === 0) {
@@ -3526,7 +3558,7 @@ export default function CanvasPage({
           onGroupSelection={groupSelection}
           onUngroupSelection={ungroupSelection}
           rerunDone={rerunDone}
-          staleCount={nodesRef.current.filter((n) => n.stale || n.agentOn).length}
+          staleCount={staleCount}
           assetCount={assetCount}
           onRerunAffected={rerunAffected}
           onRunAll={runAll}
