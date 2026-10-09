@@ -57,7 +57,6 @@ export function Palette({ collapsed, onCollapse, onExpand, onAddByDoubleClick }:
               <b>{t.name}</b>
               <span>{t.sub}</span>
             </div>
-            {t.p1 ? <span className="p1">P1</span> : t.wf ? <span className="p1">WF</span> : null}
           </div>
         ))}
       </aside>

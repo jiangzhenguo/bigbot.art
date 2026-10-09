@@ -1,27 +1,64 @@
-import { VIDEO_ASPECTS, VIDEO_TIERS, SHOT_SIZES as SHARED_SHOT_SIZES, type VideoAspect } from '@bigbotart/shared';
+import {
+  VIDEO_ASPECTS,
+  VIDEO_TIERS,
+  SHOT_SIZES as SHARED_SHOT_SIZES,
+  HIDDEN_NODE_KINDS,
+  isHiddenNodeKind,
+  type VideoAspect,
+} from '@bigbotart/shared';
 import type { NodeTag, CanvasNode, Edge, NodeInfo } from './types';
 
+/**
+ * 已实现、可用的节点类型 —— **节点面板 / 「+」弹层只列这一组**。
+ *
+ * ⚠️ 判定标准是「点了真的会出东西」,不是「类型定义里有这个 kind」:
+ * 每一条都必须有 `CanvasPage.runNode` 的执行分支,或是纯引用/纯文档这类
+ * 天然不需要执行分支的节点(document/storyboard/asset/timeline)。
+ */
 export const NODE_TYPES: NodeTag[] = [
   { id: 'doc', kind: 'document', name: '提示词 / 文档', sub: 'Markdown · 五段式/六段式' },
   { id: 'storyboard', kind: 'storyboard', name: '分镜表', sub: '脚本 · 一行 = 一个分镜' },
   { id: 'asset', kind: 'asset', name: '资产引用', sub: '角色 / 环境 / 物品 · 资产中心' },
   { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
-  { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分', p1: true },
+  { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分' },
   { id: 'vupscale', kind: 'video-upscale', name: '视频增强', sub: '超分 + 合修脸 · Real-ESRGAN/GFPGAN' },
   { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
   { id: 'stitch', kind: 'image-stitch', name: '图片拼接', sub: '多图横排/竖排/网格 · ffmpeg' },
   { id: 'split', kind: 'image-split', name: '图片拆分', sub: '长图切片 · 九宫格切图' },
   { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/参考图/参考视频' },
   { id: 'grab', kind: 'frame-grab', name: '视频裁切取帧', sub: '从视频截一帧 → 导出为图片资源' },
-  { id: 'director', kind: 'director', name: '导演台', sub: '运镜参考小样', p1: true },
   { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
-  { id: 'timeline', kind: 'timeline', name: '时间线 / 剪辑', sub: 'FFmpeg 导出', p1: true },
-  { id: 'comfy', kind: 'director', name: 'ComfyUI 工作流', sub: '导入 workflow_api.json', p1: true },
-  { id: 'wf-input', kind: 'workflow-input', name: '工作流入口', sub: '声明输入槽位 · 资源容器', wf: true },
-  { id: 'wf-output', kind: 'workflow-output', name: '工作流出口', sub: '产物汇聚 · 运行收口', wf: true },
+  { id: 'timeline', kind: 'timeline', name: '时间线 / 剪辑', sub: 'FFmpeg 导出' },
 ];
 
+/**
+ * 未实现节点的 kind —— **入口已下架**(2026-10-08),定义保留以便读旧项目文件。
+ *
+ * 判定标准是「有没有执行分支」:这三类在 `CanvasPage.runNode` 里没有任何分支,
+ * 从面板建出来只会得到「连得起来、点运行没反应」的空壳(节点的渲染/检查器/
+ * 连线派发仍在,所以已存在的老画布照常打开、照常显示,只是不再能从 UI 新建)。
+ *
+ * ⚠️ **真正的单一事实源在 `packages/shared/src/connector-map.ts` 的
+ * `HIDDEN_NODE_KINDS`**(主进程拒绝 Agent 建节点时用的是它)。
+ * 这里只是 re-export,禁止在渲染层再维护第二份名单 —— 两份表分叉正是
+ * 2026-09「边画得出来但提交时被静默丢弃」闪烁事故的根因。
+ *
+ * 恢复入口的前置条件是**先补上 runNode 执行分支**,不是把名字加回来。
+ */
+export const HIDDEN_KINDS = HIDDEN_NODE_KINDS;
+
+/** 该 kind 是否已下架(UI 不可建;Agent 侧同步拒绝) */
+export const isHiddenKind = isHiddenNodeKind;
+
+/**
+ * 旧版演示画布的连线白名单(按**节点库短 id**)。
+ *
+ * ⚠️ 这是早期演示数据的兼容表,已被 `connectors.ts` 的 `resolvePortOptions` +
+ * shared `validateEdge` 取代(那两处才是写边的权威判定)。保留它只为老演示数据,
+ * 但它包含已下架的 `director` / `wf-*` —— **任何"按此表建节点"的路径都必须先过
+ * `isHiddenKind`**,否则会从侧面把空壳节点放回画布。
+ */
 export const COMPAT: Record<string, string[]> = {
   brief: ['image', 'shot', 'doc', 'director', 'storyboard'],
   storyboard: ['image', 'shot', 'edit', 'timeline', 'director'],

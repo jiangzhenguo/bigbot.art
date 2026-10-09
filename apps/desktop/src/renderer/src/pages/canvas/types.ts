@@ -76,9 +76,6 @@ export interface NodeTag {
   kind: NodeKind;
   name: string;
   sub: string;
-  p1?: boolean;
-  /** 🆕 v2 工作流专用节点(显示 WF 角标) */
-  wf?: boolean;
 }
 
 export interface NodeInfo {
