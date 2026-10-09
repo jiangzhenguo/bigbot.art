@@ -9,7 +9,7 @@ import { ImageTakeSection } from './ImageTakeSection';
 import { KVSection, Lbl, TextAreaField } from './fields';
 import { ImagePreview } from './ImagePreview';
 import { CropTakePreview } from './CropTakePreview';
-import { previewUrlOf } from '../media';
+import { previewUrlOf, AudioPlayer } from '../media';
 import { ImageGenInspector } from './ImageGenInspector';
 import { ImageEditInspector } from './ImageEditInspector';
 import { MediaInfoPanel } from './MediaInfoPanel';
@@ -432,33 +432,10 @@ export function InspectorBody({
               </div>
             </div>
           ) : null}
-          {outPath ? (
-            <div>
-              <Lbl>增强结果</Lbl>
-              <video
-                src={previewUrlOf(outPath) ?? ''}
-                controls
-                muted
-                preload="metadata"
-                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
-              />
-              <div className="mono mut" style={{ fontSize: 11, marginTop: 4 }}>
-                {d.width && d.height ? `${d.width}×${d.height}` : ''}
-                {d.durationSec ? ` · ${d.durationSec}s` : ''}
-              </div>
-            </div>
-          ) : srcPath ? (
-            <div>
-              <Lbl>源视频预览</Lbl>
-              <video
-                src={previewUrlOf(srcPath) ?? ''}
-                controls
-                muted
-                preload="metadata"
-                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
-              />
-            </div>
-          ) : null}
+          {/* ⚠️ 这里曾经又渲染了一遍「增强结果 / 源视频预览」——与检查器顶部那块**完全重复**
+              (2026-10 用户报「视频超分节点有俩预览」)。预览统一只保留顶部那一处:
+              顶部带注释说明「产物优先于源视频,都没有时给连接提示」,且靠近节点标题与进度条,
+              点中节点即见。此处不再重复,避免同一个 video 元素出现两次、也省一份 video 解码。 */}
           <ImageTakeSection node={node} projectId={projectId} jobs={jobs} onSelectTake={selectImageTake} toastMsg={toastMsg} />
         </div>
       );
@@ -865,8 +842,41 @@ export function InspectorBody({
     }
     case 'audio-ref': {
       const assetId = String(d.assetId ?? '');
+      // 🆕 视频来源(2026-10-08):连了 shot / video-upscale 时,音轨会被自动抽出并存为资产
+      const fromNodeId = (d.inputAudioFrom as { nodeId?: string } | undefined)?.nodeId;
+      const srcVideo = String(d.sourceVideoPath ?? '');
+      /* 绑定资产的「可播 URL」:优先按 assetId 查资产库(抽取/手绑都会写 assetId);
+         assetId 缺失时回退到抽出的产物路径(中间态:已抽但还没绑定) */
+      const boundAsset = assetId ? assetsList.find((a) => a.id === assetId) : undefined;
+      const boundSrc = boundAsset ? previewUrlOf(boundAsset.localPath) : previewUrlOf(srcVideo || null);
+      const boundAudio = boundSrc ? { src: boundSrc, name: boundAsset?.name ?? '已抽取音轨' } : null;
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {fromNodeId ? (
+            <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.6 }}>
+              音轨来源:上游视频节点 {fromNodeId.slice(0, 10)}
+              {srcVideo ? (
+                <>
+                  <br />
+                  已抽自:{srcVideo.split(/[\\/]/).pop()}
+                </>
+              ) : (
+                <>
+                  <br />
+                  <span style={{ color: 'var(--warn)' }}>待上游产出成片后自动抽取</span>
+                </>
+              )}
+            </div>
+          ) : null}
+          {/* 🆕 试听(2026-10-08):绑定了音频资产就能直接在这里播 ——
+              声音是本节点的唯一产物,不给播放能力等于只能靠下游出片来间接确认它对不对。
+              src 与 asset 节点/节点卡同源(bba-asset:// + Range,可拖动定位)。 */}
+          {boundAudio ? (
+            <div>
+              <Lbl>试听</Lbl>
+              <AudioPlayer src={boundAudio.src} name={boundAudio.name} />
+            </div>
+          ) : null}
           <TextAreaField label="音频资产 ID" value={assetId} rows={1} placeholder="asset-…" onChange={(v) => setData({ assetId: v })} />
           <button
             className="btn btn-s btn-sm"

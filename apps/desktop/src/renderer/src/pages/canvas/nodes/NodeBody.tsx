@@ -22,7 +22,7 @@ import {
   WAVE_BARS,
 } from '../constants';
 import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
-import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb, VideoPoster } from '../media';
+import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb, VideoPoster, AudioPlayer } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
 
 interface NodeBodyProps {
@@ -525,6 +525,19 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
     }
     case 'audio-ref': {
       const assetId = String(d.assetId ?? '');
+      const am = assetMeta[assetId];
+      // 🆕 真实播放(2026-10-08):绑定了音频资产就给可播的播放器,
+      // 而不是一条**假波形**(旧实现 WAVE_BARS 是纯装饰,点它没有任何反应)。
+      // src 走 assetMeta(与 asset 节点/检查器同一来源:bba-asset:// + Range 支持,可拖动定位)
+      const playable = am && (am.kind === 'audio' || am.kind === 'video') ? am.src : null;
+      if (playable) {
+        return (
+          <div className="nb">
+            <AudioPlayer src={playable} name={am!.name} compact />
+            <div className="nmeta mono">{am!.name} · --ref-audio</div>
+          </div>
+        );
+      }
       return (
         <div className="nb">
           <div className="wave">
@@ -532,7 +545,11 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
               <i key={i} style={{ height: h }} />
             ))}
           </div>
-          <div className="nmeta mono">{assetId ? `资产 ${assetId.slice(0, 12)}… · --ref-audio` : '未绑定音频 · 检查器里选择'}</div>
+          <div className="nmeta mono">
+            {assetId
+              ? `资产 ${assetId.slice(0, 12)}… 未加载 · --ref-audio`
+              : '未绑定音频 · 检查器里选择,或从视频节点连一条线自动抽取'}
+          </div>
         </div>
       );
     }

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { WAVE_BARS } from './constants';
 
 export function basenameOf(p: string): string {
   const parts = p.replace(/\\/g, '/').split('/');
@@ -402,6 +403,184 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
           {badge}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+/* ───────────────────────── 音频播放(audio-ref 节点) ───────────────────────── */
+
+/** 音频扩展名白名单(与主进程 assets.ts 的 MIME_BY_EXT 同口径) */
+const AUDIO_EXT_RE = /\.(mp3|wav|m4a|aac|flac|ogg)$/i;
+
+/** 该路径是否为音频文件(同样先取 basename,避免目录名误命中) */
+export function isAudioPath(p: string | null | undefined): boolean {
+  if (!p) return false;
+  return AUDIO_EXT_RE.test(basenameOf(p));
+}
+
+/**
+ * 秒 → `m:ss`(播放器时间轴用)。
+ *
+ * 与 `formatDurationSec` 分开是因为用途不同:那个是「生成耗时」的人读文案(「3分20秒」),
+ * 这个是播放器上的紧凑计时(「3:20」),且**必须容忍 NaN** ——
+ * 音频还没 loadedmetadata 时 `duration` 是 NaN,直接渲染会出现「NaN:NaN」。
+ * 非有限值/负数一律回 `0:00`,让 UI 有个确定的样子。
+ */
+export function formatClock(sec: number | null | undefined): string {
+  const s = Number(sec);
+  if (!Number.isFinite(s) || s < 0) return '0:00';
+  const total = Math.floor(s);
+  const m = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${m}:${String(rest).padStart(2, '0')}`;
+}
+
+/** 播放进度 0~1(时长未知/非法时回 0,供波形高亮用) */
+export function playProgress(current: number, duration: number): number {
+  if (!Number.isFinite(current) || !Number.isFinite(duration) || duration <= 0) return 0;
+  return Math.min(1, Math.max(0, current / duration));
+}
+
+/**
+ * 音频播放器(节点卡与检查器共用)。
+ *
+ * 为什么不用 `<audio controls>` 原生控件:
+ *  1. 原生控件在 224px 宽的节点卡里会被裁掉一半(时间/音量挤不下);
+ *  2. 项目视觉语言是自绘的波形条(`.wave`),原生控件风格完全对不上。
+ * 故自绘:波形 + 点击定位 + 播放/暂停 + 时间。
+ *
+ * ⚠️ **拖动进度条不要用 onInput 直接改 state**:`onTimeUpdate` 在播放时会持续回写
+ * `current`,与用户拖拽互相打架(表现为拖动时指针乱跳)。这里的做法是拖拽期间
+ * 用 `scrubbingRef` 冻结 timeupdate 的写入,松手才同步。
+ */
+export function AudioPlayer({
+  src,
+  name,
+  compact,
+}: {
+  src: string;
+  /** 文件名(展示用;缺省不显示) */
+  name?: string;
+  /** 紧凑模式(节点卡内;检查器用完整尺寸) */
+  compact?: boolean;
+}) {
+  const aRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  /** 加载失败原因(未绑定/文件缺失时给出人话,而不是一个死按钮) */
+  const [err, setErr] = useState<string | null>(null);
+  /** 拖拽中:冻结 timeupdate 回写,避免与用户操作互相覆盖 */
+  const scrubbingRef = useRef(false);
+
+  const toggle = useCallback(() => {
+    const a = aRef.current;
+    if (!a || err) return;
+    if (a.paused) {
+      // 播放失败(格式不支持/文件损坏)必须让用户看见,不能静默什么都不发生
+      void a.play().catch((e: unknown) => {
+        setErr(`无法播放:${(e as Error).message}`);
+        setPlaying(false);
+      });
+      setPlaying(true);
+    } else {
+      a.pause();
+      setPlaying(false);
+    }
+  }, [err]);
+
+  /** 波形点击/拖动定位:ratio 0~1 */
+  const seekTo = useCallback((ratio: number) => {
+    const a = aRef.current;
+    if (!a || !Number.isFinite(a.duration) || a.duration <= 0) return;
+    const t = Math.min(a.duration, Math.max(0, ratio * a.duration));
+    a.currentTime = t;
+    setCurrent(t);
+  }, []);
+
+  const pct = playProgress(current, duration);
+  /** 已播过的波形条数(高亮到播放头) */
+  const playedBars = Math.round(pct * WAVE_BARS.length);
+
+  return (
+    <div className={`aud${compact ? ' compact' : ''}`}>
+      <audio
+        ref={aRef}
+        src={src}
+        preload="metadata"
+        onLoadedMetadata={(e) => {
+          const a = e.currentTarget;
+          if (Number.isFinite(a.duration)) setDuration(a.duration);
+        }}
+        onTimeUpdate={(e) => {
+          if (!scrubbingRef.current) setCurrent(e.currentTarget.currentTime);
+        }}
+        onEnded={() => {
+          setPlaying(false);
+          setCurrent(0);
+          const a = aRef.current;
+          if (a) a.currentTime = 0;
+        }}
+        onError={() => setErr('音频加载失败(文件可能已被移动或删除)')}
+      />
+      <button
+        className="aud-play"
+        onClick={(e) => {
+          e.stopPropagation();
+          toggle();
+        }}
+        disabled={!!err}
+        title={err ?? (playing ? '暂停' : '播放')}
+        aria-label={playing ? '暂停' : '播放'}
+      >
+        {playing ? (
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <rect x="6" y="5" width="4" height="14" rx="1" />
+            <rect x="14" y="5" width="4" height="14" rx="1" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M8 5.5v13l11-6.5z" />
+          </svg>
+        )}
+      </button>
+      {/* 波形即进度条:已播部分高亮,点击/拖动定位 */}
+      <div
+        className="aud-wave"
+        role="slider"
+        aria-label="播放进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pct * 100)}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          scrubbingRef.current = true;
+          const r = e.currentTarget.getBoundingClientRect();
+          seekTo((e.clientX - r.left) / r.width);
+        }}
+        onPointerMove={(e) => {
+          if (!scrubbingRef.current) return;
+          e.stopPropagation();
+          const r = e.currentTarget.getBoundingClientRect();
+          seekTo((e.clientX - r.left) / r.width);
+        }}
+        onPointerUp={() => {
+          scrubbingRef.current = false;
+        }}
+        onPointerLeave={() => {
+          scrubbingRef.current = false;
+        }}
+      >
+        {WAVE_BARS.map((h, i) => (
+          <i key={i} style={{ height: h }} className={i < playedBars ? 'on' : undefined} />
+        ))}
+      </div>
+      <span className="aud-time mono">
+        {formatClock(current)}/{formatClock(duration)}
+      </span>
+      {name && !compact ? <span className="aud-name mono">{name}</span> : null}
+      {err ? <span className="aud-err">{err}</span> : null}
     </div>
   );
 }
