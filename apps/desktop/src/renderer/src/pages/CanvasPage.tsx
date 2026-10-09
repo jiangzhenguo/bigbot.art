@@ -1957,6 +1957,76 @@ export default function CanvasPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edges, nodes]);
 
+  /* ══ 视频 → 音频参考节点:连上即抽音轨(2026-10-08) ══
+   *
+   * 「视频节点 →「+」→ 音频参考」连上以后,把来源视频的音轨用 ffmpeg 抽出来、
+   * 导入资产库、绑定为 audio-ref 节点的 `data.assetId` —— 之后它就是一个普通音频参考节点,
+   * 可以再连给任意多个镜头(`--ref-audio`)。
+   *
+   * 为什么放在 effect 而不是派发里:派发(`computeEdgeDerivations`)是**纯函数**,
+   * 不能有 ffmpeg 副作用(它在 reducer 里被调用,StrictMode 下还会双跑)。
+   *
+   * 防重入靠 `data.sourceVideoPath` 记录「已为哪个视频抽过」:
+   *  - 同一个视频 → 不重复抽
+   *  - 上游换了产物(重新生成)→ 路径变了 → 自动重抽
+   *  - 删边 → 派发清掉 inputAudioFrom/sourceVideoPath → 下次连上会重抽
+   * 加 in-flight 集合防止同一节点在一次抽取完成前被重复触发(StrictMode 双跑 / 快速抖动)。 */
+  const audioExtractInflightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const n of nodes) {
+      if (n.kind !== 'audio-ref') continue;
+      const d = (n.data ?? {}) as Record<string, unknown>;
+      const from = (d.inputAudioFrom as { nodeId?: string } | undefined)?.nodeId;
+      if (!from) continue;
+      const up = nodes.find((x) => x.id === from);
+      const srcVideo = String((up?.data as Record<string, unknown> | undefined)?.resultPath ?? '');
+      if (!srcVideo) continue; // 上游还没产物 → 等它跑出来再抽(不报错,连线先立着)
+      if (String(d.sourceVideoPath ?? '') === srcVideo) continue; // 已为这个视频抽过
+      if (audioExtractInflightRef.current.has(n.id)) continue;
+      audioExtractInflightRef.current.add(n.id);
+      void (async () => {
+        try {
+          const ex = await window.bigbotart.extractAudio(srcVideo);
+          if (!ex.ok || !ex.path) {
+            // 明确告知,不静默(红线 R6):上游成片可能本来就没有音轨
+            toastMsg(`抽取音轨失败:${ex.error ?? '未知错误'}`);
+            return;
+          }
+          const imported = await window.bigbotart.importAssets({
+            paths: [ex.path],
+            ...(projectId ? { projectId } : {}),
+          });
+          const assetId = imported.assets[0]?.id;
+          if (!assetId) {
+            toastMsg('音轨已抽出,但导入资产库失败(音频文件在产物目录)');
+            return;
+          }
+          setNodes((ns) =>
+            ns.map((x) =>
+              x.id === n.id
+                ? {
+                    ...x,
+                    extra: `✓ ${ex.path!.split(/[\\/]/).pop()}`,
+                    data: {
+                      ...(x.data ?? {}),
+                      // 绑定抽出来的音频资产 —— 音频参考节点的既有语义(data.assetId)不变
+                      assetId,
+                      sourceVideoPath: srcVideo,
+                    },
+                  }
+                : x,
+            ),
+          );
+          toastMsg(`已从视频抽取音轨并绑定 · ${n.title}`);
+        } catch (e) {
+          toastMsg(`抽取音轨失败:${(e as Error).message}`);
+        } finally {
+          audioExtractInflightRef.current.delete(n.id);
+        }
+      })();
+    }
+  }, [nodes, projectId, toastMsg]);
+
   /* ══ 「+」下游节点弹层 ══ */
   const openAddPop = useCallback(
     (nodeId: string) => {
@@ -2854,15 +2924,24 @@ export default function CanvasPage({
       const engine = String(d.engine ?? (isImage ? 'mlxgen' : 'h3c'));
 
       // 参考绑定 → Provider references(首/尾帧、参考图、参考音频;shot 接续走 path 直链)
+      // ⚠️ 这里必须给出**具体类型**而不是 `as never[]`:下面 ref-audio 的抽音轨分支要读改
+      // `asset.kind` / `localPath`,退化成 never 后每次访问都得强转,类型检查就形同虚设。
+      type RenderRef = {
+        asset: { id: string; kind: Asset['kind']; name: string; localPath: string; tags: string[]; createdAt: string };
+        role: string;
+        localPath: string;
+      };
       const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }> | undefined) ?? [];
-      let references = refs
-        .map((r) => {
+      let references: RenderRef[] = refs
+        .map((r): RenderRef | null => {
           const localPath = r.path ?? assetCache[r.assetId ?? ''];
           if (!localPath) return null;
           return {
             asset: {
               id: r.assetId ?? `shot-frame:${localPath.split('/').pop() ?? ''}`,
-              kind: 'image',
+              // 音频参考的源是音轨(资产库里的音频、或下面抽出来的 wav),
+              // 写成 image 会让 referenceMediaIssues 误判媒体不匹配
+              kind: r.role === 'ref-audio' ? 'audio' : 'image',
               name: r.assetId ?? (localPath.split(/[\\/]/).pop() ?? localPath),
               localPath,
               tags: [],
@@ -2872,7 +2951,38 @@ export default function CanvasPage({
             localPath,
           };
         })
-        .filter(Boolean) as never[];
+        .filter((x): x is RenderRef => x !== null);
+
+      /* 音频参考端口 ref-audio 的视频源 → 现场抽音轨(2026-10-08「视频节点 → 音频参考」)。
+       *
+       * 背景:`ref-audio` 过去只接受音频资产,于是「拿上游镜头的声音当这一段的声音参考」
+       * 走不通 —— 视频节点产物是 mp4,连得上去但提交时 h3 需要的是音轨。
+       * 现在派发层登记的是**视频路径**(派发是纯函数,不能有 ffmpeg 副作用),
+       * 由提交这一步把它换成抽出来的 wav。
+       *
+       * ⚠️ 抽音轨失败必须**明确报错**,不能让 h3 拿到一个 mp4 当音轨用(它只会在
+       * 入队后报一句看不懂的错);这正是本项目反复出现的「假成功」形态。 */
+      const audioRefIdx = references.findIndex(
+        (r) =>
+          r.role === 'ref-audio' &&
+          /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(String(r.localPath ?? '')),
+      );
+      if (audioRefIdx >= 0) {
+        const srcVideo = String(references[audioRefIdx]!.localPath ?? '');
+        const ex = await window.bigbotart.extractAudio(srcVideo);
+        if (!ex.ok || !ex.path) {
+          toastMsg(`音频参考抽取失败:${ex.error ?? '未知错误'}`);
+          return;
+        }
+        const prev = references[audioRefIdx]!;
+        references[audioRefIdx] = {
+          ...prev,
+          // 抽出的就是音轨:kind 必须跟着改成 audio,否则 referenceMediaIssues
+          // 会以「ref-audio 需要 audio,实际是 video」把提交拒掉(白连一场)
+          asset: { ...prev.asset, kind: 'audio', localPath: ex.path, name: ex.path.split(/[\\/]/).pop() ?? ex.path },
+          localPath: ex.path,
+        };
+      }
 
       /* image-gen / image-edit 的参考图:ref-image 入边 → references。
          - image-gen:多参考生成(mlxgen 对不支持的模型给指引报错)。
@@ -3070,6 +3180,11 @@ export default function CanvasPage({
             maskPath,
             scale: d.scale,
             imageStrength: d.imageStrength,
+            /* 像素面积预算(仅 Qwen-Image-2.1 参考编辑用 → `--output-resolution`)。
+               必须在这里显式列出:本对象是**白名单**,不在其中的 data 字段到不了 provider
+               (2026-10 加检查器控件时才发现的漏点 —— 只写 data 不列这里 = 控件看起来生效、
+               实际参数根本没传)。 */
+            outputResolution: d.outputResolution,
             outpaintSides: d.outpaintSides,
           }
         : {

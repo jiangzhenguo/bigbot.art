@@ -173,6 +173,17 @@ export function AddNodePopover({
                     {rowPort.desc}
                   </div>
                 ) : null}
+                {/* 多端口在**未选中时只显示首个** —— 用户点「+」看不到还有别的角色可选,
+                    会以为「没有这个功能」(2026-10-08 实测反馈:新增的「音频参考」端口被当成没做)。
+                    故未选中时补一行提示,把「还有其他角色」这件事显式说出来;
+                    选中后才展开可点的角色 chips。 */}
+                {multi && sel !== t.id ? (
+                  <div className="ap-more-hint" title={rpOpts.map((o) => PORT_LABEL[o.port] ?? o.port).join(' · ')}>
+                    还有 {rpOpts.length - 1} 个可选角色:
+                    {rpOpts.slice(1).map((o) => PORT_LABEL[o.port] ?? o.port).join(' / ')}
+                    <span className="mut"> · 点此展开</span>
+                  </div>
+                ) : null}
                 {multi && sel === t.id ? (
                   <div className="ap-port">
                     <span className="lbl" style={{ marginRight: 6 }}>角色</span>
@@ -192,7 +203,6 @@ export function AddNodePopover({
                 ) : null}
               </div>
               {t.id === 'shot' ? <span className="rec">推荐</span> : null}
-              {t.p1 ? <span className="p1">P1</span> : t.wf ? <span className="p1">WF</span> : null}
             </div>
           );
         })}
