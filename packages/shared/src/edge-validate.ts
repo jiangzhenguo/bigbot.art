@@ -61,6 +61,17 @@ export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-c
 /** 视频产物类节点(视频直通:video-upscale 的产物是 mp4,不是静帧) */
 export const VIDEO_KINDS = ['video-upscale'];
 
+/**
+ * **带内嵌音轨的视频产物类节点** —— 它们的产物可作 `ref-audio` 的音源
+ * (2026-10-08「视频节点 → 音频参考」连接器)。
+ *
+ * 为什么单独一张表而不是复用 VIDEO_KINDS:`shot` 的产物同样是带音轨的 mp4,
+ * 但它**不在** VIDEO_KINDS 里(VIDEO_KINDS 的语义是「视频直通、不能当静帧用」,
+ * shot 由各自的 first-frame/ref-video 分支单独处理)。这里要的是「产物里有没有声音」,
+ * 与那张表正交,混用会让两个语义互相绑架。
+ */
+export const AUDIO_BEARING_VIDEO_KINDS = ['shot', ...VIDEO_KINDS];
+
 /** 非 asset 节点的输出媒体(asset 按资产元数据动态判定) */
 export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'text'> = {
   shot: 'video',
@@ -90,6 +101,8 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
   input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可;video-upscale 输入:视频
   /** 视频裁切取帧的输入端口:必须是视频(mp4),不能把静帧塞进来 */
   'input-video': 'video',
+  /** 视频 → audio-ref 的输入端口:载荷是从视频抽出的音轨,故按 audio 判定 */
+  'input-audio': 'audio',
   piece: 'image', // stitch 拼接件:仅图片
   'piece-N': 'image', // split 产物按序号取片(piece-1/piece-2/…;替代 input/piece 端口)
   clip: undefined, // 静帧/视频皆可入轨
@@ -143,12 +156,28 @@ function sourceMedia(node: EdgeNodeMin, opts?: ValidateEdgeOptions): string | un
 
 /**
  * 该源节点在指定端口上实际提供的「载荷媒体」(而非节点主输出媒体)。
- * 特例:shot 的 first-frame 端口消费的是其「尾帧 PNG」(图片),不是视频本体 ——
- * 镜头接续语义(deriveShotRefsFromEdges 以 tailFramePath 注入;尾帧未就绪也允许建边,
- * 提交期 W004 兜底),与渲染层 connectors.ts(BY_KIND shot→shot 恒提供 first-frame)同口径。
+ * 特例:
+ * - shot 的 first-frame 端口消费的是其「尾帧 PNG」(图片),不是视频本体 ——
+ *   镜头接续语义(deriveShotRefsFromEdges 以 tailFramePath 注入;尾帧未就绪也允许建边,
+ *   提交期 W004 兜底),与渲染层 connectors.ts(BY_KIND shot→shot 恒提供 first-frame)同口径。
+ * - **视频产物 → ref-audio(2026-10-08)**:视频源在该端口上提供的是它的**内嵌音轨**,
+ *   不是视频本体。提交期由 `extractAudio` 抽出 wav 再走 h3 `--ref-audio`,
+ *   故这里按 'audio' 判定 —— 否则 PORT_REQUIRED_MEDIA 会以「源媒体=video」为由
+ *   把这条完全合法的边拒掉。
+ *   ⚠️ 只对**视频产物类**节点开这个口子:音频 asset 走的是 asset 分支(本来就是 audio),
+ *   图片产物没有音轨,不该被放进来。
  */
 function portPayloadMedia(node: EdgeNodeMin, label: string, opts?: ValidateEdgeOptions): string | undefined {
   if (node.kind === 'shot' && label === 'first-frame') return 'image';
+  // 带音轨的视频产物在这两个端口上提供的是**音轨**而非视频本体:
+  //   - ref-audio  → shot 的声音参考(提交期抽 wav)
+  //   - input-audio → audio-ref 节点(抽出来后导入资产库并绑定)
+  if (
+    (label === 'ref-audio' || label === 'input-audio') &&
+    AUDIO_BEARING_VIDEO_KINDS.includes(node.kind)
+  ) {
+    return 'audio';
+  }
   return sourceMedia(node, opts);
 }
 
@@ -332,13 +361,23 @@ export function deriveShotRefsFromEdges(
         // 整段成片作参考视频(h3 --ref-video):与「首帧接续」是两个独立端口,可同时用
         const mp4 = String(sd.resultPath ?? '');
         if (mp4) derived.push({ path: mp4, role: 'ref-video', auto: true });
+      } else if (lbl === 'ref-audio') {
+        // 上游成片的**内嵌音轨**作声音参考(2026-10-08):这里只登记视频文件路径,
+        // 真正抽音轨发生在提交期(渲染层 runNode / 主进程 engine.submit 调 frames.extractAudio)
+        // —— 派发是纯函数,不该有 ffmpeg 副作用。
+        const mp4 = String(sd.resultPath ?? '');
+        if (mp4) derived.push({ path: mp4, role: 'ref-audio', auto: true });
       }
     } else if (VIDEO_KINDS.includes(src.kind)) {
       // 视频产物 → 镜头:ref-video 参考视频(video-upscale 增强成片等);
-      // first-frame 端口消费的是静帧,这里不注入(需经 frames 取帧后再连)
+      // first-frame 端口消费的是静帧,这里不注入(需经 frames 取帧后再连);
+      // ref-audio 同理只登记视频路径,提交期抽音轨
       if (lbl === 'ref-video') {
         const mp4 = String(sd.resultPath ?? '');
         if (mp4) derived.push({ path: mp4, role: 'ref-video', auto: true });
+      } else if (lbl === 'ref-audio') {
+        const mp4 = String(sd.resultPath ?? '');
+        if (mp4) derived.push({ path: mp4, role: 'ref-audio', auto: true });
       }
     } else if (IMAGE_KINDS.includes(src.kind)) {
       // 图片产物 → 镜头:first-frame 静帧直通首帧 / ref-image 参考图注入(图生视频双端口,与资产图行为一致)
@@ -365,6 +404,42 @@ export function deriveShotRefsFromEdges(
     else merged.push(r);
   }
   return merged;
+}
+
+/* ─────────────── audio-ref 节点的输入来源(视频 → 音频参考) ─────────────── */
+
+/**
+ * 从入边推导 `audio-ref`(音频参考节点)的**视频来源**。
+ *
+ * 语义(2026-10-08):`shot` / `video-upscale` 的产物是带音轨的 mp4,
+ * 连到 audio-ref 上时,由渲染层用 ffmpeg 把音轨抽出来 → 导入资产库 →
+ * 自动绑定为该节点的 `data.assetId`,节点从此就是一个**可见、可复用**的音频产物
+ * (同一个音频参考节点可以再连给多个镜头)。
+ *
+ * 为什么单独一个函数而不是塞进 `deriveShotRefsFromEdges`:
+ * 那个函数的输出形状是「shot 的 refs[](assetId 或 path)」,而这里要的是
+ * 「audio-ref 节点的来源视频路径 + 抽取状态」。两者的消费方与生命周期都不同,
+ * 硬塞会造出一个既要管 refs 又要管 assetId 的混合结构。
+ *
+ * @returns 来源视频路径;无合法入边时 undefined
+ */
+export function deriveAudioRefSource(
+  nodes: EdgeNodeMin[],
+  edges: EdgeMin[],
+  nodeId: string,
+): string | undefined {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const e of edges) {
+    if (e.target !== nodeId) continue;
+    if ((e.label ?? '') !== 'input-audio') continue;
+    const src = byId.get(e.source);
+    if (!src) continue;
+    // 只有带音轨的视频产物能作来源(与 allowedPortLabels 的媒体门禁同口径)
+    if (!AUDIO_BEARING_VIDEO_KINDS.includes(src.kind)) continue;
+    const mp4 = String(((src.data ?? {}) as Record<string, unknown>).resultPath ?? '');
+    if (mp4) return mp4;
+  }
+  return undefined;
 }
 
 /* ───────────────────────── D:提交前防呆 ───────────────────────── */

@@ -7,11 +7,13 @@ import {
   validateEdge,
   allowedPortLabels,
   deriveShotRefsFromEdges,
+  deriveAudioRefSource,
   validateRefsForSubmit,
   referenceMediaIssues,
   type EdgeNodeMin,
   type EdgeMin,
 } from '../edge-validate.js';
+import { SINGLE_VALUE_PORTS } from '../connector-map.js';
 
 const assetNode = (id: string, mediaType = 'image'): EdgeNodeMin => ({
   id,
@@ -76,7 +78,7 @@ describe('A · validateEdge 端口合法性', () => {
     const nodes = [shotNode('up', { resultPath: '/out/up.mp4', tailFramePath: '/out/up-last.png' }), shotNode('down')];
     const res = validateEdge(nodes, [], edge('up', 'down', 'first-frame'));
     expect(res.ok).toBe(true);
-    expect(allowedPortLabels(shotNode('up'), 'shot')).toEqual(['first-frame', 'ref-video']);
+    expect(allowedPortLabels(shotNode('up'), 'shot')).toEqual(['first-frame', 'ref-video', 'ref-audio']);
   });
 
   it('shot → shot 尾帧未就绪也允许建边(连线先立,提交期 W004 兜底)', () => {
@@ -453,5 +455,161 @@ describe('2.1 多参考编辑:→ image-edit ref-image 端口(2026-09-29 接线)
     const labels = allowedPortLabels(assetNode('a'), 'image-edit');
     expect(labels).toContain('input');
     expect(labels).toContain('ref-image');
+  });
+});
+
+/**
+ * 视频节点 → 音频参考(2026-10-08 新增连接器)
+ *
+ * 动机:`ref-audio` 端口过去只接受**音频资产**,于是「拿上游镜头的声音当这一段的声音参考」
+ * 这条最自然的用法反而走不通 —— 视频节点(shot / video-upscale)产物是 mp4,连不上去。
+ * 现在放开直连:提交期由 `extractAudio` 从视频抽出 wav 再走 h3 `--ref-audio`。
+ *
+ * 本组锁死三件事:
+ *  1. 视频产物 → shot 的 ref-audio **合法**(媒体门禁认的是「音轨」而不是「视频本体」);
+ *  2. 图片产物**不能**钻这个口子(没有音轨的东西不该被放进来);
+ *  3. 派发层登记的是视频路径(抽音轨是提交期的副作用,纯函数不碰 ffmpeg)。
+ */
+describe('视频节点 → 音频参考(→ shot ref-audio)', () => {
+  it('shot → shot ref-audio 合法(上游成片的内嵌音轨作声音参考)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4' }), shotNode('down')];
+    const res = validateEdge(nodes, [], edge('up', 'down', 'ref-audio'));
+    expect(res.ok).toBe(true);
+  });
+
+  it('video-upscale → shot ref-audio 合法(增强成片的音轨同样可用)', () => {
+    const nodes = [
+      { id: 'vu', kind: 'video-upscale', data: { resultPath: '/out/vu.mp4' } },
+      shotNode('down'),
+    ];
+    const res = validateEdge(nodes, [], edge('vu', 'down', 'ref-audio'));
+    expect(res.ok).toBe(true);
+  });
+
+  it('媒体门禁按「载荷是音轨」判定,不因源节点主输出是 video 而误拒', () => {
+    // 这是本次改动的核心:portPayloadMedia 对带音轨的视频产物返回 'audio',
+    // 否则 PORT_REQUIRED_MEDIA['ref-audio']='audio' 会把这条合法边挡下
+    expect(allowedPortLabels(shotNode('up', { resultPath: '/out/up.mp4' }), 'shot')).toContain('ref-audio');
+    expect(allowedPortLabels({ id: 'vu', kind: 'video-upscale', data: {} }, 'shot')).toContain('ref-audio');
+  });
+
+  it('图片产物不能连 ref-audio(没有音轨,不该开口子)', () => {
+    // image-gen 的 CONNECTOR_MAP 里本来就没有 ref-audio 端口 → 无可用端口
+    const nodes = [{ id: 'ig', kind: 'image-gen', data: { resultPath: '/out/ig.png' } }, shotNode('down')];
+    const res = validateEdge(nodes, [], edge('ig', 'down', 'ref-audio'));
+    expect(res.ok).toBe(false);
+    expect(allowedPortLabels({ id: 'ig', kind: 'image-gen', data: {} }, 'shot')).not.toContain('ref-audio');
+  });
+
+  it('asset(图片)不能连 shot ref-audio(仍按资产真实媒体判定)', () => {
+    const nodes = [assetNode('a'), shotNode('down')];
+    const res = validateEdge(nodes, [], edge('a', 'down', 'ref-audio'));
+    expect(res.ok).toBe(false);
+  });
+
+  it('asset(audio)→ shot ref-audio 仍合法(原有能力没被改动)', () => {
+    const nodes = [assetNode('au', 'audio'), shotNode('down')];
+    expect(validateEdge(nodes, [], edge('au', 'down', 'ref-audio')).ok).toBe(true);
+  });
+
+  it('ref-audio 是单值端口:第二个视频源会被判冲突(可替换)', () => {
+    const nodes = [shotNode('up1', { resultPath: '/o/1.mp4' }), shotNode('up2', { resultPath: '/o/2.mp4' }), shotNode('down')];
+    const existing = [edge('up1', 'down', 'ref-audio')];
+    const res = validateEdge(nodes, existing, edge('up2', 'down', 'ref-audio'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('single-port-conflict');
+    expect(res.errors[0]!.replaceable).toBe(true);
+  });
+
+  it('B · deriveShotRefsFromEdges:视频源登记的是**视频路径**(抽音轨留给提交期)', () => {
+    const nodes = [shotNode('up', { resultPath: '/out/up.mp4' }), shotNode('down')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'ref-audio')], 'down');
+    // 纯函数不产生 ffmpeg 副作用 → 这里必须是原视频路径,不是 .wav
+    expect(refs).toEqual([{ path: '/out/up.mp4', role: 'ref-audio', auto: true }]);
+  });
+
+  it('B · video-upscale → shot 的 ref-audio 同样被推导出来', () => {
+    const nodes = [
+      { id: 'vu', kind: 'video-upscale', data: { resultPath: '/out/vu.mp4' } },
+      shotNode('down'),
+    ];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('vu', 'down', 'ref-audio')], 'down');
+    expect(refs).toEqual([{ path: '/out/vu.mp4', role: 'ref-audio', auto: true }]);
+  });
+
+  it('B · 产物未就绪时不注入(与 ref-video 同口径,提交期兜底)', () => {
+    const nodes = [shotNode('up', {}), shotNode('down')];
+    expect(deriveShotRefsFromEdges(nodes, [edge('up', 'down', 'ref-audio')], 'down')).toEqual([]);
+  });
+});
+
+/**
+ * 视频 → 音频参考节点(2026-10-08)
+ *
+ * 需求原话:「视频节点加一个连接音频参考的连接器。通过 ffmpeg 把视频的声音抽出来
+ * 给音频参考节点」。即 `audio-ref` 要能作为**下游**接住视频源 ——
+ * 此前它只能手填 `data.assetId`,**没有任何来源可以连进来**(这是关键缺口)。
+ *
+ * 链路:视频连上 → 渲染层 ffmpeg 抽音轨 → 导入资产库 → 绑定 audio-ref.assetId。
+ * 本组锁死端口合法性与来源推导(抽取本身由 main/__tests__/extract-audio.test.ts 覆盖)。
+ */
+describe('视频 → 音频参考节点(audio-ref 作为下游)', () => {
+  const arNode = (id: string, data: Record<string, unknown> = {}) => ({ id, kind: 'audio-ref', data });
+
+  it('shot → audio-ref 的 input-audio 端口合法', () => {
+    const nodes = [shotNode('s', { resultPath: '/out/s.mp4' }), arNode('ar')];
+    expect(validateEdge(nodes, [], edge('s', 'ar', 'input-audio')).ok).toBe(true);
+    expect(allowedPortLabels(shotNode('s', { resultPath: '/out/s.mp4' }), 'audio-ref')).toEqual(['input-audio']);
+  });
+
+  it('video-upscale → audio-ref 同样合法(两个带音轨的视频源都能接)', () => {
+    const nodes = [{ id: 'vu', kind: 'video-upscale', data: { resultPath: '/out/vu.mp4' } }, arNode('ar')];
+    expect(validateEdge(nodes, [], edge('vu', 'ar', 'input-audio')).ok).toBe(true);
+    expect(allowedPortLabels({ id: 'vu', kind: 'video-upscale', data: {} }, 'audio-ref')).toEqual(['input-audio']);
+  });
+
+  it('媒体门禁按「载荷是音轨」判定,不因源主输出是 video 而误拒', () => {
+    // 与 ref-audio 同一手法:PORT_REQUIRED_MEDIA['input-audio']='audio',
+    // 若 portPayloadMedia 不把带音轨的视频产物判成 audio,这条合法边会被自己挡下
+    expect(allowedPortLabels(shotNode('s', { resultPath: '/o/s.mp4' }), 'audio-ref')).toContain('input-audio');
+  });
+
+  it('图片产物不能连 audio-ref(没有音轨,端口表里就没有)', () => {
+    const ig = { id: 'ig', kind: 'image-gen', data: { resultPath: '/o/ig.png' } };
+    expect(allowedPortLabels(ig, 'audio-ref')).toEqual([]);
+    expect(validateEdge([ig, arNode('ar')], [], edge('ig', 'ar', 'input-audio')).ok).toBe(false);
+  });
+
+  it('audio-ref 自身不能再连 audio-ref(没有这个端口)', () => {
+    expect(allowedPortLabels(arNode('ar1'), 'audio-ref')).toEqual([]);
+  });
+
+  it('input-audio 不是单值端口:可接多条(多来源由用户自行取舍)', () => {
+    // 与 first-frame 等单值端口不同,这里不做基数限制 —— 抽取是幂等的「最后写入生效」,
+    // 若做成单值会与「一个视频源一条边」的正常交互冲突(替换语义反而更困惑)
+    expect(SINGLE_VALUE_PORTS.has('input-audio')).toBe(false);
+  });
+
+  it('deriveAudioRefSource:从 input-audio 边取出源视频路径', () => {
+    const nodes = [shotNode('s', { resultPath: '/out/s.mp4' }), arNode('ar')];
+    expect(deriveAudioRefSource(nodes, [edge('s', 'ar', 'input-audio')], 'ar')).toBe('/out/s.mp4');
+  });
+
+  it('deriveAudioRefSource:上游未产出 → undefined(等它跑完再抽,不误报)', () => {
+    const nodes = [shotNode('s', {}), arNode('ar')];
+    expect(deriveAudioRefSource(nodes, [edge('s', 'ar', 'input-audio')], 'ar')).toBeUndefined();
+  });
+
+  it('deriveAudioRefSource:其它 label 的入边不算音源', () => {
+    const nodes = [shotNode('s', { resultPath: '/out/s.mp4' }), arNode('ar')];
+    expect(deriveAudioRefSource(nodes, [edge('s', 'ar', 'first-frame')], 'ar')).toBeUndefined();
+  });
+
+  it('deriveAudioRefSource:只有带音轨的视频产物才算(图片源被忽略)', () => {
+    const nodes = [
+      { id: 'ig', kind: 'image-gen', data: { resultPath: '/o/ig.png' } },
+      arNode('ar'),
+    ];
+    expect(deriveAudioRefSource(nodes, [edge('ig', 'ar', 'input-audio')], 'ar')).toBeUndefined();
   });
 });

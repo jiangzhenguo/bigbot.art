@@ -166,6 +166,14 @@ export interface BigBotArtApi {
     /** mode='at' 时的取帧时间点(秒,非负) */
     seconds?: number,
   ): Promise<{ ok: boolean; path?: string; error?: string }>;
+  /**
+   * 音轨抽取:从视频抽出音轨 → 16-bit PCM wav(产物落 outputs/audio/)。
+   *
+   * 用途:「视频节点 → 音频参考」连接器 —— shot / video-upscale 的产物是 mp4,
+   * 而 h3 的 `--ref-audio` 要的是音轨。提交前把视频源换成抽出的 wav。
+   * 视频**没有音轨**时明确失败(不产出空文件)。
+   */
+  extractAudio(videoPath: string): Promise<{ ok: boolean; path?: string; error?: string }>;
   /** 图片裁切:按目标画幅(A:B)ffmpeg 裁剪原图(image-crop 节点用;产物落 outputs/crops/) */
   cropImage(input: {
     path: string;

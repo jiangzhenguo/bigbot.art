@@ -52,6 +52,7 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     shot: [
       ['first-frame', '首帧 · 上游尾帧自动取帧'],
       ['ref-video', '参考视频 · 上游整段成片(风格/动作参考)'],
+      ['ref-audio', '音频参考 · 上游成片的内嵌音轨'],
     ],
     // ⚠️ shot → image-edit **不再提供**直接连线:图片编辑的 input 要的是静帧,
     // 视频必须先经「视频裁切取帧(frame-grab)」落成图片资源再交给图片编辑 ——
@@ -59,6 +60,8 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     // 节点在「有输入图 / 无输入图」之间反复翻(2026-09 不停闪烁事故)。
     grab: ['input-video', '输入视频 · 待取帧的成片'],
     vupscale: ['input', '输入视频 · 镜头成片增强(超分/修脸)'],
+    // 🆕 视频 → 音频参考节点:抽出成片的音轨喂给它(ffmpeg 抽 → 导入资产 → 自动绑定)
+    audio: ['input-audio', '输入音频 · 抽成片的音轨'],
     timeline: ['clip', '视频片段 · 整段入轨'],
   },
   'image-gen': {
@@ -133,9 +136,11 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     shot: [
       ['first-frame', '首帧 · 增强成片首帧直通'],
       ['ref-video', '参考视频 · 风格/动作参考'],
+      ['ref-audio', '音频参考 · 增强成片的内嵌音轨'],
     ],
     grab: ['input-video', '输入视频 · 从增强成片取帧'],
     vupscale: ['input', '输入视频 · 链式二次增强'],
+    audio: ['input-audio', '输入音频 · 抽增强成片的音轨'],
     timeline: ['clip', '增强成片 · 整段入轨'],
   },
   'image-crop': {
@@ -266,6 +271,8 @@ export const PORT_LABEL: Record<string, string> = {
   input: '输入图',
   /** 视频增强的输入端口:语义是「待增强的视频」,与图片节点的「输入图」区分 */
   'input-video': '输入视频',
+  /** 视频 → 音频参考节点的输入端口:载荷是抽出来的音轨 */
+  'input-audio': '输入音频',
   piece: '拼接件',
   clip: '入轨',
 };

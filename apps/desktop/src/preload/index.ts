@@ -83,6 +83,7 @@ const api: BigBotArtApi = {
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),
   exportStatus: (taskId: string) => ipcRenderer.invoke('export-status', taskId),
   extractFrame: (videoPath, mode, seconds) => ipcRenderer.invoke('extract-frame', videoPath, mode, seconds),
+  extractAudio: (videoPath) => ipcRenderer.invoke('extract-audio', videoPath),
   cropImage: (input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
     ipcRenderer.invoke('crop-image', input),
   stitchImages: (input: { paths: string[]; mode: 'row' | 'column' | 'grid'; gridCols?: number; gap?: number; bg?: string }) =>

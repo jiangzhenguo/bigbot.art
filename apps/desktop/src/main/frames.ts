@@ -104,6 +104,80 @@ function doExtract(
   });
 }
 
+/* ── 音轨抽取:视频 → wav(作 shot 的 ref-audio 参考) ──
+
+   动机(2026-10-08):`ref-audio` 端口过去只接受**音频资产**,于是「把上游镜头的声音
+   拿来当这一段的声音参考」这条最自然的用法反而走不通 —— 视频节点(shot / video-upscale)
+   的产物是 mp4,连不到 ref-audio 上。现在放开「视频节点 → shot 的 ref-audio」直连:
+   提交时用 ffmpeg 从视频里抽出音轨,再走既有的 `--ref-audio`。
+
+   ⚠️ **抽成 wav 而不是直接把 mp4 交给 h3**:h3 的 `--ref-audio` 语义是音轨参考,
+   喂 mp4 等于让它自己解容器,行为不确定;先落地成标准 PCM wav 更可控,
+   也与「产物可见、可回查」的项目口径一致(产物落 outputs/audio/)。 */
+const AUDIO_DIR = join(OUTPUTS_DIR, 'audio');
+
+export interface AudioExtractResult {
+  ok: boolean;
+  path?: string;
+  error?: string;
+}
+
+/**
+ * 从视频/音频抽取音轨 → wav(16-bit PCM,48kHz 立体声)。
+ *
+ * 无音轨是**明确失败**而非静默产出空文件:h3 拿到一个 0 字节的 wav 只会在很远的地方
+ * 报一句看不懂的错,不如在这里就说清「这个视频没有声音」。
+ * `-vn` 丢掉视频流;`-map 0:a:0` 只取第一条音轨(多轨时不猜)。
+ */
+export function extractAudio(srcPath: string): Promise<AudioExtractResult> {
+  const run = extractChain.then(() => doExtractAudio(srcPath));
+  extractChain = run.catch(() => undefined);
+  return run;
+}
+
+function doExtractAudio(srcPath: string): Promise<AudioExtractResult> {
+  return new Promise((resolveP) => {
+    if (!srcPath) return resolveP({ ok: false, error: '视频路径为空' });
+    if (!existsSync(srcPath)) return resolveP({ ok: false, error: '视频文件不存在' });
+    // 与取帧/裁切同白名单:只读产物/资产/导出目录,防任意读
+    const roots = ffmpegReadRoots();
+    if (!roots.some((r) => isUnderRoot(srcPath, r))) {
+      return resolveP({ ok: false, error: '视频不在允许目录,拒绝抽取音轨' });
+    }
+    try {
+      mkdirSync(AUDIO_DIR, { recursive: true });
+    } catch {
+      /* 交给 ffmpeg 报错 */
+    }
+    const name = basename(srcPath).replace(/\.[^.]+$/, '') || 'audio';
+    const out = join(AUDIO_DIR, `${name}-${Date.now()}.wav`);
+    const args = [
+      '-y',
+      '-i', srcPath,
+      '-vn', // 丢弃视频流
+      '-map', '0:a:0?', // 第一条音轨;`?` 让「无音轨」不直接让 ffmpeg 报参数错,由下方判定
+      '-acodec', 'pcm_s16le',
+      '-ar', '48000',
+      '-ac', '2',
+      out,
+    ];
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let errAcc = '';
+    child.stderr.on('data', (d: Buffer) => (errAcc += d.toString()));
+    child.on('close', (code) => {
+      if (code === 0 && existsSync(out)) return resolveP({ ok: true, path: out });
+      // 无音轨是最常见的失败原因,单独给一句人能看懂的错(而不是抛 ffmpeg 的英文尾巴)
+      const noAudio = /does not contain any stream|matches no streams|Stream map .* matches no streams/i.test(errAcc);
+      if (noAudio) {
+        return resolveP({ ok: false, error: '该视频没有音轨,无法作为音频参考(可改用参考视频,或另配音频资产)' });
+      }
+      const tail = errAcc.split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 200);
+      resolveP({ ok: false, error: `ffmpeg exit ${code}: ${tail || '未知错误'}` });
+    });
+    child.on('error', (e) => resolveP({ ok: false, error: e.message }));
+  });
+}
+
 /* ── 图片裁切(image-crop 节点):按目标画幅(A:B)裁出最大内接窗口 ── */
 const CROPS_DIR = join(OUTPUTS_DIR, 'crops');
 /** 支持的画幅集合(与 mlxgen capabilities.aspectRatios 对齐;可扩展) */

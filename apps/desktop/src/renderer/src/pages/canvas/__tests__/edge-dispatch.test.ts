@@ -198,3 +198,106 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect(outputs[0]!.sourceNodeIds).toContain('c1');
   });
 });
+/**
+ * 视频节点 → 音频参考(2026-10-08 新增连接器,渲染层派发)
+ *
+ * 派发层只**登记视频路径**,不抽音轨 —— 派发是纯函数,不能有 ffmpeg 副作用;
+ * 真正的抽取发生在提交期(runNode / 主进程 engine.submit 调 extractAudio)。
+ * 这里锁死「登记的是视频路径」这条契约,防止有人图省事在派发里抽音轨。
+ */
+describe('视频节点 → shot 的 ref-audio 派发', () => {
+  const refsOf = (ns: CanvasNode[], id: string) =>
+    ((ns.find((n) => n.id === id)!.data as { refs?: Array<{ path?: string; role: string; auto?: boolean }> }).refs ?? []);
+
+  it('shot → shot:ref-audio 写入 refs,路径是上游成片 mp4(不是 wav)', () => {
+    const nodes = [node('up', 'shot', { resultPath: '/out/up.mp4' }), node('down', 'shot')];
+    const edges: Edge[] = [{ from: 'up', to: 'down', cls: '', label: 'ref-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(refsOf(nextNodes, 'down')).toEqual([{ path: '/out/up.mp4', role: 'ref-audio', auto: true }]);
+  });
+
+  it('video-upscale → shot:同样派发', () => {
+    const nodes = [node('vu', 'video-upscale', { resultPath: '/out/vu.mp4' }), node('down', 'shot')];
+    const edges: Edge[] = [{ from: 'vu', to: 'down', cls: '', label: 'ref-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(refsOf(nextNodes, 'down')).toEqual([{ path: '/out/vu.mp4', role: 'ref-audio', auto: true }]);
+  });
+
+  it('上游产物未就绪 → 不派发(提交期 W004 兜底)', () => {
+    const nodes = [node('up', 'shot', {}), node('down', 'shot')];
+    const edges: Edge[] = [{ from: 'up', to: 'down', cls: '', label: 'ref-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(refsOf(nextNodes, 'down')).toEqual([]);
+  });
+
+  it('删除 ref-audio 边 → refs 被清理(撤销直通)', () => {
+    const nodes = [
+      node('up', 'shot', { resultPath: '/out/up.mp4' }),
+      node('down', 'shot', { refs: [{ path: '/out/up.mp4', role: 'ref-audio', auto: true }] }),
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, []);
+    expect(refsOf(nextNodes, 'down')).toEqual([]);
+  });
+
+  it('用户手动绑定过 ref-audio(非 auto)→ 自动项让位,不覆盖用户意图', () => {
+    const nodes = [
+      node('up', 'shot', { resultPath: '/out/up.mp4' }),
+      node('down', 'shot', { refs: [{ path: '/my/manual.wav', role: 'ref-audio' }] }),
+    ];
+    const edges: Edge[] = [{ from: 'up', to: 'down', cls: '', label: 'ref-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = refsOf(nextNodes, 'down');
+    expect(refs.some((r) => r.path === '/my/manual.wav')).toBe(true);
+    expect(refs.some((r) => r.path === '/out/up.mp4')).toBe(false);
+  });
+});
+
+/**
+ * 视频 → 音频参考节点(2026-10-08 新增连接器,渲染层派发)
+ *
+ * 派发只**登记来源节点**(`inputAudioFrom`),不抽音轨 —— 抽取是 ffmpeg 副作用,
+ * 由 CanvasPage 的专用 effect 完成(见「连上即抽音轨」)。这里锁死登记与撤销语义。
+ */
+describe('视频 → audio-ref 的派发', () => {
+  const d = (ns: CanvasNode[], id: string) => ns.find((n) => n.id === id)!.data as Record<string, unknown>;
+
+  it('shot → audio-ref:登记 inputAudioFrom = 源节点 id', () => {
+    const nodes = [node('s1', 'shot', { resultPath: '/o/s1.mp4' }), node('ar', 'audio-ref', {})];
+    const edges: Edge[] = [{ from: 's1', to: 'ar', cls: '', label: 'input-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'ar').inputAudioFrom).toEqual({ nodeId: 's1' });
+  });
+
+  it('video-upscale → audio-ref:同样登记', () => {
+    const nodes = [node('vu', 'video-upscale', { resultPath: '/o/vu.mp4' }), node('ar', 'audio-ref', {})];
+    const edges: Edge[] = [{ from: 'vu', to: 'ar', cls: '', label: 'input-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'ar').inputAudioFrom).toEqual({ nodeId: 'vu' });
+  });
+
+  it('删边 → inputAudioFrom 与抽取记录一并清掉(不留无主的 assetId)', () => {
+    // 抽出来的产物绑定(sourceVideoPath)必须跟着边一起清:
+    // 否则会留下一个与任何连线都无关的 assetId,用户看不出它从哪来
+    const nodes = [
+      node('s1', 'shot', { resultPath: '/o/s1.mp4' }),
+      node('ar', 'audio-ref', { inputAudioFrom: { nodeId: 's1' }, sourceVideoPath: '/o/s1.mp4', assetId: 'asset-x' }),
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, []);
+    expect(d(nextNodes, 'ar').inputAudioFrom).toBeUndefined();
+    expect(d(nextNodes, 'ar').sourceVideoPath).toBeUndefined();
+  });
+
+  it('图片源连 audio-ref 不登记(端口表本就没这条路,派发也不该写)', () => {
+    const nodes = [node('ig', 'image-gen', { resultPath: '/o/ig.png' }), node('ar', 'audio-ref', {})];
+    const edges: Edge[] = [{ from: 'ig', to: 'ar', cls: '', label: 'input-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'ar').inputAudioFrom).toBeUndefined();
+  });
+
+  it('audio-ref 原有的 assetId 绑定不被派发抹掉(它是那条链之外的独立能力)', () => {
+    const nodes = [node('s1', 'shot', { resultPath: '/o/s1.mp4' }), node('ar', 'audio-ref', { assetId: 'manual-audio' })];
+    const edges: Edge[] = [{ from: 's1', to: 'ar', cls: '', label: 'input-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'ar').assetId).toBe('manual-audio');
+  });
+});

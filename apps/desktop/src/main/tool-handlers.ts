@@ -9,6 +9,8 @@ import type { CanvasNode, CanvasEdge, CanvasSnapshot } from '@bigbotart/shared';
 import {
   connectorSummary,
   nodeKindGuide,
+  isHiddenNodeKind,
+  HIDDEN_NODE_REASONS,
   parseGfmTable,
   tableToGfm,
   assembleH3Prompt,
@@ -40,7 +42,7 @@ import type { RenderQueue } from './render-queue';
 import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
-import { cropImage, extractFrame } from './frames';
+import { cropImage, extractFrame, extractAudio } from './frames';
 import { captionImage } from './vision';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
@@ -611,6 +613,22 @@ export class ToolHandlers {
     'canvas.create_node': async (a, ctx) => {
       const kind = String(a.kind ?? 'document');
       const label = String(a.label ?? '新节点');
+      /*
+       * ── 未实现节点:创建入口下架(2026-10-08)──
+       *
+       * `director` / `workflow-input` / `workflow-output` 在渲染层没有任何执行分支,
+       * 建出来就是「连得起来、点运行没反应」的空壳。以前只把它们的**面板入口**去掉还不够:
+       * Agent 手里有 `canvas.create_node`,而且 systemPrompt 的节点清单会主动告诉它有哪些 kind ——
+       * 不在这里拦,模型换个入口照样能把空壳节点建回画布(用户看到的是「Agent 建了个没用的节点」)。
+       *
+       * 拒绝而不是静默忽略:给模型一句**可执行的替代方案**,它才知道该改用什么。
+       */
+      if (isHiddenNodeKind(kind)) {
+        return {
+          ok: false,
+          result: `节点类型「${kind}」尚未实现,已下架不可创建:${HIDDEN_NODE_REASONS[kind] ?? '没有执行分支'}。请改用已实现的节点(document/storyboard/asset/image-gen/image-edit/image-upscale/image-crop/image-stitch/image-split/frame-grab/video-upscale/shot/timeline/audio-ref)。`,
+        };
+      }
       // data 同样容忍字符串化(本地小模型常见退化;旧实现在这里直接当对象用,
       // 传字符串会让 `'refs' in rawData` 抛错或把字符串当 data 存进节点)
       const normCreate = normalizeDataArg((a as { data?: unknown }).data);
@@ -885,22 +903,33 @@ export class ToolHandlers {
         const now = new Date().toISOString();
         const resolved: Array<{ asset: import('@bigbotart/shared').Asset; role: string; localPath: string }> = [];
         for (const r of refs) {
+          /* 音频参考的视频源 → 现场抽音轨(「视频节点 → 音频参考」连接器,2026-10-08)。
+             派生层登记的是**视频路径**(纯函数不能有 ffmpeg 副作用),提交这一步换成 wav;
+             抽不出来就明确失败 —— 让 h3 拿到一个 mp4 当音轨用只会得到一句看不懂的报错。 */
+          let refPath = r.path;
+          if (r.role === 'ref-audio' && refPath && /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(refPath)) {
+            const ex = await extractAudio(refPath);
+            if (!ex.ok || !ex.path) {
+              return { ok: false, result: `音频参考抽取失败:${ex.error ?? '未知错误'}` };
+            }
+            refPath = ex.path;
+          }
           if (r.assetId) {
             const as = this.assets.get(r.assetId);
             if (!as) continue;
             resolved.push({ asset: as, role: r.role, localPath: as.localPath });
-          } else if (r.path) {
+          } else if (refPath) {
             resolved.push({
               asset: {
                 id: `shot-frame:${nodeId}`,
-                kind: kindFromPath(r.path) ?? 'image',
-                name: basenameOf(r.path),
-                localPath: r.path,
+                kind: kindFromPath(refPath) ?? 'image',
+                name: basenameOf(refPath),
+                localPath: refPath,
                 tags: [],
                 createdAt: now,
               },
               role: r.role,
-              localPath: r.path,
+              localPath: refPath,
             });
           }
         }

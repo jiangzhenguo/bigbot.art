@@ -15,7 +15,7 @@ import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileRespon
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
-import { extractFrame, cropImage } from './frames';
+import { extractFrame, extractAudio, cropImage } from './frames';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideoPostTooling, cancelAllVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
 import { RenderQueue } from './render-queue';
@@ -764,6 +764,8 @@ ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId)
 // ---------- IPC:视频取帧(镜头接续尾帧归档 / 取帧编辑 / Agent 指定时间点取帧) ----------
 ipcMain.handle('extract-frame', (_e, videoPath: string, mode: 'first' | 'last' | 'at', seconds?: number) =>
   extractFrame(videoPath, mode, seconds));
+// 音轨抽取(「视频节点 → 音频参考」连接器):视频 → wav,作 shot 的 --ref-audio
+ipcMain.handle('extract-audio', (_e, videoPath: string) => extractAudio(videoPath));
 // 图片裁切(image-crop 节点):按目标画幅裁剪原图
 ipcMain.handle('crop-image', (_e, input: { path: string; aspect: string; focus?: 'center' | 'top' | 'bottom' | 'left' | 'right' }) =>
   cropImage(input.path, input.aspect, input.focus));

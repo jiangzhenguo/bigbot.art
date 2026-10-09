@@ -43,6 +43,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const editRefPatch = new Map<string, string[]>();
   /** 视频输入端口(video-upscale / frame-grab 的输入):只收视频来源(shot/video-upscale/视频 asset) */
   const videoFromPatch = new Map<string, { nodeId: string } | null>();
+  /** 🆕 audio-ref 节点的来源视频(视频 → 音频参考节点;抽取由渲染层副作用完成) */
+  const audioFromPatch = new Map<string, { nodeId: string } | null>();
   /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
   const stitchPatch = new Map<string, Array<{ nodeId: string; x: number; y: number }>>();
   const promptFromPatch = new Map<string, { nodeId: string } | null>();
@@ -111,6 +113,13 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
             const mp4 = String(s.resultPath ?? '');
             if (mp4) arr.push({ path: mp4, role: 'ref-video', auto: true });
           }
+          // 音频参考(ref-audio,2026-10-08):上游成片的**内嵌音轨**作声音参考。
+          // 这里登记的是**视频文件路径**,抽音轨在提交期做(runNode → extractAudio)
+          // —— 派发是纯函数,不能有 ffmpeg 副作用。
+          if (e.label === 'ref-audio' && !autoBlocked('ref-audio')) {
+            const mp4 = String(s.resultPath ?? '');
+            if (mp4) arr.push({ path: mp4, role: 'ref-audio', auto: true });
+          }
           // 画面规格继承:比例 + 档位(三件套)整组取自上游;下游手动改过则不再覆盖
           if (d.specOverride !== true) {
             const spec = pickShotSpec(s);
@@ -123,6 +132,11 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           if (e.label === 'ref-video' && !autoBlocked('ref-video')) {
             const mp4 = String(s.resultPath ?? '');
             if (mp4) arr.push({ path: mp4, role: 'ref-video', auto: true });
+          }
+          // 音频参考:登记视频路径,提交期抽音轨(同 shot → shot 的 ref-audio)
+          if (e.label === 'ref-audio' && !autoBlocked('ref-audio')) {
+            const mp4 = String(s.resultPath ?? '');
+            if (mp4) arr.push({ path: mp4, role: 'ref-audio', auto: true });
           }
         } else if (fromImage) {
           // 图片产物 → 镜头(图生视频双端口):
@@ -280,6 +294,16 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         }
         break;
       }
+      case 'audio-ref': {
+        /* 🆕 视频 → 音频参考节点(2026-10-08):登记来源视频,抽取在连接时执行
+           (见 CanvasPage 的 audioRefSync effect —— 抽音轨有 ffmpeg 副作用,派发保持纯函数)。
+           只收**带音轨的视频产物**(shot / video-upscale);音频 asset 不走这条路
+           (audio-ref 的 assetId 由检查器或抽取结果直接绑定)。 */
+        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '')) {
+          audioFromPatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
       case 'image-crop': {
         // 输入图端口 input(裁切源):静帧产物直通 / 素材引用;无条件登记(幂等)
         if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
@@ -387,6 +411,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       const target = videoFromPatch.get(n.id) ?? null;
       if (target) data.inputVideoFrom = target;
       else delete data.inputVideoFrom;
+    }
+    /* audio-ref 的来源视频:记录来源节点 id,供渲染层据此抽音轨。
+       删边即撤销 —— 同时要把**抽出来的产物绑定**一并清掉(否则会留下一个
+       与任何连线都无关的 assetId,用户看不出它从哪来)。 */
+    if (n.kind === 'audio-ref') {
+      const target = audioFromPatch.get(n.id) ?? null;
+      if (target) data.inputAudioFrom = target;
+      else {
+        delete data.inputAudioFrom;
+        delete data.sourceVideoPath;
+      }
     }
     // 拼接件端口 piece(多值):按目标 mode 排序(row 按 x,column/grid 按 y;同级再按另一轴),边删除即撤销
     if (n.kind === 'image-stitch') {

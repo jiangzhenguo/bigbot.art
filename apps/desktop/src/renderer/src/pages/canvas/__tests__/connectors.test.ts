@@ -3,7 +3,7 @@
  * 覆盖:「+」弹窗可见性与端口锚定;源/目标类型矩阵;图片产物集合
  */
 import { describe, it, expect } from 'vitest';
-import { resolvePortOptions, resolvePort, hasConnector, guardEdge, IMAGE_KINDS } from '../connectors.js';
+import { resolvePortOptions, resolvePort, hasConnector, guardEdge, IMAGE_KINDS, PORT_LABEL } from '../connectors.js';
 import { NODE_TYPES } from '../constants.js';
 import type { CanvasNode } from '../types.js';
 
@@ -257,10 +257,33 @@ describe('shot 的「+」弹层可见类型(不含图片编辑,含视频裁切�
     expect(visible(shot())).toContain('视频裁切取帧');
   });
 
-  it('镜头节点弹层仍是「视频增强 + 镜头 + 取帧 + 时间线 + 工作流出口」这组(无图片编辑)', () => {
+  it('镜头节点弹层是「视频增强 + 镜头 + 取帧 + 音频参考 + 时间线」这组(无图片编辑)', () => {
+    // 2026-10-08 两次变更合并后的真实可见集:
+    //  - 去掉「工作流出口」:workflow-output 没有执行分支,入口已下架(见 HIDDEN_NODE_KINDS)
+    //  - 新增「音频参考」:视频 → 音频参考节点,抽音轨喂给它(本次)
     expect(visible(shot()).sort()).toEqual(
-      ['视频增强', '镜头（视频）', '视频裁切取帧', '时间线 / 剪辑', '工作流出口'].sort(),
+      ['视频增强', '镜头（视频）', '视频裁切取帧', '音频参考', '时间线 / 剪辑'].sort(),
     );
+  });
+
+  it('视频节点能连到「音频参考」节点(即 audio-ref 作为下游,不是抽给 shot)', () => {
+    // 需求原话:「视频节点加一个连接音频参考的连接器。通过 ffmpeg 把视频的声音抽出来
+    // 给音频参考节点」—— 目标节点是 audio-ref,不是 shot 的 ref-audio 端口。
+    const shotNode = shot();
+    expect(hasConnector(shotNode, 'audio')).toBe(true);
+    const opts = resolvePortOptions(shotNode, 'audio');
+    expect(opts.map((o) => o.port)).toEqual(['input-audio']);
+    // video-upscale 同样能连
+    const vu = { id: 'u', title: '视频增强', w: 200, x: 0, y: 0, kind: 'video-upscale', data: { resultPath: '/o/u.mp4' } } as CanvasNode;
+    expect(hasConnector(vu, 'audio')).toBe(true);
+  });
+
+  it('已下架的三个 kind 不出现在节点面板与「+」弹层里', () => {
+    // 下架依据:director / workflow-input / workflow-output 在 runNode 里没有任何执行分支
+    const hiddenNames = ['导演台', 'ComfyUI 工作流', '工作流入口', '工作流出口'];
+    for (const name of hiddenNames) expect(visible(shot())).not.toContain(name);
+    const paletteNames = NODE_TYPES.map((t) => t.name);
+    for (const name of hiddenNames) expect(paletteNames).not.toContain(name);
   });
 });
 
@@ -293,5 +316,48 @@ describe('frame-grab · 视频裁切取帧(新增节点的连接与类型)', () 
 
   it('frame-grab 归入图片产物类(IMAGE_KINDS),下游图片处理节点都能接', () => {
     expect(IMAGE_KINDS).toContain('frame-grab');
+  });
+});
+/**
+ * 多端口「可见性」回归(2026-10-08 实测反馈:「新增的音频参考端口没有啊」)
+ *
+ * 真因不是端口没做,而是**弹层把它藏住了**:`AddNodePopover` 对多端口组合只在
+ * 「选中该行之后」才展开角色 chips,未选中时只显示首个端口 —— 用户点「+」扫一眼
+ * 看不到「音频参考」,自然认为功能不存在。
+ *
+ * 教训:多端口能力**必须能在未选中状态被看见**(哪怕只是提示「还有 N 个可选角色」)。
+ * 这组测试锁死「端口确实存在且可枚举」这条底线,防止有人把端口表改回只留首个。
+ */
+describe('多端口可见性 · shot 的三个下游角色都必须可枚举', () => {
+  const shot = (): CanvasNode =>
+    ({ id: 's', title: '镜头 01', w: 200, x: 0, y: 0, kind: 'shot', data: { resultPath: '/o/s.mp4' } }) as CanvasNode;
+  const vup = (): CanvasNode =>
+    ({ id: 'u', title: '视频增强', w: 200, x: 0, y: 0, kind: 'video-upscale', data: { resultPath: '/o/u.mp4' } }) as CanvasNode;
+
+  it('shot → shot 枚举出 3 个角色(首帧 / 参考视频 / 音频参考)', () => {
+    const opts = resolvePortOptions(shot(), 'shot');
+    expect(opts.map((o) => o.port)).toEqual(['first-frame', 'ref-video', 'ref-audio']);
+    // 每个都要有能被人看懂的中文标签(空 desc 等于没提示)
+    for (const o of opts) expect(o.desc.trim().length).toBeGreaterThan(0);
+  });
+
+  it('音频参考端口带「音频」字样的标签与说明(否则用户认不出这是什么)', () => {
+    const audio = resolvePortOptions(shot(), 'shot').find((o) => o.port === 'ref-audio');
+    expect(audio).toBeTruthy();
+    expect(PORT_LABEL['ref-audio']).toBe('音频参考');
+    expect(audio!.desc).toContain('音轨');
+  });
+
+  it('video-upscale → shot 同样枚举出音频参考(两个源都不能漏)', () => {
+    // ⚠️ 渲染层 BY_KIND 对 video-upscale 保留了 first-frame(增强成片首帧直通),
+    // shared 的 allowedPortLabels 才会按媒体把它过滤掉 —— 两层职责不同,别按 shared 结果断言渲染层
+    const ports = resolvePortOptions(vup(), 'shot').map((o) => o.port);
+    expect(ports).toContain('ref-audio');
+    expect(ports).toContain('ref-video');
+  });
+
+  it('端口数 >1 时弹层会走「多角色」展示分支(未选中也要给提示)', () => {
+    // 弹层的 multi 判定就是 rpOpts.length > 1;这里锁死判定输入,展示逻辑改动不回退
+    expect(resolvePortOptions(shot(), 'shot').length).toBeGreaterThan(1);
   });
 });
