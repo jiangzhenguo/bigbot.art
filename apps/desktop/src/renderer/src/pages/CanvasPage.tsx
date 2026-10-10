@@ -35,7 +35,7 @@ import {
   preserveMeasuredSize,
 } from './canvas/node-mapping';
 import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from './canvas/connectors';
-import { ensureToolModels } from './canvas/tool-models-store';
+import { ensureToolModels, fetchAccelDefaultShotConfig } from './canvas/tool-models-store';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc, previewUrlOf } from './canvas/media';
@@ -2075,9 +2075,10 @@ export default function CanvasPage({
   /** 拖拽连线命中多端口组合(asset 图 → shot)时的角色选择:指针位置 + 候选端口 */
   const [portPick, setPortPick] = useState<{ from: string; to: string; x: number; y: number; options: PortResolution[] } | null>(null);
 
-  /* 创建并连线(类型/画幅/档位/端口角色由 AddNodePopover 回传) */
+  /* 创建并连线(类型/画幅/档位/端口角色由 AddNodePopover 回传)
+     async:shot 需先取「默认加速配置」再落节点(见下方 accel 段),避免建出未加速的中间态 */
   const createFromPop = useCallback(
-    (typeId: string, aspect: string, tier: string, port?: string) => {
+    async (typeId: string, aspect: string, tier: string, port?: string) => {
       if (!apFrom) return;
       const src = nodesRef.current.find((n) => n.id === apFrom);
       const t = NODE_TYPES.find((x) => x.id === typeId);
@@ -2153,6 +2154,16 @@ export default function CanvasPage({
               tier: specTier,
             }
           : initData;
+
+      /* 🚀 加速默认(2026-10-09):设置页开了「新建 shot 默认开启加速」时,
+         新建的 shot 直接带上 accel —— 与 Agent storyboard.materialize 同口径。
+         必须在**建节点之前**取到(节点一旦建出来再补,就会出现「刚建好还没加速」的中间态,
+         用户若此时点运行就是未加速的一次生成)。
+         取不到 / 开关关闭 → null → 不写 accel(存量行为不变)。 */
+      if (t.kind === 'shot') {
+        const accelCfg = await fetchAccelDefaultShotConfig();
+        if (accelCfg) (dataWithSpec as Record<string, unknown>).accel = accelCfg;
+      }
 
       // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
       const edgeLabel = deriveEdgeLabel(src, t, port);
@@ -3221,7 +3232,12 @@ export default function CanvasPage({
           const t = await window.bigbotart.takesCreate(projectId, {
             shotNodeId: nodeId,
             status: 'queued',
-            params,
+            // ⚠️ `__refRoles` 必须一并留痕(2026-10-09 补):它记录本次提交**实际带了哪些参考角色**,
+            // 是排查「参考图到底有没有进 h3 命令」的**唯一**事后证据。
+            // 此前只有 Agent 路径写了它,渲染层路径没写 → 出片人不像角色卡时,
+            // 完全无法从 Take 判断是「参考没传」还是「传了但模型没跟」,只能靠猜。
+            // 与 tool-handlers.ts 的 engine.submit 同口径。
+            params: { ...params, __refRoles: references.map((r) => r.role) },
           });
           takeId = t.id;
         }

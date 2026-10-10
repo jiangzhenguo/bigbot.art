@@ -12,12 +12,14 @@ import {
   tierKeyOf,
   h3AlignFrames,
   h3FramesForSeconds,
+  parseSecondsInput,
+  SHOT_MAX_SECONDS,
   h3OutputSeconds,
   MIN_SOUNDTRACK_SECONDS,
   MIN_SOUNDTRACK_FRAMES,
 } from '../constants';
 import { clamp32, thumbImageSrc, previewUrlOf, outputUrlOf, VideoPoster, formatDurationSec } from '../media';
-import { takePromptOf, takeElapsedSec } from './ImageTakeSection';
+import { takePromptOf, takeElapsedSec, takeRefreshSig, hasUnsettledTake } from './ImageTakeSection';
 
 export interface ShotInspectorProps {
   node: CanvasNode;
@@ -66,6 +68,18 @@ export function ShotInspector({
   })();
   const prompt = String(d.prompt ?? '');
   const seconds = Number(d.seconds ?? 0);
+  /* 时长输入框的本地草稿(见下方输入的注释)。
+     受控输入不能直接绑 data.seconds —— 空串中间态会把值清掉。
+     这里以节点数据为准做同步:切换节点、或外部(Agent 工具/撤销)改了 seconds 时,
+     草稿要跟着走,否则会显示过期内容。 */
+  const [secDraft, setSecDraft] = useState(seconds > 0 ? String(seconds) : '');
+  const secSyncRef = useRef(seconds);
+  useEffect(() => {
+    if (secSyncRef.current !== seconds) {
+      secSyncRef.current = seconds;
+      setSecDraft(seconds > 0 ? String(seconds) : '');
+    }
+  }, [seconds]);
   const customWidth = Number(d.customWidth ?? 544);
   const customHeight = Number(d.customHeight ?? 544);
   const seed = Number(d.seed ?? 42);
@@ -105,21 +119,46 @@ export function ShotInspector({
   const [hist, setHist] = useState<ShotTakeHistory | null>(null);
   const refreshHist = useCallback(() => {
     if (!projectId) return;
-    void window.bigbotart.takesHistory(projectId, node.id).then(setHist).catch(() => setHist(null));
+    void window.bigbotart.takesHistory(projectId, node.id).then((h) => {
+      setHist(h);
+      /* 落盘竞态兜底(与 ImageTakeSection 同口径):主进程已改为「Take 终态先落盘再 notify」,
+         但「任务已完成、Take 仍是 queued」这条路上没有主动重试 —— 一旦某次恰好在 patch
+         落盘前读到盘,界面就永久定格在错误状态(用户看到「生成成功但历史里没有」)。
+         这里对「读到未终态记录」做一次短延时复检(仅一次,不轮询)。 */
+      if (hasUnsettledTake(h?.takes)) {
+        window.setTimeout(() => {
+          void window.bigbotart
+            .takesHistory(projectId, node.id)
+            .then((again) => setHist(again))
+            .catch(() => {
+              /* 复检失败保留首次结果,不静默清空 */
+            });
+        }, 600);
+      }
+    }).catch(() => setHist(null));
   }, [projectId, node.id]);
   useEffect(() => {
     refreshHist();
   }, [refreshHist]);
-  // 任务提交/完成时自动刷新 Take 历史:按本节点 job 签名(含状态)变化才重拉,
-  // 长跑轮询期间签名不变不会重复请求 —— 同一节点连续生成,新版本立即可见
-  const jobSigRef = useRef('');
+  /* 任务提交/完成时自动刷新 Take 历史。
+   *
+   * ⚠️ 签名必须走 takeRefreshSig(与 ImageTakeSection 共用一个函数),不能只看 job:
+   * 旧实现签名 = `<nodeId>|<job.id>:<status>,…`,只在**本节点的 job 出现在 jobs 列表里**
+   * 时才会变。而 RenderQueue 的 jobs 是纯内存的 —— 应用重启 / 窗口重载 / 切画布再回来之后
+   * 队列里没有这条 job(签名恒为 `<nodeId>|`),effect 首次挂载拉一次后**永不重拉**,
+   * 于是磁盘上早已 succeeded 的 Take 在界面上永远不出现。
+   * 真实事故(2026-10-09):镜头 03 生成成功、takes.json 里 T4 齐全、节点 currentTakeId 也指对了,
+   * 但 Take 历史与预览都不显示。图片节点侧(ImageTakeSection)早就修过同一个 bug,
+   * **shot 侧没跟上**,这次补齐。
+   * 现在把**节点产物路径**也纳入签名:`resultPath` 出现/变化本身就是「历史一定变了」的强信号,
+   * 与 job 是否存在无关(jobs 被清空、跨重启都拦不住它)。 */
+  const histSigRef = useRef('');
   useEffect(() => {
-    const mine = jobs.filter((j) => j.nodeId === node.id);
-    const sig = `${node.id}|${mine.map((j) => `${j.id}:${j.status}`).join(',')}`;
-    if (sig === jobSigRef.current) return;
-    jobSigRef.current = sig;
+    const sig = takeRefreshSig(node.id, jobs, (node.data as Record<string, unknown> | undefined)?.resultPath);
+    if (sig === histSigRef.current) return;
+    histSigRef.current = sig;
     refreshHist();
-  }, [jobs, node.id, refreshHist]);
+  }, [jobs, node.id, node.data, refreshHist]);
   const takes = hist?.takes ?? [];
   // 🚀 加速 LoRA:设置页登记的蒸馏模型包清单(主进程回填 exists)
   const [packs, setPacks] = useState<AccelPack[]>([]);
@@ -548,26 +587,37 @@ export function ShotInspector({
           <span className="f-lbl">seed</span>
           <input className="f-in" type="number" value={seed} style={{ width: 76 }} onChange={(e) => setData({ seed: Number(e.target.value) })} />
           <span className="f-lbl">时长</span>
+          {/* 时长输入:用**本地草稿态**接收键盘输入,只在值合法时才写进节点。
+              ⚠️ 直接受控于 data.seconds 会有「点击即清零」的 bug(2026-10-09 实测):
+              `type="number"` 的输入框在「全选后输入」「退格删到空」时会先抛出 `''`,
+              而 `Number('') === 0` 且 `0 <= 0` 成立 → 旧代码立刻 `setData({seconds:0})` 把值清空,
+              用户看到的就是「明明填了 5 秒,点一下变成 1 秒」(占位符回落到按 frames 推算的值)。
+              现在:空/非法输入一律**不碰节点数据**,仅更新草稿;合法值才落盘。 */}
           <input
             className="f-in"
             type="number"
             min={1}
             max={10}
-            value={seconds > 0 ? seconds : ''}
+            value={secDraft}
             placeholder={`${Math.round(h3AlignFrames(Number(d.frames ?? 124)) / 24)}s`}
             style={{ width: 52 }}
             onChange={(e) => {
-              let s = Number(e.target.value);
-              if (!Number.isFinite(s) || s <= 0) {
-                setData({ seconds: 0 });
-                return;
+              const raw = e.target.value;
+              setSecDraft(raw); // 键盘输入先落草稿,保证受控输入流畅
+              const r = parseSecondsInput(raw);
+              // keep=true 表示空/半截/非法 —— 中间态一律不写盘(丢值 bug 的根因)
+              if (r.keep) return;
+              if (r.clamped) {
+                toastMsg(`h3.c 单段时长最多 ${SHOT_MAX_SECONDS} 秒 · 更长请拆多镜头段落`);
+                setSecDraft(String(SHOT_MAX_SECONDS));
               }
-              if (s > 10) {
-                toastMsg('h3.c 单段时长最多 10 秒 · 更长请拆多镜头段落');
-                s = 10;
-              }
-              // 选时长 → 帧数按 h3.c 规则自动填上(24fps 后对齐 5+17n;h3 --seconds 内部同此换算)
-              setData({ seconds: s, frames: h3FramesForSeconds(s) });
+              // 合法值才落盘:秒数 + 按 h3.c 规则对齐的帧数(5+17n)
+              setData({ seconds: r.seconds, frames: r.frames });
+            }}
+            onBlur={() => {
+              // 失焦时把草稿与节点数据对齐:输入了非法值/清空 → 回显真实数据,不留假象
+              const t = String(seconds > 0 ? seconds : '');
+              if (secDraft !== t) setSecDraft(t);
             }}
           />
           <span className="f-hint">最多 10s(24fps · 10s≈{h3FramesForSeconds(10)} 帧)· 选时长自动填对齐帧数(5+17n)</span>

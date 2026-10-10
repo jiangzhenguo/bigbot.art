@@ -13,6 +13,7 @@ import type { RefObject } from 'react';
 import type { AgentChatResponse, Asset, LlmSource } from '@bigbotart/shared';
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
+import { selectRestoreWindow } from './restore-window';
 import { llmDisplayName } from './llm-display';
 
 /** 错误卡标题:模板类错误(本地模型 Prompt Template 损坏,pi-chat 已附修复指引)/ 不可达 / 其他对话失败 */
@@ -429,7 +430,14 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
     let alive = true;
     void window.bigbotart.memoryGet(projectId).then((mem) => {
       if (!alive) return;
-      const recent = mem.recall.filter((r) => r.canvasId === canvasId).slice(-20);
+      /* ⚠️ 窗口口径(2026-10-09 「对话消失了」事故):
+         旧实现是 `mem.recall.filter(...).slice(-20)` —— **所有角色一起数**。
+         一次「铺节点并生成」发了 8 个 engine.submit(每个 tool + system 两条记录),
+         单轮吃掉 16+ 条额度,把整段人类对话冲到窗口外;用户重启后看到对话"消失"了
+         (数据其实完好,只是没回显)。现在改走 selectRestoreWindow:额度只数
+         user/assistant/ask 卡片,机器记录不占额度。
+         与主进程 memory.ts 的 recall 注入窗口(RECALL_INJECT_LIMIT)同口径。 */
+      const recent = selectRestoreWindow(mem.recall.filter((r) => r.canvasId === canvasId));
       if (recent.length === 0) return;
       const restored: ChatMsg[] = [];
       let toolGroup: ToolRun[] | null = null;

@@ -172,6 +172,40 @@ export function h3FramesForSeconds(seconds: number): number {
   return h3AlignFrames(seconds * 24);
 }
 
+/** 时长输入框单段上限(h3.c 硬约束;与 ShotInspector 的 max 一致) */
+export const SHOT_MAX_SECONDS = 10;
+
+/**
+ * 解析时长输入框的一次按键(纯函数,便于单测)。
+ *
+ * ⚠️ 存在的唯一理由是修一个真实 bug(2026-10-09):
+ * 旧实现直接 `Number(e.target.value)`,而 `type="number"` 在全选重输 / 退格删空时
+ * 会先抛出**空串**,`Number('') === 0` 且 `0 <= 0` 成立 → 立刻 `setData({seconds:0})`
+ * 把值清掉。用户看到「明明填了 5 秒,点一下变成 1 秒」(占位符回落到按 frames 推算的值)。
+ *
+ * 契约(调用方据此决定要不要写盘):
+ *   - `keep: true`  → **不要碰节点数据**,本次输入只是中间态(空 / 半截 / 非法);
+ *   - `keep: false` → 把 `seconds`/`frames` 写进节点(`clamped` 表示被上限截断过,要提示用户)。
+ *
+ * @param raw 输入框当前字符串
+ */
+export function parseSecondsInput(raw: string): {
+  keep: boolean;
+  seconds?: number;
+  frames?: number;
+  clamped?: boolean;
+} {
+  const t = String(raw ?? '').trim();
+  // 空串 = 用户正在清空/重输,绝不能当成 0 写盘 —— 这是丢值的根因
+  if (t === '') return { keep: true };
+  const s = Number(t);
+  // 非法中间态(如只打了 "-"、字母)同样保留草稿,不动数据
+  if (!Number.isFinite(s) || s <= 0) return { keep: true };
+  const clamped = s > SHOT_MAX_SECONDS;
+  const seconds = clamped ? SHOT_MAX_SECONDS : s;
+  return { keep: false, seconds, frames: h3FramesForSeconds(seconds), clamped };
+}
+
 /** h3 输出帧率(与 h3.c 的 H3_FPS 一致) */
 export const H3_FPS = 24;
 

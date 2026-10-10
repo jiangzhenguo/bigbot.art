@@ -75,3 +75,48 @@ describe('hasUnsettledTake', () => {
     expect(hasUnsettledTake(undefined)).toBe(false);
   });
 });
+
+/**
+ * ★ shot 侧采用同一签名(2026-10-09 事故回归)
+ *
+ * 事故:镜头 03 生成成功(T4),takes.json 里 4 条 Take 齐全、节点 currentTakeId 也指向 T4、
+ * 产物文件真实存在 —— **磁盘上一切正确**,但检查器的 Take 历史与预览都不显示。
+ *
+ * 根因:`ImageTakeSection`(图片节点)**早就修过**这个 bug(见本文件顶部注释),
+ * 但 `ShotInspector`(镜头节点)沿用旧签名 `<nodeId>|<job.id>:<status>,…` ——
+ * jobs 为内存态、重启/重载/切画布后查不到该 job → 签名恒定 → **永不重拉**。
+ * 注意:即便 job 一直在内存里,签名变化也只在 job 状态迁移那一刻触发一次;
+ * 任何导致重挂载的场景(切画布/重启)都会让 jobs 查不到该 job 而彻底失联。
+ *
+ * 本组用例锁「shot 侧必须用同一个签名函数」的语义,防止两处再次分叉。
+ */
+describe('shot 侧刷新签名(事故回归)', () => {
+  const SHOT = 'shot-1791533926779-jqqc';
+
+  it('★ 队列无该 job 时,产物出现必须让签名变化(旧 shot 实现不变 → 事故)', () => {
+    // 模拟:重启后 RenderQueue 内存清空,jobs 里没有这个 shot 的 job
+    const beforeGen = takeRefreshSig(SHOT, [], '');
+    const afterGen = takeRefreshSig(SHOT, [], '/out/shot-xxx_1791542363600.mp4');
+    expect(beforeGen).not.toBe(afterGen);
+  });
+
+  it('旧 shot 签名(只看 job)在同一场景下**不会**变化 —— 证明这就是事故根因', () => {
+    // 旧实现:signature = `${nodeId}|${mine.map(...)}`
+    const legacySig = (js: Job[]) => `${SHOT}|${js.map((j) => `${j.id}:${j.status}`).join(',')}`;
+    expect(legacySig([])).toBe(legacySig([])); // 恒定 → effect 首次挂载后永不重拉
+    // 而新签名在同一输入下会随 resultPath 变化
+    expect(takeRefreshSig(SHOT, [], '/out/a.mp4')).not.toBe(takeRefreshSig(SHOT, [], ''));
+  });
+
+  it('切换 Take(节点 resultPath 变化)→ 签名变化,重拉历史', () => {
+    const t3 = takeRefreshSig(SHOT, [], '/out/shot_1791538557457.mp4');
+    const t4 = takeRefreshSig(SHOT, [], '/out/shot_1791542363600.mp4');
+    expect(t3).not.toBe(t4);
+  });
+
+  it('读到未终态 Take → 需要复检(收敛「完成但仍是 queued」的落盘竞态)', () => {
+    // 事故的另一半:Take 落盘与 notify 之间有窗口,读早了会拿到 queued
+    expect(hasUnsettledTake([{ status: 'succeeded' }, { status: 'queued' }])).toBe(true);
+    expect(hasUnsettledTake([{ status: 'succeeded' }])).toBe(false);
+  });
+});
