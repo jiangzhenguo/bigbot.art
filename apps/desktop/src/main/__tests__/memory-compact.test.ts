@@ -219,6 +219,84 @@ describe('MemoryStore.buildContext 注入激活技能指令(@当前技能」段)
   });
 });
 
+describe('MemoryStore.buildContext · 【提问规则】的「直接执行」清单(2026-10-09 「测试1」事故)', () => {
+  /**
+   * 事故形态:技能 3d-animation-short 要求「缺信息用 ask.user 补齐」,模型连问两轮
+   * (风格 / 打斗强度),用户答完后回了「我开始出分镜表」——**本轮零工具调用**,对话结束,
+   * 画布 nodes 始终为 []。
+   *
+   * 根因之一:【提问规则】的「一律直接执行,不要确认」清单列了 canvas.create_node /
+   * update_node / connect / engine.submit / storyboard.materialize / timeline.export,
+   * 却**唯独漏了 storyboard.plan** —— 而它正是「出分镜表」对应的工具。模型于是在
+   * 「技能要我确认」与「prompt 没禁止我问」之间,选择了先宣布再做(然后没做)。
+   *
+   * 本用例把「清单必须含 storyboard.plan」钉住,防止后续编辑 prompt 时又漏掉。
+   */
+  it('systemPrompt 的「直接执行」清单包含 storyboard.plan', () => {
+    const pid = `p-ask-rule-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '出分镜表');
+    expect(ctx.systemPrompt).toContain('storyboard.plan');
+    // 必须在「一律直接执行,不要确认」那句话的清单里,而不是别处顺带提到
+    expect(ctx.systemPrompt).toMatch(/一律直接执行,不要确认[^。]*storyboard\.plan/);
+  });
+
+  it('明确禁止「先问要不要出表」与「只宣布不执行」', () => {
+    const pid = `p-ask-rule2-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '出分镜表');
+    expect(ctx.systemPrompt).toContain('不要先问「要不要我出分镜表」');
+    // 点名「回一句就开始、然后结束本轮」这个具体形态
+    expect(ctx.systemPrompt).toContain('也不要回一句「我开始出分镜表」就结束本轮');
+  });
+});
+
+describe('MemoryStore.buildContext · 【提交即收尾】的受控例外(2026-10-09 「测试3」事故)', () => {
+  /* 事故:Agent 提交角色卡渲染 → 按「禁轮询」规矩收尾 → 图 2 分钟后就出好了,
+     但用户说「继续」时它回「提交后等出图,工期内不再主动轮询」,**零工具调用**,
+     永远停在「等」的状态 —— 用户看到的就是「又卡住了」。
+     根因是规则冲突:禁轮询治的是「同一轮反复查」,却把「用户在下一轮催推进」也一起禁掉了。 */
+
+  it('仍然保留「禁轮询」的本意(同一轮内不许反复刷)', () => {
+    const pid = `p-nopoll-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '继续');
+    expect(ctx.systemPrompt).toContain('【提交即收尾 — 禁轮询】');
+    expect(ctx.systemPrompt).toContain('禁止在无新指令时反复 get_node 看节点状态');
+  });
+
+  it('★ 补上受控例外:用户催推进时可以查一次', () => {
+    const pid = `p-nopoll2-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '继续');
+    // 例外段存在且点名「用户在新的一轮里给了推进指令」
+    expect(ctx.systemPrompt).toContain('例外');
+    expect(ctx.systemPrompt).toContain('用户催推进时可以「查一次」');
+    expect(ctx.systemPrompt).toContain('用户在新的一轮里给了推进指令');
+    expect(ctx.systemPrompt).toContain('先查一次');
+  });
+
+  it('两路结果都写清了:有产物就直接推进 / 无产物就如实说', () => {
+    const pid = `p-nopoll3-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '继续');
+    expect(ctx.systemPrompt).toContain('已有产物');
+    expect(ctx.systemPrompt).toContain('直接推进下一步');
+    expect(ctx.systemPrompt).toContain('不要再提「等出图」');
+    expect(ctx.systemPrompt).toContain('仍无产物');
+    expect(ctx.systemPrompt).toContain('还在渲染中');
+  });
+
+  it('禁止凭空承诺「出图后我会自动做 X」(没有后台唤醒机制)', () => {
+    const pid = `p-nopoll4-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '继续');
+    expect(ctx.systemPrompt).toContain('不要凭空承诺');
+    expect(ctx.systemPrompt).toContain('没有后台唤醒机制');
+  });
+
+  it('给出判据:用户在催(可查) vs 同轮反复刷(禁止)', () => {
+    const pid = `p-nopoll5-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '继续');
+    expect(ctx.systemPrompt).toContain('还是我在同一轮里自己反复刷');
+    expect(ctx.systemPrompt).toContain('只查一次');
+  });
+});
+
 describe('MemoryStore.buildContext · system 动作记录与当前画布状态注入', () => {
   /** 测试节点(data 与本用例无关,用 never 塞空) */
   function node(kind: CanvasNode['kind'], id: string, label: string): CanvasNode {
