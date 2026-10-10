@@ -12,6 +12,7 @@ import type {
 } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
 import { ToolModelsSection } from './ToolModelsSection';
+import { setAccelDefaultCache } from './canvas/tool-models-store';
 import { useI18n, useT } from '../i18n';
 
 interface SettingsPageProps {
@@ -1104,6 +1105,34 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       else setAccelMsg(r.error ?? t('操作失败'));
     });
   };
+  /* 🆕 总开关:新建 shot 是否默认带 accel(与「默认包」正交,见 domain.ts AppSettings 注释) */
+  const [accelDefaultEnabled, setAccelDefaultEnabled] = useState(false);
+  useEffect(() => {
+    const api = window.bigbotart;
+    if (typeof api.accelGetDefaultEnabled !== 'function') return;
+    void api
+      .accelGetDefaultEnabled()
+      .then((v: boolean) => {
+        setAccelDefaultEnabled(!!v);
+        setAccelDefaultCache(!!v); // 同步渲染层缓存,画布新建 shot 才能立刻读到
+      })
+      .catch(() => {});
+  }, []);
+  const toggleAccelDefaultEnabled = (next: boolean): void => {
+    const prev = accelDefaultEnabled;
+    setAccelDefaultEnabled(next); // 乐观更新
+    setAccelDefaultCache(next);
+    void window.bigbotart.accelSetDefaultEnabled(next).then((r) => {
+      if (!r.ok) {
+        // 回滚:写盘失败时不能只改 UI,否则设置页显示「已开启」而实际没生效
+        setAccelDefaultEnabled(prev);
+        setAccelDefaultCache(prev);
+        setAccelMsg(t('保存失败'));
+      } else {
+        setAccelMsg(next ? t('已开启:新建镜头默认带加速配置') : t('已关闭:新建镜头不再默认加速'));
+      }
+    });
+  };
 
   /* ---- 引擎状态渲染:探测结果优先,否则回退设计稿默认文案 ---- */
   const engineBadge = (id: RuntimeProbe['id']): { text: string; ok: boolean } => {
@@ -2083,6 +2112,31 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                 <span className="badge ok">
                   {t('{a}/{b} 就绪', { a: accelPacks.filter((p) => p.exists).length, b: accelPacks.length })}
                 </span>
+              </div>
+              {/* 🆕 总开关(2026-10-09):与上面「默认包」是两件事 —— 默认包 = 用哪个包,
+                  本开关 = 建 shot 时**开不开**加速。此前只有「用哪个包」没有「开不开」,
+                  于是新建的镜头一律不带 accel,用户以为装了加速包就自动加速(真实事故) */}
+              <div className="srow">
+                <div className="grow">
+                  <b>{t('新建镜头默认开启加速')}</b>
+                  <div className="sub">
+                    {t(
+                      '开启后,新建的镜头节点自动带上加速配置(用上面选定的默认包);单个镜头仍可在检查器里单独关闭。已存在的镜头不受影响。',
+                    )}
+                  </div>
+                  {accelDefaultEnabled && accelPacks.filter((p) => p.exists).length === 0 && (
+                    <div className="sub" style={{ color: 'var(--warn, #b8860b)' }}>
+                      {t('⚠️ 当前没有可用模型包(目录缺失),新建镜头不会真正启用加速')}
+                    </div>
+                  )}
+                </div>
+                <button
+                  className={`btn btn-s btn-sm${accelDefaultEnabled ? ' on' : ''}`}
+                  data-od-id="settings-accel-default-enabled"
+                  onClick={() => void toggleAccelDefaultEnabled(!accelDefaultEnabled)}
+                >
+                  {accelDefaultEnabled ? t('已开启') : t('已关闭')}
+                </button>
               </div>
               {accelPacks.length === 0 ? (
                 <div className="srow">

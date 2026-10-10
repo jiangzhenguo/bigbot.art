@@ -102,9 +102,45 @@ export class AccelStore {
   }
 
   /**
-   * 解析镜头加速请求 → 实际落地 { modelDir, steps }(提交前替换 h3.c -d / --steps)。
-   * 未开启 / 无可用包 / 包目录缺失 → 返回 null(调用方抛错提示)。
+   * 设置「新建 shot 默认开启加速」总开关。
+   * 只写 settings,不改任何已存在的节点 —— 已铺的 shot 保持各自 data.accel 不变
+   * (否则用户一按开关,画布上所有历史镜头的加速状态都会被改写,那是意外副作用)。
    */
+  setDefaultEnabled(enabled: boolean): { ok: boolean; enabled: boolean } {
+    this.settings.patch({ accelDefaultEnabled: !!enabled });
+    return { ok: true, enabled: !!enabled };
+  }
+
+  /** 读总开关(设置页回填用) */
+  isDefaultEnabled(): boolean {
+    return !!this.settings.get().accelDefaultEnabled;
+  }
+
+  /**
+   * 新建 shot 时应写入的**默认加速配置**(2026-10-09 新增)。
+   *
+   * 为什么需要它:`settings.accelDefaultEnabled` 只是「用户希望默认开加速」的意图,
+   * 真正落到节点上的是 `shot.data.accel = {enabled, packId, steps}`。两个建 shot 的
+   * 入口(渲染层「+」弹层 / Agent storyboard.materialize)必须拿到**同一份**默认值,
+   * 否则又会出现「从这里建的开加速、从那里建的不开」的口径分叉——
+   * 本次「测试1」事故正是如此:8 个 shot 里只有 Agent 事后手动补的那个开了加速。
+   *
+   * 返回 null 的三种情况(调用方一律「不写 accel」,保持存量行为):
+   *   ① 用户没开这个总开关;② 没有任何已登记包;③ 选中的包目录不可用(缺失/结构不对)。
+   * ⚠️ ③ 必须返回 null 而不是写一个 enable 的坏包 —— 否则提交期
+   * `resolveAccel` 会抛「加速 LoRA 开启但模型包不可用」,用户看到的是一开机就报错的画布。
+   */
+  defaultShotAccel(): { enabled: true; packId: string; steps: 4 | 8 } | null {
+    if (!this.settings.get().accelDefaultEnabled) return null;
+    this.ensureSeeded();
+    const packs = this.settings.get().accelPacks ?? [];
+    const pack = packs.find((p) => p.default) ?? packs[0];
+    if (!pack || !packValid(pack.path)) return null;
+    return { enabled: true, packId: pack.id, steps: isSteps(pack.steps) ? pack.steps : 8 };
+  }
+
+  /** 解析镜头加速请求 → 实际落地 { modelDir, steps }(提交前替换 h3.c -d / --steps)。
+   *  未开启 / 无可用包 / 包目录缺失 → 返回 null(调用方抛错提示)。 */
   resolveAccel(accel: { enabled?: boolean; packId?: string; steps?: number } | undefined): { modelDir: string; steps: number } | null {
     if (!accel?.enabled) return null;
     const packs = this.settings.get().accelPacks ?? PRESEED;

@@ -885,6 +885,21 @@ export interface Skill {
   inject?: 'full' | 'summary';
   /** 🆕 官方精选出厂技能(首次启动 seed,可删除;区别于「我的 Skill」) */
   builtin?: boolean;
+  /**
+   * 🆕 内置技能的**出厂正文指纹**(仅 builtin 技能有;用户自建技能为空)。
+   *
+   * 用途:区分「用户改过正文」与「出厂内容已升级」——这两者从正文本身看不出来。
+   * 启动时的种子合并据此决定要不要把新版出厂正文写回:
+   *   - 当前 instructions 与 fingerprint 一致 ⇒ 用户没动过 ⇒ **安全升级**为新版出厂正文;
+   *   - 不一致 ⇒ 用户编辑过 ⇒ **尊重用户,一律不覆盖**。
+   *
+   * 为什么必须引入它(2026-10-09 事故):此前合并器只补缺失技能、从不更新已有技能,
+   * 于是修好内置技能正文(如 3D 短片的 h3 能力表)对**老用户完全无效** ——
+   * 源文件改对了、应用重启了,skills.json 里还是旧内容,改了等于没改。
+   * 用「与出厂逐字比对」硬判「是否被编辑过」也不可靠:出厂内容一升级,比对必然不等,
+   * 会把所有老用户误判成「编辑过」而永远失去更新。
+   */
+  builtinFingerprint?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -945,6 +960,17 @@ export interface AppSettings {
   defaultTier?: QualityTier;
   /** 🚀 加速 LoRA 蒸馏模型包库(设置页安装/管理;h3.c -d 用的 turbo 目录,非 .safetensors) */
   accelPacks?: AccelPack[];
+  /**
+   * 🚀 新建 shot 是否默认开启加速 LoRA(设置页「加速 LoRA › 默认开启」)。
+   *
+   * 与 accelPacks[].default 的区别(两者容易混):
+   *   - `accelPacks[].default` = **用哪个包**(packId 缺省时的选择);
+   *   - `accelDefaultEnabled`  = **开不开加速**(决定 shot.data.accel 是否被写入)。
+   * 缺省/未设置 = false(存量行为不变:不主动开,由用户或 Agent 逐镜开启)。
+   *
+   * 写入点只有两处,口径必须一致:渲染层「+」弹层建 shot 与 Agent storyboard.materialize。
+   */
+  accelDefaultEnabled?: boolean;
   /** 云端供应商目录(凭据存钥匙串,这里只有 hasKey 标记) */
   cloudProviders?: CloudProviderEntry[];
   /** 🆕 工具模型绑定(设置页「工具模型」;缺省走 DEFAULT_TOOL_MODELS / vision env 回退链) */

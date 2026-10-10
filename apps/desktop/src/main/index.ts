@@ -585,6 +585,23 @@ ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
     params.steps = resolved.steps;
     logger.log('info', `submit-render accel: -d ${resolved.modelDir} --steps ${resolved.steps}`);
   }
+  /* ⚠️ 把解析结果**回写 Take**(2026-10-09 事故修复)。
+   *
+   * 为什么必须回写:Take 是渲染层在调本 IPC **之前**建的
+   * (CanvasPage.runNode 先 takesCreate(params) 再 submitRender),
+   * 那时 accel 还没解析 —— 所以 Take 里存的是 `steps:30 / 无 modelDir`。
+   * 后果:检查器回看历史时显示「30 步、未加速」,**与真实执行不符**。
+   * 实测踩中:用户据此以为「加速没生效」而重复排查一个并不存在的问题
+   * (日志里明明是 `-d .../turbo-T8test --steps 8`)。
+   *
+   * 这里在解析后立即用**最终参数**覆盖 Take,让历史记录与实际执行一致。
+   * 失败不阻断提交 —— Take 记录失真不该让渲染任务失败,只记日志。
+   * 异步不 await:本 IPC 要尽快返回任务句柄,写盘不该拖慢提交。 */
+  if (req.takeId && req.projectId && (params.modelDir || accelReq?.enabled)) {
+    void takes
+      .patch(req.projectId, req.takeId, { params })
+      .catch((e) => logger.log('warn', `take params 回写失败(不影响渲染): ${(e as Error).message}`));
+  }
   return queue.submit(req);
 });
 
@@ -956,6 +973,9 @@ ipcMain.handle('accel-list', () => accel.list());
 ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number }) => accel.install(input));
 ipcMain.handle('accel-remove', (_e, id: string) => accel.remove(id));
 ipcMain.handle('accel-set-default', (_e, id: string | null) => accel.setDefault(id));
+ipcMain.handle('accel-set-default-enabled', (_e, enabled: boolean) => accel.setDefaultEnabled(enabled));
+ipcMain.handle('accel-get-default-enabled', () => accel.isDefaultEnabled());
+ipcMain.handle('accel-default-shot-config', () => accel.defaultShotAccel());
 
 // ---------- IPC:LLM 来源(五档) ----------
 ipcMain.handle('llm-local-models', (_e, kind: 'lmstudio' | 'ollama' | 'pimlx') => {

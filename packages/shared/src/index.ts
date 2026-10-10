@@ -275,6 +275,21 @@ export interface BigBotArtApi {
   accelRemove(id: string): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
   /** 设默认包(id=null 清除默认);镜头开启加速未选包时用默认包 */
   accelSetDefault(id: string | null): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
+  /**
+   * 新建 shot 是否默认开启加速 LoRA(设置页总开关)。
+   * 与 accelSetDefault 的区别:`default` 决定**用哪个包**,本开关决定**开不开**。
+   * 开启后,渲染层「+」弹层与 Agent storyboard.materialize 建出的 shot 都会带上
+   * `data.accel={enabled, packId, steps}`;单个镜头仍可在检查器里关掉。
+   */
+  accelSetDefaultEnabled(enabled: boolean): Promise<{ ok: boolean; enabled: boolean }>;
+  /** 读「新建 shot 默认开启加速」总开关(设置页回填用;缺省 false) */
+  accelGetDefaultEnabled(): Promise<boolean>;
+  /**
+   * 新建 shot 应写入的默认加速配置(null = 不该写 accel)。
+   * 选包逻辑只在主进程 AccelStore 一处实现,渲染层「+」弹层直接取这份结果写入节点,
+   * 避免两个建 shot 入口各写一份「选哪个包」的判断而分叉。
+   */
+  accelDefaultShotConfig(): Promise<{ enabled: true; packId: string; steps: 4 | 8 } | null>;
   // Agent 内核
   agentStatus(): Promise<AgentProcessState>;
   agentStart(modelSource?: import('./domain').LlmSource): Promise<AgentProcessState>;

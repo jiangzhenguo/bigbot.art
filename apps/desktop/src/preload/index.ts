@@ -113,6 +113,9 @@ const api: BigBotArtApi = {
   accelInstall: (input) => ipcRenderer.invoke('accel-install', input),
   accelRemove: (id) => ipcRenderer.invoke('accel-remove', id),
   accelSetDefault: (id) => ipcRenderer.invoke('accel-set-default', id),
+  accelSetDefaultEnabled: (enabled) => ipcRenderer.invoke('accel-set-default-enabled', enabled),
+  accelGetDefaultEnabled: () => ipcRenderer.invoke('accel-get-default-enabled'),
+  accelDefaultShotConfig: () => ipcRenderer.invoke('accel-default-shot-config'),
   llmLocalModels: (kind: 'lmstudio' | 'ollama' | 'pimlx') => ipcRenderer.invoke('llm-local-models', kind),
   llmLoadModel: (kind: 'lmstudio' | 'ollama' | 'pimlx', modelId: string) =>
     ipcRenderer.invoke('llm-load-model', kind, modelId),
