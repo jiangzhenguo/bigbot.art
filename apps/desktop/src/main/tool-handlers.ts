@@ -73,6 +73,57 @@ const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
 const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
 
 /**
+ * 节点 data 里的**布尔开关字段**清单。
+ *
+ * 为什么需要它(2026-10-09 事故):模型调 `canvas.update_node` 时把布尔值写成了
+ * **字符串** `"true"`(`{"mode":"ref-image","modeOverride":"true"}`),而渲染层所有
+ * 判定都是严格比较 `=== true` —— 字符串 `"true" === true` 为 **false**,
+ * 于是「用户已手动选过模式,别再自动推导」这道闸**失效**,模式被入边推导顶掉,
+ * 参考图连线随之在提交时丢失,用户看到的就是「人物根本没绑定上角色卡」。
+ *
+ * 这类 bug 的特点是**静默**:工具返回 ✓、节点上确实写着 "true"、界面看着也是开的,
+ * 只有严格比较的那一行知道它是假的。所以统一在**写入端**归一化,而不是逐个判断点去放宽比较
+ * (放宽比较要改十几处,还会把真正的 false 也放进来)。
+ */
+const BOOLEAN_DATA_FIELDS = [
+  'modeOverride', // shot:用户手动选过生成模式
+  'specOverride', // shot:用户手动改过画幅/档位
+  'manualOrder', // timeline:用户手动排过序
+  'refVideoSilent', // shot:参考视频只取画面(忽略音轨)
+  'ssdStreaming', // shot:SSD 流式读权重
+  'specFrom', // 仅作删除标记用,不参与布尔语义
+] as const;
+
+/**
+ * 把 data 里的布尔字段从「字符串形式」归一化成真布尔。
+ *
+ * 接受:`true/false` 布尔本身、`"true"/"false"`(含大小写与空白)、`1/0`、`"1"/"0"`、`"yes"/"no"`。
+ * 其余值(含 `undefined`)**原样保留**,不猜测 —— 宁可留着让后续逻辑按原值处理,
+ * 也不要凭空造一个布尔出来(那会引入新的静默行为)。
+ *
+ * @returns 归一化后的新对象(不修改入参)
+ */
+export function normalizeBooleanFields(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...data };
+  for (const key of BOOLEAN_DATA_FIELDS) {
+    if (!(key in out)) continue;
+    const v = out[key];
+    if (typeof v === 'boolean') continue;
+    if (typeof v === 'number' && (v === 1 || v === 0)) {
+      out[key] = v === 1;
+      continue;
+    }
+    if (typeof v === 'string') {
+      const t = v.trim().toLowerCase();
+      if (t === 'true' || t === '1' || t === 'yes') out[key] = true;
+      else if (t === 'false' || t === '0' || t === 'no') out[key] = false;
+      // 其它字符串(如 "maybe")保持原样,不猜
+    }
+  }
+  return out;
+}
+
+/**
  * 规整工具参数里的 `data` 字段为普通对象。
  *
  * 为什么需要:工具 schema 把 `data` 声明为 object,但**本地小模型(Ornith 等)常把它
@@ -494,7 +545,17 @@ export class ToolHandlers {
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
       let brief = String(a.brief ?? '');
-      const nodeId = String(a.nodeId ?? '');
+      const rawNodeId = String(a.nodeId ?? '');
+      /* ⚠️ 必须走 resolveNodeRef(2026-10-09 补):此前是裸 find(n => n.id === nodeId),
+         模型把标题当 id 传回来时(真实事故形态)会静默拿不到 brief,报「需要 brief 文本」
+         —— 用户明明传了一个存在的 document 节点,却被告知没给内容,无从排查。
+         与 canvas.get_node / engine.submit 等入口同口径(id 精确优先 → 标题唯一才采用)。 */
+      let nodeId = '';
+      if (rawNodeId) {
+        const hit = resolveNodeRefOrError(cur.nodes, rawNodeId, '节点');
+        if (!hit.ok) return { ok: false, result: hit.error };
+        nodeId = hit.node.id;
+      }
       if (!brief.trim() && nodeId) {
         const src = cur.nodes.find((n) => n.id === nodeId);
         brief = String((src?.data as { markdown?: string } | undefined)?.markdown ?? '');
@@ -536,12 +597,41 @@ export class ToolHandlers {
       return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
     },
     'storyboard.materialize': async (a, ctx) => {
-      const nodeId = String(a.nodeId ?? '');
+      const rawNodeId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
-      const sb = cur.nodes.find((n) => n.id === nodeId && n.kind === 'storyboard');
-      if (!sb) return { ok: false, result: `节点 ${nodeId} 不是分镜表(storyboard)节点` };
+      /* ⚠️ 两级解析(2026-10-09 事故修复,二合一):
+         ① **标题容错**:与 canvas.get_node / engine.submit 等入口同口径,模型把标题当 id 传时能救回;
+         ② **失败必须给候选**:本工具原先是裸 find + 一句「不是分镜表节点」,
+            模型传了一个**幻觉 id**(真实事故:传 storyboard-1791532265048-7l8p,
+            该 id 在画布上根本不存在,它是把「项目简报的时间戳」和「storyboard 前缀」拼出来的),
+            报错既不说画布上有哪些分镜表,也不说 id 长什么样 → 模型下一轮只能继续猜,
+            而它甚至直接宣布「12 个 shot 已铺出」骗过了用户。
+            现在 id 不存在时,把画布上**真实的分镜表节点**列出来,让模型照着改。 */
+      const sbList = cur.nodes.filter((n) => n.kind === 'storyboard');
+      const hit = resolveNodeRef(cur.nodes, rawNodeId);
+      let sb = hit.node?.kind === 'storyboard' ? hit.node : undefined;
+      if (!sb && hit.node) {
+        // 解析到了节点但不是分镜表(如传了 document 的 id)→ 说清它是什么,并给出真正的分镜表
+        return {
+          ok: false,
+          result: `节点「${hit.node.label || hit.node.id}」(id=${hit.node.id})是 ${hit.node.kind} 节点,不是分镜表(storyboard)${sbList.length ? `。画布上的分镜表:${sbList.map((n) => `「${n.label || n.id}」(id=${n.id})`).join('、')}` : '(画布上没有分镜表节点,请先用 storyboard.plan 生成)'}`,
+        };
+      }
+      if (!sb) {
+        if (hit.ambiguous.length > 0) {
+          return {
+            ok: false,
+            result: `「${rawNodeId}」匹配到多个节点:${hit.ambiguous.map((n) => `「${n.label || n.id}」(id=${n.id})`).join('、')}。请改用 id 精确指定。`,
+          };
+        }
+        return {
+          ok: false,
+          result: `节点 ${rawNodeId} 不存在${sbList.length ? `。画布上的分镜表:${sbList.map((n) => `「${n.label || n.id}」(id=${n.id})`).join('、')} —— 请用其中一个 id 重试,或先 canvas.list_nodes 现拉最新 id(不要凭记忆拼 id)` : '(画布上没有分镜表节点,请先用 storyboard.plan 生成)'}`,
+        };
+      }
+      const nodeId = sb.id;
       const sd = (sb.data ?? {}) as Record<string, unknown>;
       const tb = parseGfmTable(String(sd.markdown ?? ''));
       if (!tb) return { ok: false, result: '分镜表缺少表格块 · 无法铺节点' };
@@ -561,6 +651,11 @@ export class ToolHandlers {
       const anchorY = sb.position.y ?? 80;
       let created = 0;
       let imgs = 0;
+      /* 🚀 加速默认(2026-10-09):用户在设置页开了「新建 shot 默认开启加速」时,
+         铺出来的每个 shot 都带上同一份 accel。取一次、循环内复用 —— 保证同一批节点
+         的 packId/steps 完全一致(逐行各取一次会在用户中途改设置时产出参数不齐的一批)。
+         未开启/无可用包 → null,不写 accel(存量行为不变)。 */
+      const defaultAccel = this.accel?.defaultShotAccel() ?? null;
       tb.rows.forEach((row, r) => {
         const rowNo = r + 1;
         if (doneRows.has(rowNo)) return;
@@ -570,10 +665,15 @@ export class ToolHandlers {
           id: shotId, kind: 'shot', label: `镜头 ${String(rowNo).padStart(2, '0')}`,
           position: { x: anchorX + 560, y: anchorY + r * 186 }, width: 250,
           data: {
-            engine: 'mock', mode: 'text2video', prompt: p.text,
+            /* ⚠️ engine 必须与渲染层「+」弹层建 shot 同口径(h3c)。这里曾长期写死 'mock',
+               后果是「用分镜表铺节点」得到的永远是 ffmpeg 占位片 —— 2026-10-09「测试1」
+               事故:8 个镜头全部落 outputs/mock/,用户以为在跑真模型,实际上没走 h3。
+               演示态由 settings.renderMode 决定(mock 只在 demo 模式启用),节点不该自己写死。 */
+            engine: 'h3c', mode: 'text2video', prompt: p.text,
             width: size.width, height: size.height,
             seconds: rowSeconds(row, tb.head) || undefined,
             steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
+            ...(defaultAccel ? { accel: defaultAccel } : {}),
             promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
           } as CanvasNode['data'],
           createdAt: now, updatedAt: now,
@@ -665,6 +765,9 @@ export class ToolHandlers {
           ...data,
         };
       }
+      // 布尔字段归一化(与 update_node 同口径):模型常把 true 写成 "true",
+      // 而渲染层判定全是严格 `=== true`(见 BOOLEAN_DATA_FIELDS 注释)
+      data = normalizeBooleanFields(data) as typeof data;
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
@@ -756,7 +859,10 @@ export class ToolHandlers {
         return { ok: false, result: `prompt 必须是字符串,收到 ${Array.isArray(topPrompt) ? '数组' : typeof topPrompt}。` };
       }
       if (patch) {
-        const next = { ...(node.data as Record<string, unknown>), ...patch };
+        // 布尔字段归一化:模型常把 true 写成 "true",而渲染层全是严格 `=== true` 判定
+        // (见 BOOLEAN_DATA_FIELDS 注释,2026-10-09 modeOverride 事故)
+        const norm = normalizeBooleanFields({ ...(node.data as Record<string, unknown>), ...patch });
+        const next = { ...norm };
         // 方案 B:refs 由连线推导,直写 refs 一律忽略(消除双写漂移)
         if ('refs' in patch) {
           delete next.refs;
@@ -773,7 +879,13 @@ export class ToolHandlers {
       const missed = patch
         ? Object.keys(patch).filter((k) => {
             if (k === 'refs') return false; // 有意忽略,不算未生效
-            return JSON.stringify((node.data as Record<string, unknown>)[k]) !== JSON.stringify(patch[k]);
+            /* ⚠️ 期望值必须取**归一化后**的 patch,不能拿原始 patch 比(2026-10-09)。
+               布尔字段在写入前被 normalizeBooleanFields 转过:
+               patch 里是 "true"(字符串)、节点里存的是 true(布尔),
+               拿原始 patch 比会 JSON.stringify('true') !== JSON.stringify(true) → 误报「未生效」,
+               而其实写入完全成功。这类误报会让模型以为失败而反复重试。 */
+            const expected = normalizeBooleanFields(patch)[k];
+            return JSON.stringify((node.data as Record<string, unknown>)[k]) !== JSON.stringify(expected);
           })
         : [];
       if (missed.length > 0) {
@@ -975,6 +1087,25 @@ export class ToolHandlers {
         const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath, this.getToolModels?.());
         if (!built.ok) return { ok: false, result: built.error };
         submitParams = built.params;
+      }
+      /* 🚀 加速 LoRA 解析(2026-10-09 事故修复)。
+       *
+       * 问题:本工具**直接** `queue.submit`,绕过了渲染层的 `submit-render` IPC ——
+       * 而 accel → `modelDir`(-d)+ `steps` 的解析只写在那个 IPC 里。
+       * 后果:Agent 提交的视频即使节点开着加速(h3c.ts 只认 `params.modelDir`),
+       * 也**永远走默认模型 + 默认步数**,加速静默失效 —— 与检查器显示的状态不符。
+       * 这里补齐,与 index.ts 的 submit-render 同口径、同报错文案。 */
+      const accelReq = submitParams.accel as { enabled?: boolean; packId?: string; steps?: number } | undefined;
+      if (accelReq?.enabled && !isImage) {
+        const resolved = this.accel?.resolveAccel(accelReq) ?? null;
+        if (!resolved) {
+          return {
+            ok: false,
+            result: '加速 LoRA 开启但模型包不可用(未安装或目录缺失) · 请到设置页「加速 LoRA」检查,或先用 canvas.update_node 关闭该节点的 data.accel',
+          };
+        }
+        submitParams.modelDir = resolved.modelDir;
+        submitParams.steps = resolved.steps;
       }
       /* ⚠️ 提交必须带全 projectId/canvasId/takeId,缺一个就会「生成成功但画布上什么都没有」
          (2026-09-28 真实事故):Agent 侧此前只传 provider/nodeId/slot/params/references,
