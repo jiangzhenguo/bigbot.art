@@ -157,11 +157,127 @@ export function sbStats(head: string[], rows: string[][]): {
   return { n: rows.length, imgs, secs: Math.round(secs * 10) / 10 };
 }
 
-/** H3 五段式组装(shot 节点;「提示词(可选)」列有值则显式使用) */
+/**
+ * 参考素材条目 —— 供 H3 Ref2VA 的 `<Subject n>` 标签段使用(2026-10-09)。
+ *
+ * 背景:h3 收到 `--ref-image` 后**按传入顺序**自动编号成 `<Picture 1>`、`<Picture 2>`……
+ * 但官方 Ref2VA 规范要求**提示词里用 `<Subject n>` 显式引用这些图**,否则模型只是
+ * 「看到了图」却不知道要继承什么(脸?服装?还是背景?)。
+ * 真实事故:角色卡/场景卡连了边、提示词却完全没提,9 张参考图的能力形同虚设。
+ */
+export interface PromptSubject {
+  /** 主体名(如「苏青」);由调用方/Agent 给出,本模块不做推断 */
+  name: string;
+  /** character = 身份锁(脸/发型/服装) / scene = 环境锁(布局/光位/地标) */
+  kind: 'character' | 'scene';
+  /**
+   * 该主体的**具体可辨识特征**(如「黑色短发、黑色皮夹克」)。
+   *
+   * 为什么需要它(2026-10-09 实测):只写一句笼统的 `identity lock: face, hair, outfit`
+   * 时,模型会把「锁」理解成「我看到了这个人」,但**抓不住具体特征** ——
+   * 实测角色卡是「黑色短发 + 黑夹克」,出片却变成「黑色爆炸头 + 黑皮衣」;
+   * 另一角色卡是「金色马尾 + 黑战术服」,出片变成「金色盘发 + 红外套」。
+   * 服装/颜色这类大色块能对上,发型与服装**款式**这类细节会漂。
+   * 把特征逐条写进标签里,等于给模型一张**逐项核对清单**,代价几乎为零。
+   */
+  traits?: string;
+}
+
+/**
+ * 组装 Ref2VA 的 `<Subject n>` 标签段(纯函数,便于单测)。
+ *
+ * 输出形如:
+ *   `<Subject 1> is 苏青 in <Picture 1> (identity lock: face, hair, outfit).`
+ *   `<Subject 2> is the environment in <Picture 2> (scene lock).`
+ *
+ * ⚠️ **编号即顺序**:`<Picture n>` 的 n 由数组下标决定,调用方必须保证数组顺序
+ * = 参考图连线的先后顺序(h3 就是这样编号的),否则标签与图对不上 ——
+ * 那种错误比不写标签更糟(模型会拿场景图当角色继承)。
+ *
+ * 名字为空或全空白的条目**跳过**(不产出半截标签,也不浪费一个 Picture 编号):
+ * 宁可不写,也不要写一句"某人"误导模型。
+ *
+ * @param subjects 参考素材(按连线顺序)
+ * @returns 标签段文本;无有效条目时返回空串(调用方据此不插入该段)
+ */
+export function buildSubjectLabels(subjects?: PromptSubject[]): string {
+  const valid = validSubjects(subjects);
+  if (valid.length === 0) return '';
+  return valid
+    .map((s, i) => {
+      const n = i + 1;
+      const name = String(s.name).trim();
+      const traits = String(s.traits ?? '').trim();
+      if (s.kind === 'scene') {
+        // 场景锁:特征给定时逐条列出,否则退回通用槽位说明
+        return traits
+          ? `<Subject ${n}> is the environment in <Picture ${n}> (scene lock — must match exactly: ${traits}).`
+          : `<Subject ${n}> is the environment in <Picture ${n}> (scene lock: layout, landmarks, lighting).`;
+      }
+      /* 角色锁:实测「只写 face, hair, outfit」会漂(见 PromptSubject.traits 注释),
+         故把具体特征显式列出,并追加一句**不许改**的硬约束。
+         注意措辞用 "must match exactly" —— H3 官方 Ref2VA 结构里 retention 关系就是
+         靠这类明确措辞表达的(fully_preserved / weak_reference),含糊的"lock"力度不够。 */
+      return traits
+        ? `<Subject ${n}> is ${name} in <Picture ${n}> (identity lock — must match exactly: ${traits}). Do not change this character's face, hairstyle, hair color, or outfit design.`
+        : `<Subject ${n}> is ${name} in <Picture ${n}> (identity lock: face, hair, outfit). Do not change this character's face, hairstyle, or outfit design.`;
+    })
+    .join('\n');
+}
+
+/** 过滤掉名字为空白的条目(它们不占 Picture 编号,否则标签与图会错位) */
+function validSubjects(subjects?: PromptSubject[]): PromptSubject[] {
+  return (subjects ?? []).filter((s) => String(s?.name ?? '').trim());
+}
+
+/**
+ * 组装 Ref2VA 的 `retention_analysis:` 段(纯函数,便于单测)。
+ *
+ * 为什么单独成段(H3 官方 Ref2VA 骨架的必需段落,2026-10-09 补):
+ * 官方模板把「参考素材保留关系」单列为一段,逐主体声明保留强度:
+ *
+ *   retention_analysis:
+ *   <Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - ...
+ *   <Subject 2> (appears in [Shot 1]): weak_reference - ...
+ *
+ * 而只写一句笼统的 `identity lock` 时,模型收到的是「请保持一致」这种**无强度**的要求。
+ * 实测事故:角色卡明确定义为「深灰战术背心」,提示词却在 4 处反复写 `red coat`,
+ * 参考图与文字互相冲突,出片自然锁不住 —— 而 `fully_preserved` 这类**逐项声明**
+ * 能把「哪个主体、保留到什么程度」讲清楚,是官方结构里专门治这个的部分。
+ *
+ * 角色用 `fully_preserved`(身份必须完全保留);场景用 `fully_preserved` 但声明
+ * 保留的是布局/地标/光位(环境本就不该逐像素照搬,重点是空间关系稳定)。
+ *
+ * @param subjects 参考素材(按连线顺序,与 `buildSubjectLabels` 同一份)
+ * @param shotLabels 该主体出现的镜头标签(如 `[Shot 1]`);缺省给 `[Shot 1]`
+ * @returns 段落文本;无有效条目时返回空串(调用方据此不插入该段)
+ */
+export function buildRetentionAnalysis(subjects?: PromptSubject[], shotLabels?: string[]): string {
+  const valid = validSubjects(subjects);
+  if (valid.length === 0) return '';
+  const where = (shotLabels ?? ['[Shot 1]']).join(', ');
+  const lines = valid.map((s, i) => {
+    const n = i + 1;
+    if (s.kind === 'scene') {
+      return `<Subject ${n}> (appears in ${where}): fully_preserved - spatial layout, landmarks, and lighting direction unchanged from <Picture ${n}>.`;
+    }
+    return `<Subject ${n}> (appears in ${where}): fully_preserved - face, hairstyle, hair color, outfit design, and body proportions unchanged from <Picture ${n}>.`;
+  });
+  return `retention_analysis:\n${lines.join('\n')}`;
+}
+
+/** H3 五段式组装(shot 节点;「提示词(可选)」列有值则显式使用)
+ *
+ * @param subjects 参考素材(Ref2VA 镜传入;按连线顺序 → 生成 `<Subject n>` 标签段)。
+ *                 first-frame(FL2VA)镜不传 —— FL2VA 与 ref-image 互斥,没有 Picture 可言。
+ *                 ⚠️ 显式提示词(表格「提示词(可选)」列有值)时**不覆盖**,尊重作者原文;
+ *                 此时标签段由作者自己写(技能文档已给出写法)。
+ */
 export function assembleH3Prompt(
   row: string[] | undefined,
   head: string[],
   basePrompt?: string,
+  subjects?: PromptSubject[],
 ): { explicit: boolean; text: string } {
   const p = rowCell(row, head, '提示词(可选)').trim();
   if (p) return { explicit: true, text: p };
@@ -176,15 +292,42 @@ export function assembleH3Prompt(
   const scene = rowCell(row, head, '画面描述');
   const size = rowCell(row, head, '景别');
   const move = rowCell(row, head, '运镜') || '固定';
-  return {
-    explicit: false,
-    text: [
+  /* Ref2VA(带参考素材)走 h3 官方的**分段结构**;否则沿用原来的五段式。
+   *
+   * 为什么分叉:官方 Ref2VA 骨架用 `overall_soundscape:` / `non_diegetic_music:` 这类
+   * **固定段名**,模型是按段名解析的;用自造的 `Audio:` 会让这段落进「正文描述」而不是
+   * 「声音轨」,音画配合会退化。T2VA/FL2VA 那些没有参考素材的场景不受影响,保持原样
+   * (改它们只会引入无谓的回归面)。 */
+  const labels = buildSubjectLabels(subjects);
+  if (!labels) {
+    const body = [
       `Scene: ${scene}（${size}落位）`,
       `Action: ${action}`,
       `Camera: ${size} · ${move}`,
       `Look: ${look}`,
       `Audio: ${hasDial ? '口型同步 · 环境音' : '环境音 · 水声与风声'}`,
-    ].join('\n'),
+    ].join('\n');
+    return { explicit: false, text: body };
+  }
+  const retention = buildRetentionAnalysis(subjects);
+  const detailed = [
+    `[Shot 1] ${scene}`,
+    `Camera: ${size} · ${move}`,
+    `Action: ${action}`,
+    `Look: ${look}`,
+  ].join('\n');
+  const soundscape = hasDial
+    ? '口型同步的人声 · 环境音'
+    : '环境音 · 水声与风声';
+  return {
+    explicit: false,
+    text: [
+      `subject_definitions:\n${labels}`,
+      retention,
+      `detailed_description:\n${detailed}`,
+      `overall_soundscape: ${soundscape}`,
+      'non_diegetic_music: N/A',
+    ].join('\n\n'),
   };
 }
 

@@ -150,7 +150,16 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
     name: '3D动画短片生成器',
     description: 'MiniMax 官方:根据故事创意,完成人物与场景设定、镜头规划、分镜生成和视频合成',
     instructions: animation3dShort,
-    inject: 'summary',
+    /* ⚠️ 必须是 full(2026-10-09 由 summary 改)。
+     * 本技能的核心是**角色/场景一致性**,而这条规则写在文档中段
+     * (「角色卡为权威身份源,场景卡为权威环境源」),summary 模式只注入前 160 字 =
+     * 只有「项目简报 → 故事大纲 → 角色卡 → 场景卡 → …」这串流程名,规则一条都看不到。
+     * 真实事故(「测试1」画布):Agent 激活本技能后**从未调用 skills.read**(recall 里 0 次),
+     * 于是完全不知道角色卡是必需的,直接从分镜表跳到铺节点,8 个镜头的角色各画各的、
+     * 毫无一致性可言 —— 用户看到的正是「拆分镜头后并没有生成人物参考图」。
+     * 代价:约 +4k token systemPrompt(10k 字文档);换来的是流程不再被跳过,
+     * 与该技能「角色一致」的核心价值相比是划算的(同批其他技能仍保持 summary)。 */
+    inject: 'full',
   },
   {
     id: 'brand-promo-video',
@@ -202,6 +211,8 @@ function builtinSeed(): Skill[] {
     instructions: b.instructions,
     inject: b.inject ?? 'full',
     builtin: true,
+    // 出厂指纹:记录「出厂那一版正文」,供后续启动判断用户是否编辑过
+    builtinFingerprint: fingerprintText(b.instructions),
     createdAt: now,
     updatedAt: now,
   }));
@@ -214,6 +225,57 @@ function readTombstones(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+/**
+ * 出厂正文指纹(内容哈希)。
+ *
+ * 只用于判断「当前 instructions 是否仍是出厂那一版」,不需要密码学强度 ——
+ * 一个稳定的 32 位 FNV-1a 足够(碰撞概率对「十几个技能的正文比对」可忽略,
+ * 且即便碰撞也只会导致一次不该发生的覆盖,后果可控)。
+ * 不引 crypto 是为了让这段逻辑零依赖、可在渲染层/测试里直接复用。
+ */
+export function fingerprintText(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `fnv1a-${h.toString(16)}-${text.length}`;
+}
+
+/**
+ * **历史出厂版本**的正文指纹白名单(迁移用)。
+ *
+ * 为什么需要它:builtinFingerprint 是本次(2026-10-09)才引入的字段,
+ * 之前所有用户的库里都没有 —— 若只认指纹,老用户会被判成「无法判断是否编辑过」
+ * 而**永远拿不到出厂正文升级**,修复等于对新老用户割裂。
+ *
+ * 做法:把历次出厂正文的指纹登记在这里。启动合并时,只要当前正文的指纹
+ * 命中白名单中**任何一个**(= 内容逐字等于某一个历史出厂版),就判定「用户没编辑过」,
+ * 安全升级到最新版;不命中才认为用户改过,一律不动。
+ *
+ * ⚠️ 维护约定:**每次改动 builtin-skills/*.md 后,把被替换掉的那一版指纹追加到这里**
+ * (用 fingerprintText 算,或跑单测让它告诉你该填什么)。漏加不会导致数据损坏,
+ * 只会让「没编辑过的老用户」停留在旧版正文 —— 但那就正是本次事故的形态,务必别漏。
+ */
+const LEGACY_BUILTIN_FINGERPRINTS = new Set<string>([
+  // 3d-animation-short:2026-10-09 之前的初版(10132 字,无 h3 参考图能力表)
+  'fnv1a-37793bcf-10132',
+  // 3d-animation-short:2026-10-09 第一次修订(13177 字,有参考图能力表 + 逐镜模式选择,
+  // 但标签段只有笼统的 face/hair/outfit,且未写「开场不留白」规则)
+  'fnv1a-893dbe89-13177',
+  // 3d-animation-short:2026-10-09 第二次修订(14588 字,加了 traits + 开场不留白,
+  // 但仍是自造段名;未写「逐字抄角色卡 Visual ID」硬规则)
+  'fnv1a-dafca940-14588',
+  // 3d-animation-short:2026-10-09 第三次修订(16322 字,官方六段结构 + 逐字抄规则,
+  // 但未写「提交即收尾 vs 多步流程」的关系 → Agent 会卡在「等出图」)
+  'fnv1a-a90fae91-16322',
+]);
+
+/** 导出供单测断言「历史版本识别」行为(生产代码不应改动它) */
+export function isLegacyBuiltinFingerprint(fp: string): boolean {
+  return LEGACY_BUILTIN_FINGERPRINTS.has(fp);
 }
 
 export class SkillStore {
@@ -232,8 +294,59 @@ export class SkillStore {
       // 已有技能库:合并官方新增的内置技能(按 id 去重;用户删除过的在 tombstone 里,不复活)
       const have = new Set(existing.map((s) => s.id));
       const missing = seeds.filter((b) => !have.has(b.id));
-      this.skills = missing.length ? [...existing, ...missing] : existing;
-      if (missing.length) this.persist();
+      /* 🆕 内置技能正文升级(2026-10-09 事故修复)。
+       *
+       * 问题:种子合并此前**只补缺失**,已存在的内置技能原样保留 ——
+       * 于是修好出厂正文(如 3D 短片的 h3 参考图能力表)对**老用户完全无效**:
+       * 源文件改对了、应用也重启了,skills.json 里还是旧内容。实测踩中:
+       * 改完 3D 技能后重启,库里仍是 10132 字的旧文,新写的「最多 9 张」一条都没进去。
+       *
+       * 判据用 **builtinFingerprint** + 历史指纹白名单,而不是「与当前出厂正文比对」:
+       *   - 当前正文指纹 == builtinFingerprint,或命中 LEGACY_BUILTIN_FINGERPRINTS
+       *     ⇒ 内容逐字等于某一版出厂正文 ⇒ 用户没编辑过 ⇒ **安全升级**;
+       *   - 否则 ⇒ 用户编辑过 / 来源不明 ⇒ **正文一字不动**。
+       *
+       * 为什么不能直接「与当前出厂正文比对」:出厂内容一升级,比对必然不等,
+       * 会把所有「没编辑过的老用户」误判成「编辑过」而永远失去更新 —— 正是本次事故形态。 */
+      const byId = new Map(seeds.map((b) => [b.id, b]));
+      let updated = 0;
+      const merged = existing.map((s) => {
+        if (!s.builtin) return s; // 用户自建技能一律不动
+        const seed = byId.get(s.id);
+        if (!seed) return s;
+        const fp = s.builtinFingerprint;
+        const curFp = fingerprintText(s.instructions ?? '');
+        /* 「用户没动过正文」的两个充分条件:
+           ① 有 fingerprint 且与当前正文吻合(本次之后新建/升级过的库);
+           ② 当前正文命中**历史出厂指纹白名单**(本次之前建的库,没有 fingerprint 字段)。
+           两者都不满足 ⇒ 视为用户编辑过 / 内容来源不明 ⇒ 一律不覆盖。 */
+        const untouched = (!!fp && curFp === fp) || LEGACY_BUILTIN_FINGERPRINTS.has(curFp);
+        if (!untouched) {
+          /* 用户编辑过正文,或内容与任何已知出厂版都不符(来源不明)。
+             两种情况的共同处置:**不碰正文**。区别只在 inject ——
+             有 fingerprint 说明是我们管理过的库,用户既然可能改过,就听他的;
+             没有 fingerprint 且不命中白名单,同样保守不动。 */
+          return s;
+        }
+        // 用户没动过 → 把出厂正文/inject/描述升级到最新版
+        const changed =
+          s.instructions !== seed.instructions ||
+          (s.inject ?? 'full') !== seed.inject ||
+          s.description !== seed.description;
+        if (!changed) return s;
+        updated += 1;
+        return {
+          ...s,
+          instructions: seed.instructions,
+          inject: seed.inject,
+          description: seed.description,
+          params: seed.params,
+          builtinFingerprint: fingerprintText(seed.instructions ?? ''),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      this.skills = missing.length ? [...merged, ...missing] : merged;
+      if (missing.length || updated) this.persist();
     }
   }
 
@@ -284,8 +397,17 @@ export class SkillStore {
       const trimmed = patch.instructions?.trim();
       next.instructions = trimmed ? trimmed : undefined;
       next.inject = trimmed ? (patch.inject === 'summary' ? 'summary' : 'full') : undefined;
+      /* ⚠️ 用户改过正文 ⇒ **立即清掉出厂指纹**(2026-10-09)。
+         语义:builtinFingerprint 存在的唯一含义是「正文仍是出厂那一版」。
+         用户一动正文,这个前提就不成立了;若不清,下次启动合并会拿新正文去比旧指纹、
+         判成「没动过」→ **把用户的编辑覆盖掉**。
+         清空后合并逻辑走「fp 存在但正文不符 ⇒ 尊重用户,不覆盖」分支,编辑永久受保护。 */
+      if (next.builtin) next.builtinFingerprint = undefined;
     } else if (patch.inject && next.instructions) {
       next.inject = patch.inject;
+      // 只改注入模式、没动正文 —— 指纹保留(正文仍是出厂版),但用户既然显式选了
+      // inject,合并时也不该再被出厂值顶掉;故一并清除指纹,视为「用户已介入」。
+      if (next.builtin) next.builtinFingerprint = undefined;
     }
     this.skills[idx] = next;
     this.persist();
