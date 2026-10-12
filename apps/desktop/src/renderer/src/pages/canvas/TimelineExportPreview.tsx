@@ -21,6 +21,8 @@ export function TimelineExportPreview({
   const [muted, setMuted] = useState(true);
   const [t, setT] = useState(0);
   const [dur, setDur] = useState(lastExport.durationSec ?? 0);
+  /** 成片加载失败(文件被移动/删除):给文字兜底,而不是留一块黑屏让人以为「只是没播」 */
+  const [loadErr, setLoadErr] = useState(false);
 
   const togglePlay = useCallback(() => {
     const v = vRef.current;
@@ -74,6 +76,7 @@ export function TimelineExportPreview({
   }, []);
 
   useEffect(() => {
+    setLoadErr(false);
     const v = vRef.current;
     if (!v) return;
     const onTime = () => setT(v.currentTime);
@@ -106,6 +109,26 @@ export function TimelineExportPreview({
 
   return (
     <div className={`npv${compact ? '' : ' npv-lg'}`} data-od-id="timeline-export-preview">
+      {loadErr ? (
+        <div
+          style={{
+            aspectRatio: '16/9',
+            display: 'grid',
+            placeItems: 'center',
+            background: 'var(--surface-warm)',
+            border: '1.5px dashed var(--border)',
+            color: 'var(--meta)',
+            fontSize: 11,
+            textAlign: 'center',
+            padding: '0 16px',
+            lineHeight: 1.7,
+          }}
+        >
+          成片无法加载:{lastExport.name ?? '导出文件'} 可能已被移动或删除
+          <br />
+          重新导出即可恢复预览
+        </div>
+      ) : (
       <div
         className="pv-stage"
         onClick={togglePlay}
@@ -119,6 +142,7 @@ export function TimelineExportPreview({
           muted
           loop
           playsInline
+          onError={() => setLoadErr(true)}
           onClick={(e) => {
             e.stopPropagation();
             togglePlay();
@@ -173,6 +197,7 @@ export function TimelineExportPreview({
           </button>
         </div>
       </div>
+      )}
       {!compact ? (
         <div className="pv-meta">
           <span className="mono mut" style={{ fontSize: 11 }}>

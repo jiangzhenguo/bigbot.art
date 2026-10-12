@@ -228,7 +228,8 @@ export const SHOT_MODE_LABEL: Record<string, string> = {
   'first-frame': '首帧',
   'last-frame': '尾帧',
   'first-last': '首尾帧',
-  'ref-image': 'Ref2VA',
+  /** 关联生成 = h3 Ref2VA(`--ref-image`);UI 用「关联」对齐全中文模式名 */
+  'ref-image': '关联',
   'ref-video': '参考视频',
 };
 /** 参考角色(按 mode 可用的)+ 需要的媒体类型 */

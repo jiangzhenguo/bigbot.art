@@ -30,6 +30,21 @@ import type { TakeStore } from './takes.js';
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 const EXPORT_DIR = join(DATA_DIR, 'exports');
 
+/**
+ * 按**文件名**解析导出目录内的成片(「另存为…」/「存入资源库」用)。
+ *
+ * 渲染层只持有 bba-output:// URL 与文件名(lastExport.name),绝对路径由主进程
+ * 在这里重建:basename 化防目录穿越 + 限定 EXPORT_DIR + 必须真实存在。
+ * 文件缺失返回 null,调用方给「成片文件不存在(可能已被清理)」的人话,而不是假装成功。
+ */
+export function resolveExportFile(name: string | undefined): string | null {
+  const base = basename(String(name ?? ''));
+  if (!base || base === '.' || base.includes('..')) return null;
+  const p = resolve(join(EXPORT_DIR, base));
+  if (!isUnderRoot(p, EXPORT_DIR)) return null;
+  return existsSync(p) ? p : null;
+}
+
 function sanitizeOutputName(name: string | undefined): string {
   const base = basename(name ?? 'timeline').replace(/\.[^.]+$/, '');
   const cleaned = base.replace(/[^\w.\u4e00-\u9fff-]+/g, '_').replace(/^\.+/, '') || 'timeline';
@@ -48,25 +63,36 @@ function isAdvanced(req: TimelineExportRequest): boolean {
   return Array.isArray(req.sequence) && req.sequence.length > 0;
 }
 
-/** 从编排里解出每个 entry 的 resultPath(优先 sequence.takeId → shot 的 currentTakeId → 最新 succeeded) */
+/** 从编排里解出每个 entry 的产物路径(优先 sequence.takeId → shot 的 currentTakeId → 最新 succeeded;
+ *  都没有时回退读**节点自身的 resultPath** —— timeline 成片这类「节点产物型」入线条目没有 Take) */
 function resolveSequencePaths(
   req: TimelineExportRequest,
   takeStore: TakeStore,
+  resolveNodePath?: (projectId: string, nodeId: string) => string | undefined,
 ): Array<{ path: string; nodeId: string; takeId?: string; label: string }> {
   const projectId = req.projectId;
   const out: Array<{ path: string; nodeId: string; takeId?: string; label: string }> = [];
   for (const s of req.sequence ?? []) {
     const hist = takeStore.history(projectId, s.shotNodeId, s.takeId);
     const pick = hist.takes.find((t: { id: string }) => t.id === hist.currentTakeId) ?? hist.takes[0];
-    if (!pick?.resultPath) {
-      throw new Error(`镜头 ${s.shotNodeId.slice(0, 8)} 还没有可导出的 Take(先生成)`);
+    if (pick?.resultPath) {
+      out.push({
+        path: pick.resultPath,
+        nodeId: s.shotNodeId,
+        takeId: pick.id,
+        label: `shot ${s.shotNodeId.slice(0, 6)} · ${pick.id.slice(0, 6)}`,
+      });
+      continue;
     }
-    out.push({
-      path: pick.resultPath,
-      nodeId: s.shotNodeId,
-      takeId: pick.id,
-      label: `shot ${s.shotNodeId.slice(0, 6)} · ${pick.id.slice(0, 6)}`,
-    });
+    /* 节点产物回退(timeline → timeline「成片再入轨」):timeline 节点没有 Take,
+       成片路径写在节点 data.resultPath 上。没有它,这类条目会以「还没有可导出的 Take」
+       把整次导出炸掉(2026-10 接线 timeline 作为视频源时补上)。 */
+    const nodePath = resolveNodePath?.(projectId, s.shotNodeId);
+    if (nodePath) {
+      out.push({ path: nodePath, nodeId: s.shotNodeId, label: `node ${s.shotNodeId.slice(0, 6)} · 节点产物` });
+      continue;
+    }
+    throw new Error(`镜头 ${s.shotNodeId.slice(0, 8)} 还没有可导出的 Take(先生成)`);
   }
   return out;
 }
@@ -220,8 +246,15 @@ function encoderArgs(preset: TimelineExportPreset | undefined): string[] {
 export class ExportService {
   private tasks: ExportTask[] = [];
   private children = new Map<string, ChildProcess>();
-  /** TakeStore 注入(渲染层 sequence 路径解析用);缺省时 sequence 不可用 */
-  constructor(private takeStore?: TakeStore) {}
+  /**
+   * @param takeStore TakeStore 注入(渲染层 sequence 路径解析用);缺省时 sequence 不可用
+   * @param resolveNodePath 节点产物回退解析(timeline 成片入轨:timeline 没有 Take,
+   *   成片路径在节点 data.resultPath;主进程从画布快照读)
+   */
+  constructor(
+    private takeStore?: TakeStore,
+    private resolveNodePath?: (projectId: string, nodeId: string) => string | undefined,
+  ) {}
 
   status(taskId: string): ExportTask {
     const t = this.tasks.find((x) => x.id === taskId);
@@ -236,7 +269,7 @@ export class ExportService {
       if (!this.takeStore) {
         throw new Error('时间线编排导出需要 TakeStore(主进程未注入)');
       }
-      const resolved = resolveSequencePaths(req, this.takeStore);
+      const resolved = resolveSequencePaths(req, this.takeStore, this.resolveNodePath);
       clipList = resolved.map((r) => ({ path: r.path, label: r.label, nodeId: r.nodeId, takeId: r.takeId }));
     } else {
       clipList = req.clips;

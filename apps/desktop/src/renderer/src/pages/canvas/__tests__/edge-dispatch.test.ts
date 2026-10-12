@@ -88,7 +88,7 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect(refs).toContainEqual({ path: '/tmp/out/g1.png', role: 'ref-image', auto: true });
   });
 
-  it('ref-image 边不触发 mode 自动切换(保持 text2video;h3 --ref-image 与 --first-frame 互斥)', () => {
+  it('ref-image 边自动切 mode=ref-image(关联生成;2026-10-12 文生误显事故)', () => {
     const nodes = [
       node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
       node('s1', 'shot', { mode: 'text2video', refs: [] }),
@@ -96,7 +96,41 @@ describe('出边派发 · crop 产物 → 下游', () => {
     const edges: Edge[] = [{ from: 'g1', to: 's1', cls: '', label: 'ref-image' }];
     const { nextNodes } = computeEdgeDerivations(nodes, edges);
     const shot = nextNodes.find((n) => n.id === 's1')!;
-    expect((shot.data as { mode: string }).mode).toBe('text2video');
+    expect((shot.data as { mode: string }).mode).toBe('ref-image');
+  });
+
+  it('first-frame 与 ref-image 并存时 first-frame 优先(h3 互斥)', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('g2', 'image-gen', { resultPath: '/tmp/out/g2.png' }),
+      node('s1', 'shot', { mode: 'text2video', refs: [] }),
+    ];
+    const edges: Edge[] = [
+      { from: 'g1', to: 's1', cls: '', label: 'first-frame' },
+      { from: 'g2', to: 's1', cls: '', label: 'ref-image' },
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect((nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('first-frame');
+  });
+
+  it('删掉 ref-image 入边 ⇒ 自动切的关联模式收回 text2video', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('s1', 'shot', { mode: 'text2video', refs: [] }),
+    ];
+    const once = computeEdgeDerivations(nodes, [{ from: 'g1', to: 's1', cls: '', label: 'ref-image' }]);
+    expect((once.nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('ref-image');
+    const twice = computeEdgeDerivations(once.nextNodes, []);
+    expect((twice.nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('text2video');
+  });
+
+  it('modeOverride=true 时 ref-image 边不改 mode', () => {
+    const nodes = [
+      node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),
+      node('s1', 'shot', { mode: 'text2video', modeOverride: true, refs: [] }),
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, [{ from: 'g1', to: 's1', cls: '', label: 'ref-image' }]);
+    expect((nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('text2video');
   });
 
   /* ── 参考视频(h3 --ref-video):三类视频源之前全被静默丢弃,连线可见但不进生成命令 ── */
@@ -299,5 +333,58 @@ describe('视频 → audio-ref 的派发', () => {
     const edges: Edge[] = [{ from: 's1', to: 'ar', cls: '', label: 'input-audio' }];
     const { nextNodes } = computeEdgeDerivations(nodes, edges);
     expect(d(nextNodes, 'ar').assetId).toBe('manual-audio');
+  });
+});
+
+/**
+ * timeline 作为**视频产物源**(2026-10 接线,用户反馈:「+」弹层只给 document,
+ * 而导出成片本质是视频)。成片路径在 data.resultPath(导出完成时回写),
+ * 派发散落各处都应与 video-upscale 同口径(VIDEO_KINDS 已含 timeline)。
+ */
+describe('timeline 成片 → 下游的派发', () => {
+  const d = (ns: CanvasNode[], id: string) => ns.find((n) => n.id === id)!.data as Record<string, unknown>;
+
+  it('timeline → shot ref-video:写入 refs,路径是成片 mp4', () => {
+    const nodes = [node('tl', 'timeline', { resultPath: '/out/tl.mp4' }), node('s', 'shot')];
+    const edges: Edge[] = [{ from: 'tl', to: 's', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (d(nextNodes, 's').refs ?? []) as Array<{ path?: string; role: string }>;
+    expect(refs).toEqual([{ path: '/out/tl.mp4', role: 'ref-video', auto: true }]);
+  });
+
+  it('timeline → video-upscale / frame-grab:写入 inputVideoFrom(取帧/再增强)', () => {
+    const nodes = [
+      node('tl', 'timeline', { resultPath: '/out/tl.mp4' }),
+      node('vu', 'video-upscale'),
+      node('fg', 'frame-grab'),
+    ];
+    const edges: Edge[] = [
+      { from: 'tl', to: 'vu', cls: '', label: 'input' },
+      { from: 'tl', to: 'fg', cls: '', label: 'input-video' },
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'vu').inputVideoFrom).toEqual({ nodeId: 'tl' });
+    expect(d(nextNodes, 'fg').inputVideoFrom).toEqual({ nodeId: 'tl' });
+  });
+
+  it('timeline → audio-ref:登记 inputAudioFrom(成片音轨可作来源)', () => {
+    const nodes = [node('tl', 'timeline', { resultPath: '/out/tl.mp4' }), node('ar', 'audio-ref', {})];
+    const edges: Edge[] = [{ from: 'tl', to: 'ar', cls: '', label: 'input-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'ar').inputAudioFrom).toEqual({ nodeId: 'tl' });
+  });
+
+  it('timeline → timeline(clip):成片入另一条时间线的 shotNodeIds(兼补 video-upscale 入轨的既有漏派发)', () => {
+    const nodes = [
+      node('tl1', 'timeline', { resultPath: '/out/tl1.mp4' }),
+      node('vu', 'video-upscale', { resultPath: '/out/vu.mp4' }),
+      node('tl2', 'timeline', {}),
+    ];
+    const edges: Edge[] = [
+      { from: 'tl1', to: 'tl2', cls: '', label: 'clip' },
+      { from: 'vu', to: 'tl2', cls: '', label: 'clip' },
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect(d(nextNodes, 'tl2').shotNodeIds).toEqual(['tl1', 'vu']);
   });
 });

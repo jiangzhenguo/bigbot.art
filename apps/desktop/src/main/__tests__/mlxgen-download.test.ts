@@ -87,6 +87,15 @@ describe('mlxgenDownload 去重', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toContain('不在图片模型清单内');
   });
+
+  it('manualOnly 模型(Uncensored 本地包)明确拒绝下载并给构建指引(不假装能下、不起进程)', () => {
+    const before = h.children.length;
+    const r = M.mlxgenDownload('Qwen-Image-2.1-Uncensored-MLX');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('无应用内下载通道');
+    expect(r.error).toContain('build_qwen21_uncensored_package.sh');
+    expect(h.children.length).toBe(before); // 没有起任何下载进程
+  });
 });
 
 describe('停滞看门狗(Xet 挂起形态)', () => {

@@ -36,7 +36,8 @@ describe('ask.user 脏记录防护', () => {
     const loopStart = code.indexOf('for (const tc of result.toolCalls) {');
     expect(loopStart).toBeGreaterThan(-1);
     const skipIdx = code.indexOf("if (tc.name === 'ask.user') continue;", loopStart);
-    const addRecallIdx = code.indexOf('memory.addRecall(req.projectId, {', loopStart);
+    // 2026-10-10 起对话执行体抽为 executeAgentChat(opts),recall 写入的标识符随之改为 opts.projectId
+    const addRecallIdx = code.indexOf('memory.addRecall(opts.projectId, {', loopStart);
     expect(skipIdx).toBeGreaterThan(loopStart);
     expect(addRecallIdx).toBeGreaterThan(skipIdx);
   });

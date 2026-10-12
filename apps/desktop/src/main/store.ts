@@ -174,6 +174,19 @@ export class ProjectStore {
   private saveProjectCanvases(pc: ProjectCanvases): void {
     const f = this.canvasesFile(pc.projectId);
     this.ensureDir(f);
+    // 写前轮换备份(2026-10-11「美女项目画布全空」事故):空快照覆盖事故发生过两次,
+    // 没有备份就只能靠 Take 重建。保留最近 3 份(.bak.1 最新),代价可忽略、可回滚。
+    try {
+      if (existsSync(f)) {
+        try {
+          renameSync(`${f}.bak.2`, `${f}.bak.3`);
+        } catch { /* 不存在则忽略 */ }
+        try {
+          renameSync(`${f}.bak.1`, `${f}.bak.2`);
+        } catch { /* 不存在则忽略 */ }
+        writeFileSync(`${f}.bak.1`, readFileSync(f));
+      }
+    } catch { /* 备份失败不阻断主写入(主写入本身失败才会抛) */ }
     writeFileSync(f, JSON.stringify(pc, null, 2));
     const p = this.docs.projects.find((x) => x.id === pc.projectId);
     if (p) {
@@ -198,7 +211,17 @@ export class ProjectStore {
     // 有内容画布写成了空画布;version 防护挡不住(渲染层版本并不落后),只能靠内容判空兜底。
     // 用户真要清空画布时,渲染层会先删节点(每次删除都算内容变化)→ 那时传的是「非首次」的空快照,
     // 这里按「当前 store 有、传入为空」拒绝;确需清空请走 delete-canvas 或先删到只剩一个节点再删。
-    if (cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0 && (snap.edges?.length ?? 0) === 0) {
+    //
+    // ⚠️ 2026-10-11「美女项目画布全空」事故:旧判定要求 **nodes 与 edges 同时为空**才拦,
+    // 而事故快照是「0 节点 + 1 条悬空边」(pal4→new6,重挂载窗口期 nodesRef 已空、edgesRef 还有边)
+    // —— 边引用的节点不存在,本身就是损坏快照,却被放行覆盖了整个画布。
+    // 故判定收紧为**只看 nodes**:0 节点 + N 边永远是坏快照;0+0 的合法清空依然被拦(同原设计)。
+    if (cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0) {
+      // R6 留痕:拒绝必须可查——这类写入一旦出现就是事故前兆(2026-10-11 实测:
+      // 旧判定被「0 节点 + 1 悬空边」绕过,整个画布被覆盖)
+      console.error(
+        `[store] 拒绝空快照覆盖:canvas=${snap.id} store 有 ${cur.nodes?.length} 节点,传入 0 节点/${snap.edges?.length ?? 0} 边(version ${snap.version} → 当前 ${cur.version})`,
+      );
       this.onCanvasSaved?.(cur);
       return { ok: false, stale: true, current: cur };
     }

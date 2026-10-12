@@ -52,6 +52,16 @@ export const MODEL_CAPABILITIES: Record<string, ImageCapability[]> = {
     'image.outpaint',
   ],
   'AbstractFramework/seedvr2-3b-8bit': ['image.upscale'],
+  // Qwen-Image-2.1 Uncensored(社区 8bit,mlx-gen 本地转换包,2026-10 接入):
+  // text_encoder 为纯语言塔(0 个 visual.* 张量,转换时刻意丢弃 vision tower 省体积),
+  // 能力与历史 8bit 导出同档:qwen21.text + qwen21.latent,**没有** qwen21.edit 参考编辑。
+  // 故只有文生图 + latent 图生图;多参考/指令编辑/inpaint/outpaint 全部没有。
+  'Qwen-Image-2.1-Uncensored-MLX': ['image.generate', 'image.img2img'],
+  // Qwen-Image-2.1-Turbo(2026-10 接入):2.1 的 8 步蒸馏版,采样表内置于 checkpoint
+  // (model_index.json 的 sample_sigmas,引擎原样使用,--steps 被锁成 8)。
+  // 全量 checkpoint 带 vision tower(text_encoder 750 张量含 351 个 visual.*)→ 参考编辑可做,
+  // 能力面与 bf16 相同;与 Uncensored(纯语言塔)截然相反。
+  'Qwen/Qwen-Image-2.1-Turbo': ['image.generate', 'image.img2img', 'image.instruction'],
 };
 
 /**
@@ -84,6 +94,14 @@ const MODEL_ID_ALIASES: Record<string, string> = {
   'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
   'flux2-klein-9b-8bit': 'AbstractFramework/flux.2-klein-9b-8bit',
   'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
+  // Uncensored 本地包:repoId 即目录名(自映射);本地绝对路径按 basename 命中此条
+  'qwen-image-2.1-uncensored': 'Qwen-Image-2.1-Uncensored-MLX',
+  'Qwen-Image-2.1-Uncensored-MLX': 'Qwen-Image-2.1-Uncensored-MLX',
+  // Turbo(2.1 的 8 步蒸馏):短别名与本地目录名 → 官方 repoId
+  'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  'qwen-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  'qwen-image-21-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  'Qwen-Image-2.1-Turbo': 'Qwen/Qwen-Image-2.1-Turbo',
 };
 
 /** 该模型是否支持某能力(查询前先归一化;未知模型一律 false,由提交层防呆兜底) */

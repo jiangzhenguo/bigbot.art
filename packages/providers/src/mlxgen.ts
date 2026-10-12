@@ -91,6 +91,8 @@ export class MlXGenProvider implements Provider {
         'AbstractFramework/z-image-turbo-8bit (Z-Image Turbo, 文生图, ~11GB)',
         'qwen-image (Qwen Image, 文生图)',
         'Qwen/Qwen-Image-2.1 (Qwen-Image-2.1 全量 bf16, 文生图/图生图/参考编辑(1-10 张), ~33GB)',
+        'Qwen/Qwen-Image-2.1-Turbo (Qwen-Image-2.1 Turbo 8步蒸馏, 文生图/图生图/参考编辑, 步数被采样表锁定为8)',
+        'Qwen-Image-2.1-Uncensored-MLX (Qwen-Image-2.1 Uncensored 8bit 本地包, 文生图/图生图, ~22GB)',
         'mlx-community/Qwen-Image-Edit-8bit (Qwen Image Edit 8bit, 指令编辑/mask, ~37.5GB)',
         'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint, ~18GB)',
         'AbstractFramework/seedvr2-3b-8bit (超分修复, ~4.7GB)',
@@ -118,6 +120,16 @@ export class MlXGenProvider implements Provider {
     // 老项目文件 / 老节点里存的模型名仍是它,不给提示会被家族兜底误路由成旧 `qwen.generate`
     // 直接加载失败。列表里已不提供该模型,但历史数据仍要能打开、能给出可用的报错或降级
     'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'qwen-image-2.1',
+    // Qwen-Image-2.1 Uncensored(2026-10 接入):社区 8bit(abenzerps/Qwen-Image-2.1-Uncensored-GGUF)
+    // 经 mlx-gen tools/build_qwen21_uncensored_package.sh 转换的本地 mflux 包,repoId 即目录名。
+    // 无 catalog 命中,必须给家族提示,否则落旧 Qwen 家族兜底误路由(与 bf16 同因)。
+    'Qwen-Image-2.1-Uncensored-MLX': 'qwen-image-2.1',
+    // Qwen-Image-2.1-Turbo(2026-10 接入):官方 catalog 已收录(别名 qwen-image-2.1-turbo),
+    // HF 直传不需要提示;但**本地目录路径**需要(ConfigResolution 按目录内容猜不保证命中),
+    // 且提示必须是 turbo 键 —— 给 'qwen-image-2.1' 会拿到普通 2.1 的采样配置
+    // (requires_sigma_shift=true),与 Turbo 的固定 sample_sigmas 采样表冲突
+    'Qwen/Qwen-Image-2.1-Turbo': 'qwen-image-2.1-turbo',
+    'Qwen-Image-2.1-Turbo': 'qwen-image-2.1-turbo',
   };
 
   /**
@@ -139,6 +151,13 @@ export class MlXGenProvider implements Provider {
     'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
     'qwen-2.1': 'Qwen/Qwen-Image-2.1',
     'qwen-image-21': 'Qwen/Qwen-Image-2.1',
+    // Uncensored 是独立的本地包(不归一化到 bf16):它就是为「不要 vision tower 的纯文生图」
+    // 场景存在的,归一化到 bf16 会让用户选不到它
+    'qwen-image-2.1-uncensored': 'Qwen-Image-2.1-Uncensored-MLX',
+    // Turbo(2.1 的 8 步蒸馏,2026-10):官方 HF 仓库,本地 4bit 目录直用优先
+    'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+    'qwen-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+    'qwen-image-21-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
   };
 
   /**
@@ -152,8 +171,18 @@ export class MlXGenProvider implements Provider {
    */
   /** 该 repo(或本地目录名)是否是可用的 2.1 全量 checkpoint(带 vision tower) */
   private static isQwen21EditModel(model: string): boolean {
+    // ⚠️ Uncensored 本地包(Qwen-Image-2.1-Uncensored-MLX)绝不能被判为可编辑:
+    // 它的 text_encoder 是纯语言塔(0 个 visual.* 张量),qwen21.edit 编码参考图必炸。
+    // 显式排除置前(改名/加正则时必须保持,单测锁:mlxgen.test.ts「Uncensored」组)。
+    if (/uncensored/i.test(model)) return false;
     const base = model.split('/').pop() ?? model;
-    return /Qwen-Image-2\.1-bf16/i.test(base) || /Qwen-Image-2\.1$/i.test(model);
+    // Turbo(2026-10):全量 checkpoint 带 vision tower(750 张量含 351 个 visual.*),
+    // 引擎 edit CLI 已通过 extra_keys 接受 qwen-image-2.1-turbo → 可编辑
+    return (
+      /Qwen-Image-2\.1-bf16/i.test(base) ||
+      /Qwen-Image-2\.1-Turbo/i.test(base) ||
+      /Qwen-Image-2\.1$/i.test(model)
+    );
   }
 
   /**
@@ -172,6 +201,14 @@ export class MlXGenProvider implements Provider {
     // 兼容曾用过 8bit 本地目录的用户:仍认这个目录名,但归一化到同一份 bf16 模型
     // (旧目录若还在也只作路径解析,编辑能力以 bf16 为准)
     'JoyFusionAI/Qwen-Image-2.1-MLX-8bit': 'Qwen-Image-2.1-bf16',
+    // Qwen-Image-2.1 Uncensored 本地包(2026-10):引擎侧 build_qwen21_uncensored_package.sh
+    // 产出的 mflux prepared package(transformer 预量化 8bit 分片 + 纯语言塔 text_encoder +
+    // vae + processor)。只直用本地目录,没有 HF 缓存下载通道(社区源是单文件 GGUF,
+    // 需本地转换);目录缺失时回退 repoId → 走 mlxgen 解析会失败,属诚实报错
+    'Qwen-Image-2.1-Uncensored-MLX': 'Qwen-Image-2.1-Uncensored-MLX',
+    // Qwen-Image-2.1-Turbo(2026-10):本机 4bit 全量目录(13GB,带 vision tower + sample_sigmas)
+    'Qwen/Qwen-Image-2.1-Turbo': 'Qwen-Image-2.1-Turbo',
+    'Qwen-Image-2.1-Turbo': 'Qwen-Image-2.1-Turbo',
     // FLUX.2 Klein 9B:官方 AbstractFramework 仓库在 HF 上是 gated,国内直连常不通;
     // 实际来源是 ModelScope 的 mlx-community/flux2-klein-9b-8bit(与之同源),
     // 下到本地模型根后即以散装目录直用,免下载、免 HF 授权。
@@ -271,6 +308,16 @@ export class MlXGenProvider implements Provider {
     // 本地直用目录优先(免下载):repoId 在本地模型根下有就绪目录时改用该路径;
     // BASE_MODEL_HINTS 仍按 repoId 查——路由提示与「模型在哪」无关,二者必须一起生效
     const localDir = MlXGenProvider.localDirFor(repoModel);
+    // Uncensored 没有 HF 下载通道(repoId 即本地目录名,不是真实仓库):目录缺失时
+    // 若放行,mxgen 会拿它去 HF 解析然后报一个看不懂的错误 —— 提前拦截给可执行指引
+    if (!localDir && repoModel === 'Qwen-Image-2.1-Uncensored-MLX') {
+      throw new Error(
+        'Qwen-Image-2.1 Uncensored 是本地转换包,当前机器未找到 ~/ai/models/Qwen-Image-2.1-Uncensored-MLX:' +
+          '请先在 mlx-gen 仓库运行 tools/build_qwen21_uncensored_package.sh 构建' +
+          '(源模型 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 需另行下载);' +
+          '或把节点模型改为 Qwen/Qwen-Image-2.1(bf16 全量,可应用内下载)',
+      );
+    }
     const model = localDir ?? repoModel;
     const taskId = `mlxgen-${kind}-${Date.now()}`;
     const outBase = `${this.outDir}/${req.nodeId}_${taskId}`;
@@ -295,8 +342,11 @@ export class MlXGenProvider implements Provider {
       // 其余模型维持 24 步 + guidance 1.0 的既有默认(见 mlxgen 各模型 README)
       // 按 **repoModel 正则**判 2.1 族(不能只匹配某一个 repoId:本地路径时 model 是目录,
       // 且 2.1 现有 bf16 与历史 8bit 两个标识,漏一个就会让 40 步默认静默回落成 24)
+      // Turbo(2026-10):8 步蒸馏,采样表(sample_sigmas)内置于 checkpoint,
+      // 引擎会把步数锁成 len(sigmas)=8、忽略 --steps —— 默认给 8 让 UI/日志说真话
+      const isQwen21Turbo = /qwen.*2\.1.*turbo/i.test(repoModel);
       const isQwen21 = /qwen.*2\.1/i.test(repoModel);
-      const defSteps = isQwen21 ? 40 : 24;
+      const defSteps = isQwen21Turbo ? 8 : isQwen21 ? 40 : 24;
       // ⚠️ 根因记录(2026-09,真实事故:klein exit 2 且表现为「同参数一次成一次败」):
       // FLUX.2 Klein 是**蒸馏**模型,裸 `mflux-generate-flux2` 只对 FLUX.2 **base** 模型接受
       // `--guidance`;给 klein 传会被 argparse 直接拒绝并退出:
@@ -439,7 +489,9 @@ export class MlXGenProvider implements Provider {
         // 且没有任何地方能让用户看出来(2.1 上 40 步约 4 分钟,6 步版仅 54-92 秒)。
         // 现在两端统一 30:检查器负责写回 data,这里的兜底只作**安全网**
         // (历史节点 / Agent 直传 data 未带 steps 时),不再是一套隐藏默认值。
-        cmd.push('--steps', String(Number(p.steps ?? 30)));
+        // Turbo 例外:采样表内置、引擎锁 8 步(忽略 --steps),兜底给 8 让日志说真话
+        const isTurboEdit = /qwen.*2\.1.*turbo/i.test(repoModel);
+        cmd.push('--steps', String(Number(p.steps ?? (isTurboEdit ? 8 : 30))));
         if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
         if (seeds.length > 0) {
           cmd.push('--seed');

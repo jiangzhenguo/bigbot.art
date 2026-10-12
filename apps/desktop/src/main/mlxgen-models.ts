@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { DebugLogger } from './logger';
 import { runMsDownload } from './ms-download';
+import { isMlxVlCheckpoint } from './mlxgen-caption';
 
 export interface MlxModelInfo {
   id: string;
@@ -28,8 +29,19 @@ export interface MlxModelInfo {
 }
 
 /** 已知图片模型清单(与设置页「模型下载」分组同口径;下载白名单)
- *  msRepoId 存在 = 走 ModelScope 直连通道(实测 sha256 与 HF LFS oid 一致) */
-const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?: string; localDir?: string }> = [
+ *  msRepoId 存在 = 走 ModelScope 直连通道(实测 sha256 与 HF LFS oid 一致)
+ *  localCheckpointDirs = 直接可用的**扁平 MLX-VL checkpoint 目录**(LM Studio 那种布局,
+ *  没有 `transformer/` 子层),命中即「已就绪」——见 qwen3-vl-8b-caption 行 */
+const KNOWN_MODELS: Array<{
+  id: string;
+  name: string;
+  repoId: string;
+  msRepoId?: string;
+  localDir?: string;
+  /** LM Studio 模型库下的相对目录(扁平 MLX-VL checkpoint;调用期用 lmStudioModelsRoot() 拼绝对路径) */
+  lmstudioDir?: string;
+  manualOnly?: boolean;
+}> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', repoId: 'AbstractFramework/z-image-turbo-8bit' },
   // Qwen-Image-2.1 MLX 8bit（JoyFusionAI 自建导出，24GB / 本地 22GB）：
   // MS 仓库名与 HF repo 不同名，故 msRepoId 必须显式给出（其余条目同名可省略）；
@@ -41,6 +53,28 @@ const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?:
   // 且缺 per-component config.json → 跑编辑直接失败。留两个只会让用户在「文生图选了 8bit、
   // 想编辑时编辑不了」上踩坑。无 msRepoId(HF 官方仓库,走 HF 通道)
   { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1 (bf16 全量)', repoId: 'Qwen/Qwen-Image-2.1', localDir: 'Qwen-Image-2.1-bf16' },
+  // Qwen-Image-2.1-Turbo(2026-10 接入):2.1 的 8 步蒸馏版,采样表内置于 checkpoint
+  // (model_index.json 的 sample_sigmas,引擎锁 8 步、忽略 --steps);全量带 vision tower,
+  // 参考编辑(qwen21.edit)可做。官方 HF 仓库、ModelScope 有同名直连镜像;
+  // 本地目录直用优先(本机为 4bit 量化目录,13GB)
+  {
+    id: 'qwen-image-2.1-turbo',
+    name: 'Qwen-Image-2.1 Turbo (8步蒸馏)',
+    repoId: 'Qwen/Qwen-Image-2.1-Turbo',
+    msRepoId: 'Qwen/Qwen-Image-2.1-Turbo',
+    localDir: 'Qwen-Image-2.1-Turbo',
+  },
+  // Qwen-Image-2.1 Uncensored(2026-10 接入):社区 8bit 转换包,纯文生图/图生图
+  // (text_encoder 无 vision tower,做不了参考编辑)。repoId 即本地目录名 ——
+  // 没有 HF 下载通道(源是单文件 GGUF,需 mlx-gen tools/build_qwen21_uncensored_package.sh
+  // 本地转换),故 manualOnly:就绪判定只看 localDir,下载入口明确拒绝
+  {
+    id: 'qwen-image-2.1-uncensored',
+    name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)',
+    repoId: 'Qwen-Image-2.1-Uncensored-MLX',
+    localDir: 'Qwen-Image-2.1-Uncensored-MLX',
+    manualOnly: true,
+  },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', msRepoId: 'mlx-community/Qwen-Image-Edit-8bit' },
   // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需)。
   // 官方 AbstractFramework 仓库在 HF 上是 gated(需登录授权),且国内直连常不通;
@@ -56,8 +90,33 @@ const KNOWN_MODELS: Array<{ id: string; name: string; repoId: string; msRepoId?:
     localDir: 'flux2-klein-9b-8bit',
   },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit' },
-  { id: 'qwen2.5-vl', name: 'Qwen2.5-VL', repoId: 'Qwen/Qwen2.5-VL-7B-Instruct', msRepoId: 'Qwen/Qwen2.5-VL-7B-Instruct' },
+  // 看图反推(Agent `vision.caption` 的本地通道,2026-10 对接 mlx-gen 的 `mlxgen-caption`)。
+  // ⚠️ 必须是 **MLX 格式 dense Qwen3-VL**(mlx-lm / mlx-vlm 布局:`language_model.*` +
+  // `vision_tower.*`)。原先那行 `qwen2.5-vl`(Qwen/Qwen2.5-VL-7B-Instruct)是 **torch 布局**,
+  // 且不是 Qwen3-VL 家族 —— mlx-gen 的两个入口(generate / caption)都加载不了它,
+  // 等于「下得下来但用不了」的假通道,故本次替换(见 docs/mlxgen-图片引擎-安装与模型管理.md §6.1)。
+  //
+  // 模型选型 = V4.5 caption 微调(NSFW-Caption-V4.5,5.4GB):**它的目的是提示词反推**,
+  // 比通用 Instruct checkpoint 更贴合「看图写提示词」,也是本机既有那份(在 LM Studio 里)。
+  // ⚠️ **没有 ModelScope 镜像**(2026-10 实测 gavinmroy/ Disty0/ thesby/ 三个上游全部 record not found),
+  // 故**不给 msRepoId** —— 应用内下载只能走 `spawn mlxgen download`(HF);HF 直连不通的环境
+  // 请在 LM Studio 里下载(它有自己的通道),下完由下面这条本地探测直接认成「已就绪」。
+  {
+    id: 'qwen3-vl-8b-caption',
+    name: 'Qwen3-VL 8B (看图反推 · caption 微调)',
+    repoId: 'gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit',
+    // 扁平 MLX-VL 目录(LM Studio 布局,无 transformer/ 子层)→ 用 isMlxVlCheckpoint 探
+    lmstudioDir: 'gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit',
+  },
 ];
+
+/**
+ * LM Studio 模型库根(LM Studio 自己的下载通道落盘处)。
+ * `BIGBOTART_LMSTUDIO_MODELS` 可覆盖(LM Studio 允许把模型库搬到别的盘)
+ */
+export function lmStudioModelsRoot(): string {
+  return process.env.BIGBOTART_LMSTUDIO_MODELS ?? join(homedir(), '.lmstudio', 'models');
+}
 
 /**
  * 本地模型目录根(用户已自行下载/导出的模型,免重复下载 20GB+)。
@@ -228,6 +287,12 @@ export function mlxgenModelInfo(logger?: DebugLogger): MlxModelInfo[] {
         const cand = join(localModelsRoot(), m.localDir);
         if (isLocalModelDir(cand)) localPath = cand;
       }
+      // 扁平 MLX-VL checkpoint(LM Studio 布局):没有 transformer/ 子层,用专门判定
+      // —— 本机那份 Qwen3-VL 8B caption 就在 LM Studio 模型库里,不认它就会显示「未下载」
+      if (m.lmstudioDir) {
+        const cand = join(lmStudioModelsRoot(), m.lmstudioDir);
+        if (isMlxVlCheckpoint(cand)) localPath = cand;
+      }
     } catch (e) {
       logger?.log('warn', `mlxgen 本地模型目录探测失败 ${m.id}: ${(e as Error).message}`);
     }
@@ -312,6 +377,16 @@ export function mlxgenDownload(
 ): { ok: boolean; jobId?: string; error?: string } {
   const known = KNOWN_MODELS.find((m) => m.repoId === repoId);
   if (!known) return { ok: false, error: `不在图片模型清单内: ${repoId}` };
+  // manualOnly 模型没有下载通道(如 Uncensored 本地转换包):不假装能下,直接给构建指引
+  if (known.manualOnly) {
+    return {
+      ok: false,
+      error:
+        `${known.name} 无应用内下载通道:需在 mlx-gen 仓库运行 ` +
+        'tools/build_qwen21_uncensored_package.sh 从社区 GGUF 本地转换构建' +
+        '(源 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 需另行下载)',
+    };
+  }
   const activeId = activeByRepo.get(repoId);
   const active = activeId ? jobs.get(activeId) : undefined;
   if (active?.status === 'running') {

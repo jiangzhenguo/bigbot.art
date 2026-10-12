@@ -59,6 +59,7 @@ mlxgen --help          # 应打印帮助与版本号
 | 指令编辑 / mask | `mlx-community/Qwen-Image-Edit-8bit` | ~37.5GB | image-edit `instruction` / `inpaint`;8bit 量化版(官方原版 57.7GB,64GB 内存跑不动)。生成时 Provider 自动追加 `--base-model Qwen/Qwen-Image-Edit`(不给会被误路由成文生图 handler) |
 | 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | image-edit 多参考 / 扩图 |
 | 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~4.7GB | image-upscale |
+| 看图反推(图片 → 文本) | `gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit` | ~5.4GB | Agent `vision.caption` 的**本地通道**(`mlxgen-caption`,2026-10 接入,见 §6.1)。V4.5 caption 微调(专为提示词反推),必须是 **MLX 格式 dense Qwen3-VL**;原 `qwen2.5-vl`(torch 布局)mlx-gen 加载不了,已替换。⚠️ **无 ModelScope 镜像** → 应用内下载走 HF 通道;HF 不通时在 LM Studio 里下(下完自动认「已就绪」) |
 
 *体积 = HF 官方文件清单实测汇总(2026-09;设置页/检查器展示同口径)。Qwen-Image-2.1 bf16 全量约 33GB(本地目录实测 31GB)
 
@@ -174,7 +175,7 @@ App 侧:检查器把模型选为「Qwen-Image-2.1 (bf16 全量 · 参考编辑)�
 ## 4. 应用内「设置管理模型」入口
 
 - 设置页「引擎」分组:`mlxgen(图片主引擎)` 行右侧 **「管理模型」** 按钮(当前跳到「模型」分组——该分组是 **LLM 本地模型**(LM Studio / Ollama / pi-mlx)管理,用于 Agent 规划内核;**mlxgen 图像模型**的下载在设置页「模型下载」分组,也可 CLI `mlxgen download`)。
-- 设置页「模型下载」分组:白名单 5 个模型(Z-Image-Turbo / Qwen-Image-2.1 / Qwen Image Edit / SeedVR2 3B / Qwen2.5-VL)。**双通道下载**:Qwen 系(MS 有镜像、sha256 与 HF LFS oid 一致)默认走 **ModelScope 国内 CDN 直连**(`apps/desktop/src/main/ms-download.ts`,主进程按 HF 缓存布局落盘,断点续传 + 4 路并发 + 多轮自愈 + 停滞看门狗,不依赖 HF 可达性;`BIGBOTART_MS_DOWNLOAD=0` 可强制回退 HF);其余模型走 `spawn mlxgen download`(HF),Xet/CAS 报错自动 `HF_HUB_DISABLE_XET=1` 重试,**同一模型去重**(连点复用进行中任务,防多进程互等 hf_hub 锁),**停滞看门狗**(blobs 连续 5 分钟零字节增长判定挂起,杀掉切经典通道重试)。
+- 设置页「模型下载」分组:白名单 8 个模型(Z-Image-Turbo / Qwen-Image-2.1 / Qwen-Image-2.1-Turbo / Qwen-Image-2.1-Uncensored(手动构建)/ Qwen Image Edit / FLUX.2 Klein 9B / SeedVR2 3B / **Qwen3-VL 8B caption(看图反推)**)。**双通道下载**:Qwen 系(MS 有镜像、sha256 与 HF LFS oid 一致)默认走 **ModelScope 国内 CDN 直连**(`apps/desktop/src/main/ms-download.ts`,主进程按 HF 缓存布局落盘,断点续传 + 4 路并发 + 多轮自愈 + 停滞看门狗,不依赖 HF 可达性;`BIGBOTART_MS_DOWNLOAD=0` 可强制回退 HF);其余模型走 `spawn mlxgen download`(HF),Xet/CAS 报错自动 `HF_HUB_DISABLE_XET=1` 重试,**同一模型去重**(连点复用进行中任务,防多进程互等 hf_hub 锁),**停滞看门狗**(blobs 连续 5 分钟零字节增长判定挂起,杀掉切经典通道重试)。
 - **「已下载」判定 = HF 缓存完整性校验**(`apps/desktop/src/main/mlxgen-models.ts` 的 `isCacheComplete`):① blobs 无「无主」`*.incomplete` 中断分块;② snapshot 有可解析的非空文件且无悬空链接;③ 至少一个权重文件(只有配置/分词器不算模型);④ 有 `*.safetensors.index.json` 时其引用的分片必须齐全。注意:Xet→经典通道重试成功后旧 `.incomplete` 分块不清理(同名 blob 已完成),属正常残渣,不会误判为未下载;下载中途掐断(空壳 snapshot / 中断分块 / 权重为零 / 分片缺失)会正确显示「未下载」,重下即可断点续传。
 - 节点内选模型:image-gen / image-edit 检查器的「模型」输入框可直接填任意模型 id(与 §3 清单一致);提交时原样传给 `mlxgen`。
 
@@ -208,6 +209,67 @@ App 侧:检查器把模型选为「Qwen-Image-2.1 (bf16 全量 · 参考编辑)�
 
 > 「🟠」= 骨架期薄映射:截至本文档,本机未安装 mlxgen,四种编辑模式的 CLI 差异无法在真机上验证。安装模型后可跑通闭环,再按真实 CLI 细化各模式参数(建议优先补 inpaint mask / outpaint 边距 / img2img 强度)。
 
+### 6.1 图片 → 文本(看图反推,`mlxgen-caption`,2026-10 对接)
+
+生成路线的**逆向**:一张图 → 一段文字(提示词反推 / 画面描述)。引擎侧是新增的
+`mlxgen-caption`(模块 `mflux.models.qwen3_vl_caption.cli.caption`),用**本地 MLX 格式 Qwen3-VL**
+跑 mlx-gen 自己的 decoder + vision tower,**不需要 LM Studio 或任何 server**。
+
+```bash
+# 直接跑引擎(本地目录或已下载的 repo id 都行;引擎**不会**在运行时联网下载)
+mlxgen-caption \
+  --model ~/.lmstudio/models/gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit \
+  --image-path photo.jpg \
+  --prompt-preset zh \
+  --max-pixels 640000 \
+  --output caption.txt
+```
+
+**App 侧怎么用**:Agent 工具 `vision.caption` 现在有两条通道,由 `apps/desktop/src/main/vision.ts`
+统一编排、`apps/desktop/src/main/mlxgen-caption.ts` 负责本地通道执行:
+
+| 通道 | 依赖 | 选择方式 |
+|---|---|---|
+| 端点(`endpoint`) | LM Studio / 任意 OpenAI 兼容多模态端点**要在跑** | 设置 → 工具模型 → 看图反推 → 本地 LM Studio / 云端 / OpenAI 兼容端点;env `BIGBOTART_VL_*` |
+| 本地引擎(`mlxgen`) | 只要有 MLX 格式 Qwen3-VL checkpoint | 设置 → 工具模型 → 看图反推 → **本地 · mlxgen-caption**(免 LM Studio) |
+
+选择顺序:**设置页显式绑定 > `BIGBOTART_CAPTION_BACKEND=endpoint|mlxgen` > `auto`**(本机命令 +
+checkpoint 都齐 → 本地,否则端点链 —— 存量行为不变)。**回退只在 auto 下发生**,且工具返回里会明写
+「主通道 X 失败已回退 Y」(`note` 字段),显式指定通道时失败就报失败。
+
+**「看图反推」那一格填什么**:三种写法都认 —— ①checkpoint **目录绝对路径**;②**`owner/name` 仓库 id**(引擎去本地缓存找);
+③**裸模型名**(如 LM Studio 里的 `qwen3-vl-8b-nsfw-caption-v4.5-affine`)→ 按归一化名字自动匹配到本机已发现的 checkpoint。
+**留空 = 自动发现**。填错时不再笼统报「通道不可用」,而是给出具体原因(目录不存在 / 目录不是合格 MLX dense Qwen3-VL /
+既不是目录也不是仓库 id 且匹配不到,并列出本机已发现的候选)。
+
+相关环境变量:
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BIGBOTART_CAPTION_BACKEND` | `auto` | `auto` / `endpoint` / `mlxgen` |
+| `BIGBOTART_CAPTION_MODEL` | 自动发现 | checkpoint 目录或 HF repo id |
+| `BIGBOTART_CAPTION_BIN` | — | 可执行文件路径(配 `BIGBOTART_CAPTION_MODULE=1` 时视为解释器,走 `-m` 模块入口) |
+| `BIGBOTART_CAPTION_MODEL_ROOTS` | `~/.lmstudio/models:~/.ai/models` | 额外扫描根(`:` 分隔);自动发现还会扫 HF 缓存 `snapshots/` |
+| `BIGBOTART_CAPTION_MAX_PIXELS` | `640000` | 图片 token 预算(≈800×800),prefill 成本随其平方增长,是主要速度旋钮 |
+| `BIGBOTART_CAPTION_MAX_TOKENS` | `1024` | 生成长度(caption 模型卡建议 2048) |
+| `BIGBOTART_CAPTION_TIMEOUT_MS` | `300000` | 单次超时 |
+| `BIGBOTART_CAPTION_FALLBACK` | 开 | 设 `0` 关闭跨通道回退 |
+
+⚠️ **checkpoint 必须带 vision tower 的 MLX 格式 dense Qwen3-VL**(2B/4B/8B/32B,bf16 或已量化):
+torch/HF 原始布局与 MoE `qwen3_vl_moe` 会被引擎**明确拒绝**(报第一个不匹配的 key),不会静默给坏结果。
+**模型清单里已有这一行**:设置页「模型下载」→ **Qwen3-VL 8B caption 微调**
+(`gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit`,~5.4GB)。
+⚠️ **该仓库没有 ModelScope 镜像**(2026-10 实测 `gavinmroy/` `Disty0/` `thesby/` 三个上游在 MS 全部 record not found),
+所以应用内下载只能走 `spawn mlxgen download`(HF 通道);**HF 直连不通的环境请在 LM Studio 里下载**
+(LM Studio 有自己的通道),下完 App 的本地探测会**直接认成「已就绪」**——它探的是
+`~/.lmstudio/models/gavinmroy/...` 这个扁平 MLX-VL 目录(`KNOWN_MODELS` 的 `lmstudioDir` + `isMlxVlCheckpoint`),
+不需要用户再配任何路径。放在 `~/ai/models` 或 HF 缓存的其它 MLX Qwen3-VL 也会被自动发现(N 个里 caption 微调排最前)。
+原 `qwen2.5-vl` 那行是 **torch 布局**,两个入口(generate / caption)都加载不了,故已替换(2026-10)。
+
+**实测成本**(本机 M5 Pro / 64GB,`Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit` 5.4GB):
+640×480 一张 15.7 秒、857 字符;引擎 doc 记 1920×1080 冷启动 4.2 秒、峰值 6.3GB。
+opt-in 真跑用例:`BIGBOTART_CAPTION_E2E=1 pnpm vitest run apps/desktop/src/main/__tests__/mlxgen-caption-e2e.test.ts`。
+
 ---
 
 ## 7. 排障表
@@ -223,6 +285,11 @@ App 侧:检查器把模型选为「Qwen-Image-2.1 (bf16 全量 · 参考编辑)�
 | `exit 2: Qwen Image Edit does not support latent image-to-image` | img2img 模式配了 Qwen Edit 模型(无 latent I2I) | 检查器把模型改为 `AbstractFramework/z-image-turbo-8bit`,或改用指令编辑模式(Provider 已前置拦截此组合) |
 | 图片编辑命令行为与模式不符 | 骨架期薄映射(§6) | 暂以手动指定模型兜底;后续按真实 CLI 校准 |
 | 图片槽位一直排队 | 与视频任务互斥 | 等视频任务完成(FIFO) |
+| 模型下载行「Qwen3-VL 8B caption」点下载报 HF 错误 | 该仓库无 ModelScope 镜像,只能走 HF;本机 HF 直连不可达 | 在 LM Studio 里下载(下完 App 自动认「已就绪」),或设 `HF_ENDPOINT=<镜像>` 后用 `mlxgen download` 手动拉 |
+| `vision.caption` 报 `fetch failed` 且提示「未单独配置看图模型」 | 走的是**端点通道**而端点不可达(最常见:LM Studio 没在跑);⚠️ 若你刚在设置页配好「本地 mlxgen-caption」仍报这个,**说明应用主进程还是改动前启动的** | 重启应用(主进程代码只在启动时加载);或直接在设置页选「本地 · mlxgen-caption」(免 LM Studio) |
+| `vision.caption` 报「本地看图通道不可用」 | `mlxgen-caption` 命令缺失(**旧 venv 里没有这个 console script**,引擎 2026-10 才加)或本机没有 MLX 格式 Qwen3-VL | 在 mlx-gen 仓库 `uv tool install --editable .` 重装;或 `BIGBOTART_CAPTION_BIN=<可执行路径>`。App 已内置 shebang 回退(用 `mlxgen` 的解释器跑模块),若仍报此错说明 `mlxgen` 也不在 PATH |
+| `vision.caption` 报「未产出文本」 | checkpoint 不是 MLX 格式 dense Qwen3-VL(torch 布局 / MoE),或输出被截断 | 换 `mlx-community` / `mlx-vlm` 转换过的仓库;报错里的 `do not map` 段会点名第一个不匹配的 key;截断则调大 `BIGBOTART_CAPTION_MAX_TOKENS` |
+| `vision.caption` 变慢 / 内存高 | 图片 token 预算过大(prefill 随其平方增长) | 调小 `BIGBOTART_CAPTION_MAX_PIXELS`(默认 640000 已接近 800×800) |
 
 ---
 
@@ -233,3 +300,4 @@ App 侧:检查器把模型选为「Qwen-Image-2.1 (bf16 全量 · 参考编辑)�
 - 输出目录默认:`MLXGEN_DEFAULTS.outputDir`(`BIGBOTART_MLXGEN_OUTPUTS ?? ~/.bigbotart/outputs/images`)
 - 节点渲染:image-gen / image-edit / image-upscale 检查器在 `apps/desktop/src/renderer/src/pages/canvas/inspector/InspectorBody.tsx`;提交链路在 `CanvasPage.tsx` `runNode`
 - 安装提示:`apps/desktop/src/main/index.ts` `install-runtime`(mlxgen → `uv tool install --upgrade mlx-gen`)
+- 看图反推两条通道(§6.1):`apps/desktop/src/main/vision.ts`(通道编排 / 白名单 / 指令 / 回退)+ `apps/desktop/src/main/mlxgen-caption.ts`(命令解析含 shebang 回退 / checkpoint 发现 / spawn / 错误面);设置入口 `apps/desktop/src/renderer/src/pages/ToolModelsSection.tsx`,绑定字段 `ToolModelBinding.captionLocal`(`packages/shared/src/domain.ts`)

@@ -689,6 +689,33 @@ function annotateLlmError(raw: string): string {
   return raw;
 }
 
+/**
+ * 工具名净化(Kimi coding 等端点,2026-10-10「kimi-coding 对话 400」事故):
+ * 这类端点只接受 [a-zA-Z0-9_-] 的 function 名,含 '.' 直接报
+ * 400「function name is invalid, must start with a letter and can contain
+ * letters, numbers, underscores, and dashes」—— 而本项目工具名全是「域.动作」
+ * 格式(canvas.list_nodes / engine.submit)。
+ * 处理:**首次撞上该错误时**,本会话把工具定义切换成短横线别名(canvas-list_nodes)
+ * 并重试本轮;模型回传的调用名再映射还原供闸判/工具桥使用。历史里的 assistant 块
+ * 保持别名原样不动(协议一致性:声明用什么名,调用与 toolResult 就用什么名,
+ * 否则第二轮请求又会因历史里的点号名被 400)。
+ * 全部工具名均为单点号且无短横线(tool-name-sanitize 测试锁定),映射可逆。
+ * 切换只会实际发生在第 0 轮:任何一轮成功都说明端点接受了当时的工具名。
+ */
+const FUNC_NAME_INVALID_RE = /function name is invalid|invalid function name/i;
+
+/**
+ * 端点拒绝自定义 temperature 的错误特征(Kimi k3,2026-10-10 实测:
+ * 400「invalid temperature: only 1 is allowed for this model」)。
+ * 撞上即本会话改走端点默认(不下发 temperature 字段)重试,与工具名净化同一手法。
+ */
+const TEMPERATURE_INVALID_RE = /invalid temperature|temperature.*only .*allowed/i;
+
+/** 内部名 → 端点别名('.' → '-') */
+export const sanitizeToolName = (name: string): string => name.replace(/\./g, '-');
+/** 端点别名 → 内部名(首个 '-' → '.';无 '-' 原样返回,幂等) */
+export const desanitizeToolName = (name: string): string => name.replace('-', '.');
+
 function splitThink(raw: string): { text: string; thinking?: string } {
   const thinks: string[] = [];
   const cleaned = raw.replace(/<think>([\s\S]*?)(?:<\/think>|$)/g, (_m, inner: string) => {
@@ -840,7 +867,15 @@ export class PiChatSession {
       { role: 'user', content: userText, timestamp: Date.now() } as Message,
     ];
 
-    const tools = toolDefinitions() as never;
+    /** 端点拒绝点号工具名时置 true,工具定义改用短横线别名(见 sanitizeToolName 注释) */
+    let sanitizeNames = false;
+    /** 端点拒绝自定义 temperature 时置 true,之后不再下发该字段(见 TEMPERATURE_INVALID_RE) */
+    let dropTemperature = false;
+    const buildTools = (): unknown[] => {
+      const defs = toolDefinitions();
+      return sanitizeNames ? defs.map((t) => ({ ...t, name: sanitizeToolName(t.name) })) : defs;
+    };
+    let tools = buildTools() as never;
 
     /** 本轮对话里是否已有成功的 engine.submit(提交成功即进入「收尾期」) */
     let submitted = false;
@@ -886,12 +921,28 @@ export class PiChatSession {
         assistant = await models.complete(models.getModel('bigbotart-llm', ep.modelId)!, context, {
           // 输出预算:见 LLM_MAX_TOKENS(2026-09-28 由 12000 调大到 32000)
           maxTokens: LLM_MAX_TOKENS,
-          temperature: 0.4,
+          // Kimi k3 等端点只允许 temperature=1:撞上后不再下发该字段(走端点默认)
+          ...(dropTemperature ? {} : { temperature: 0.4 }),
           apiKey: ep.apiKey ?? 'unused',
           signal,
         });
       } catch (e) {
         if (signal.aborted) return { reply: '', toolCalls, aborted: true };
+        // 端点拒绝含点号的 function 名(抛异常形态)→ 切换短横线别名重试本轮
+        if (!sanitizeNames && FUNC_NAME_INVALID_RE.test(e instanceof Error ? e.message : String(e))) {
+          sanitizeNames = true;
+          tools = buildTools() as never;
+          console.error('[pi-chat] 端点拒绝含点号的工具名,已切换短横线别名重试');
+          round--;
+          continue;
+        }
+        // 端点拒绝自定义 temperature(抛异常形态)→ 不再下发该字段重试本轮
+        if (!dropTemperature && TEMPERATURE_INVALID_RE.test(e instanceof Error ? e.message : String(e))) {
+          dropTemperature = true;
+          console.error('[pi-chat] 端点不接受自定义 temperature,已改走端点默认重试');
+          round--;
+          continue;
+        }
         // LLM 请求失败(401/超时/不可达)必须向上抛,让主进程返回 {ok:false, error}
         // ——静默吞掉会让错误端点表现为"成功但空回复"
         throw e;
@@ -900,7 +951,25 @@ export class PiChatSession {
       }
       if (assistant.stopReason === 'aborted') return { reply: '', toolCalls, aborted: true };
       if (assistant.stopReason === 'error' || assistant.errorMessage) {
-        throw new Error(`LLM 返回错误: ${annotateLlmError(assistant.errorMessage ?? assistant.stopReason)}`);
+        const errMsg = assistant.errorMessage ?? String(assistant.stopReason);
+        // 端点拒绝含点号的 function 名(stopReason=error 形态,实测 Kimi coding 走这条)→
+        // 切换短横线别名重试本轮。此刻 assistant 块尚未入 history,切换无协议不一致风险。
+        if (!sanitizeNames && FUNC_NAME_INVALID_RE.test(errMsg)) {
+          sanitizeNames = true;
+          tools = buildTools() as never;
+          console.error('[pi-chat] 端点拒绝含点号的工具名,已切换短横线别名重试');
+          round--;
+          continue;
+        }
+        // 端点拒绝自定义 temperature(stopReason=error 形态,实测 Kimi k3 走这条)→
+        // 不再下发该字段重试本轮
+        if (!dropTemperature && TEMPERATURE_INVALID_RE.test(errMsg)) {
+          dropTemperature = true;
+          console.error('[pi-chat] 端点不接受自定义 temperature,已改走端点默认重试');
+          round--;
+          continue;
+        }
+        throw new Error(`LLM 返回错误: ${annotateLlmError(errMsg)}`);
       }
 
       // 调试:记录本轮 LLM 返回结构
@@ -924,8 +993,17 @@ export class PiChatSession {
         return all || undefined;
       };
 
-      // 收集本轮 toolCalls 并执行
-      const calls = blocks.filter((c): c is ToolCall => c.type === 'toolCall');
+      // 收集本轮 toolCalls 并执行。
+      // sanitizeNames 模式下模型回传的是短横线别名:映射还原成内部名(拷贝,不改 blocks ——
+      // assistant 块要原样入 history,保持「声明名/调用名」一致,否则下一轮请求又被 400)。
+      // rawName 保留端点别名,toolResult 的 toolName 必须用它(协议一致性)。
+      const calls: Array<ToolCall & { rawName?: string }> = blocks
+        .filter((c): c is ToolCall => c.type === 'toolCall')
+        .map((c) => {
+          if (!sanitizeNames) return c;
+          const orig = desanitizeToolName(c.name);
+          return orig === c.name ? c : { ...c, name: orig, rawName: c.name };
+        });
       console.error(`[pi-chat] round=${round} calls=${calls.map((c) => c.name).join(',') || '(none)'}`);
 
       // 结构化提问拦截:ask.user → 暂停本轮,返回 {ask},等待用户在确认卡片选择后继续
@@ -947,7 +1025,8 @@ export class PiChatSession {
             messages.push({
               role: 'toolResult' as const,
               toolCallId: askCall.id,
-              toolName: 'ask.user',
+              // toolName 必须与 tools 声明名一致(sanitize 模式下是短横线别名)
+              toolName: askCall.rawName ?? 'ask.user',
               content: [{ type: 'text' as const, text: nudge }],
               isError: true,
               timestamp: Date.now(),
@@ -1196,10 +1275,11 @@ export class PiChatSession {
         // 工具结果文本:结构化 nodeId 必须拼进正文(见 buildToolResultText 注释)。
         const resultText = buildToolResultText(tr.result, tr.nodeId, tr.ok);
         // toolResult 追加进 messages(OpenAI 协议)
+        // toolName 必须与 tools 声明名一致(sanitize 模式下用端点别名 rawName)
         messages.push({
           role: 'toolResult' as const,
           toolCallId: call.id,
-          toolName: call.name,
+          toolName: call.rawName ?? call.name,
           content: [{ type: 'text' as const, text: resultText }],
           isError: !tr.ok,
           timestamp: Date.now(),

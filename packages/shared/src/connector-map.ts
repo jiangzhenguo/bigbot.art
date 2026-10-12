@@ -130,6 +130,15 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     doc: 'prompt',
   },
   timeline: {
+    /* 🆕 成片是视频产物(2026-10 用户反馈:「+」弹层应与其它视频节点同类):
+       导出成功后 data.resultPath = 成片绝对路径,下游解析与其它视频产物节点同口径。
+       注意**不提供 first-frame**:该端口载荷是静帧,成片首帧须先经 frame-grab 落成图片
+       (与 video-upscale 同 —— 直连会被 PORT_REQUIRED_MEDIA 的 image 要求拒掉)。 */
+    shot: 'ref-video/ref-audio', // 成片作参考视频(风格/动作)/ 内嵌音轨作声音参考
+    'frame-grab': 'input-video', // 从成片裁切取帧 → 图片资源
+    'video-upscale': 'input', // 成片再增强(超分/修脸)
+    'audio-ref': 'input-audio', // 抽成片的内嵌音轨 → 音频参考节点
+    timeline: 'clip', // 成片入另一条时间线
     doc: 'prompt',
   },
   // 资产引用:端口按媒体类型动态(渲染层 connectors.ts 四类矩阵为准,此处给 Agent 综合摘要)
@@ -255,7 +264,7 @@ export const NODE_KIND_GUIDE = [
   ['frame-grab', '视频裁切取帧(纯 ffmpeg,不推理:从视频截取一帧导出为**图片资源**并自动导入资产库)。这是「视频 → 图片」的唯一合法通道——图片编辑/增强的 input 端口要的是静帧,视频**不能**直连图片编辑(会被校验拒绝)。输入连 shot 成片 / video-upscale 产物 / 视频 asset(input-video 端口,单值);参数 data={mode:first|last|at, seconds}(at 需非负秒数);产物 PNG 可再连给 image-edit / image-upscale 的 input 或 shot 的 first-frame/ref-image'],
   ['video-upscale', '视频增强(超分 + 合修脸):本地后处理,不走推理队列。三阶段可独立开关——去块(ffmpeg deblock)/ 超分(Real-ESRGAN,真人用 realesrgan-x4plus)/ 修脸(GFPGAN 或 CodeFormer)。输入连 shot 成片或视频 asset(input 端口),产物 mp4 接时间线入轨或作下游镜头参考。参数:data={scale, srModel, faceModel, faceWeight, deblock, device}'],
   ['shot', '视频镜头(h3.c:文生/首帧/尾帧/首尾帧/参考图/参考视频;参考视频端口 ref-video 可接视频 asset、上游镜头成片、视频增强产物,默认连同源片音轨一起参考(节点 data.refVideoSilent=true 改走 --ref-silent-video 只取画面);支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
-  ['timeline', '时间线/剪辑(FFmpeg 导出)'],
+  ['timeline', '时间线/剪辑(FFmpeg 导出;导出成片后自身也是**视频产物源**:可连 frame-grab 取帧 / video-upscale 再增强 / shot 的 ref-video·ref-audio / audio-ref 抽音轨 / 另一条 timeline 入轨,下游从 data.resultPath 读成片)'],
   ['audio-ref', '音频参考(--ref-audio):把音频资产作 shot 的音轨参考,产物带声直出'],
 ] as const;
 

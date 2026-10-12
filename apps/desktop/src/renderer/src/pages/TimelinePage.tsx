@@ -623,6 +623,9 @@ export default function TimelinePage({
               ...n,
               data: {
                 ...(n.data ?? {}),
+                // 成片绝对路径:timeline 作为视频源连下游(取帧/再增强/参考视频)时,
+                // 下游解析器统一读 data.resultPath(与 shot / video-upscale 同口径)
+                resultPath: outputPath,
                 lastExport: {
                   path: outputUrlOf(outputPath),
                   name: outputPath.split(/[\\/]/).pop() ?? outputPath,

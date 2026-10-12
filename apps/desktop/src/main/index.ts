@@ -3,33 +3,36 @@
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
 import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage, dialog } from 'electron';
-import { join, resolve } from 'node:path';
-import { existsSync, statSync } from 'node:fs';
+import { join, resolve, basename } from 'node:path';
+import { existsSync, statSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createRegistry } from '@bigbotart/providers';
 import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
 import { AccelStore } from './lora';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots } from './assets';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots, isValidOutputRelName } from './assets';
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
-import { ExportService } from './export';
+import { ExportService, resolveExportFile } from './export';
 import { exportProject, importProjectFromFile } from './project-package';
 import { coverOf, listProjectCovers, setCoverAsset, clearCover, isUsableCoverFile } from './project-cover';
 import { extractFrame, extractAudio, cropImage } from './frames';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideoPostTooling, cancelAllVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
 import { RenderQueue } from './render-queue';
+import { AutoContinueController, buildAutoContinueText, buildAutoRecallNote } from './auto-continue';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
 import { TakeStore } from './takes';
 import { runDataMigration } from './migrate';
 import { DATA_DIR } from './workspace-paths';
 import { DebugLogger } from './logger';
+import { installCrashGuard } from './crash-guard';
 import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus, mlxgenDownloadActive, mlxgenDownloadCancel } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
 import { runSelfCheck } from './selfcheck';
+import { buildMlxgenRoute } from './vision';
 import {
   credentialDelete,
   credentialGet,
@@ -48,6 +51,18 @@ import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatReq
 import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
+
+// 打包版从 Finder/Dock 启动时 PATH 只有系统目录(/usr/bin:/bin…),而 ffmpeg/ffprobe、
+// h3、mlxgen 等外部工具多在 /opt/homebrew/bin;h3 内部用 posix_spawnp 按名找 ffprobe,
+// PATH 缺 homebrew 会在视频合成最后一步报「cannot start FFprobe」(2026-10 真实事故)。
+// 打包版补齐常见工具目录;dev 从终端启动自带用户 PATH,不动。
+if (!isDev) {
+  const parts = (process.env.PATH ?? '').split(':').filter(Boolean);
+  for (const p of ['/usr/local/bin', '/opt/homebrew/bin']) {
+    if (!parts.includes(p)) parts.unshift(p);
+  }
+  process.env.PATH = parts.join(':');
+}
 
 /** 渲染产物根目录(h3c/mlxgen/mock 输出;bba-output:// 协议只读这里及子目录) */
 const H3_OUTPUTS_DIR = process.env.BIGBOTART_H3_OUTPUTS ?? OUTPUTS_DIR;
@@ -145,6 +160,10 @@ protocol.registerSchemesAsPrivileged([
 // 引擎:BIGBOTART_DRYRUN=0 时真实 spawn h3;未设或非 0 则 dry-run 占位
 // h3 开启 onLog:调试面板实时显示 h3 进度行
 const logger = new DebugLogger();
+// 崩溃兜底:尽早挂上(业务代码之前)。Electron 默认会把主进程未捕获异常/未处理拒绝弹成
+// 原生错误框(「A JavaScript error occurred in the main process」)——有我们自己的监听后它不再弹,
+// 异常改走日志总线(调试面板 + 终端),进程继续运行。详见 crash-guard.ts
+installCrashGuard(logger);
 const dryRun = process.env.BIGBOTART_DRYRUN !== '0';
 logger.log(
   'info',
@@ -203,20 +222,39 @@ try {
 } catch (e) {
   logger.log('warn', `[takes] 孤儿 Take 清理失败(不影响启动):${(e as Error).message}`);
 }
-const exportSvc = new ExportService(takes);
+const exportSvc = new ExportService(takes, (pid, nid) => {
+  // timeline 成片等「节点产物型」入线条目没有 Take:从画布快照读节点 data.resultPath
+  const pc = store.loadProjectCanvases(pid);
+  for (const c of pc.canvases) {
+    const n = c.nodes.find((x) => x.id === nid);
+    const p = String((n?.data as Record<string, unknown> | undefined)?.resultPath ?? '');
+    if (p) return p;
+  }
+  return undefined;
+});
 const queue = new RenderQueue(registry, settings, logger);
 const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
   accel,
   takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
-  // 🆕 工具模型(v1):图片节点缺省模型 + 看图端点覆盖,实时从 SettingsStore 读(改设置即生效,免重启)
+  // 🆕 工具模型(v1):图片节点缺省模型 + 看图通道,实时从 SettingsStore 读(改设置即生效,免重启)
   getToolModels: () => settings.get().toolModels,
   resolveVisionOverride: async () => {
-    const v = settings.get().toolModels?.vision;
+    const tm = settings.get().toolModels;
+    // ① 本地引擎通道(mlx-gen `mlxgen-caption`,2026-10):不需要任何 server 在跑,优先于端点绑定
+    if (tm?.captionLocal) {
+      const route = await buildMlxgenRoute(process.env, tm.captionLocal);
+      if (route.kind === 'mlxgen' && route.config) return route;
+      // 显式绑定但本机不可用 → 把原因带回上层报出来(不偷偷换端点;用户要的就是这条通道)
+      console.warn(`[toolModels] 本地看图通道不可用: ${route.kind === 'mlxgen' ? route.reason : ''}`);
+      return route;
+    }
+    // ② 端点通道(存量行为):settings.toolModels.vision → OpenAI 兼容端点
+    const v = tm?.vision;
     if (!v) return undefined;
     try {
       const ep = await resolveLlmEndpoint(settings.get(), v);
-      return { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+      return { kind: 'endpoint' as const, endpoint: { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model } };
     } catch (e) {
       console.warn(`[toolModels] 看图端点解析失败,回退 env 链: ${(e as Error).message}`);
       return undefined;
@@ -339,6 +377,9 @@ queue.onJobFinish = async (job) => {
       result: res.result,
     } satisfies AgentEvent);
   });
+  /* 自动续跑(2026-10-10):Agent 提交的任务成功后唤醒 Agent 推进任务链。
+     闸门/防抖/上限全在 controller 内;不 await —— 归档与 notify 时序不受 LLM 轮次影响。 */
+  autoContinue.notifyJobFinished(job);
 };
 
 /** 队列变更 → 渲染层实时推送(精简视图,已剔除 req 大对象)。
@@ -361,6 +402,33 @@ let currentToolCtx: { projectId: string; canvasId: string } | null = null;
  * 「agent 无响应」,让用户以为整轮白干,而画布改动其实早已落盘(真实事故 2026-09-28)。
  */
 const toolActivity = new Map<string, string[]>();
+
+/* ── 自动续跑(2026-10-10):Agent 提交的生成完成后,自动唤醒 Agent 推进任务链 ──
+   背景:「飞机1」项目实测,Agent 按【提交即收尾】结束本轮后,角色卡图 2 分钟就出好了,
+   但没有任何机制触发下一轮 —— 多步流程停在原地等用户说「继续」。
+   闸门与防抖见 auto-continue.ts 头部注释;runAutoContinueRound / executeAgentChat
+   是函数声明,此处引用靠提升,定义在下方 agent-chat IPC 附近。 */
+/** 正在进行中的对话轮次(`${projectId}:${canvasId}`;手动与自动同口径,防并发串写) */
+const inFlightChats = new Set<string>();
+const autoContinue = new AutoContinueController({
+  enabled: process.env.BIGBOTART_AGENT_AUTO_CONTINUE !== '0',
+  maxRounds: Number(process.env.BIGBOTART_AGENT_AUTO_CONTINUE_MAX ?? '') || undefined,
+  logger,
+  isInFlight: (key) => inFlightChats.has(key),
+  trigger: (projectId, canvasId, notices) => {
+    void runAutoContinueRound(projectId, canvasId, notices);
+  },
+  onCapReached: (projectId, canvasId) => {
+    // 达上限必须让用户可见(不是静默停住):推一张连续性卡说明现状与怎么继续
+    win?.webContents.send('agent-event', {
+      kind: 'continuity',
+      projectId,
+      canvasId,
+      issues: [],
+      result: `ℹ️ 自动推进已连续进行,达到上限后暂停。生成均已完成,如需继续推进,在对话里发消息(如「继续」)即可。`,
+    } satisfies AgentEvent);
+  },
+});
 
 /**
  * 安全写 stderr —— 防「管道断裂把主进程写崩」(真实事故 2026-09)。
@@ -819,6 +887,44 @@ ipcMain.handle('export-timeline', (_e, req) => {
   }
 });
 ipcMain.handle('export-status', (_e, taskId: string) => exportSvc.status(taskId));
+/** 按文件名解析导出目录内成片的**绝对路径**(timeline 旧数据愈合:只有 lastExport 没有 resultPath 的节点,
+ *  下游视频解析(取帧/增强/参考视频)需要真实路径;bba-output:// URL 只是展示层) */
+ipcMain.handle('export-file-path', (_e, input: { name?: string }) => {
+  const p = resolveExportFile(input?.name);
+  return p ? { ok: true as const, path: p } : { ok: false as const };
+});
+
+/* ---------- IPC:时间线成片的「另存为…」与「存入资源库」(2026-10) ----------
+   渲染层只有 bba-output:// URL + 文件名(lastExport.name),绝对路径一律由
+   resolveExportFile 在主进程按 EXPORT_DIR 重建(白名单 + 必须存在)。 */
+/** 另存为:系统保存对话框选位置 → 复制成片过去(取消 = canceled,不是失败) */
+ipcMain.handle('save-export-as', async (_e, input: { name?: string }) => {
+  const src = resolveExportFile(input?.name);
+  if (!src) return { ok: false as const, error: '成片文件不存在(可能已被移动或清理)' };
+  const target = BrowserWindow.getAllWindows()[0];
+  const opts = {
+    title: '成片另存为',
+    defaultPath: basename(src),
+    filters: [{ name: '视频', extensions: ['mp4', 'mov'] }],
+  };
+  const r = target ? await dialog.showSaveDialog(target, opts) : await dialog.showSaveDialog(opts);
+  if (r.canceled || !r.filePath) return { ok: false as const, canceled: true };
+  try {
+    copyFileSync(src, r.filePath);
+    logger.log('info', `[export] 成片另存为 ${basename(src)} → ${r.filePath}`);
+    return { ok: true as const, path: r.filePath };
+  } catch (e) {
+    return { ok: false as const, error: (e as Error).message };
+  }
+});
+/** 存入资源库:导出目录内成片 → 复制进资产库并登记(source='product',归项目) */
+ipcMain.handle('archive-export', async (_e, input: { projectId: string; nodeId: string; name?: string }) => {
+  const src = resolveExportFile(input?.name);
+  if (!src) return { ok: false as const, assets: [], error: '成片文件不存在(可能已被移动或清理)' };
+  const res = await assets.archiveProducts(input.projectId, [{ nodeId: input.nodeId, path: src }]);
+  if (res.ok) logger.log('info', `[export] 成片入库 ${basename(src)}(${res.assets.length} 项,项目 ${input.projectId})`);
+  return res;
+});
 
 // ---------- IPC:项目包导入/导出(.bba;取代原「H3Mise 项目导入」入口) ----------
 /** 导出:不传 path 则弹保存对话框(取消 = canceled,不是失败) */
@@ -1056,94 +1162,143 @@ ipcMain.handle('agent-plan-storyboard', async (_e, brief: string, opts?: { proje
 });
 
 /* ---------- IPC:Agent 对话(多轮 + 工具 + 记忆) ---------- */
-ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentChatResponse> => {
+
+/**
+ * 一轮 Agent 对话的完整执行体(用户消息与自动续跑共用)。
+ * 自动轮(auto=true)差异:无附件/无关注节点注入;用户消息 recall 由调用方以 system 角色
+ * 另行留痕(防止合成通知被 pinnedInstruction 误当「任务链首条用户指令」);
+ * 开始前推送 auto-start 事件让渲染层把面板切入「执行中」。
+ */
+async function executeAgentChat(opts: {
+  projectId: string;
+  canvasId: string;
+  text: string;
+  attachments?: AgentChatRequest['attachments'];
+  selectedNodeId?: string;
+  auto?: boolean;
+}): Promise<AgentChatResponse> {
+  const flightKey = `${opts.projectId}:${opts.canvasId}`;
+  if (inFlightChats.has(flightKey)) {
+    // 同画布并发对话会串写工具上下文与 recall 顺序。
+    // 自动轮被拒时必须留日志:fire() 已经把连续轮计数加上,这里再静默 return,
+    // 这一轮就从用户视角凭空消失。
+    if (opts.auto) {
+      logger.log('warn', `[auto-continue] 自动推进放弃:该画布有对话正在进行 ${flightKey}`);
+    }
+    return { ok: false, error: '该画布有对话正在进行,请等它收尾后再发' };
+  }
+  // 占坑必须在任何 await 之前。resolveLlmEndpoint 会让出事件循环,而渲染层的
+  // sending 锁要等下面的 auto-start(端点解析成功之后)才生效 —— 空窗里用户消息和
+  // 自动续跑都会通过上面的检查,两轮交错写 recall / currentToolCtx。
+  inFlightChats.add(flightKey);
+  let chatKey: string | undefined;
+  let toolCtx: { projectId: string; canvasId: string } | undefined;
+  try {
   let llm: LlmSource | undefined;
-  const project = store.getProject(req.projectId);
+  const project = store.getProject(opts.projectId);
   if (project?.llmOverride) llm = project.llmOverride;
   else if (settings.get().llm) llm = settings.get().llm;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
     llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
   } catch (e) {
+    if (opts.auto) {
+      // 自动轮 LLM 不可达:不推 failed 事件(面板没进「执行中」,推了会留一张突兀的错误卡),日志留痕即可
+      logger.log('warn', `[auto-continue] 自动推进放弃:LLM 来源不可用:${(e as Error).message}`);
+    }
     return { ok: false, error: `LLM 来源不可用:${(e as Error).message}` };
   }
 
   // 记忆上下文组装(skillResolver:激活技能经 SkillStore 解析,注入「【当前技能】」指令段;
   // canvas 快照:注入「【当前画布】」实时状态段,让 Agent 首轮就感知画布轮廓)
-  const ctxSnap = store.loadProjectCanvases(req.projectId).canvases.find((c) => c.id === req.canvasId);
+  const ctxSnap = store.loadProjectCanvases(opts.projectId).canvases.find((c) => c.id === opts.canvasId);
   const ctx = memory.buildContext(
-    req.projectId,
-    req.canvasId,
-    req.text,
+    opts.projectId,
+    opts.canvasId,
+    opts.text,
     (id) => skills.get(id),
     ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
   );
-  const chatKey = `${req.projectId}:${req.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  chatKey = `${opts.projectId}:${opts.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */
-  const activityKey = `${req.projectId}:${req.canvasId}`;
-  const toolCtx = { projectId: req.projectId, canvasId: req.canvasId };
+  const activityKey = `${opts.projectId}:${opts.canvasId}`;
+  toolCtx = { projectId: opts.projectId, canvasId: opts.canvasId };
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
 
-  // 记录用户消息到 recall(附件名 + 当轮关注节点一并留痕,渲染层据此回显「关注:节点」徽标)
-  const atts = req.attachments ?? [];
-  const visibleText = req.text + (atts.length ? ` 📎${atts.map((a) => a.name).join('、')}` : '');
-  const selNode = req.selectedNodeId && ctxSnap ? ctxSnap.nodes.find((x) => x.id === req.selectedNodeId) : undefined;
-  memory.addRecall(req.projectId, {
-    canvasId: req.canvasId,
-    role: 'user',
-    content: visibleText,
-    selectedNodeId: selNode?.id,
-    selectedNodeTitle: selNode?.label,
-  });
-  logger.log('info', `agent.chat 开始 · "${req.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
+  let attNote = '';
+  let selNote = '';
+  if (!opts.auto) {
+    // 记录用户消息到 recall(附件名 + 当轮关注节点一并留痕,渲染层据此回显「关注:节点」徽标)
+    const atts = opts.attachments ?? [];
+    const visibleText = opts.text + (atts.length ? ` 📎${atts.map((a) => a.name).join('、')}` : '');
+    const selNode = opts.selectedNodeId && ctxSnap ? ctxSnap.nodes.find((x) => x.id === opts.selectedNodeId) : undefined;
+    memory.addRecall(opts.projectId, {
+      canvasId: opts.canvasId,
+      role: 'user',
+      content: visibleText,
+      selectedNodeId: selNode?.id,
+      selectedNodeTitle: selNode?.label,
+    });
+    logger.log('info', `agent.chat 开始 · "${opts.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
 
-  // 附件先拷入项目文件夹(projects/<pid>/assets/),Agent 一律使用项目内副本——
-  // 项目自包含、可迁移;路径在 DATA_DIR 白名单内,下游 headless 导入/引用均合法
-  const projAtts = copyAttachmentsToProject(
-    req.projectId,
-    atts.map((a) => {
-      const full = assets.get(a.id);
-      return {
-        ...a,
-        localPath: full?.localPath ?? a.localPath,
-        width: full?.width,
-        height: full?.height,
-        durationSec: full?.durationSec,
-      };
-    }),
-  );
-  // 附件自动登记为项目资源(source='attachment'):项目资源页可见;按 localPath 幂等,重复对话不重复登记
-  for (const pa of projAtts) {
-    if (pa.copied && pa.projectPath) await assets.registerAttachment(req.projectId, { id: pa.id, path: pa.projectPath });
+    // 附件先拷入项目文件夹(projects/<pid>/assets/),Agent 一律使用项目内副本——
+    // 项目自包含、可迁移;路径在 DATA_DIR 白名单内,下游 headless 导入/引用均合法
+    const projAtts = copyAttachmentsToProject(
+      opts.projectId,
+      atts.map((a) => {
+        const full = assets.get(a.id);
+        return {
+          ...a,
+          localPath: full?.localPath ?? a.localPath,
+          width: full?.width,
+          height: full?.height,
+          durationSec: full?.durationSec,
+        };
+      }),
+    );
+    // 附件自动登记为项目资源(source='attachment'):项目资源页可见;按 localPath 幂等,重复对话不重复登记
+    for (const pa of projAtts) {
+      if (pa.copied && pa.projectPath) await assets.registerAttachment(opts.projectId, { id: pa.id, path: pa.projectPath });
+    }
+    // 附件注入:项目内路径 + 尺寸元数据直接给 LLM(免去 assets.get 往返,也避免"信息太简略看不出内容")
+    attNote = projAtts.length
+      ? `\n\n[用户附件 · 已拷入项目文件夹,可直接作为参考图/素材使用(也可用 canvas.create_node(kind=asset) 引用到画布):\n${projAtts
+          .map(
+            (a) =>
+              `- ${a.name}(${a.kind},assetId=${a.id}${a.width ? `,${a.width}×${a.height}` : ''}${a.durationSec ? `,${a.durationSec}s` : ''}) → ${a.projectPath}${a.copied ? '' : '(源文件缺失,未拷入项目)'}`,
+          )
+          .join('\n')}]`
+      : '';
+
+    // 选中节点注入:用户正在操作哪个节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
+    selNote = selNode && ctxSnap ? `\n\n${describeSelectedNode(selNode, ctxSnap.edges, ctxSnap.nodes)}` : '';
+  } else {
+    logger.log('info', `[auto-continue] 自动推进轮开始 · "${opts.text.slice(0, 60).replace(/\n/g, ' ')}"`);
+    // 通知渲染层切入「执行中」(loading 气泡 + 输入锁定);done/failed 终局事件照旧收尾
+    win?.webContents.send('agent-event', {
+      kind: 'auto-start',
+      projectId: opts.projectId,
+      canvasId: opts.canvasId,
+      note: '⚙️ 生成完成 · Agent 自动推进任务链…',
+    } satisfies AgentEvent);
   }
-  // 附件注入:项目内路径 + 尺寸元数据直接给 LLM(免去 assets.get 往返,也避免"信息太简略看不出内容")
-  const attNote = projAtts.length
-    ? `\n\n[用户附件 · 已拷入项目文件夹,可直接作为参考图/素材使用(也可用 canvas.create_node(kind=asset) 引用到画布):\n${projAtts
-        .map(
-          (a) =>
-            `- ${a.name}(${a.kind},assetId=${a.id}${a.width ? `,${a.width}×${a.height}` : ''}${a.durationSec ? `,${a.durationSec}s` : ''}) → ${a.projectPath}${a.copied ? '' : '(源文件缺失,未拷入项目)'}`,
-        )
-        .join('\n')}]`
-    : '';
-
-  // 选中节点注入:用户正在操作哪个节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
-  const selNote = selNode && ctxSnap ? `\n\n${describeSelectedNode(selNode, ctxSnap.edges, ctxSnap.nodes)}` : '';
 
   try {
     const result = await agent.chat({
-      projectId: req.projectId,
-      canvasId: req.canvasId,
-      text: req.text + attNote + selNote,
+      projectId: opts.projectId,
+      canvasId: opts.canvasId,
+      text: opts.text + attNote + selNote,
       context: ctx,
       llm,
-    });    logger.log(
+    });
+    logger.log(
       'info',
-      `agent.chat 完成 · 工具 ${result.toolCalls.length} 个${result.ask ? ' · 暂停待用户确认(ask.user)' : ''}${result.aborted ? ' · 已打断' : ''} · 回复 ${result.reply.length} 字`,
+      `agent.chat 完成${opts.auto ? '(自动推进)' : ''} · 工具 ${result.toolCalls.length} 个${result.ask ? ' · 暂停待用户确认(ask.user)' : ''}${result.aborted ? ' · 已打断' : ''} · 回复 ${result.reply.length} 字`,
     );
     // assistant 回复记入 recall
     if (result.reply) {
-      memory.addRecall(req.projectId, { canvasId: req.canvasId, role: 'assistant', content: result.reply });
+      memory.addRecall(opts.projectId, { canvasId: opts.canvasId, role: 'assistant', content: result.reply });
     }
     // 工具调用记入 recall(role=tool,留痕回看)+ 成功动作记入 recall(role=system,注入下一轮上下文)
     for (const tc of result.toolCalls) {
@@ -1153,22 +1308,22 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
          留一条 `ask.user({...` 的裸文本气泡,看着像调用失败。真正的提问卡由下方 result.ask
          分支负责记录,这里直接跳过。 */
       if (tc.name === 'ask.user') continue;
-      memory.addRecall(req.projectId, {
-        canvasId: req.canvasId, role: 'tool',
+      memory.addRecall(opts.projectId, {
+        canvasId: opts.canvasId, role: 'tool',
         content: `${tc.name}(${JSON.stringify(tc.args).slice(0, 120)})`,
         toolName: tc.name, toolArgs: tc.args, toolResult: tc.result,
       });
       if (tc.ok) {
-        memory.addRecall(req.projectId, {
-          canvasId: req.canvasId, role: 'system',
+        memory.addRecall(opts.projectId, {
+          canvasId: opts.canvasId, role: 'system',
           content: describeToolAction(tc.name, tc.args, tc.nodeId),
         });
       }
     }
     // ask.user 暂停卡也记入 recall(被 worker 拦截、不经工具桥):刷新/切换后恢复成可点选的确认卡,而不是丢成纯文本
     if (result.ask) {
-      memory.addRecall(req.projectId, {
-        canvasId: req.canvasId, role: 'tool',
+      memory.addRecall(opts.projectId, {
+        canvasId: opts.canvasId, role: 'tool',
         content: `ask.user(${result.ask.question.slice(0, 120)})`,
         toolName: 'ask.user',
         toolArgs: { question: result.ask.question, options: result.ask.options },
@@ -1180,7 +1335,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
       toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted,
     };
     win?.webContents.send('agent-event', {
-      kind: 'done', projectId: req.projectId, canvasId: req.canvasId, final,
+      kind: 'done', projectId: opts.projectId, canvasId: opts.canvasId, final,
     } satisfies AgentEvent);
     return final;
   } catch (e) {
@@ -1191,19 +1346,55 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
       ? `\n已完成 ${done.length} 个操作(${done.slice(-4).join('、')}${done.length > 4 ? ' 等' : ''}),画布改动已生效。`
       : '';
     const msg = `${(e as Error).message}${summary}`;
-    logger.log('error', `agent.chat 失败:${msg}`);
+    logger.log('error', `agent.chat 失败${opts.auto ? '(自动推进)' : ''}:${msg}`);
     win?.webContents.send('agent-event', {
-      kind: 'failed', projectId: req.projectId, canvasId: req.canvasId, error: msg,
+      kind: 'failed', projectId: opts.projectId, canvasId: opts.canvasId, error: msg,
     } satisfies AgentEvent);
     return { ok: false, error: msg };
-  } finally {
-    activeToolCtx.delete(chatKey);
-    // 仅当仍指向本会话时清空,避免并发 chat 的 finally 互相踩掉
-    if (currentToolCtx === toolCtx) {
+  }
+  } finally { // 占坑覆盖解析端点到对话结束;LLM 不可用的提前 return 也走这里放锁
+    inFlightChats.delete(flightKey);
+    if (chatKey) activeToolCtx.delete(chatKey);
+    // 仅当仍指向本会话时清空,避免并发 chat 的 finally 互相踩掉。
+    // LLM 解析失败时 toolCtx 还没建立,不能拿 undefined 去比。
+    if (toolCtx && currentToolCtx === toolCtx) {
       const remaining = [...activeToolCtx.values()].at(-1) ?? null;
       currentToolCtx = remaining;
     }
   }
+}
+
+/** 自动续跑入口(AutoContinueController.trigger):补节点标题 → 合成唤醒文本 → 跑一轮 chat */
+async function runAutoContinueRound(
+  projectId: string,
+  canvasId: string,
+  notices: Array<{ nodeId: string; resultPath?: string }>,
+): Promise<void> {
+  const snap = store.loadProjectCanvases(projectId).canvases.find((c) => c.id === canvasId);
+  const enriched = notices.map((n) => ({
+    ...n,
+    label: snap?.nodes.find((x) => x.id === n.nodeId)?.label,
+  }));
+  logger.log(
+    'info',
+    `[auto-continue] 触发自动推进 ${projectId}:${canvasId} · ${enriched.map((n) => `「${n.label || n.nodeId}」`).join('、')}`,
+  );
+  /* recall 留痕用 system 角色而非 user:合成通知绝不能被 pinnedInstruction 当成
+     「任务链首条用户指令」钉进 systemPrompt(那会永久顶掉用户真正的原始指令)。 */
+  memory.addRecall(projectId, { canvasId, role: 'system', content: buildAutoRecallNote(enriched) });
+  await executeAgentChat({ projectId, canvasId, text: buildAutoContinueText(enriched), auto: true });
+}
+
+ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentChatResponse> => {
+  // 用户发消息 = 接管任务链:重置该画布的连续自动轮计数,并取消待触发的防抖唤醒
+  autoContinue.resetOnUserMessage(req.projectId, req.canvasId);
+  return executeAgentChat({
+    projectId: req.projectId,
+    canvasId: req.canvasId,
+    text: req.text,
+    attachments: req.attachments,
+    selectedNodeId: req.selectedNodeId,
+  });
 });
 
 ipcMain.handle('agent-cancel', async (_e, projectId: string) => {
@@ -1357,8 +1548,9 @@ app.whenReady().then(async () => {
       const url = new URL(req.url);
       const rawHost = url.host + url.pathname.replace(/\/+$/, '');
       const name = decodeURIComponent(rawHost).replace(/^\/+/, '');
-      // 允许相对路径段(mock/xxx.mp4);禁止 .. 与绝对盘符
-      if (!name || name.includes('..') || name.startsWith('/') || !/^[A-Za-z0-9._/-]+$/.test(name)) {
+      // 允许相对路径段(mock/xxx.mp4)与中文等 Unicode 文件名(导出成片名由项目名派生);
+      // 拒绝 .. 穿越 / 绝对路径 / 控制字符(见 isValidOutputRelName,2026-10 中文名黑屏事故)
+      if (!isValidOutputRelName(name)) {
         return new Response(`bad output name: ${name}`, { status: 400 });
       }
       for (const outRoot of outputSearchRoots()) {

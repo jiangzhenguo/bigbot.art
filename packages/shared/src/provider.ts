@@ -63,6 +63,12 @@ export interface RenderRequest {
   canvasId?: string;
   /** 关联的 Take id(由渲染层/主进程生成,任务完成后回写到 Take) */
   takeId?: string;
+  /**
+   * 提交来源(2026-10-10 自动续跑):'agent' = Agent 工具 engine.submit 提交;
+   * 缺省/'user' = 用户在画布手点。队列任务完成后只对 'agent' 来源唤醒 Agent 自动推进任务链,
+   * 用户手点的生成不触发(用户在画布上看得见结果,不需要 Agent 插话)。
+   */
+  source?: 'agent' | 'user';
   /** 语义参数由 Provider 按其能力解释 */
   params: Record<string, unknown>;
   references?: { asset: Asset; role: string; localPath: string }[];

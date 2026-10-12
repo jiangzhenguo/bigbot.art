@@ -600,6 +600,23 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
             if (ev.toolName === 'skills.deactivate') setActiveSkill(null);
           }
         }
+      } else if (ev.kind === 'auto-start') {
+        /* 自动续跑(2026-10-10):Agent 提交的生成完成后,主进程自动发起一轮 chat 推进任务链。
+           这里等价于 send() 的「开局」动作:开新一轮收尾闸、重置聚合卡指针、
+           放系统说明 + loading 气泡、锁定输入;随后 tool-start/end 与 done/failed 照旧流转。
+           ⚠️ updater 纯:id 自增在 updater 外一次完成(StrictMode 双跑安全)。 */
+        settleGuard.current = false;
+        liveToolCardId.current = null;
+        pinToBottom.current = true;
+        const sysId = ++msgId.current;
+        const loadId = ++msgId.current;
+        setMsgs((m) => [
+          ...m.filter((x) => !x.loading),
+          { id: sysId, kind: 'sys', text: ev.note || '⚙️ 生成完成 · Agent 自动推进任务链…' },
+          { id: loadId, kind: 'sys', loading: true, text: '思考中…' },
+        ]);
+        setSending(true);
+        if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
       } else if (ev.kind === 'continuity') {
         setMsgs((m) => [
           ...m,

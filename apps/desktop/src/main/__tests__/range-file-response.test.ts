@@ -148,4 +148,19 @@ describe('rangeFileResponse', () => {
     expect(Number(res.headers.get('content-length'))).toBe(statSync(file).size);
     await drain(res);
   });
+
+  it('body 必须是真正的 web ReadableStream(Readable.toWeb),不能是 Node 流直塞', async () => {
+    // 背景(2026-10-12 真实弹窗事故):把 Node 流强转成 web 流塞进 Response 时,undici 的 extractBody
+    // 会用 ReadableStreamFrom() 包一层,而那一层的 pull() 在迭代器结束时**无保护地**
+    // queueMicrotask(() => controller.close());一旦 Chromium 在「源读完」的同一拍取消请求
+    // (缩略图重渲染 / <video> seek 打断 Range 请求 / HMR 重载)就抛 ERR_INVALID_STATE:
+    // ReadableStream is already closed —— queueMicrotask 里抛的异常调用方拦不住 → 主进程弹原生错误框。
+    // 走 Readable.toWeb 则命中 `instanceof ReadableStream` 分支,不生成包装器。
+    //
+    // 判据:undici 那层包装器是 **byob 字节流**(type:'bytes'),Readable.toWeb 产出的是默认流。
+    // 所以「拒绝 byob」恰好等价于「没有被 undici 包过」——这是能稳定复现的观测点。
+    const res = rangeFileResponse(file, null);
+    expect(() => res.body?.getReader({ mode: 'byob' })).toThrow();
+    await drain(res);
+  });
 });

@@ -38,12 +38,13 @@ import type { ProjectStore } from './store';
 import type { AssetStore } from './assets';
 import type { SkillStore } from './skills';
 import type { ExportService } from './export';
+import { resolveExportFile } from './export';
 import type { RenderQueue } from './render-queue';
 import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
 import { cropImage, extractFrame, extractAudio } from './frames';
-import { captionImage } from './vision';
+import { captionImage, type VisionRoute } from './vision';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
 export { toolDefinitions } from '@bigbotart/shared';
@@ -263,6 +264,8 @@ export function resolveSingleImageInput(
  * 上游节点的**视频**产物路径解析(video-upscale 用):与 resolveNodeImagePath 同形状,但只认视频产物。
  *  - asset 节点 → 资产本地路径(须为视频)
  *  - shot / video-upscale 等视频产物节点 → data.resultPath
+ *  - timeline 节点 → data.resultPath;缺失(旧数据,修复前导出的成片)时按
+ *    lastExport.name 回退解析导出目录(resolveExportFile,白名单 + 必须存在)
  */
 export function resolveNodeVideoPath(
   src: CanvasNode | undefined,
@@ -270,8 +273,14 @@ export function resolveNodeVideoPath(
 ): string | undefined {
   if (!src) return undefined;
   const sd = (src.data ?? {}) as Record<string, unknown>;
-  const p = src.kind === 'asset' ? assetPath(String(sd.assetId ?? '')) : String(sd.resultPath ?? '');
-  return p || undefined;
+  if (src.kind === 'asset') return assetPath(String(sd.assetId ?? '')) || undefined;
+  const p = String(sd.resultPath ?? '');
+  if (p) return p;
+  if (src.kind === 'timeline') {
+    const name = (sd.lastExport as { name?: string } | undefined)?.name;
+    return resolveExportFile(name) ?? undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -301,6 +310,71 @@ export function resolveSingleVideoInput(
 
 /** image-gen 的参考图输入:ref-image 入边 → 上游图片路径数组(资产节点取资产路径,产物节点取 resultPath)。 *  真实事故:Agent 连了两张参考图到 image-gen,提交时 references 只给 shot 推导,
  *  图片节点的 ref-image 边被静默丢弃,生成了纯文生图。 */
+/**
+ * 连线后同步 shot.mode(无 modeOverride 时)。
+ * 2026-10-12「测试技能2」:Agent 连了 ref-image 却不改 mode → 节点一直显示「文生」。
+ * 渲染层 edge-dispatch 会再推一遍;这里写盘即生效,避免 Agent 路径只见边不见模式。
+ */
+export function syncShotModeForEdgeLabel(
+  data: Record<string, unknown>,
+  label: string,
+): Record<string, unknown> | null {
+  if (data.modeOverride === true) return null;
+  const mode = String(data.mode ?? 'text2video');
+  if (label === 'first-frame' && (mode === 'text2video' || mode === 'ref-image')) {
+    return { ...data, mode: 'first-frame' };
+  }
+  if (label === 'ref-image' && (mode === 'text2video' || mode === 'first-frame')) {
+    // 仅当尚未有 first-frame 语义时切关联;connect 单次只知本条 label,
+    // 若节点已有 first-frame 入边,调用方应先查边(见 applyShotModeSyncOnConnect)。
+    return { ...data, mode: 'ref-image' };
+  }
+  return null;
+}
+
+/** 在 canvas.connect 成功后写回 shot.mode;有 first-frame 入边时优先首帧。 */
+export function applyShotModeSyncOnConnect(
+  node: CanvasNode,
+  edges: CanvasEdge[],
+  newLabel: string,
+): boolean {
+  if (node.kind !== 'shot') return false;
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  if (d.modeOverride === true) return false;
+  const hasFirst = edges.some((e) => e.target === node.id && e.label === 'first-frame');
+  const hasRef = edges.some((e) => e.target === node.id && e.label === 'ref-image') || newLabel === 'ref-image';
+  const mode = String(d.mode ?? 'text2video');
+  let next: string | null = null;
+  if (hasFirst || newLabel === 'first-frame') {
+    if (mode === 'text2video' || mode === 'ref-image') next = 'first-frame';
+  } else if (hasRef && (mode === 'text2video' || mode === 'first-frame')) {
+    next = 'ref-image';
+  }
+  if (!next || next === mode) return false;
+  node.data = { ...d, mode: next } as CanvasNode['data'];
+  node.updatedAt = new Date().toISOString();
+  return true;
+}
+
+/**
+ * 提交前按已推导的 refs 愈合 shot.mode(无 modeOverride)。
+ * 覆盖「边已在、mode 仍文生」的存量脏状态(测试技能2 画布)。
+ */
+export function healShotModeFromRefs(
+  data: Record<string, unknown>,
+  refs: Array<{ role: string }>,
+): Record<string, unknown> | null {
+  if (data.modeOverride === true) return null;
+  const mode = String(data.mode ?? 'text2video');
+  const hasFF = refs.some((r) => r.role === 'first-frame');
+  const hasRI = refs.some((r) => r.role === 'ref-image');
+  let next = mode;
+  if (hasFF && (mode === 'text2video' || mode === 'ref-image')) next = 'first-frame';
+  else if (!hasFF && hasRI && (mode === 'text2video' || mode === 'first-frame')) next = 'ref-image';
+  if (next === mode) return null;
+  return { ...data, mode: next };
+}
+
 export function resolveRefImagePaths(
   canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
   node: CanvasNode,
@@ -407,7 +481,7 @@ export class ToolHandlers {
   private accel?: AccelStore;
   private takes?: TakeStore;
   private getToolModels?: () => ToolModelBinding | undefined;
-  private resolveVisionOverride?: () => Promise<{ baseUrl: string; apiKey?: string; model: string } | undefined>;
+  private resolveVisionOverride?: () => Promise<VisionRoute | undefined>;
 
   constructor(
     private store: ProjectStore,
@@ -422,8 +496,8 @@ export class ToolHandlers {
       takes?: TakeStore;
       /** 🆕 工具模型设置(v1):图片节点缺省模型 / vision 端点覆盖,从 SettingsStore 实时读 */
       getToolModels?: () => ToolModelBinding | undefined;
-      /** 🆕 看图端点覆盖(v1):settings.toolModels.vision → VisionEndpoint;未配置返回 undefined(走 env 回退链) */
-      resolveVisionOverride?: () => Promise<{ baseUrl: string; apiKey?: string; model: string } | undefined>;
+      /** 🆕 看图通道覆盖(v1):settings.toolModels.{captionLocal,vision} → VisionRoute;未配置返回 undefined(走 auto/env 回退链) */
+      resolveVisionOverride?: () => Promise<VisionRoute | undefined>;
     } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
@@ -940,21 +1014,29 @@ export class ToolHandlers {
             (e) => !(e.source === replaced.source && e.target === replaced.target && e.label === replaced.label),
           );
           cur.edges.push({ id: nid('edge'), source: from, target: to, label });
+          const dstNode = cur.nodes.find((n) => n.id === to);
+          const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
+            ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
+            : '';
           cur.updatedAt = new Date().toISOString();
           cur.version += 1;
           this.store.saveCanvasSnapshot(cur);
           return {
             ok: true,
-            result: `已连线 ${from} → ${to}[${label}] · ⚠️ 单值端口冲突,已自动替换旧边 ${replaced.source} → ${replaced.target}[${replaced.label ?? ''}](旧来源不再生效,下游受影响节点会标记 stale)`,
+            result: `已连线 ${from} → ${to}[${label}] · ⚠️ 单值端口冲突,已自动替换旧边 ${replaced.source} → ${replaced.target}[${replaced.label ?? ''}](旧来源不再生效,下游受影响节点会标记 stale)${modeNote}`,
           };
         }
         return { ok: false, result: `连线被拒绝:${v.errors[0]!.message}` };
       }
       cur.edges.push({ id: nid('edge'), source: from, target: to, label });
+      const dstNode = cur.nodes.find((n) => n.id === to);
+      const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
+        ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
+        : '';
       cur.updatedAt = new Date().toISOString();
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已连线 ${from} → ${to}[${label}]` };
+      return { ok: true, result: `已连线 ${from} → ${to}[${label}]${modeNote}` };
     },
     'canvas.disconnect': async (a, ctx) => {
       const from = String(a.from ?? '');
@@ -1007,6 +1089,16 @@ export class ToolHandlers {
           Array.isArray(d.refs) ? (d.refs as DerivedRef[]) : undefined,
           Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : undefined,
         );
+        // 愈合存量「有 ref-image 边但 mode 仍文生」(测试技能2);写回节点让 UI/Take 一致
+        const healed = healShotModeFromRefs(d, refs);
+        if (healed) {
+          node.data = healed as CanvasNode['data'];
+          node.updatedAt = new Date().toISOString();
+          Object.assign(d, healed);
+          cur.updatedAt = node.updatedAt;
+          cur.version += 1;
+          this.store.saveCanvasSnapshot(cur);
+        }
         const issues = validateRefsForSubmit(nodeId, 'shot', refs, d);
         const errs = issues.filter((i) => i.severity === 'error');
         if (errs.length > 0) return { ok: false, result: `提交被拒绝:${errs.map((i) => i.message).join('; ')}` };
@@ -1128,6 +1220,9 @@ export class ToolHandlers {
         projectId: ctx.projectId || undefined,
         canvasId: ctx.canvasId || undefined,
         takeId,
+        /* 标记 Agent 来源(2026-10-10 自动续跑):任务成功后 onJobFinish 据此唤醒
+           Agent 自动推进任务链;用户在画布手点的提交不带此标记,不触发。 */
+        source: 'agent',
         params: submitParams,
         references,
       });
@@ -1215,8 +1310,8 @@ export class ToolHandlers {
     'vision.caption': async (a, ctx) => {
       // 参数校验优先于来源解析:非法 style 不该被「资产/节点不存在」抢先掩盖(报错要指向真因)
       const style = String(a.style ?? 'prompt');
-      if (!['prompt', 'zimage', 'h3', 'json'].includes(style)) {
-        return { ok: false, result: `style 非法: ${style}(可选 prompt / zimage / h3 / json)` };
+      if (!['prompt', 'prompt-en', 'zimage', 'h3', 'json'].includes(style)) {
+        return { ok: false, result: `style 非法: ${style}(可选 prompt=中文详述(默认)/ prompt-en=英文 / zimage=中文六段 / h3=中文五段 / json=结构化)` };
       }
       const nodeId = String(a.nodeId ?? '');
       const assetIdArg = String(a.assetId ?? '');
@@ -1266,21 +1361,25 @@ export class ToolHandlers {
           };
         }
       }
-      // 🆕 设置页「工具模型 → 看图反推」覆盖端点(未配置则走 env 回退链,存量行为不变)
-      const overrideEp = this.resolveVisionOverride ? await this.resolveVisionOverride() : undefined;
-      const res = await captionImage(imagePath, style, a.extra ? String(a.extra) : undefined, overrideEp);
+      // 🆕 设置页「工具模型 → 看图反推」绑定(本地 mlxgen-caption / 端点),未配置则走 auto/env 回退链
+      const overrideRoute = this.resolveVisionOverride ? await this.resolveVisionOverride() : undefined;
+      const res = await captionImage(imagePath, style, a.extra ? String(a.extra) : undefined, overrideRoute);
       if (!res.ok || !res.caption) {
         // 决策 7(§4.2.1):未单独配置看图模型时,报错必须给出可执行的下一步 ——
         // 最常见的失败就是「回退到了无视觉能力的主 LLM」,裸错误用户无从下手
-        const hint = overrideEp
+        const hint = overrideRoute
           ? ''
-          : `。当前未单独配置看图模型(可能回退到了无视觉能力的端点);可到「设置 → 工具模型 → 看图反推」配置视觉模型(本机已下载的 Qwen2.5-VL 可直接选),或设 BIGBOTART_VL_MODEL 环境变量`;
+          : `。当前未单独配置看图模型(可能回退到了无视觉能力的端点,如 LM Studio 没在跑);` +
+            `可到「设置 → 工具模型 → 看图反推」选「本地 · mlxgen-caption」(免 LM Studio,留空即自动发现本机 MLX Qwen3-VL),` +
+            `或选一个视觉端点 / 设 BIGBOTART_VL_MODEL`;
         return { ok: false, result: `反推失败:${res.error ?? '未知错误'}${hint}` };
       }
+      const via = res.backend === 'mlxgen' ? '本地引擎 mlxgen-caption' : '视觉端点';
       return {
         ok: true,
         result:
-          `已用视觉模型(${res.model})反推「${srcLabel}」:\n\n${res.caption}\n\n` +
+          `已用${via}(${res.model})反推「${srcLabel}」:\n\n${res.caption}\n\n` +
+          (res.note ? `(注意:${res.note})\n` : '') +
           `(说明:这是对图片内容的文字描述,可据此填写 shot/image-gen 的 prompt;` +
           `需要调整侧重可再调本工具并传 extra)`,
       };

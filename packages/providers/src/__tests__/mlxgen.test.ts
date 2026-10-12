@@ -873,3 +873,222 @@ describe('submit · Qwen-Image-2.1 参考编辑(qwen21.edit,2026-09-28 引擎新
     ).resolves.toBeTruthy();
   });
 });
+
+/**
+ * Qwen-Image-2.1 Uncensored 本地 8bit 包(2026-10 接入)。
+ * 引擎侧:社区 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 经
+ * tools/build_qwen21_uncensored_package.sh 转换的 mflux prepared package。
+ * 能力:text_encoder 是纯语言塔(0 个 visual.*),只有 qwen21.text + qwen21.latent,
+ * **没有** qwen21.edit —— 参考编辑/inpaint/多参考必须被拦,不能发出必炸的命令。
+ */
+describe('submit · Qwen-Image-2.1 Uncensored(本地 8bit 包)', () => {
+  const UNC = 'Qwen-Image-2.1-Uncensored-MLX';
+  const root = join(tmpdir(), `bbart-mlxunc-${process.pid}`);
+
+  beforeAll(() => {
+    process.env.BIGBOTART_MODELS_DIR = root;
+    mkdirSync(join(root, UNC, 'transformer'), { recursive: true });
+    writeFileSync(join(root, UNC, 'transformer', '0.safetensors'), 'w');
+  });
+  afterAll(() => {
+    delete process.env.BIGBOTART_MODELS_DIR;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image' as const,
+      localPath: p,
+    }));
+
+  it('capabilities 清单含 Uncensored 条目(纯文生图/图生图)', async () => {
+    const p = makeProvider();
+    const caps = await p.capabilities();
+    expect(caps.models?.some((m) => m.includes('Qwen-Image-2.1-Uncensored-MLX'))).toBe(true);
+  });
+
+  it('generate:本地目录就绪 → --model 用本地路径 + --base-model 路由提示 + 40 步默认', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: '雪山日出', model: UNC }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, UNC));
+    // 不给提示会被家族兜底误路由成旧 qwen.generate(与 bf16 同因)
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('40');
+  });
+
+  it('短别名 qwen-image-2.1-uncensored 归一化到本地包(不归一化到 bf16)', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: 'x', model: 'qwen-image-2.1-uncensored' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, UNC));
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1');
+  });
+
+  it('本地包缺失 → 提交前明确报错给构建指引(不放行给 mlxgen 去 HF 解析一个假 repoId)', async () => {
+    const prev = process.env.BIGBOTART_MODELS_DIR;
+    process.env.BIGBOTART_MODELS_DIR = join(tmpdir(), `bbart-mlxunc-none-${process.pid}`);
+    try {
+      const p = makeProvider();
+      await expect(p.submit(req('generate', { prompt: 'x', model: UNC }))).rejects.toThrow(
+        'build_qwen21_uncensored_package.sh',
+      );
+    } finally {
+      process.env.BIGBOTART_MODELS_DIR = prev;
+    }
+  });
+
+  it('generate + ref-image 参考图 → 拦截(无 vision tower,没有 qwen21.edit 参考能力)', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit({ ...req('generate', { model: UNC, prompt: 'x' }), references: refs(['/lib/r1.png']) }),
+    ).rejects.toThrow('多参考模型');
+  });
+
+  it('⚠️ instruction + 输入图 → 被 latentOnly 拦(绝不能走 qwen21.edit 路由,纯语言塔必炸)', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit(req('instruction', { prompt: '换背景', inputPath: '/in/base.png', model: UNC })),
+    ).rejects.toThrow('不支持「指令编辑」');
+  });
+
+  it('本地绝对路径形式同样被拦(isQwen21EditModel 按 checkpoint 判,不认路径形式)', async () => {
+    const p = makeProvider();
+    await expect(
+      p.submit(
+        req('instruction', {
+          prompt: 'x',
+          inputPath: '/in/base.png',
+          model: join(root, UNC),
+        }),
+      ),
+    ).rejects.toThrow('不支持「指令编辑」');
+  });
+
+  it('img2img(latent)放行:--i2i-mode latent + --image-strength(该能力不需要 vision tower)', async () => {
+    const p = makeProvider();
+    await p.submit(req('img2img', { prompt: '重绘', inputPath: '/in/base.png', model: UNC }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
+    expect(cmd).toContain('--image-strength');
+  });
+
+  it('bf16 行为不受影响:同环境下 Qwen/Qwen-Image-2.1 仍走编辑路由', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { prompt: 'x', inputPath: '/in/base.png', model: 'Qwen/Qwen-Image-2.1' }));
+    const cmd = lastCmd(p);
+    expect(cmd).toContain('--image-paths');
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+});
+
+/**
+ * Qwen-Image-2.1-Turbo(2026-10 接入):2.1 的 8 步蒸馏版。
+ * 引擎侧(mlx-gen 未提交工作区):采样表 sample_sigmas 内置于 checkpoint,
+ * 步数被锁成 8(--steps 被忽略);edit CLI 经 extra_keys 接受 qwen-image-2.1-turbo。
+ * 本机 4bit 全量目录(13GB,带 vision tower 351 个 visual.*)→ 参考编辑可做,
+ * 与 Uncensored(纯语言塔)截然相反。
+ */
+describe('submit · Qwen-Image-2.1-Turbo(8 步蒸馏)', () => {
+  const TURBO = 'Qwen/Qwen-Image-2.1-Turbo';
+  const root = join(tmpdir(), `bbart-mlxturbo-${process.pid}`);
+
+  beforeAll(() => {
+    process.env.BIGBOTART_MODELS_DIR = root;
+    mkdirSync(join(root, 'Qwen-Image-2.1-Turbo', 'transformer'), { recursive: true });
+    writeFileSync(join(root, 'Qwen-Image-2.1-Turbo', 'transformer', '0.safetensors'), 'w');
+  });
+  afterAll(() => {
+    delete process.env.BIGBOTART_MODELS_DIR;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image' as const,
+      localPath: p,
+    }));
+
+  it('generate:本地目录就绪 → --model 本地路径 + --base-model qwen-image-2.1-turbo + 默认 8 步', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: '雪山日出', model: TURBO }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, 'Qwen-Image-2.1-Turbo'));
+    // ⚠️ 提示必须是 turbo 键:给 'qwen-image-2.1' 会拿到普通 2.1 的采样配置
+    // (requires_sigma_shift=true),与 Turbo 的固定 sample_sigmas 冲突
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1-turbo');
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('8');
+  });
+
+  it('短别名 qwen-image-2.1-turbo 归一化到官方 repoId', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: 'x', model: 'qwen-image-2.1-turbo' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, 'Qwen-Image-2.1-Turbo'));
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1-turbo');
+  });
+
+  it('本地目录缺失 → 回退 repoId(官方仓库,可走 mlxgen download/HF,不拦)', async () => {
+    const prev = process.env.BIGBOTART_MODELS_DIR;
+    process.env.BIGBOTART_MODELS_DIR = join(tmpdir(), `bbart-mlxturbo-none-${process.pid}`);
+    try {
+      const p = makeProvider();
+      await p.submit(req('generate', { prompt: 'x', model: TURBO }));
+      const cmd = lastCmd(p);
+      expect(cmd[cmd.indexOf('--model') + 1]).toBe(TURBO);
+      expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1-turbo');
+      expect(cmd[cmd.indexOf('--steps') + 1]).toBe('8');
+    } finally {
+      process.env.BIGBOTART_MODELS_DIR = prev;
+    }
+  });
+
+  it('instruction + 输入图 → 走 2.1 编辑路由(有 vision tower,绝不能被 latentOnly 误拦)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { prompt: '换背景', inputPath: '/in/base.png', model: TURBO }));
+    const cmd = lastCmd(p);
+    expect(cmd).toContain('--image-paths');
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    expect(cmd).not.toContain('--image-strength');
+    // 编辑路由的步数兜底同样锁 8(采样表说了算)
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('8');
+  });
+
+  it('本地路径形式同样按编辑路由判定(isQwen21EditModel 认 Turbo basename)', async () => {
+    const p = makeProvider();
+    await p.submit(
+      req('instruction', { prompt: 'x', inputPath: '/in/base.png', model: join(root, 'Qwen-Image-2.1-Turbo') }),
+    );
+    expect(lastCmd(p)[lastCmd(p).indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+
+  it('generate + ref-image → qwen21.edit 参考生成路由(--i2i-mode edit + --image-paths)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: TURBO, prompt: '角色展示图' }),
+      references: refs(['/lib/r1.png', '/lib/r2.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    expect(cmd).toContain('--image-paths');
+  });
+
+  it('img2img(latent)放行:--i2i-mode latent + --image-strength', async () => {
+    const p = makeProvider();
+    await p.submit(req('img2img', { prompt: '重绘', inputPath: '/in/base.png', model: TURBO }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
+    expect(cmd).toContain('--image-strength');
+  });
+
+  it('⚠️ 同环境下 Uncensored 仍被拦(显式排除不被 Turbo 放宽误伤)', async () => {
+    mkdirSync(join(root, 'Qwen-Image-2.1-Uncensored-MLX', 'transformer'), { recursive: true });
+    writeFileSync(join(root, 'Qwen-Image-2.1-Uncensored-MLX', 'transformer', '0.safetensors'), 'w');
+    const p = makeProvider();
+    await expect(
+      p.submit(req('instruction', { prompt: 'x', inputPath: '/in/base.png', model: 'Qwen-Image-2.1-Uncensored-MLX' })),
+    ).rejects.toThrow('不支持「指令编辑」');
+  });
+});

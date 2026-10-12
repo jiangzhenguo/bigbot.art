@@ -31,11 +31,14 @@ const inspectorSrc = readFileSync(
   'utf-8',
 );
 
-/** 从 provider 源码取参考编辑分支的 `p.steps ?? N` 兜底值 */
-function providerEditFallbackSteps(): number {
-  const m = /cmd\.push\('--steps', String\(Number\(p\.steps \?\? (\d+)\)\)\);/.exec(providerSrc);
-  expect(m, 'mlxgen.ts 里找不到参考编辑分支的 steps 兜底').toBeTruthy();
-  return Number(m![1]);
+/** 从 provider 源码取参考编辑分支的步数兜底:{turbo, normal} 两档
+ *  (Turbo 的采样表内置 checkpoint、引擎锁 8 步,兜底给 8 让日志说真话;其余模型 30) */
+function providerEditFallbackSteps(): { turbo: number; normal: number } {
+  const m = /cmd\.push\('--steps', String\(Number\(p\.steps \?\? \(isTurboEdit \? (\d+) : (\d+)\)\)\)\);/.exec(
+    providerSrc,
+  );
+  expect(m, 'mlxgen.ts 里找不到参考编辑分支的 steps 兜底(Turbo 三元式)').toBeTruthy();
+  return { turbo: Number(m![1]), normal: Number(m![2]) };
 }
 
 describe('图片编辑默认步数:检查器与 provider 必须同口径', () => {
@@ -44,7 +47,11 @@ describe('图片编辑默认步数:检查器与 provider 必须同口径', () =>
   });
 
   it('provider 兜底值与检查器相等(改一处忘另一处 → 立刻红)', () => {
-    expect(providerEditFallbackSteps()).toBe(DEFAULT_EDIT_STEPS);
+    expect(providerEditFallbackSteps().normal).toBe(DEFAULT_EDIT_STEPS);
+  });
+
+  it('provider 的 Turbo 兜底为 8(采样表 sample_sigmas 锁步数;引擎会忽略 --steps,兜底须说真话)', () => {
+    expect(providerEditFallbackSteps().turbo).toBe(8);
   });
 
   it('检查器必须把默认步数**写回 data**(否则又回到「显示值 ≠ 提交值」的事故)', () => {

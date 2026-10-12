@@ -361,3 +361,37 @@ describe('多端口可见性 · shot 的三个下游角色都必须可枚举', (
     expect(resolvePortOptions(shot(), 'shot').length).toBeGreaterThan(1);
   });
 });
+
+/**
+ * timeline 作为视频产物源(2026-10 用户反馈:「时间线节点点击加号后面的功能不对,
+ * 它应该也是视频类型的一种」)。「+」弹层此前只给「文档引用」(BY_KIND.timeline 只有 doc),
+ * 而导出成片本质是视频,弹层应与 shot / video-upscale 同类。
+ */
+describe('timeline 的「+」弹层按视频源列下游(2026-10)', () => {
+  const tl = (): CanvasNode =>
+    ({ id: 't', title: '时间线', w: 236, x: 0, y: 0, kind: 'timeline', data: { resultPath: '/o/t.mp4' } }) as CanvasNode;
+  const visible = (src: CanvasNode) => NODE_TYPES.filter((t) => hasConnector(src, t.id)).map((t) => t.name);
+
+  it('列出视频类下游:镜头 / 视频增强 / 视频裁切取帧 / 音频参考 / 时间线(+文档)', () => {
+    expect(visible(tl()).sort()).toEqual(
+      ['镜头（视频）', '视频增强', '视频裁切取帧', '音频参考', '时间线 / 剪辑', '提示词 / 文档'].sort(),
+    );
+  });
+
+  it('不含图片编辑(视频不直连图片编辑,与 shot 同纪律)', () => {
+    expect(visible(tl())).not.toContain('图片编辑');
+  });
+
+  it('timeline → shot 枚举 ref-video / ref-audio(无 first-frame:端口载荷是静帧)', () => {
+    const opts = resolvePortOptions(tl(), 'shot');
+    expect(opts.map((o) => o.port)).toEqual(['ref-video', 'ref-audio']);
+    for (const o of opts) expect(o.desc.trim().length).toBeGreaterThan(0);
+  });
+
+  it('timeline → frame-grab / video-upscale / audio-ref / timeline 各有端口', () => {
+    expect(resolvePort(tl(), 'grab')?.port).toBe('input-video');
+    expect(resolvePort(tl(), 'vupscale')?.port).toBe('input');
+    expect(resolvePort(tl(), 'audio')?.port).toBe('input-audio');
+    expect(resolvePort(tl(), 'timeline')?.port).toBe('clip');
+  });
+});

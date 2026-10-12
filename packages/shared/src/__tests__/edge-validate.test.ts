@@ -613,3 +613,67 @@ describe('视频 → 音频参考节点(audio-ref 作为下游)', () => {
     expect(deriveAudioRefSource(nodes, [edge('ig', 'ar', 'input-audio')], 'ar')).toBeUndefined();
   });
 });
+
+/**
+ * timeline 作为**视频产物源**(2026-10 接线,用户反馈:「+」弹层只给 document,
+ * 而时间线的导出成片本质是视频,应与 shot / video-upscale 同类)。
+ *
+ * 前置:data.resultPath 由导出完成时回写(TimelinePage / 检查器轮询两处同写)。
+ * 本组锁死:端口合法性(媒体门禁)、first-frame 仍不开(载荷是静帧)、
+ * refs 推导走 VIDEO_KINDS 分支读 resultPath、成片音轨可作 ref-audio / input-audio。
+ */
+describe('timeline 作为视频产物源(成片 → 下游)', () => {
+  const tlNode = (id: string, data: Record<string, unknown> = { resultPath: `/out/${id}.mp4` }): EdgeNodeMin => ({
+    id,
+    kind: 'timeline',
+    data,
+  });
+
+  it('timeline → shot ref-video / ref-audio 合法', () => {
+    expect(validateEdge([tlNode('t'), shotNode('s')], [], edge('t', 's', 'ref-video')).ok).toBe(true);
+    expect(validateEdge([tlNode('t'), shotNode('s')], [], edge('t', 's', 'ref-audio')).ok).toBe(true);
+  });
+
+  it('timeline → frame-grab input-video 合法;timeline → video-upscale input 合法', () => {
+    const grab = { id: 'g', kind: 'frame-grab', data: {} };
+    const vup = { id: 'u', kind: 'video-upscale', data: {} };
+    expect(validateEdge([tlNode('t'), grab], [], edge('t', 'g', 'input-video')).ok).toBe(true);
+    expect(validateEdge([tlNode('t'), vup], [], edge('t', 'u', 'input')).ok).toBe(true);
+  });
+
+  it('timeline → audio-ref input-audio 合法(成片带内嵌音轨;媒体门禁按载荷=音轨判定)', () => {
+    const ar = { id: 'ar', kind: 'audio-ref', data: {} };
+    expect(validateEdge([tlNode('t'), ar], [], edge('t', 'ar', 'input-audio')).ok).toBe(true);
+    expect(allowedPortLabels(tlNode('t'), 'audio-ref')).toEqual(['input-audio']);
+  });
+
+  it('timeline → timeline clip 合法(成片入另一条时间线)', () => {
+    expect(validateEdge([tlNode('a'), tlNode('b', {})], [], edge('a', 'b', 'clip')).ok).toBe(true);
+  });
+
+  it('timeline → shot first-frame 仍被拒(端口载荷是静帧,成片取帧须先经 frame-grab)', () => {
+    const res = validateEdge([tlNode('t'), shotNode('s')], [], edge('t', 's', 'first-frame'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('port-not-allowed');
+  });
+
+  it('timeline → image-edit 仍被拒(视频不直连图片编辑,与 shot 同纪律)', () => {
+    const edit = { id: 'e', kind: 'image-edit', data: {} };
+    expect(validateEdge([tlNode('t'), edit], [], edge('t', 'e', 'input')).ok).toBe(false);
+  });
+
+  it('B · deriveShotRefsFromEdges:timeline → shot ref-video 读 data.resultPath(与 video-upscale 同分支)', () => {
+    const refs = deriveShotRefsFromEdges([tlNode('t'), shotNode('s')], [edge('t', 's', 'ref-video')], 's');
+    expect(refs).toEqual([{ path: '/out/t.mp4', role: 'ref-video', auto: true }]);
+  });
+
+  it('B · deriveShotRefsFromEdges:成片未导出(resultPath 缺失)时不注入', () => {
+    const refs = deriveShotRefsFromEdges([tlNode('t', {}), shotNode('s')], [edge('t', 's', 'ref-video')], 's');
+    expect(refs).toEqual([]);
+  });
+
+  it('B · deriveAudioRefSource:timeline 成片的音轨可作 audio-ref 来源', () => {
+    const ar = { id: 'ar', kind: 'audio-ref', data: {} };
+    expect(deriveAudioRefSource([tlNode('t'), ar], [edge('t', 'ar', 'input-audio')], 'ar')).toBe('/out/t.mp4');
+  });
+});

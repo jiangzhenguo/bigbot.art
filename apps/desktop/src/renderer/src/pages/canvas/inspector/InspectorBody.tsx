@@ -31,6 +31,8 @@ export interface InspectorBodyProps {
   runNode: (nodeId: string) => void;
   /** 当前画布全部节点(给 timeline 检查器查 shot 标题/Take 用) */
   nodes?: CanvasNode[];
+  /** nodeId → 最新成功 Take 产物路径(与节点卡同一份;视频增强等本地节点的产物兜底显示用) */
+  takeResults?: Record<string, string>;
   /** 跳到时间线页面 */
   onOpenTimelinePage?: () => void;
   /** 删除一条边(timeline 检查器「移出时间线」= 断开对应连线) */
@@ -61,6 +63,7 @@ export function InspectorBody({
   assetCache,
   runNode,
   nodes,
+  takeResults = {},
   onOpenTimelinePage,
   onRemoveEdge,
   onMaterializeStoryboard,
@@ -214,7 +217,9 @@ export function InspectorBody({
       const device = String(d.device ?? 'mps');
       const inputAssetId = String(d.inputAssetId ?? '');
       const vidFrom = d.inputVideoFrom as { nodeId?: string } | undefined;
-      const outPath = String(d.resultPath ?? '');
+      // 增强结果:data.resultPath 优先,缺失时回退 Take 回填结果
+      // (长任务期间离开画布页会让完成时的 data 回写落空;2026-10 new1-gta1 事故)
+      const outPath = String(d.resultPath ?? '') || takeResults[node.id] || '';
       const applied = (d.appliedStages as string[] | undefined) ?? [];
       // 输入视频路径:Asset ID 直绑 → 连线上游(asset 取资产,其余取产物)
       const srcPath = (() => {

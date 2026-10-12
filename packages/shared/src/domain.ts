@@ -229,6 +229,15 @@ export interface TimelineData {
     durationSec?: number;
     createdAt: string;
   };
+  /**
+   * 🆕 最近一次导出成片的**绝对路径**(与 lastExport 同一次导出,导出成功时一并回写)。
+   *
+   * 为什么需要它:timeline 作为「视频产物源」连下游(frame-grab 取帧 / video-upscale 再增强 /
+   * shot 参考视频 / audio-ref 抽音轨 / 另一条时间线入轨)时,下游解析器统一读
+   * `data.resultPath`(与 shot / video-upscale 同口径)——lastExport.path 是 bba-output://
+   * 展示 URL,ffmpeg 用不了。两字段同源同写,只用其一的读取方各取所需。
+   */
+  resultPath?: string;
 }
 
 /** 镜头间转场(在 #i 与 #i+1 镜头之间,0-indexed) */
@@ -864,6 +873,8 @@ export interface RenderJob {
   error?: string;
   takeId?: string;
   resultPath?: string;
+  /** 提交来源(RenderRequest.source 透传):'agent' 提交的任务完成后可触发 Agent 自动续跑 */
+  source?: 'agent' | 'user';
   createdAt: string;
   updatedAt: string;
 }
@@ -991,6 +1002,28 @@ export interface ToolModelBinding {
    *    指向一个看不懂图的端点(设计见方案文档 §3.1 / §4.2.1)。
    */
   vision?: LlmSource;
+  /**
+   * 看图反推的**本地引擎通道**(2026-10,mlx-gen 新增 `mlxgen-caption`)。
+   *
+   * 与 `vision`(OpenAI 兼容端点,要 LM Studio 之类 server 在跑)**二选一**;
+   * 同时存在时本地通道优先。不填 = 走 auto:本机有 MLX 格式 Qwen3-VL checkpoint
+   * 且命令可用时优先本地,否则回退端点链(存量行为不变)。
+   * 解析与执行见 apps/desktop/src/main/mlxgen-caption.ts。
+   */
+  captionLocal?: CaptionLocalBinding;
+}
+
+/**
+ * 本地看图通道绑定(mlxgen-caption)。
+ * `model` 留空 = 主进程自动发现(LM Studio 模型库 / ~/ai/models 下的 MLX Qwen3-VL)。
+ */
+export interface CaptionLocalBinding {
+  /** 本地 checkpoint 目录绝对路径,或已下载的 HF repo id */
+  model?: string;
+  /** 图片 token 预算上限(引擎 `--max-pixels`,默认 640000 ≈ 800x800) */
+  maxPixels?: number;
+  /** 生成长度上限(引擎 `--max-tokens`,默认 1024) */
+  maxTokens?: number;
 }
 
 /** 资产导入结果 */
@@ -1117,7 +1150,7 @@ export interface AgentEvent {
    * 收到请求即返回 {ok:true, accepted:true},真正的结果经事件推送。
    * 这样长任务(反推提示词等 11 轮 / 5 分钟以上的链路)不再被请求超时误杀成「假失败」。
    */
-  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed';
+  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed' | 'auto-start';
   projectId: string;
   canvasId: string;
   toolName?: string;
@@ -1126,6 +1159,8 @@ export interface AgentEvent {
   result?: string;
   nodeId?: string;
   issues?: string[];
+  /** 自动续跑(auto-start):渲染层据此把面板切入「执行中」并展示说明(如「生成完成 · Agent 自动推进中…」) */
+  note?: string;
   /** 终局(done):本轮最终结果,字段语义与 AgentChatResponse 一致 */
   final?: AgentChatResponse;
   /** 终局(failed):失败原因(带已完成工具摘要,便于判断画布改动是否已生效) */

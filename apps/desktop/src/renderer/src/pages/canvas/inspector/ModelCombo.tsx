@@ -1,6 +1,6 @@
 /**
  * ModelCombo — 模型下拉(检查器)
- * - 数据源:已知 4 模型(与 capabilities().models 同口径)+ 自定义 repoId
+ * - 数据源:内置已知模型清单(与 capabilities().models 同口径)+ 自定义 repoId
  * - 每项右侧徽章实时反映下载状态:已下载 ✓ / 待下载 ⤓ / 下载中 %(mlxgenModels / mlxgenDownload / mlxgenDownloadStatus)
  * - 点击「待下载」徽章直接发起下载;完成后自动选中
  */
@@ -22,6 +22,12 @@ export const IMAGE_MODELS: ModelItem[] = [
   // 2.1 统一 bf16 全量:文生图 + 参考编辑(1-10 张 / 原生 RGBA)三能力全有。
   // 原 8bit 社区导出无 vision tower、做不了编辑,已移除(2026-09-28)
   { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', repoId: 'Qwen/Qwen-Image-2.1', alias: 'qwen-image-2.1', desc: '文生图 / 参考编辑 · 7.1B · ~33 GB', ico: 'Q-2' },
+  // Turbo(2026-10 接入):2.1 的 8 步蒸馏版,全量带 vision tower(参考编辑可做);
+  // 采样表内置 checkpoint(sample_sigmas),步数锁定 8,--steps 被引擎忽略
+  { id: 'qwen-image-2.1-turbo', name: 'Qwen-Image-2.1 Turbo', repoId: 'Qwen/Qwen-Image-2.1-Turbo', alias: 'qwen-image-2.1-turbo', desc: '文生图 / 参考编辑 · 8步蒸馏 · 快', ico: 'Q-T' },
+  // Uncensored 本地包(2026-10 接入):纯文生图/图生图(text_encoder 无 vision tower,
+  // 做不了参考编辑);无应用内下载通道,由 mlx-gen 构建脚本产出,就绪徽章按本地目录探测
+  { id: 'qwen-image-2.1-uncensored', name: 'Qwen-Image-2.1 Uncensored', repoId: 'Qwen-Image-2.1-Uncensored-MLX', alias: 'qwen-image-2.1-uncensored', desc: '文生图 / 图生图 · 8bit · ~22 GB · 本地包', ico: 'Q-U' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', alias: 'qwen-image-edit', desc: '指令编辑 / mask · 8bit ~37.5 GB', ico: 'Q-E' },
   { id: 'flux2-klein-9b', name: 'Flux.2 Klein 9B', repoId: 'AbstractFramework/flux.2-klein-9b-8bit', desc: '多参考编辑 / outpaint · ~18 GB', ico: 'F-K' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit', desc: '超分修复 · ~4.7 GB', ico: 'S-V' },

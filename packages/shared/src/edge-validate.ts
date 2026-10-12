@@ -58,8 +58,10 @@ export interface ValidateEdgeOptions {
  *  frame-grab 产出的就是 PNG,故与其它图片产物同类 —— 它正是「视频 → 图片」的合法转换点。 */
 export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab'];
 
-/** 视频产物类节点(视频直通:video-upscale 的产物是 mp4,不是静帧) */
-export const VIDEO_KINDS = ['video-upscale'];
+/** 视频产物类节点(视频直通:产物是 mp4,不是静帧)。
+ *  timeline 在导出成功后 data.resultPath = 成片绝对路径(2026-10 起由渲染层两处回写),
+ *  与其它视频产物节点同口径:可作 ref-video / ref-audio / input-video / input 的源。 */
+export const VIDEO_KINDS = ['video-upscale', 'timeline'];
 
 /**
  * **带内嵌音轨的视频产物类节点** —— 它们的产物可作 `ref-audio` 的音源

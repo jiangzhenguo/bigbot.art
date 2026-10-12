@@ -13,8 +13,9 @@ import {
   createReadStream, readdirSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import { Readable } from 'node:stream';
 import { join, basename, extname, resolve, dirname } from 'node:path';
-import { dialog, BrowserWindow } from 'electron';
+import { dialog, BrowserWindow, app } from 'electron';
 import type { Asset, AssetCategory, AssetRef, AssetImportResult } from '@bigbotart/shared';
 import type { ProjectStore as MainProjectStore } from './store';
 import { WORKSPACES_DIR, workspaceAssetsFile } from './workspace-paths.js';
@@ -32,42 +33,79 @@ export const PROJECTS_DIR = join(DATA_DIR, 'projects');
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 
 /**
- * 解析产物根目录:优先环境变量 → 已有仓库内 .bigbotart/outputs → ~/.bigbotart/outputs
- * (兼容此前写在项目目录下的 Take 视频)
+ * 打包态(Finder/Dock 启动的安装版)。真实事故 2026-10:安装版 cwd=/,
+ * cwd 候选全部落空 → 产物根飘到 ~/.bigbotart/outputs,而历史产物在仓库
+ * .bigbotart/outputs,bba-output:// 白名单又只认产物根 → 画布视频全部「消失」。
+ * 打包版因此**绝不跟随 cwd**;dev 版保留 cwd 候选以兼容仓库内历史产物。
  */
-function resolveOutputsDir(): string {
-  if (process.env.BIGBOTART_H3_OUTPUTS) return resolve(process.env.BIGBOTART_H3_OUTPUTS);
-  const candidates = [
-    join(process.cwd(), '.bigbotart', 'outputs'),
-    join(process.cwd(), '..', '..', '.bigbotart', 'outputs'),
-    join(DATA_DIR, 'outputs'),
-  ];
+const IS_PACKAGED = !!app.isPackaged;
+
+/**
+ * 解析产物根目录(纯函数,可单测):环境变量优先;
+ * 打包版固定 DATA_DIR/outputs;dev 版额外尝试 cwd 候选(兼容仓库内旧产物)。
+ */
+export function pickOutputsDir(opts: {
+  envOverride?: string;
+  isPackaged: boolean;
+  cwd: string;
+  dataDir: string;
+  exists: (p: string) => boolean;
+}): string {
+  const { envOverride, isPackaged, cwd, dataDir, exists } = opts;
+  if (envOverride) return resolve(envOverride);
+  const candidates = isPackaged
+    ? [join(dataDir, 'outputs')]
+    : [join(cwd, '.bigbotart', 'outputs'), join(cwd, '..', '..', '.bigbotart', 'outputs'), join(dataDir, 'outputs')];
   for (const c of candidates) {
-    if (existsSync(c)) return resolve(c);
+    if (exists(c)) return resolve(c);
   }
-  const fallback = join(DATA_DIR, 'outputs');
-  mkdirSync(fallback, { recursive: true });
-  return resolve(fallback);
+  return resolve(join(dataDir, 'outputs'));
+}
+
+function resolveOutputsDir(): string {
+  const dir = pickOutputsDir({
+    envOverride: process.env.BIGBOTART_H3_OUTPUTS,
+    isPackaged: IS_PACKAGED,
+    cwd: process.cwd(),
+    dataDir: DATA_DIR,
+    exists: existsSync,
+  });
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /** 渲染产物根(与主进程 H3_OUTPUTS_DIR / mock / mlxgen 对齐) */
 export const OUTPUTS_DIR = resolveOutputsDir();
 
-/** bba-output 查找根:当前 OUTPUTS_DIR + 导出目录 + 其它已知产物目录(旧路径兼容) */
+/** bba-output 查找根:当前 OUTPUTS_DIR + 导出目录;dev 版另含 cwd 候选(旧路径兼容) */
 export function outputSearchRoots(): string[] {
-  const roots = new Set<string>([
-    resolve(OUTPUTS_DIR),
-    resolve(join(DATA_DIR, 'exports')),
-    resolve(join(process.cwd(), '.bigbotart', 'exports')),
-  ]);
-  for (const c of [
-    join(DATA_DIR, 'outputs'),
-    join(process.cwd(), '.bigbotart', 'outputs'),
-    join(process.cwd(), '..', '..', '.bigbotart', 'outputs'),
-  ]) {
-    if (existsSync(c)) roots.add(resolve(c));
+  const roots = new Set<string>([resolve(OUTPUTS_DIR), resolve(join(DATA_DIR, 'exports'))]);
+  const dataOutputs = join(DATA_DIR, 'outputs');
+  if (existsSync(dataOutputs)) roots.add(resolve(dataOutputs));
+  if (!IS_PACKAGED) {
+    roots.add(resolve(join(process.cwd(), '.bigbotart', 'exports')));
+    for (const c of [join(process.cwd(), '.bigbotart', 'outputs'), join(process.cwd(), '..', '..', '.bigbotart', 'outputs')]) {
+      if (existsSync(c)) roots.add(resolve(c));
+    }
   }
   return [...roots];
+}
+
+/**
+ * bba-output:// 相对文件名校验(纯函数,可单测)。
+ *
+ * 真实事故(2026-10):旧实现用 `/^[A-Za-z0-9._/-]+$/` 白名单,而导出成片文件名由
+ * 项目名派生(sanitizeOutputName 明确保留中文 ‑‑ ),于是「飞机1-xxx.mp4」这类
+ * 中文名被协议层 400 拒掉 → 画布 timeline 节点成片预览**整块黑屏**。
+ * 现只拒绝真正危险的形态:空串 / `..` 路径穿越 / 绝对路径 / 控制字符 / 反斜杠 / 冒号;
+ * 中文等 Unicode 文件名合法。最终落盘仍由调用处的 resolve + 根目录边界检查兜底。
+ */
+export function isValidOutputRelName(name: string): boolean {
+  if (!name) return false;
+  if (name.includes('..') || name.startsWith('/')) return false;
+  // eslint-disable-next-line no-control-regex -- 故意拒绝控制字符(协议层防呆)
+  if (/[\x00-\x1f\\:]/.test(name)) return false;
+  return true;
 }
 
 function mimeOf(file: string): string {
@@ -122,7 +160,18 @@ export function rangeFileResponse(file: string, rangeHeader: string | null): Res
   }
 
   const length = end - start + 1;
-  const body = createReadStream(file, { start, end }) as unknown as ReadableStream<Uint8Array>;
+  // ⚠️ 必须是**真正的 web ReadableStream**(`Readable.toWeb`),不能把 Node 流直接塞进 Response
+  // (原写法 `createReadStream(...) as unknown as ReadableStream` 只是骗过 tsc;2026-10-12 真实弹窗事故):
+  // undici 的 extractBody 见「不是 ReadableStream、但是 async iterable」就会用 ReadableStreamFrom()
+  // 包一层,而那一层的 pull() 在迭代器结束时**无保护地** `queueMicrotask(() => controller.close())`
+  // (Node 22.22 / Electron 38.8.6 内置 undici,行号 1596)。一旦消费方在「源读完」的同一拍取消
+  // —— Chromium 取消 bba-asset/bba-output 请求:缩略图重渲染、节点删除、`<video>` seek 打断上一个
+  // Range 请求、HMR 整页重载 —— close() 就抛 ERR_INVALID_STATE: ReadableStream is already closed;
+  // 异常发生在 queueMicrotask 里,调用方 try/catch **拦不住** → 主进程 uncaughtException →
+  // Electron 弹「A JavaScript error occurred in the main process」。走 toWeb 则 undici 命中
+  // `object instanceof ReadableStream` 分支,根本不生成那层包装器
+  // (Node 22.22 实测:旧写法 150 次命中 3 次,toWeb 200 次 0 次)。
+  const body = Readable.toWeb(createReadStream(file, { start, end })) as ReadableStream<Uint8Array>;
   const headers: Record<string, string> = {
     'content-type': type,
     'content-length': String(length),

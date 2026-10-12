@@ -86,6 +86,10 @@ const api: BigBotArtApi = {
   skillActive: (projectId: string, canvasId: string) => ipcRenderer.invoke('skill-active', projectId, canvasId),
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),
   exportStatus: (taskId: string) => ipcRenderer.invoke('export-status', taskId),
+  exportFilePath: (input: { name: string }) => ipcRenderer.invoke('export-file-path', input),
+  saveExportAs: (input: { name: string }) => ipcRenderer.invoke('save-export-as', input),
+  archiveExport: (input: { projectId: string; nodeId: string; name: string }) =>
+    ipcRenderer.invoke('archive-export', input),
   exportProjectPackage: (req) => ipcRenderer.invoke('export-project-package', req),
   importProjectPackage: (input) => ipcRenderer.invoke('import-project-package', input),
   extractFrame: (videoPath, mode, seconds) => ipcRenderer.invoke('extract-frame', videoPath, mode, seconds),

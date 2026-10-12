@@ -11,10 +11,11 @@ interface OnboardingPageProps {
 const IMAGE_MODELS: Array<{ id: string; name: string; desc: string; recommended?: boolean }> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', desc: '文生图 · ~11GB', recommended: true },
   { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', desc: '文生图 / 参考编辑 · 7.1B · ~33GB' },
+  { id: 'qwen-image-2.1-turbo', name: 'Qwen-Image-2.1 Turbo', desc: '文生图 / 参考编辑 · 8步蒸馏 · 快 · ~33GB' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 37.5GB' },
   { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', desc: '多参考生成/编辑 · Outpain ~18GB' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', desc: '超分修复 · ~4.7GB' },
-  { id: 'qwen2.5-vl', name: 'Qwen2.5-VL', desc: '视觉 LLM · Agent 识图 · ~16.6GB' },
+  { id: 'qwen3-vl-8b-caption', name: 'Qwen3-VL 8B caption', desc: '看图反推 · Agent 识图(本地 mlxgen-caption)· ~5.4GB · 建议在 LM Studio 下载' },
 ];
 
 /** 自检项占位(运行前展示「待检测」;真实结果由主进程返回,见 selfcheck.ts) */
@@ -36,6 +37,11 @@ const MANUAL_MODELS: Array<{ name: string; desc: string; how: string }> = [
     name: 'Ornith-1.5-35B-A3B · MLX 4bit',
     desc: 'LLM · Agent 内核 · 19.4GB',
     how: '在 LM Studio 内下载(本应用不代下)',
+  },
+  {
+    name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)',
+    desc: '图片 · 文生图/图生图 · ~22GB',
+    how: 'mlx-gen 本地转换构建(tools/build_qwen21_uncensored_package.sh),构建后自动识别',
   },
 ];
 
@@ -584,10 +590,11 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                           {
                             'z-image-turbo': 'AbstractFramework/z-image-turbo-8bit',
                             'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
+                            'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
                             'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
                             'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
                             'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
-                            'qwen2.5-vl': 'Qwen/Qwen2.5-VL-7B-Instruct',
+                            'qwen3-vl-8b-caption': 'gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit',
                           }[m.id] ?? m.id,
                         )
                       }

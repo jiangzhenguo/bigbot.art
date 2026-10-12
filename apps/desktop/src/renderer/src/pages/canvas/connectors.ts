@@ -207,7 +207,18 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     timeline: ['sequence', '镜头编排 · 入轨'],
     doc: ['prompt', '文档引用'],
   },
+  /* 🆕 时间线作为**源**(2026-10):成片是视频产物 → 与其它视频节点同类。
+     导出成功后 data.resultPath = 成片绝对路径(TimelinePage 与检查器导出轮询都会回写),
+     下游按 resultPath 解析。不含 first-frame(端口载荷是静帧,成片取帧须先经 frame-grab)。 */
   timeline: {
+    shot: [
+      ['ref-video', '参考视频 · 成片作风格/动作参考'],
+      ['ref-audio', '音频参考 · 成片的内嵌音轨'],
+    ],
+    grab: ['input-video', '输入视频 · 从成片取帧'],
+    vupscale: ['input', '输入视频 · 成片再增强(超分/修脸)'],
+    audio: ['input-audio', '输入音频 · 抽成片的音轨'],
+    timeline: ['clip', '成片 · 整段入轨'],
     doc: ['prompt', '文档引用'],
   },
   'workflow-input': {
@@ -224,8 +235,8 @@ const BY_TARGET: Record<string, PortRow> = {
  *  frame-grab 产出的就是 PNG,故与其它图片产物同类 —— 它正是「视频 → 图片」的合法转换点。 */
 export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab'];
 
-/** 视频产物类节点(视频直通:video-upscale 产物是 mp4,不能当静帧用) */
-export const VIDEO_KINDS = ['video-upscale'];
+/** 视频产物类节点(视频直通:产物是 mp4,不能当静帧用;timeline 成片同 —— 与 shared VIDEO_KINDS 同口径) */
+export const VIDEO_KINDS = ['video-upscale', 'timeline'];
 
 /** 能收口到 workflow-output 的源(必须与 dispatch 的收集逻辑一致,否则弹窗会承诺不存在的边) */
 const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS, ...VIDEO_KINDS];

@@ -51,6 +51,25 @@ describe('normalizeModelId:同一模型三种写法等价(缺陷 A 根因锁定)
     expect(normalizeModelId('/models/flux2-klein-9b-8bit')).toBe('AbstractFramework/flux.2-klein-9b-8bit');
   });
 
+  it('Uncensored 本地包:repoId / 短别名 / 本地路径 → 同一 id(独立于 bf16,不归一化过去)', () => {
+    const forms = [
+      'Qwen-Image-2.1-Uncensored-MLX',
+      'qwen-image-2.1-uncensored',
+      '/Users/x/ai/models/Qwen-Image-2.1-Uncensored-MLX',
+    ];
+    for (const f of forms) expect(normalizeModelId(f), f).toBe('Qwen-Image-2.1-Uncensored-MLX');
+  });
+
+  it('Turbo:repoId / 短别名 / 本地目录路径 → 同一 id', () => {
+    const forms = [
+      'Qwen/Qwen-Image-2.1-Turbo',
+      'qwen-image-2.1-turbo',
+      'qwen-2.1-turbo',
+      '/Users/x/ai/models/Qwen-Image-2.1-Turbo',
+    ];
+    for (const f of forms) expect(normalizeModelId(f), f).toBe('Qwen/Qwen-Image-2.1-Turbo');
+  });
+
   it('自定义 repoId 原样返回(用户自行负责);空串安全', () => {
     expect(normalizeModelId('someone/custom')).toBe('someone/custom');
     expect(normalizeModelId('')).toBe('');
@@ -79,6 +98,29 @@ describe('supportsCapability:按实测矩阵判定', () => {
 
   it('未知模型一律 false(防呆交给提交层)', () => {
     expect(supportsCapability('someone/custom', 'image.generate')).toBe(false);
+  });
+
+  it('Uncensored:仅文生图/图生图(纯语言塔,无 vision tower → 无参考编辑/inpaint/outpaint/多参考)', () => {
+    for (const f of ['Qwen-Image-2.1-Uncensored-MLX', '/m/Qwen-Image-2.1-Uncensored-MLX']) {
+      expect(supportsCapability(f, 'image.generate'), f).toBe(true);
+      expect(supportsCapability(f, 'image.img2img'), f).toBe(true);
+      expect(supportsCapability(f, 'image.instruction'), f).toBe(false);
+      expect(supportsCapability(f, 'image.inpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.outpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.multiReference'), f).toBe(false);
+      expect(supportsCapability(f, 'image.upscale'), f).toBe(false);
+    }
+  });
+
+  it('Turbo:能力面与 bf16 相同(全量带 vision tower → 参考编辑 ✓;多参考/inpaint/outpaint ✗)', () => {
+    for (const f of ['Qwen/Qwen-Image-2.1-Turbo', 'qwen-image-2.1-turbo', '/m/Qwen-Image-2.1-Turbo']) {
+      expect(supportsCapability(f, 'image.generate'), f).toBe(true);
+      expect(supportsCapability(f, 'image.img2img'), f).toBe(true);
+      expect(supportsCapability(f, 'image.instruction'), f).toBe(true);
+      expect(supportsCapability(f, 'image.inpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.outpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.multiReference'), f).toBe(false);
+    }
   });
 });
 

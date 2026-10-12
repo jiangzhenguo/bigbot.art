@@ -51,10 +51,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   /** 镜头画面规格继承(shot → shot):目标节点 → 要写入的规格键值 */
   const specPatch = new Map<string, Record<string, unknown>>();
   const specFromPatch = new Map<string, { nodeId: string } | null>();
-  /** 接续/直通自动切换 mode(默认文生 → 首帧) */
+  /** 接续/直通自动切换 mode(默认文生 → 首帧);ref-image 边另见 refImageEdgeNodes */
   const modePatch = new Map<string, string>();
   /** 有「首帧端口」入边的 shot 节点(用于删边后把自动切换的 mode 收回) */
   const frameEdgeNodes = new Set<string>();
+  /**
+   * 有「参考图端口」入边的 shot(2026-10-12「测试技能2」事故):
+   * 连了 ref-image 却停在 text2video → UI 显示「文生」、检查器参考槽按文生过滤,
+   * 用户以为参考图没生效。有 ref-image 且无 first-frame 时自动切 mode=ref-image。
+   * ⚠️ first-frame 优先(与 h3 `--ref-image`/`--first-frame` 互斥一致)。
+   */
+  const refImageEdgeNodes = new Set<string>();
 
   for (const e of edges) {
     const src = byId.get(e.from);
@@ -70,14 +77,20 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         const fromShot = src.kind === 'shot';
         const fromImage = IMAGE_KINDS.includes(src.kind ?? '');
         // 只有「首帧端口」入边才自动切 mode(默认文生 → 首帧);
-        // ref-image(参考图)边不误切首帧 —— h3 的 --ref-image 与 --first-frame 互斥(连接器设计 §10.4)
+        // ref-image 边不误切首帧 —— h3 的 --ref-image 与 --first-frame 互斥(连接器设计 §10.4)
         const isFirstFrameEdge = e.label === 'first-frame';
         const hasFrameEdge = (fromShot || fromImage || src.kind === 'asset') && isFirstFrameEdge;
         // 只要存在「首帧端口」入边就登记(与是否需要切换 mode 无关),供删边后收回判断
         if (hasFrameEdge) {
           frameEdgeNodes.add(e.to);
-          // 下游没显式选过模式(仍是默认文生)时,自动切「首帧」
-          if (modeRaw === 'text2video' && !modeOverridden) modePatch.set(e.to, 'first-frame');
+          // 下游没显式选过模式(仍是默认文生/自动关联)时,自动切「首帧」
+          if ((modeRaw === 'text2video' || modeRaw === 'ref-image') && !modeOverridden) {
+            modePatch.set(e.to, 'first-frame');
+          }
+        }
+        // 登记参考图入边(图片产物 / 资产);写 mode 在下方 apply 阶段统一裁决
+        if (e.label === 'ref-image' && (fromImage || src.kind === 'asset')) {
+          refImageEdgeNodes.add(e.to);
         }
         const effMode = modePatch.get(e.to) ?? modeRaw;
         const frameOk = effMode === 'first-frame' || effMode === 'first-last';
@@ -166,7 +179,14 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       case 'timeline': {
         // 入线端口 clip / audio-track:视频、静帧、编排、音轨、音视频素材
         const asMedia = src.kind === 'asset' && ['video', 'audio'].includes(String(s.mediaType ?? ''));
-        const isClip = src.kind === 'shot' || src.kind === 'director' || src.kind === 'audio-ref' || IMAGE_KINDS.includes(src.kind ?? '');
+        // VIDEO_KINDS(video-upscale / timeline 成片)同样可整段入轨
+        //(video-upscale → timeline 此前连接器表宣称支持、这里漏了派发,2026-10 一并补上)
+        const isClip =
+          src.kind === 'shot' ||
+          src.kind === 'director' ||
+          src.kind === 'audio-ref' ||
+          IMAGE_KINDS.includes(src.kind ?? '') ||
+          VIDEO_KINDS.includes(src.kind ?? '');
         if (isClip || asMedia) {
           const arr = timelinePatch.get(e.to) ?? [];
           if (!arr.includes(e.from)) arr.push(e.from);
@@ -356,11 +376,18 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       // 比例 + 档位继承(用户手动改过 ⇒ specOverride=true,不再覆盖)
       const spec = specPatch.get(n.id);
       if (spec && data.specOverride !== true) Object.assign(data, spec);
-      // 模式:接续/直通时自动切「首帧」;手动选过模式(modeOverride)则不动
+      // 模式:入边驱动自动切换;手动选过模式(modeOverride)则不动。
+      // 优先级:first-frame 入边 > ref-image 入边 > 收回文生。
       if (data.modeOverride !== true) {
-        const wantMode = modePatch.get(n.id);
-        if (wantMode) data.mode = wantMode;
-        else if (!frameEdgeNodes.has(n.id) && data.mode === 'first-frame') data.mode = 'text2video';
+        if (frameEdgeNodes.has(n.id)) {
+          const wantMode = modePatch.get(n.id);
+          if (wantMode) data.mode = wantMode;
+          else if (data.mode === 'text2video' || data.mode === 'ref-image') data.mode = 'first-frame';
+        } else if (refImageEdgeNodes.has(n.id)) {
+          if (data.mode === 'text2video' || data.mode === 'first-frame') data.mode = 'ref-image';
+        } else if (data.mode === 'first-frame' || data.mode === 'ref-image') {
+          data.mode = 'text2video';
+        }
       }
     }
     if (n.kind === 'timeline') {

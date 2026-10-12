@@ -194,7 +194,11 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
     name: '双人游戏开场视频生成器',
     description: 'MiniMax 官方:根据玩家信息、角色参考图和视觉风格,完成首图确认与界面动效设计',
     instructions: coOpGameIntro,
-    inject: 'summary',
+    /* ⚠️ 必须是 full(2026-10-12 由 summary 改,同 3d-animation-short)。
+     * 真实事故「测试技能2」:summary 只见「先静帧再视频」流程名,Agent 跳过 PLAYER 角色卡、
+     * 把一张主菜单静帧当唯一参考、7 镜 mode 停在文生并行提交 → 人物锁不住、成片接不齐。
+     * 核心规则(角色卡先行 / 1 静帧+1 镜头 / mode=ref-image)写在正文前段,必须全量注入。 */
+    inject: 'full',
   },
 ];
 

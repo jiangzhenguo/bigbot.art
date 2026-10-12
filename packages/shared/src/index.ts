@@ -170,6 +170,12 @@ export interface BigBotArtApi {
   // 时间线导出(FFmpeg)
   exportTimeline(req: import('./domain').TimelineExportRequest): Promise<{ ok: boolean; taskId?: string; error?: string }>;
   exportStatus(taskId: string): Promise<import('./domain').ExportTask>;
+  /** 按文件名解析导出目录内成片的绝对路径(timeline 旧节点 resultPath 愈合用;不存在返回 ok:false) */
+  exportFilePath(input: { name: string }): Promise<{ ok: boolean; path?: string }>;
+  /** 时间线成片「另存为…」:系统保存对话框选位置,把导出目录内的成片复制过去(取消返回 canceled=true) */
+  saveExportAs(input: { name: string }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+  /** 时间线成片「存入资源库」:复制进资产库并登记(source='product',归入 projectId) */
+  archiveExport(input: { projectId: string; nodeId: string; name: string }): Promise<{ ok: boolean; assets: import('./domain').Asset[]; error?: string }>;
   // 项目包导入/导出(.bba 单文件:结构 + Take 历史 + 记忆 + 附件实体;不含生成产物)
   /**
    * 导出项目为 .bba 包。不传 path 时主进程弹保存对话框(取消返回 canceled=true)。

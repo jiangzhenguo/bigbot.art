@@ -11,7 +11,7 @@
  * 关键:vision.ts / assets.ts 的模块级常量按 env 求值 → 必须在模块顶层先设 env,再在测试内动态 import。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,10 @@ import { join } from 'node:path';
 const tmpHome = mkdtempSync(join(tmpdir(), 'bbart-vision-'));
 process.env.BIGBOTART_HOME = tmpHome;
 process.env.BIGBOTART_H3_OUTPUTS = join(tmpHome, 'outputs');
+// ⚠️ 测试机若**恰好**装了 MLX 格式 Qwen3-VL,auto 模式会去走本地 mlxgen-caption
+// (真加载 6GB 模型!)—— 故本文件默认钉死端点通道,本地通道的用例自己临时切 env。
+// 这也保证「同一份用例在任何机器上跑,走的是同一条通道」。
+process.env.BIGBOTART_CAPTION_BACKEND = 'endpoint';
 
 const outDir = join(tmpHome, 'outputs');
 const assetDir = join(tmpHome, 'assets');
@@ -88,25 +92,43 @@ describe('resolveVisionEndpoint', () => {
 
 /* ── 2. 指令组装(纯函数) ── */
 describe('buildCaptionInstruction', () => {
-  it('四种 style 的出稿要求互不相同', () => {
+  /* ⚠️ 2026-10-12 用户反馈「反推出来的提示词都是英文」→ 默认风格必须**写死中文**,
+     不能靠模型自己猜语言(同一张图会时中时英)。英文走显式 style=prompt-en。 */
+  it('默认 style=prompt → 中文详述命令(不再是英文)', () => {
     const p = vision.buildCaptionInstruction('prompt');
+    expect(p).toContain('中文');
+    expect(p).not.toContain('English'); // 回归:旧实现这里写的是 "detailed English ... prompt"
+    expect(p).toContain('文生图');
+  });
+
+  it('五种 style 的出稿要求互不相同', () => {
+    const p = vision.buildCaptionInstruction('prompt');
+    const en = vision.buildCaptionInstruction('prompt-en');
     const z = vision.buildCaptionInstruction('zimage');
     const h = vision.buildCaptionInstruction('h3');
     const j = vision.buildCaptionInstruction('json');
-    expect(p).toContain('English');
+    expect(en).toContain('English');
     expect(z).toContain('Z-Image');
+    expect(z).toContain('中文');
     expect(h).toContain('H3');
     expect(j).toContain('JSON');
-    expect(new Set([p, z, h, j]).size).toBe(4);
+    expect(j).toContain('值一律用中文');
+    expect(new Set([p, en, z, h, j]).size).toBe(5);
   });
 
-  it('未知 style 落通用分支(不抛错)', () => {
-    expect(vision.buildCaptionInstruction('whatever')).toContain('English');
+  it('未知 style 落通用分支(不抛错,同样是中文)', () => {
+    const x = vision.buildCaptionInstruction('whatever');
+    expect(x).toContain('中文');
+    expect(x).not.toContain('English');
   });
 
-  it('extra 追加到指令末尾;空白 extra 不追加', () => {
-    expect(vision.buildCaptionInstruction('prompt', '强调光影')).toContain('强调光影');
-    expect(vision.buildCaptionInstruction('prompt', '   ')).not.toContain('Additional requirement');
+  it('extra 追加到指令末尾(中文前缀);英文风格用英文前缀;空白 extra 不追加', () => {
+    const zh = vision.buildCaptionInstruction('prompt', '强调光影');
+    expect(zh).toContain('附加要求:强调光影');
+    expect(vision.buildCaptionInstruction('prompt-en', 'emphasize lighting')).toContain('Additional requirement:emphasize lighting');
+    const blank = vision.buildCaptionInstruction('prompt', '   ');
+    expect(blank).not.toContain('附加要求');
+    expect(blank).not.toContain('Additional requirement');
   });
 });
 
@@ -207,6 +229,28 @@ describe('captionImage', () => {
     expect(r.caption).toBe('Partial');
   });
 
+  it('默认发给端点的指令是**中文**成稿要求(2026-10-12 事故回归)', async () => {
+    let sent: any;
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: any) => {
+      sent = JSON.parse(init.body);
+      return Response.json({ choices: [{ message: { content: '一只猫' } }] });
+    }));
+    await vision.captionImage(join(assetDir, 'sample.png'), 'prompt', undefined, { baseUrl: 'http://x/v1', model: 'm' });
+    const text = sent.messages[0].content[0].text;
+    expect(text).toContain('中文');
+    expect(text).not.toContain('English');
+  });
+
+  it('style=prompt-en → 指令显式要英文(英文能力没被砍掉,只是不再默认)', async () => {
+    let sent: any;
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: any) => {
+      sent = JSON.parse(init.body);
+      return Response.json({ choices: [{ message: { content: 'a cat' } }] });
+    }));
+    await vision.captionImage(join(assetDir, 'sample.png'), 'prompt-en', undefined, { baseUrl: 'http://x/v1', model: 'm' });
+    expect(sent.messages[0].content[0].text).toContain('English');
+  });
+
   it('发出的请求体是 data URL 且带正确 mime', async () => {
     let sent: any;
     vi.stubGlobal('fetch', vi.fn(async (_u: string, init: any) => {
@@ -292,6 +336,17 @@ describe('vision.caption tool handler', () => {
     expect(r.result).toContain('标题拼 id');
   });
 
+  it('style=prompt-en → 通过白名单(新增风格没漏接线)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ choices: [{ message: { content: 'a cat' } }] })));
+    const h = makeHandlers(
+      makeStore([{ id: 'asset-node-en', kind: 'asset', label: '参考图', position: { x: 0, y: 0 }, data: { assetId: 'a1' } }]),
+      makeAssets({ a1: { id: 'a1', name: '参考图.png', localPath: join(assetDir, 'sample.png') } }),
+    );
+    const r = await h.call('vision.caption', { nodeId: 'asset-node-en', style: 'prompt-en' }, ctx);
+    expect(r.ok, r.result).toBe(true);
+    expect(r.result).toContain('a cat');
+  });
+
   it('style 非法 → 明确拒绝(白名单外不静默落通用分支)', async () => {
     const h = makeHandlers(makeStore([]), makeAssets({}));
     const r = await h.call('vision.caption', { assetId: 'a1', style: 'bogus' }, ctx);
@@ -331,5 +386,199 @@ describe('vision.caption tool handler', () => {
     const r = await h.call('vision.caption', { nodeId: 'img-2' }, ctx);
     expect(r.ok).toBe(false);
     expect(r.result).toContain('反推失败');
+  });
+});
+
+/* ═══ 7. 本地引擎通道 mlxgen-caption(2026-10 对接)═══ */
+
+/** 假 checkpoint 树 + 假命令:把「本机可用」这件事做成可控的注入,不碰真模型 */
+function fakeLocalDeps(over: Partial<import('../mlxgen-caption.js').CaptionDeps> = {}) {
+  const modelDir = '/fake/models/gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit';
+  const tree: Record<string, string[]> = {
+    '/fake/models': ['gavinmroy'],
+    '/fake/models/gavinmroy': ['Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit'],
+    [modelDir]: ['config.json', 'model.safetensors'],
+    '/fake/.cache/huggingface/hub': [],
+  };
+  const files: Record<string, string> = {
+    [`${modelDir}/config.json`]: JSON.stringify({ model_type: 'qwen3_vl', architectures: ['Qwen3VLForConditionalGeneration'] }),
+  };
+  return {
+    modelDir,
+    /** 假 roots 必须落在 process.env 上:captionImage 内部读的是 process.env,不是测试局部 env */
+    env: { BIGBOTART_CAPTION_MODEL_ROOTS: '/fake/models' },
+    deps: {
+      which: async (bin: string) => (bin === 'mlxgen-caption' ? '/fake/bin/mlxgen-caption' : undefined),
+      // 假树 ∪ 真盘:caption 的 --output 临时文件是真实写入的,存在性必须落到真实 fs
+      exists: (p: string) => p in tree || p in files || existsSync(p),
+      listDir: (p: string) => tree[p] ?? [],
+      // 同理:假树 ∪ 真盘 —— caption 的 --output 文件要能真读回来;不存在时 readFileSync 自然抛 ENOENT
+      readText: (p: string) => (p in files ? files[p]! : readFileSync(p, 'utf8')),
+      ...over,
+    } as import('../mlxgen-caption.js').CaptionDeps,
+  };
+}
+
+describe('resolveVisionRoute / planFallback(纯逻辑)', () => {
+  it('BIGBOTART_CAPTION_BACKEND=endpoint → 端点通道(即使本机有本地模型)', async () => {
+    const { deps } = fakeLocalDeps();
+    const route = await vision.resolveVisionRoute({ ...process.env, BIGBOTART_CAPTION_BACKEND: 'endpoint' }, deps);
+    expect(route.kind).toBe('endpoint');
+  });
+
+  it('=mlxgen → 本地通道,且 checkpoint 自动发现到 caption 微调', async () => {
+    const { deps, modelDir } = fakeLocalDeps();
+    const env = { ...process.env, BIGBOTART_CAPTION_BACKEND: 'mlxgen', BIGBOTART_CAPTION_MODEL_ROOTS: '/fake/models' };
+    const route = await vision.resolveVisionRoute(env, deps);
+    expect(route.kind).toBe('mlxgen');
+    if (route.kind !== 'mlxgen') return;
+    expect(route.config?.model).toBe(modelDir);
+    expect(route.config?.cmd.bin).toBe('/fake/bin/mlxgen-caption');
+  });
+
+  it('=mlxgen 但本机没有命令 → 返回带原因的空 route(不回退,让用户看到真因)', async () => {
+    const { deps } = fakeLocalDeps({ which: async () => undefined });
+    const route = await vision.resolveVisionRoute({ ...process.env, BIGBOTART_CAPTION_BACKEND: 'mlxgen' }, deps);
+    expect(route.kind).toBe('mlxgen');
+    if (route.kind !== 'mlxgen') return;
+    expect(route.config).toBeUndefined();
+    expect(route.reason).toContain('mlxgen-caption');
+  });
+
+  it('auto + 本机可用 → 本地;auto + 本机不可用 → 端点(存量行为不变)', async () => {
+    const { deps, modelDir } = fakeLocalDeps();
+    const env = { ...process.env, BIGBOTART_CAPTION_BACKEND: 'auto', BIGBOTART_CAPTION_MODEL_ROOTS: '/fake/models' };
+    const local = await vision.resolveVisionRoute(env, deps);
+    expect(local.kind).toBe('mlxgen');
+    if (local.kind === 'mlxgen') expect(local.config?.model).toBe(modelDir);
+
+    const none = await vision.resolveVisionRoute(env, fakeLocalDeps({ which: async () => undefined }).deps);
+    expect(none.kind).toBe('endpoint');
+  });
+
+  it('planFallback:auto 下端点→本地可回退;显式指定通道/关闭开关 → 不回退', () => {
+    const ep: import('../vision.js').VisionRoute = { kind: 'endpoint', endpoint: { baseUrl: 'http://x/v1', model: 'm' } };
+    const local: import('../vision.js').VisionRoute = { kind: 'mlxgen', config: undefined };
+    expect(vision.planFallback(ep, { BIGBOTART_CAPTION_BACKEND: 'auto' } as NodeJS.ProcessEnv)).toBe('mlxgen');
+    expect(vision.planFallback(local, { BIGBOTART_CAPTION_BACKEND: 'auto' } as NodeJS.ProcessEnv)).toBe('endpoint');
+    // 用户显式选了通道 = 他的选择,失败就报失败
+    expect(vision.planFallback(ep, { BIGBOTART_CAPTION_BACKEND: 'endpoint' } as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(vision.planFallback(local, { BIGBOTART_CAPTION_BACKEND: 'mlxgen' } as NodeJS.ProcessEnv)).toBeUndefined();
+    // 设置页传入的 route 也是显式选择:env 仍是 auto 也不许换通道
+    expect(vision.planFallback(ep, { BIGBOTART_CAPTION_BACKEND: 'auto' } as NodeJS.ProcessEnv, true)).toBeUndefined();
+    expect(vision.planFallback(local, {} as NodeJS.ProcessEnv, true)).toBeUndefined();
+    // 显式关掉回退
+    expect(vision.planFallback(ep, { BIGBOTART_CAPTION_BACKEND: 'auto', BIGBOTART_CAPTION_FALLBACK: '0' } as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('captionImage 本地通道与回退', () => {
+  const img = (): string => join(assetDir, 'sample.png');
+  const savedBackend = process.env.BIGBOTART_CAPTION_BACKEND;
+
+  beforeEach(() => vi.unstubAllGlobals());
+  afterAll(() => {
+    if (savedBackend === undefined) delete process.env.BIGBOTART_CAPTION_BACKEND;
+    else process.env.BIGBOTART_CAPTION_BACKEND = savedBackend;
+    delete process.env.BIGBOTART_CAPTION_MODEL_ROOTS;
+  });
+
+  /** 假执行器:写 --output 文件(与真 CLI 同契约),并把收到的参数回传给断言 */
+  function fakeRunner(caption = '一只猫坐在窗台上'): { run: NonNullable<import('../mlxgen-caption.js').CaptionDeps['run']>; calls: string[][] } {
+    const calls: string[][] = [];
+    return {
+      calls,
+      run: async (_cmd, args) => {
+        calls.push([_cmd, ...args]);
+        const i = args.indexOf('--output');
+        writeFileSync(args[i + 1]!, caption);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+  }
+
+  it('route=mlxgen → 走本地引擎,返回 caption 与 backend 标记', async () => {
+    process.env.BIGBOTART_CAPTION_BACKEND = 'mlxgen';
+    process.env.BIGBOTART_CAPTION_MODEL_ROOTS = '/fake/models';
+    const { deps, modelDir } = fakeLocalDeps();
+    const { run, calls } = fakeRunner();
+    const r = await vision.captionImage(img(), 'zimage', undefined, undefined, { ...deps, run });
+    expect(r.ok, r.error).toBe(true);
+    expect(r.caption).toBe('一只猫坐在窗台上');
+    expect(r.backend).toBe('mlxgen');
+    expect(r.model).toContain('Qwen3-VL-8B-NSFW-Caption'); // 回显目录名,不是模型名
+    // 参数面:--model 指真目录、--image-path 指图、--prompt 收到 zimage 指令、temperature 0
+    const argv = calls[0]!;
+    expect(argv[argv.indexOf('--model') + 1]).toBe(modelDir);
+    expect(argv[argv.indexOf('--image-path') + 1]).toBe(img());
+    expect(argv[argv.indexOf('--prompt') + 1]).toContain('Z-Image');
+    expect(argv[argv.indexOf('--temperature') + 1]).toBe('0');
+  });
+
+  it('route=mlxgen 但通道不可用 → 显式失败并说明原因(不偷偷换端点)', async () => {
+    process.env.BIGBOTART_CAPTION_BACKEND = 'mlxgen';
+    process.env.BIGBOTART_CAPTION_MODEL_ROOTS = '/fake/models';
+    const { deps } = fakeLocalDeps({ which: async () => undefined });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const r = await vision.captionImage(img(), 'prompt', undefined, undefined, deps);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('本地看图通道不可用');
+    expect(fetchSpy).not.toHaveBeenCalled(); // 关键:没有偷偷回退到端点
+  });
+
+  it('设置页显式绑定端点失败 → 不回退本地(env 仍是 auto 也尊重这次选择)', async () => {
+    delete process.env.BIGBOTART_CAPTION_BACKEND;
+    process.env.BIGBOTART_CAPTION_MODEL_ROOTS = '/fake/models';
+    const { deps } = fakeLocalDeps();
+    const { run, calls } = fakeRunner('不该出现的本地描述');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('lmstudio down', { status: 503 })));
+    const boundEndpoint: import('../vision.js').VisionRoute = { kind: 'endpoint', endpoint: { baseUrl: 'http://127.0.0.1:1234/v1', model: 'vl' } };
+    const r = await vision.captionImage(img(), 'prompt', undefined, boundEndpoint, { ...deps, run });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('503');
+    expect(r.note).toBeUndefined();
+    expect(calls.length).toBe(0);
+  });
+
+  it('设置页显式绑定本地通道但不可用 → 不回退端点', async () => {
+    delete process.env.BIGBOTART_CAPTION_BACKEND;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const r = await vision.captionImage(img(), 'prompt', undefined, {
+      kind: 'mlxgen',
+      reason: '没有可用的 checkpoint',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('没有可用的 checkpoint');
+    expect(r.note).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('auto 且未显式绑定:本地失败后再试端点,两条错误都报出来', async () => {
+    process.env.BIGBOTART_CAPTION_BACKEND = 'auto';
+    process.env.BIGBOTART_CAPTION_MODEL_ROOTS = '/fake/models';
+    const { deps } = fakeLocalDeps();
+    const run = async (): Promise<{ code: number; stdout: string; stderr: string }> => ({
+      code: 1,
+      stdout: '',
+      stderr: 'MLX-Gen will not download model files during generation',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('lmstudio down', { status: 503 })));
+    const r = await vision.captionImage(img(), 'prompt', undefined, undefined, { ...deps, run });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('mlxgen-caption 退出码');
+    expect(r.error).toContain('回退endpoint 也失败');
+    expect(r.error).toContain('503');
+  });
+
+  it('显式指定端点通道 → 端点失败时不回退(尊重用户选择)', async () => {
+    process.env.BIGBOTART_CAPTION_BACKEND = 'endpoint';
+    const { deps } = fakeLocalDeps();
+    const { run, calls } = fakeRunner();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+    const r = await vision.captionImage(img(), 'prompt', undefined, undefined, { ...deps, run });
+    expect(r.ok).toBe(false);
+    expect(calls.length).toBe(0); // 本地执行器一次都没被调用
   });
 });

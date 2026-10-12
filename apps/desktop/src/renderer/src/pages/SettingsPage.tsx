@@ -103,7 +103,12 @@ const PV_CATALOG: PvCatalogEntry[] = [
   ] },
   { id: 'opencode-go', av: 'OC', name: 'opencode go', sub: 'OpenAI 兼容', host: '', models: [] },
   { id: 'minimax', av: 'M', name: 'MiniMax', sub: 'MiniMax 系列', host: 'https://api.minimaxi.com/v1', models: [] },
-  { id: 'kimi', av: 'K', name: 'Kimi（月之暗面）', sub: 'kimi-k2 等', host: 'https://api.moonshot.cn/v1', models: [] },
+  { id: 'kimi', av: 'K', name: 'Kimi 开放平台（月之暗面）', sub: '按量计费 · moonshot/kimi-k2 系列', host: 'https://api.moonshot.cn/v1', models: [] },
+  // Kimi 编程套餐(kimi.com 会员)与开放平台是两套账号体系:sk-kimi- 前缀的 Key 只认
+  // api.kimi.com/coding 端点,配到 moonshot.cn 必 401(2026-10 实测)
+  { id: 'kimi-coding', av: 'K', name: 'Kimi 编程套餐', sub: 'kimi.com 会员 · kimi-for-coding/k3', host: 'https://api.kimi.com/coding/v1', models: [
+    { id: 'kimi-for-coding', note: '编程' }, { id: 'k3', note: 'K3' }, { id: 'k3-256k', note: 'K3 · 长上下文' },
+  ] },
   { id: 'zcode', av: 'Z', name: 'zcode', sub: 'OpenAI 兼容', host: '', models: [] },
   { id: 'openai', av: 'O', name: 'OpenAI', sub: 'gpt 系列', host: 'https://api.openai.com/v1', models: [] },
   { id: 'claude', av: 'C', name: 'Claude（兼容端点）', sub: 'Anthropic 兼容', host: 'https://api.anthropic.com/v1', models: [] },
@@ -219,7 +224,10 @@ interface DownloadState {
 }
 
 /** 模型下载列表里可下载的条目(按 .mdl-row 顺序) */
-const MODEL_IDS = ['qwen-image-2.1', 'qwen-image-edit', 'flux2-klein-9b', 'seedvr2-3b', 'qwen2.5-vl'] as const;
+const MODEL_IDS = ['qwen-image-2.1', 'qwen-image-2.1-turbo', 'qwen-image-2.1-uncensored', 'qwen-image-edit', 'flux2-klein-9b', 'seedvr2-3b', 'qwen3-vl-8b-caption'] as const;
+
+/** 无应用内下载通道的条目(本地构建包):不渲染下载按钮,只显示就绪状态 */
+const MANUAL_IMAGE_IDS = new Set<string>(['qwen-image-2.1-uncensored']);
 
 /** 模型 id → huggingface repo(mlxgen download 参数,与主进程白名单同口径) */
 const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> = {
@@ -227,10 +235,18 @@ const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> =
   // 2.1 统一用 bf16 全量:文生图 + 参考编辑(qwen21.edit)三能力全有;
   // 原 8bit 社区导出无 vision tower(做不了编辑)已移除(2026-09-28)
   'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
+  // Turbo:8 步蒸馏版,官方 HF 仓库 + MS 直连,可应用内下载
+  'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  // Uncensored:repoId 即本地目录名,仅作与主进程 KNOWN_MODELS 对齐的标识,无下载通道
+  'qwen-image-2.1-uncensored': 'Qwen-Image-2.1-Uncensored-MLX',
   'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
   'flux2-klein-9b': 'AbstractFramework/flux.2-klein-9b-8bit',
   'seedvr2-3b': 'AbstractFramework/seedvr2-3b-8bit',
-  'qwen2.5-vl': 'Qwen/Qwen2.5-VL-7B-Instruct',
+  // 看图反推(mlxgen-caption 本地通道):V4.5 caption 微调,必须是 MLX 格式 dense Qwen3-VL。
+  // ⚠️ 该仓库**无 ModelScope 镜像**(2026-10 实测),应用内下载走 HF;HF 不通时请在
+  // LM Studio 里下载(下完由主进程的本地 checkpoint 探测直接认成「已就绪」)。
+  // 原 qwen2.5-vl(torch 布局)mlx-gen 加载不了,已替换(2026-10)
+  'qwen3-vl-8b-caption': 'gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit',
 };
 
 export default function SettingsPage({ onNavigate, onBack, backLabel }: SettingsPageProps) {
@@ -2025,14 +2041,16 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
                 // 模型大小按 HF 官方文件清单实测(2026-09,hf-mirror tree 汇总 / ModelScope 直连清单):
-                //   z-image-turbo-8bit 10.99GB · Qwen-Image-2.1-bf16 ~33GB · qwen-image-edit-8bit 37.5GB · flux.2-klein-9b-8bit ~18GB · seedvr2-3b-8bit 4.72GB · qwen2.5-vl-7b 16.6GB
+                //   z-image-turbo-8bit 10.99GB · Qwen-Image-2.1-bf16 ~33GB · qwen-image-edit-8bit 37.5GB · flux.2-klein-9b-8bit ~18GB · seedvr2-3b-8bit 4.72GB · qwen3-vl-8b-caption 5.4GB(本地 LM Studio 那份实测)
                 const meta: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], { name: string; desc: string }> = {
                   'z-image-turbo': { name: 'Z-Image-Turbo', desc: t('文生图 · 推荐 · ~11GB') },
                   'qwen-image-2.1': { name: 'Qwen-Image-2.1 (bf16 全量)', desc: t('文生图 / 参考编辑 1-10 张 · ~33GB') },
+                  'qwen-image-2.1-turbo': { name: 'Qwen-Image-2.1 Turbo (8步蒸馏)', desc: t('文生图 / 参考编辑 · 采样表锁 8 步 · 快 · ~33GB(本地 4bit ~13GB)') },
+                  'qwen-image-2.1-uncensored': { name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)', desc: t('文生图 / 图生图 · ~22GB · 本地构建包(mlx-gen tools/build_qwen21_uncensored_package.sh)') },
                   'qwen-image-edit': { name: 'Qwen Image Edit', desc: t('指令编辑 / Inpaint · 推荐 · 37.5GB') },
                   'flux2-klein-9b': { name: 'FLUX.2 Klein 9B', desc: t('多参考生成/编辑 · Outpaint · ~18GB') },
                   'seedvr2-3b': { name: 'SeedVR2 3B', desc: t('超分修复 · 可选 · ~4.7GB') },
-                  'qwen2.5-vl': { name: 'Qwen2.5-VL', desc: t('视觉 LLM · Agent 识图 · 可选 · ~16.6GB') },
+                  'qwen3-vl-8b-caption': { name: 'Qwen3-VL 8B caption 微调', desc: t('看图反推 · Agent 识图(本地 mlxgen-caption)· ~5.4GB · 无 MS 镜像,HF 不通时请在 LM Studio 下载') },
                 };
                 const m = meta[id];
                 const dl = downloads[id] ?? { status: 'idle' as const, pct: 0 };
@@ -2052,6 +2070,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     </div>
                     {ready ? (
                       <span className="badge ok">{t('已就绪')}</span>
+                    ) : MANUAL_IMAGE_IDS.has(id) ? (
+                      // 本地构建包(如 Uncensored):无下载通道,不渲染下载按钮
+                      <span className="badge" title={t('由 mlx-gen tools/build_qwen21_uncensored_package.sh 本地转换构建,详见引擎仓库')}>
+                        {t('手动构建')}
+                      </span>
                     ) : dl.status === 'idle' ? (
                       <button className="btn btn-s btn-sm" data-dl="" onClick={() => startDownload(id)}>
                         {t('下载')}

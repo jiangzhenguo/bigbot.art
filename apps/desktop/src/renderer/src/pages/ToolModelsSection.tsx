@@ -6,7 +6,7 @@
  * 设计:docs/工具模型选择-产品设计与技术方案.md §5。
  */
 import React, { useEffect, useState } from 'react';
-import type { AppSettings, LlmSource, ToolModelBinding } from '@bigbotart/shared';
+import type { AppSettings, ToolModelBinding } from '@bigbotart/shared';
 import {
   DEFAULT_TOOL_MODELS,
   MODEL_CAPABILITIES,
@@ -39,7 +39,7 @@ export function ToolModelsSection() {
   const [cloudProviders, setCloudProviders] = useState<AppSettings['cloudProviders']>([]);
   // vision 行的紧凑表单状态
   const [vlmModel, setVlmModel] = useState('');
-  const [visionKind, setVisionKind] = useState<'none' | 'lmstudio' | 'cloud' | 'openai-compatible'>('none');
+  const [visionKind, setVisionKind] = useState<'none' | 'mlxgen-caption' | 'lmstudio' | 'cloud' | 'openai-compatible'>('none');
   const [visionCloudId, setVisionCloudId] = useState('');
   const [visionCompatUrl, setVisionCompatUrl] = useState('');
 
@@ -52,7 +52,8 @@ export function ToolModelsSection() {
       setTm(cur);
       setCloudProviders(s.cloudProviders ?? []);
       const v = cur.vision;
-      if (!v) setVisionKind('none');
+      if (cur.captionLocal) { setVisionKind('mlxgen-caption'); setVlmModel(cur.captionLocal.model ?? ''); }
+      else if (!v) setVisionKind('none');
       else if (v.kind === 'lmstudio') { setVisionKind('lmstudio'); setVlmModel(v.model ?? ''); }
       else if (v.kind === 'cloud') { setVisionKind('cloud'); setVisionCloudId(v.provider); setVlmModel(v.model ?? ''); }
       else if (v.kind === 'openai-compatible') { setVisionKind('openai-compatible'); setVisionCompatUrl(v.baseUrl); setVlmModel(v.model ?? ''); }
@@ -78,16 +79,29 @@ export function ToolModelsSection() {
   const capValue = (cap: ImageCapability): string =>
     tm.image?.[cap] && tm.image[cap]!.trim() ? tm.image[cap]! : DEFAULT_TOOL_MODELS[cap];
 
+  /**
+   * 保存看图通道。两条通道**互斥**:选一条就把另一条显式置 undefined
+   * (settings.json 是整体替换 toolModels,JSON.stringify 会丢掉 undefined 键 → 真的被清掉)。
+   */
   const saveVision = (kind: typeof visionKind, model: string, cloudId: string, compatUrl: string) => {
-    let vision: LlmSource | undefined;
-    if (kind === 'lmstudio') vision = { kind: 'lmstudio', model: model.trim() || undefined };
-    else if (kind === 'cloud' && cloudId) vision = { kind: 'cloud', provider: cloudId, model: model.trim() || undefined };
-    else if (kind === 'openai-compatible' && compatUrl.trim()) vision = { kind: 'openai-compatible', baseUrl: compatUrl.trim(), model: model.trim() || undefined };
-    save({ ...tm, vision });
+    const next: ToolModelBinding = { ...tm, vision: undefined, captionLocal: undefined };
+    if (kind === 'mlxgen-caption') next.captionLocal = { model: model.trim() || undefined };
+    else if (kind === 'lmstudio') next.vision = { kind: 'lmstudio', model: model.trim() || undefined };
+    else if (kind === 'cloud' && cloudId) next.vision = { kind: 'cloud', provider: cloudId, model: model.trim() || undefined };
+    else if (kind === 'openai-compatible' && compatUrl.trim()) next.vision = { kind: 'openai-compatible', baseUrl: compatUrl.trim(), model: model.trim() || undefined };
+    save(next);
   };
 
   /* 当前生效的看图来源(三态透明化,决策 7) */
   const visionStatus = (() => {
+    if (tm.captionLocal) {
+      return {
+        ok: true,
+        text: tm.captionLocal.model?.trim()
+          ? `${t('已配置')}:${t('本地引擎 mlxgen-caption')} · ${tm.captionLocal.model.trim()}`
+          : `${t('已配置')}:${t('本地引擎 mlxgen-caption')} · ${t('自动发现本机 MLX Qwen3-VL 检查点')}`,
+      };
+    }
     const v = tm.vision;
     if (v && v.kind !== 'none') {
       const modelName =
@@ -180,6 +194,7 @@ export function ToolModelsSection() {
               }}
             >
               <option value="none">{t('未配置(按回退链)')}</option>
+              <option value="mlxgen-caption">{t('本地 · mlxgen-caption(免 LM Studio)')}</option>
               <option value="lmstudio">{t('本地 · LM Studio')}</option>
               <option value="cloud">{t('云端供应商')}</option>
               <option value="openai-compatible">{t('OpenAI 兼容端点')}</option>
@@ -216,7 +231,13 @@ export function ToolModelsSection() {
             <div className="row g8 tm-field">
               <span className="input-w mono">
                 <input
-                  placeholder={visionKind === 'cloud' ? t('模型名(留空 = 供应商首个模型)') : t('模型名(如 qwen2.5-vl-7b-instruct)')}
+                  placeholder={
+                    visionKind === 'cloud'
+                      ? t('模型名(留空 = 供应商首个模型)')
+                      : visionKind === 'mlxgen-caption'
+                        ? t('checkpoint 目录路径 / owner/name 仓库 id(留空 = 自动发现)')
+                        : t('模型名(如 qwen3-vl-8b-instruct)')
+                  }
                   value={vlmModel}
                   onChange={(e) => setVlmModel(e.target.value)}
                   onBlur={() => saveVision(visionKind, vlmModel, visionCloudId, visionCompatUrl)}
@@ -224,9 +245,16 @@ export function ToolModelsSection() {
               </span>
             </div>
           ) : null}
+          {visionKind === 'mlxgen-caption' ? (
+            <div className="sub" style={{ marginTop: 6 }}>
+              {t(
+                '提示:走 mlx-gen 新增的 mlxgen-caption(本地 MLX Qwen3-VL,不需要启动 LM Studio)。留空即自动发现 ~/.lmstudio/models、~/ai/models 与本机 HF 缓存里的 MLX 格式 Qwen3-VL(「模型下载」里的 Qwen3-VL 8B caption 下完,或已在 LM Studio 里,都会被认到)。**填 LM Studio 的模型名也行**——会自动匹配到本机那份 checkpoint;填错(既不是目录也不是仓库 id 又匹配不到)时会明确告诉你原因。引擎命令缺失时会给安装指引。',
+              )}
+            </div>
+          ) : null}
           {visionKind === 'lmstudio' ? (
             <div className="sub" style={{ marginTop: 6 }}>
-              {t('提示:本机「模型下载」里的 Qwen2.5-VL(~16.6GB)就是为此准备的;在 LM Studio 加载后把模型名填在这里。')}
+              {t('提示:请在 LM Studio 里加载一个**视觉**模型(Qwen3-VL / Qwen2.5-VL 等),再把模型名填在这里。若不想开 LM Studio,把上面改成「本地 · mlxgen-caption」。')}
             </div>
           ) : null}
         </div>

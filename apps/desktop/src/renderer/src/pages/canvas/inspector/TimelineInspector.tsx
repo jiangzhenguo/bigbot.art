@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   RenderJob,
   TimelineAudio,
@@ -9,7 +9,8 @@ import type {
 } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { KVSection, Lbl } from './fields';
-import { outputUrlOf } from '../media';
+import { basenameOf, outputUrlOf } from '../media';
+import { TimelineExportPreview } from '../TimelineExportPreview';
 
 /** 产物 URL 是否为视频(决定用 <video> 还是 <img>) */
 function isVideoSrc(src: string | null | undefined): boolean {
@@ -95,6 +96,18 @@ export function TimelineInspector({
   /** 导出进度(本地状态;成功 toast 即可) */
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  /** 导出进度轮询定时器(检查器发起的导出也要轮询到终态并回写 lastExport) */
+  const exportPollRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (exportPollRef.current !== null) window.clearTimeout(exportPollRef.current);
+    },
+    [],
+  );
+  /* setData 由 InspectorBody 内联生成、每次渲染新引用;轮询回调是延迟执行,
+     必须经 ref 取最新(与「延迟保存只读 ref」同一纪律,防闭包捕获旧引用) */
+  const setDataRef = useRef(setData);
+  setDataRef.current = setData;
 
   /* ── 入线序列操作 ── */
   const moveShot = useCallback(
@@ -205,6 +218,46 @@ export function TimelineInspector({
   };
 
   /* ── 导出 ── */
+  /** 轮询导出任务到终态:成功回写 data.lastExport(节点卡/检查器据此展示成片预览与入库/另存为入口) */
+  const pollExport = useCallback(
+    (taskId: string, format: TimelineExportPreset['format']) => {
+      const tick = async () => {
+        try {
+          const task = await window.bigbotart.exportStatus(taskId);
+          if (task.status === 'running') {
+            exportPollRef.current = window.setTimeout(() => void tick(), 800);
+            return;
+          }
+          setExporting(false);
+          if (task.status === 'succeeded' && task.outputPath) {
+            const name = basenameOf(task.outputPath);
+            setDataRef.current({
+              // resultPath(绝对路径)与 lastExport(展示 URL)同写:
+              // 下游视频解析器(frame-grab / video-upscale / shot 参考)统一读 resultPath
+              resultPath: task.outputPath,
+              lastExport: {
+                path: outputUrlOf(task.outputPath),
+                name,
+                format,
+                resolution: 'source',
+                createdAt: new Date().toISOString(),
+              },
+            });
+            toastMsg(`导出完成:${name}`);
+          } else {
+            setExportNote(`导出失败:${task.error ?? '未知错误'}`);
+            toastMsg(`导出失败:${task.error ?? '未知错误'}`);
+          }
+        } catch (e) {
+          setExporting(false);
+          setExportNote(`导出失败:${(e as Error).message}`);
+        }
+      };
+      exportPollRef.current = window.setTimeout(() => void tick(), 500);
+    },
+    [toastMsg],
+  );
+
   const startExport = useCallback(async () => {
     if (!projectId) {
       setExportNote('未关联项目,无法导出');
@@ -255,26 +308,83 @@ export function TimelineInspector({
         outputName: 'timeline',
       });
       if (!res.ok) {
+        setExporting(false);
         setExportNote(res.error ?? '导出失败');
         toastMsg(`导出失败:${res.error ?? '未知错误'}`);
+      } else if (res.taskId) {
+        // 检查器内直接轮询到终态并回写 lastExport —— 此前只有时间线页会回写,
+        // 在检查器点导出后节点卡永远没有成片预览(2026-10 用户反馈)
+        setExportNote('导出进行中…');
+        pollExport(res.taskId, exportPresetFixed.format);
       } else {
-        toastMsg('导出已启动,可在时间线页面查看进度');
+        setExporting(false);
+        setExportNote('导出失败:未返回任务 ID');
       }
     } catch (e) {
+      setExporting(false);
       setExportNote(`导出失败:${(e as Error).message}`);
       toastMsg(`导出失败:${(e as Error).message}`);
-    } finally {
-      setExporting(false);
     }
-  }, [projectId, shotNodeIds, picks, trim, audio, transitions, exportPreset, nodesById, toastMsg]);
+  }, [projectId, shotNodeIds, picks, trim, audio, transitions, exportPreset, nodesById, toastMsg, pollExport]);
 
   const readyShots = shotNodeIds.filter((sid) => {
     const list = takeHistory[sid] ?? [];
     return list.some((t) => t.status === 'succeeded' && t.resultPath);
   });
 
+  /* ── 最近成片(lastExport):预览 + 另存为 + 存入资源库 ── */
+  const lastExport = d.lastExport;
+  /** 成片文件名(另存为/入库按名解析;老数据缺 name 时从 bba-output URL 解码兜底) */
+  const lastExportName = lastExport?.path
+    ? lastExport.name ?? decodeURIComponent(basenameOf(lastExport.path))
+    : '';
+
+  const onSaveAs = useCallback(() => {
+    if (!lastExportName) return;
+    void window.bigbotart
+      .saveExportAs({ name: lastExportName })
+      .then((r) => {
+        if (r.ok) toastMsg(`已另存为:${basenameOf(r.path ?? '')}`);
+        else if (!r.canceled) toastMsg(`另存为失败:${r.error ?? ''}`);
+      })
+      .catch(() => toastMsg('另存为失败'));
+  }, [lastExportName, toastMsg]);
+
+  const onArchiveExport = useCallback(() => {
+    if (!projectId || !lastExportName) return;
+    void window.bigbotart
+      .archiveExport({ projectId, nodeId: node.id, name: lastExportName })
+      .then((r) =>
+        toastMsg(r.ok ? `已存入资源库(${r.assets.length} 项,source=产物)` : `入库失败:${r.error ?? ''}`),
+      )
+      .catch(() => toastMsg('入库失败'));
+  }, [projectId, lastExportName, node.id, toastMsg]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* ── 0. 最近成片预览(导出成功即出现;可播/另存为/入库) ── */}
+      {lastExport?.path ? (
+        <div className="kv" data-od-id="timeline-last-export">
+          <div className="f-sec-h" style={{ padding: '8px 12px 4px' }}>
+            <span className="lbl">成片预览</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>
+              {lastExport.name ?? ''}
+            </span>
+          </div>
+          <div style={{ padding: '0 8px 4px' }}>
+            <TimelineExportPreview lastExport={lastExport} compact={false} />
+          </div>
+          <div className="row g6" style={{ padding: '0 8px 8px', display: 'flex', gap: 6 }}>
+            <button className="btn btn-s btn-sm" type="button" onClick={onSaveAs}>
+              另存为…
+            </button>
+            <button className="btn btn-s btn-sm" type="button" onClick={onArchiveExport} disabled={!projectId}>
+              存入资源库
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* ── 1. 入线镜头序列 ── */}
       <div>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
@@ -290,6 +400,16 @@ export function TimelineInspector({
             通过上游 shot 节点连线自动入线
           </div>
         )}
+        {/* item 限宽:轨道最小 max(260px, 50%-4px) ⇒ 任何宽度下至多一行 2 个;
+            卡片自身再封顶 320px 并靠左(2026-10 用户两轮反馈「太宽」) */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(max(260px, calc(50% - 4px)), 1fr))',
+            gap: 8,
+            justifyItems: 'start',
+          }}
+        >
         {shotNodeIds.map((sid, i) => {
           const shotNode = nodesById.get(sid);
           const takes = takeHistory[sid] ?? [];
@@ -306,8 +426,10 @@ export function TimelineInspector({
                 border: '1px solid var(--border-soft)',
                 borderRadius: 8,
                 padding: '8px 10px',
-                marginBottom: 6,
                 background: 'var(--surface-soft)',
+                width: '100%',
+                maxWidth: 320,
+                boxSizing: 'border-box',
               }}
             >
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -439,7 +561,7 @@ export function TimelineInspector({
                   step="0.1"
                   min={0}
                   placeholder="inSec"
-                  style={{ width: 70, fontSize: 11, padding: '2px 6px' }}
+                  style={{ width: 54, fontSize: 11, padding: '2px 6px' }}
                   value={trimCur?.inSec ?? ''}
                   onChange={(e) => setTrim(sid, { inSec: Number(e.target.value) })}
                 />
@@ -450,7 +572,7 @@ export function TimelineInspector({
                   step="0.1"
                   min={0}
                   placeholder="outSec"
-                  style={{ width: 70, fontSize: 11, padding: '2px 6px' }}
+                  style={{ width: 54, fontSize: 11, padding: '2px 6px' }}
                   value={trimCur?.outSec ?? ''}
                   onChange={(e) => setTrim(sid, { outSec: Number(e.target.value) })}
                 />
@@ -461,7 +583,7 @@ export function TimelineInspector({
                   step="0.1"
                   min={0}
                   max={2}
-                  style={{ width: 50, fontSize: 11, padding: '2px 6px' }}
+                  style={{ width: 40, fontSize: 11, padding: '2px 6px' }}
                   value={vol}
                   onChange={(e) => setVolume(sid, Number(e.target.value))}
                 />
@@ -469,6 +591,7 @@ export function TimelineInspector({
             </div>
           );
         })}
+        </div>
       </div>
 
       {/* ── 2. 转场 ── */}
@@ -611,6 +734,3 @@ export function TimelineInspector({
     </div>
   );
 }
-
-// 静音符号引用,避免 unused 警告
-void outputUrlOf;

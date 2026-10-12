@@ -393,7 +393,10 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       const faceModel = String(d.faceModel ?? 'gfpgan');
       const deblock = d.deblock === true;
       const applied = (d.appliedStages as string[] | undefined) ?? [];
-      const outVid = String(d.resultPath ?? '');
+      // 产物路径走 productOf(data.resultPath 优先,Take 回填兜底)——
+      // 长任务(video-upscale 实测 82 分钟)期间若离开画布页,那次 data 回写会落空,
+      // 只读 data.resultPath 会让节点卡永远显示成「未生成」(2026-10 new1-gta1 事故)
+      const outVid = productOf(n);
       const inputState = String(d.inputAssetId ?? '')
         ? `输入 · 资产 ${String(d.inputAssetId).slice(0, 8)}`
         : (d.inputVideoFrom as { nodeId?: string } | undefined)?.nodeId

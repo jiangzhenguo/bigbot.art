@@ -13,11 +13,32 @@ const REPO = 'AbstractFramework/z-image-turbo-8bit';
 const REPO_DIR = 'models--AbstractFramework--z-image-turbo-8bit';
 
 let hfHome = '';
+let lmStudioHome = '';
 let M: typeof import('../mlxgen-models.js');
 
 const repoCache = (): string => join(hfHome, 'hub', REPO_DIR);
 const resetRepo = (): void => rmSync(repoCache(), { recursive: true, force: true });
 const model = () => M.mlxgenModelInfo().find((m) => m.repoId === REPO)!;
+
+/** 看图反推行:走 LM Studio 那种**扁平 MLX-VL 目录**(无 transformer/ 子层)判定就绪 */
+const CAPTION_REPO = 'gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit';
+const captionModel = () => M.mlxgenModelInfo().find((m) => m.repoId === CAPTION_REPO)!;
+const captionDir = (): string => join(lmStudioHome, 'gavinmroy', 'Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit');
+
+/** 构造一份 LM Studio 风格的 MLX Qwen3-VL 目录(config 判族 + 权重真在) */
+function makeCaptionCheckpoint(opts: { modelType?: string; arch?: string; withWeights?: boolean } = {}): void {
+  const dir = captionDir();
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      model_type: opts.modelType ?? 'qwen3_vl',
+      architectures: [opts.arch ?? 'Qwen3VLForConditionalGeneration'],
+    }),
+  );
+  if (opts.withWeights !== false) writeFileSync(join(dir, 'model.safetensors'), 'weights');
+}
 
 /** 构造一份「完整」缓存:blobs/<hash> 非空 + snapshots/<commit>/model.safetensors 符号链接 */
 function makeComplete(): void {
@@ -30,12 +51,42 @@ function makeComplete(): void {
 
 beforeAll(async () => {
   hfHome = mkdtempSync(join(tmpdir(), 'bbart-mlxdl-test-'));
+  lmStudioHome = mkdtempSync(join(tmpdir(), 'bbart-lmstudio-test-'));
   process.env.HF_HOME = hfHome;
+  process.env.BIGBOTART_LMSTUDIO_MODELS = lmStudioHome;
   M = await import('../mlxgen-models.js');
 });
 
 afterAll(() => {
   rmSync(hfHome, { recursive: true, force: true });
+  rmSync(lmStudioHome, { recursive: true, force: true });
+  delete process.env.BIGBOTART_LMSTUDIO_MODELS;
+});
+
+describe('看图反推行:LM Studio 扁平 MLX-VL checkpoint 就绪判定', () => {
+  it('LM Studio 里有合格的 Qwen3-VL 目录 → 已就绪,且回显 localPath(不必走 HF 缓存)', () => {
+    makeCaptionCheckpoint();
+    const m = captionModel();
+    expect(m.downloaded).toBe(true);
+    expect(m.localPath).toBe(captionDir());
+  });
+
+  it('目录在但 config 判族不是 Qwen3-VL(如 llama)→ 不算就绪(不把别的东西认成模型)', () => {
+    makeCaptionCheckpoint({ modelType: 'llama', arch: 'LlamaForCausalLM' });
+    expect(captionModel().downloaded).toBe(false);
+  });
+
+  it('只有 config 没有权重(下了一半)→ 不算就绪', () => {
+    makeCaptionCheckpoint({ withWeights: false });
+    expect(captionModel().downloaded).toBe(false);
+  });
+
+  it('目录不存在 → 未下载(不假装就绪)', () => {
+    rmSync(captionDir(), { recursive: true, force: true });
+    const m = captionModel();
+    expect(m.downloaded).toBe(false);
+    expect(m.localPath).toBeUndefined();
+  });
 });
 
 describe('mlxgenModelInfo 已下载判定(HF 缓存完整性校验)', () => {

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, AssetCategory, NodeKind, Take, DebugLogEntry, PromptSource } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, AssetCategory, NodeKind, Take, DebugLogEntry, PromptSource, TimelineData } from '@bigbotart/shared';
 import {
   parseGfmTable,
   resolvePromptFromSource,
@@ -39,7 +39,8 @@ import { ensureToolModels, fetchAccelDefaultShotConfig } from './canvas/tool-mod
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc, previewUrlOf } from './canvas/media';
-import { nodesReducer } from './canvas/edge-dispatch';
+import { latestTakeResultByNode } from './canvas/inspector/useTakeResult';
+import { computeEdgeDerivations, nodesReducer } from './canvas/edge-dispatch';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
 import {
   UNMEASURED_NODE_H as SEL_UNMEASURED_H,
@@ -1304,7 +1305,12 @@ export default function CanvasPage({
       // 🛡️ 防「空快照覆盖有内容画布」:本地内存为空,但 store 里这份画布有节点时一律不写盘。
       // 事故背景(2026-09-22):启动瞬间/切画布时若 nodes 尚未装填,一次 flush 就会把有内容的画布写成空,
       // 而基线比对只看「本地内容是否变过」,挡不住「本地是空、基线也是空」的首次写盘。
-      const localEmpty = (snap.nodes?.length ?? 0) === 0 && (snap.edges?.length ?? 0) === 0;
+      // 🛡️ 防「空快照覆盖有内容画布」:本地内存为空,但 store 里这份画布有节点时一律不写盘。
+      // 事故背景(2026-09-22):启动瞬间/切画布时若 nodes 尚未装填,一次 flush 就会把有内容的画布写成空,
+      // 而基线比对只看「本地内容是否变过」,挡不住「本地是空、基线也是空」的首次写盘。
+      // ⚠️ 2026-10-11「美女项目画布全空」事故:判空只看 nodes —— 「0 节点 + 1 悬空边」是坏快照
+      // (边引用的节点不存在),旧判定要求 nodes 与 edges 同时为空,把它放行了(store 侧同口径收紧)。
+      const localEmpty = (snap.nodes?.length ?? 0) === 0;
       const storeHasNodes = (activeCanvas?.nodes?.length ?? 0) > 0;
       if (localEmpty && storeHasNodes) return;
       if (local === lastSavedRef.current) {
@@ -1706,26 +1712,21 @@ export default function CanvasPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges, projectId, activeCanvasId]);
 
-  /* 镜头产物回填:nodeId → 最新成功 Take resultPath(画布加载 + 任务完成后刷新)
-     (历史 Take 只在 takes json,节点 data 可能缺 resultPath → 渲染时两层回退) */
+  /* 产物回填:nodeId → 最新成功 Take resultPath(画布加载 + 任务完成后刷新)
+     (历史 Take 只在 takes json,节点 data 可能缺 resultPath → 渲染时两层回退)
+     ⚠️ 2026-10 起**覆盖全部产物类节点**(此前只查 shot):一次 `takesList` 单次 IPC,
+     比逐节点 takesHistory 更省;video-upscale / 图片类节点的产物同样有兜底
+     (真实事故:new1-gta1 视频增强跑 82 分钟,用户中途离开画布页 → 节点 data 回写落空,
+      磁盘上有产物、Take 里 resultPath 完整,节点卡与检查器却什么都不显示)。 */
   const [takeResults, setTakeResults] = useState<Record<string, string>>({});
   const refreshTakeResults = useCallback(async () => {
     if (!projectId) return;
-    const shotIds = nodesRef.current.filter((x) => x.kind === 'shot').map((x) => x.id);
-    if (shotIds.length === 0) return;
-    const out: Record<string, string> = {};
-    await Promise.all(
-      shotIds.map(async (id) => {
-        try {
-          const h = await window.bigbotart.takesHistory(projectId, id);
-          const ok = h?.takes?.find((t) => t.status === 'succeeded' && t.resultPath);
-          if (ok?.resultPath) out[id] = ok.resultPath;
-        } catch {
-          /* 单个节点失败不影响其它 */
-        }
-      }),
-    );
-    setTakeResults(out);
+    try {
+      const list = await window.bigbotart.takesList(projectId);
+      setTakeResults(latestTakeResultByNode(list));
+    } catch {
+      /* 拉取失败保持旧值(不静默清空,否则节点上的产物会「闪一下又没了」) */
+    }
   }, [projectId]);
 
   /** 重生成某节点 ⇒ 全部下游生成节点标 stale(依赖过期;接力跑完逐个刷新,成功即清) */
@@ -1737,6 +1738,81 @@ export default function CanvasPage({
   useEffect(() => {
     void refreshTakeResults();
   }, [refreshTakeResults]);
+
+  /* ── timeline 成片路径愈合(2026-10)──
+     背景:「timeline 作为视频源」接线前的旧数据里,timeline 节点只有 lastExport(展示用
+     bba-output:// URL),没有 resultPath(下游视频解析的统一读取点)——于是「时间线成片 →
+     视频增强/取帧」的连线建得出来,运行却报「需要输入视频」(真实反馈:new1-gta1)。
+     这里扫一遍:缺 resultPath 但有 lastExport.name 的 timeline 节点,按文件名向主进程解析
+     导出目录内的绝对路径并回写 —— 愈合一次,之后 dispatch / runNode / Agent 全部走通。
+     防重入:healTriedRef 按 id:name 记录(重新导出了新文件名会再试一次)。 */
+  const healTriedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = nodes.filter((n) => {
+      if (n.kind !== 'timeline') return false;
+      const d = (n.data ?? {}) as Partial<TimelineData>;
+      const name = d.lastExport?.name;
+      return !d.resultPath && !!name && !healTriedRef.current.has(`${n.id}:${name}`);
+    });
+    if (pending.length === 0) return;
+    for (const n of pending) {
+      const name = ((n.data ?? {}) as Partial<TimelineData>).lastExport?.name ?? '';
+      healTriedRef.current.add(`${n.id}:${name}`);
+    }
+    void (async () => {
+      const fixes: Array<{ id: string; path: string }> = [];
+      for (const n of pending) {
+        const name = ((n.data ?? {}) as Partial<TimelineData>).lastExport?.name;
+        if (!name) continue;
+        try {
+          const r = await window.bigbotart.exportFilePath({ name });
+          if (r.ok && r.path) fixes.push({ id: n.id, path: r.path });
+        } catch {
+          /* 单个失败不影响其它;文件名对不上就不愈合(下次导出会正规回写) */
+        }
+      }
+      if (fixes.length === 0) return;
+      setNodes((ns) =>
+        ns.map((x) => {
+          const f = fixes.find((y) => y.id === x.id);
+          return f ? { ...x, data: { ...(x.data ?? {}), resultPath: f.path } } : x;
+        }),
+      );
+    })();
+  }, [nodes, setNodes]);
+
+  /* ── Take 产物愈合(2026-10)──
+     背景:产物类节点(shot / video-upscale / 图片类)的 `data.resultPath` 由**任务完成时
+     渲染层 setNodes 回写**,而长任务期间离开画布页会让这次回写落在已卸载组件上被丢弃
+     (Take 已在主进程落盘:磁盘有产物、Take 里 resultPath 完整,节点 data 却为空)。
+     真实事故:飞机1 · new1-gta1 视频增强跑了 82 分钟(22:54→00:16),节点卡与检查器
+     都不显示增强结果 —— 用户视角就是「视频不显示」。
+
+     愈合口径与检查器 useTakeResult **完全一致**(最新 succeeded + 有 resultPath),
+     只是把结果**持久化回节点 data**:愈合一次之后,下游(runNode 的 upstreamVideoPath /
+     Agent 的 resolveNodeVideoPath / 时间线导出 / 项目封面)全部按 resultPath 走通。
+     防重入:同一个「节点:路径」只补一次;节点若真没有 Take 就不写(等下轮生成正规回写)。 */
+  const healTakeTriedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const fixes: Array<{ id: string; path: string }> = [];
+    for (const n of nodes) {
+      const d = (n.data ?? {}) as Record<string, unknown>;
+      if (typeof d.resultPath === 'string' && d.resultPath) continue;
+      const p = takeResults[n.id];
+      if (!p) continue;
+      const key = `${n.id}:${p}`;
+      if (healTakeTriedRef.current.has(key)) continue;
+      healTakeTriedRef.current.add(key);
+      fixes.push({ id: n.id, path: p });
+    }
+    if (fixes.length === 0) return;
+    setNodes((ns) =>
+      ns.map((x) => {
+        const f = fixes.find((y) => y.id === x.id);
+        return f ? { ...x, data: { ...(x.data ?? {}), resultPath: f.path } } : x;
+      }),
+    );
+  }, [nodes, takeResults, setNodes]);
 
   /* 视频增强进度订阅:分钟级长任务(video-upscale)期间把主进程阶段/帧号写进节点 badge。
      没有这个订阅时,`videoUpscale` 的 invoke 会一直阻塞且界面毫无反馈 —— 看起来像「瞬间完成/没启动」。 */
@@ -1958,8 +2034,21 @@ export default function CanvasPage({
      === 计算移入 canvas/edge-dispatch.ts(computeEdgeDerivations 纯函数,可单测) ===
      这里只负责「触发」:nodes/edges 任一变化 → dispatch derive-from-edges action,
      nodesReducer 调 computeEdgeDerivations 计算派生态,JSON 内容比对后决定是否写回。
-     语义不变:边 → 下游 data 自动填充/删除边撤销自动项(手动项保留)。 */
+     语义不变:边 → 下游 data 自动填充/删除边撤销自动项(手动项保留)。
+
+     ⚠️⚠️ 派生结果必须同步进 nodesRef(2026-10-11「图片编辑无法运行」事故):
+     dispatchNodes 走 reducer 直达 nodes state,**不经过 setNodes 包装**(ref 同步在包装里),
+     于是派生态(inputImageFrom / refs / promptFrom …)只进 state、不进 ref ——
+     而 runNode / buildActiveSnapshot / 连线校验全都读 nodesRef:
+     检查器(读 state)显示输入图已绑定,点「运行」却因 ref 里 inputImageFrom=null
+     报「需要输入图」,派生态也永远存不进快照。事故源于 9f80e2f 引入 ref 同步包装时
+     只覆盖了 'set' 分支,derive 分支成了旁路。 */
   useEffect(() => {
+    // 先在同一批数据上算出派生结果;ref 永远与「含派生态的最新内容」对齐 —
+    // 即使 state 早已含派生态(changed=false)也要同步,否则历史遗留的 ref 裂口永远合不上
+    // (reducer 侧对同一份 state 重算一次,幂等;此处多读一次纯函数只为拿结果同步 ref)
+    const r = computeEdgeDerivations(nodes, edges);
+    nodesRef.current = r.changed ? r.nextNodes : nodes;
     dispatchNodes({ type: 'derive-from-edges', edges });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edges, nodes]);
@@ -3878,6 +3967,7 @@ export default function CanvasPage({
                 assetCache={assetCache}
                 runNode={(id) => void runNode(id)}
                 nodes={nodes}
+                takeResults={takeResults}
                 onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}
                 onUndoStoryboard={(sbNode) => undoStoryboard(sbNode)}
                 onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}

@@ -26,6 +26,31 @@ export function pickTakeResultPath(takes: Array<{ status?: string; resultPath?: 
   return undefined;
 }
 
+/**
+ * 项目全部 Take → 「节点 id → 最新成功产物路径」映射(2026-10)。
+ *
+ * 为什么需要:画布侧原先只对 **shot** 节点逐个 `takesHistory` 回填产物
+ * (`refreshTakeResults`),而 video-upscale / 图片类节点的产物**只**靠
+ * 「任务完成时渲染层 setNodes 回写 data.resultPath」。真实事故(飞机1 · new1-gta1):
+ * 视频增强跑了 82 分钟,期间用户离开画布页 → 那次 setState 落在已卸载组件上被丢弃,
+ * 而 Take 已由同一次回写流程写进主进程 → 磁盘上有产物、Take 里 resultPath 完整,
+ * 节点 data 却是空的 ⇒ 节点卡/检查器都不显示,只有「什么都不出」可看。
+ *
+ * 一次性取回全部 Take(单次 IPC,优于逐节点 takesHistory)后按节点归组:
+ * 调用方按 `createdAt` 倒序传入(takesList 的既有顺序),每个节点第一条命中的即最新。
+ */
+export function latestTakeResultByNode(
+  takes: Array<{ shotNodeId?: string; status?: string; resultPath?: string }> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const t of takes ?? []) {
+    if (!t?.shotNodeId || t.status !== 'succeeded' || !t.resultPath) continue;
+    if (out[t.shotNodeId]) continue; // 倒序输入 → 先到者最新
+    out[t.shotNodeId] = t.resultPath;
+  }
+  return out;
+}
+
 export function useTakeResult(
   nodeId: string,
   projectId: string | null,

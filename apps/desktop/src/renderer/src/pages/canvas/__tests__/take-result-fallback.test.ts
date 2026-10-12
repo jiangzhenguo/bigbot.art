@@ -9,7 +9,7 @@
  * 从 Take 历史里挑「最新一条 status=succeeded 且有 resultPath」的产物。
  */
 import { describe, it, expect } from 'vitest';
-import { pickTakeResultPath } from '../inspector/useTakeResult';
+import { pickTakeResultPath, latestTakeResultByNode } from '../inspector/useTakeResult';
 import { takeStatusLabel } from '../inspector/ImageTakeSection';
 
 type T = { status?: string; resultPath?: string };
@@ -89,5 +89,59 @@ describe('takeStatusLabel · 状态文案中文映射', () => {
     expect(takeStatusLabel({ status: 'failed' })).toBe('✗');
     expect(takeStatusLabel({ status: 'weird' })).toBe('weird');
     expect(takeStatusLabel({})).toBe('未知');
+  });
+});
+
+/* ═══ 2026-10 事故回归 3:video-upscale 长任务期间离开画布页 → 节点 data 没回写 ═══
+ *
+ * 事故形态(飞机1 · new1-gta1):视频增强跑了 82 分钟(22:54→00:16),期间用户离开画布页,
+ * 完成时渲染层那次 `setNodes` 落在已卸载组件上被丢弃 —— 而 Take 已由同一次回写流程写进主进程
+ * (磁盘上有 29MB 产物、Take 里 resultPath 完整)。节点 data 为空 ⇒ 节点卡/检查器都不显示。
+ * 现在画布侧一次性拉全部 Take 归组,不只 shot:video-upscale / 图片类节点同样有兜底。 */
+describe('latestTakeResultByNode · 全项目 Take → 每节点最新成功产物', () => {
+  type Row = { shotNodeId?: string; status?: string; resultPath?: string };
+
+  it('事故形态:video-upscale 节点的成功 Take 能被归到该节点(此前只有 shot 会被查)', () => {
+    const takes: Row[] = [
+      { shotNodeId: 'new1-gta1', status: 'succeeded', resultPath: '/out/video-post/timeline-post-1.mp4' },
+    ];
+    expect(latestTakeResultByNode(takes)).toEqual({ 'new1-gta1': '/out/video-post/timeline-post-1.mp4' });
+  });
+
+  it('同一节点多条历史:takesList 按 createdAt 倒序 → 先到者即最新', () => {
+    const takes: Row[] = [
+      { shotNodeId: 'n1', status: 'succeeded', resultPath: '/out/new.mp4' },
+      { shotNodeId: 'n1', status: 'succeeded', resultPath: '/out/old.mp4' },
+    ];
+    expect(latestTakeResultByNode(takes)['n1']).toBe('/out/new.mp4');
+  });
+
+  it('最新一条是失败/无产物时不会顶掉更早的成功产物', () => {
+    const takes: Row[] = [
+      { shotNodeId: 'n1', status: 'failed' },
+      { shotNodeId: 'n1', status: 'succeeded', resultPath: '/out/ok.mp4' },
+      { shotNodeId: 'n1', status: 'running' },
+    ];
+    expect(latestTakeResultByNode(takes)['n1']).toBe('/out/ok.mp4');
+  });
+
+  it('缺 shotNodeId / 非成功 / 空路径一律跳过(不产生空串键,避免 rendered 裂图)', () => {
+    const takes: Row[] = [
+      { status: 'succeeded', resultPath: '/out/anon.mp4' },
+      { shotNodeId: 'n2', status: 'queued' },
+      { shotNodeId: 'n3', status: 'succeeded', resultPath: '' },
+    ];
+    expect(latestTakeResultByNode(takes)).toEqual({});
+  });
+
+  it('多节点各自归组;空/undefined 输入 → 空表(不抛)', () => {
+    const takes: Row[] = [
+      { shotNodeId: 'a', status: 'succeeded', resultPath: '/o/a.mp4' },
+      { shotNodeId: 'b', status: 'succeeded', resultPath: '/o/b.png' },
+      { shotNodeId: 'a', status: 'failed' },
+    ];
+    expect(latestTakeResultByNode(takes)).toEqual({ a: '/o/a.mp4', b: '/o/b.png' });
+    expect(latestTakeResultByNode([])).toEqual({});
+    expect(latestTakeResultByNode(undefined)).toEqual({});
   });
 });

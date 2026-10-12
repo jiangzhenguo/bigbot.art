@@ -459,6 +459,23 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .clipstrip .cs{flex:1;height:34px;border-radius:6px;overflow:hidden;background:var(--surface);position:relative}
 .pg-canvas .clipstrip .cs img{width:100%;height:100%;object-fit:cover}
 .pg-canvas .clipstrip .cs.wait{border:1.5px dashed var(--border);background:var(--surface-warm)}
+/* 时间线成片内嵌预览(节点卡 + 检查器共用;与 .pg-timeline 的 npv 同构,此前只在时间线页有样式,
+   画布页渲染裸元素 —— 2026-10 补) */
+.pg-canvas .npv{border-radius:var(--radius-sm);overflow:hidden;background:var(--surface)}
+.pg-canvas .npv .pv-stage{position:relative;overflow:hidden}
+.pg-canvas .npv .pv-chip{position:absolute;top:7px;left:7px;background:rgba(0,0,0,.55);color:rgba(255,255,255,.92);font-size:9.5px;padding:2px 8px;border-radius:var(--radius-pill);letter-spacing:.02em;z-index:2;pointer-events:none}
+.pg-canvas .npv .pv-big{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:36px;height:36px;border-radius:50%;border:none;background:rgba(255,255,255,.92);color:var(--fg);display:grid;place-items:center;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.28);transition:transform var(--motion-fast) var(--ease-standard);z-index:2}
+.pg-canvas .npv .pv-big:hover{transform:translate(-50%,-50%) scale(1.07)}
+.pg-canvas .npv .pv-big:active{transform:translate(-50%,-50%) scale(.95)}
+.pg-canvas .npv .pv-big svg{width:14px;height:14px}
+.pg-canvas .npv .pv-ctl{display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(0,0,0,.55);color:rgba(255,255,255,.92)}
+.pg-canvas .npv .pv-ctl .tc{font-family:var(--font-mono);font-size:10px;white-space:nowrap}
+.pg-canvas .npv .pv-track{flex:1;height:2.5px;border-radius:2px;background:rgba(255,255,255,.4);overflow:hidden;cursor:pointer}
+.pg-canvas .npv .pv-track i{display:block;height:100%;background:var(--accent)}
+.pg-canvas .npv .pv-btn{width:22px;height:22px;border:none;background:transparent;color:rgba(255,255,255,.85);border-radius:50%;display:grid;place-items:center;cursor:pointer;transition:background var(--motion-fast),color var(--motion-fast)}
+.pg-canvas .npv .pv-btn:hover{background:rgba(255,255,255,.16);color:#fff}
+.pg-canvas .npv .pv-btn svg{width:12px;height:12px}
+.pg-canvas .npv .pv-meta{padding:6px 8px;border-top:1px solid var(--border-soft)}
 .pg-canvas .add-pop{position:absolute;z-index:70;width:272px;background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--radius-md);box-shadow:var(--elev-raised);font-size:var(--text-xs);display:none;max-height:calc(100vh - 24px);overflow:auto;overscroll-behavior:contain}
 .pg-canvas .add-pop.open{display:block}
 .pg-canvas .ap-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-soft);font-weight:600}

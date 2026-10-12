@@ -49,6 +49,8 @@ interface InspectorPaneProps {
   assetCache: Record<string, string>;
   runNode: (nodeId: string) => void;
   nodes: CanvasNode[];
+  /** nodeId → 最新成功 Take 产物路径(视频增强等本地节点产物兜底显示;与节点卡同一份) */
+  takeResults?: Record<string, string>;
   onMaterializeStoryboard: (sbNode: CanvasNode, aspect: string, tier: string) => void;
   onUndoStoryboard: (sbNode: CanvasNode) => void;
   onResyncStoryboard: (sbNode: CanvasNode) => void;
@@ -81,6 +83,7 @@ export function InspectorPane({
   assetCache,
   runNode,
   nodes,
+  takeResults,
   onMaterializeStoryboard,
   onUndoStoryboard,
   onResyncStoryboard,
@@ -123,6 +126,7 @@ export function InspectorPane({
           assetCache={assetCache}
           runNode={runNode}
           nodes={nodes}
+          takeResults={takeResults}
           onMaterializeStoryboard={onMaterializeStoryboard}
           onUndoStoryboard={onUndoStoryboard}
           onResyncStoryboard={onResyncStoryboard}

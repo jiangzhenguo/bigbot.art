@@ -67,6 +67,7 @@ export class RenderQueue {
       projectId: req.projectId,
       canvasId: req.canvasId,
       takeId: req.takeId,
+      source: req.source,
       req,
       createdAt: now,
       updatedAt: now,
