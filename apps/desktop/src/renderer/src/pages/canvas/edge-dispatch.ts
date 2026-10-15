@@ -19,6 +19,7 @@ import type { PromptSource } from '@bigbotart/shared';
 import { inferPromptSource } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from './types';
 import { pickShotSpec, IMAGE_KINDS, VIDEO_KINDS } from './connectors';
+import { SHOT_REF_ROLES } from './constants';
 
 type RefEntry = { assetId?: string; path?: string; role: string; auto?: boolean };
 
@@ -100,9 +101,15 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         const curRefs = Array.isArray(d.refs) ? (d.refs as Array<{ role?: string; auto?: boolean }>) : [];
         const suppressedRoles = Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : [];
         const SINGLE_ROLES = ['first-frame', 'last-frame', 'ref-audio', 'ref-video'];
+        /* 用户手选了模式(modeOverride)时,该模式需要的角色不再被 refsSuppressed 挡住。
+           2026-10-13:旧 × 只写停用、不删边。切到「首帧」后清晨阳台仍不出现,
+           因为 first-frame 还在停用名单里,和当前模式无关。 */
+        const activeMode = modeOverridden ? modeRaw : effMode;
+        const modeRoles = new Set((SHOT_REF_ROLES[activeMode] ?? []).map((rd) => rd.role));
         const autoBlocked = (role: string) =>
           SINGLE_ROLES.includes(role) &&
-          (suppressedRoles.includes(role) || curRefs.some((r) => !r.auto && r.role === role));
+          (curRefs.some((r) => !r.auto && r.role === role) ||
+            (suppressedRoles.includes(role) && !(modeOverridden && modeRoles.has(role))));
         if (src.kind === 'asset') {
           // 资产引用注入:按边 label 决定角色 —— 图片资源可作「首帧参考(first-frame)」或「参考图(ref-image)」,
           // 视频资源可作「参考视频(ref-video)」,音频资源作「音轨参考(ref-audio)」
@@ -369,6 +376,14 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         else merged.push(r);
       }
       data.refs = merged;
+      // 手选模式需要的角色,清掉旧 × 留下的停用标记,避免「模式已切、图仍被藏」
+      if (data.modeOverride === true && Array.isArray(data.refsSuppressed)) {
+        const keepRoles = new Set((SHOT_REF_ROLES[String(data.mode ?? 'text2video')] ?? []).map((rd) => rd.role));
+        const nextSuppressed = (data.refsSuppressed as string[]).filter((role) => !keepRoles.has(role));
+        if (nextSuppressed.length !== (data.refsSuppressed as string[]).length) {
+          data.refsSuppressed = nextSuppressed;
+        }
+      }
       // 画面规格来源标记(检查器显示「继承自上游镜头 X」)
       const sf = specFromPatch.get(n.id) ?? null;
       if (sf) data.specFrom = sf;

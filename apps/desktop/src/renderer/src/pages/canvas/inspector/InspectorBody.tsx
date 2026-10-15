@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { RenderJob, Asset, TimelineData, PromptSource } from '@bigbotart/shared';
-import type { CanvasNode } from '../types';
+import type { CanvasNode, Edge } from '../types';
 import { ShotInspector } from './ShotInspector';
 import { TimelineInspector } from './TimelineInspector';
 import DocumentInspector from './DocumentInspector';
@@ -14,6 +14,45 @@ import { ImageGenInspector } from './ImageGenInspector';
 import { ImageEditInspector } from './ImageEditInspector';
 import { MediaInfoPanel } from './MediaInfoPanel';
 import { AssetInspector } from './AssetInspector';
+
+/** 视频增强进行中的「取消」。成功后由画布收尾提示;这里只在主进程拒绝时提示。 */
+export function VideoPostCancelButton({
+  nodeId,
+  toastMsg,
+  className,
+}: {
+  nodeId: string;
+  toastMsg: (msg: string) => void;
+  className?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      className={className ?? 'btn btn-s btn-sm vp-cancel'}
+      data-od-id="vpost-cancel"
+      disabled={busy}
+      onClick={() => {
+        if (busy) return;
+        setBusy(true);
+        void window.bigbotart
+          .videoPostCancel({ nodeId })
+          .then((r) => {
+            if (!r.ok) {
+              setBusy(false);
+              toastMsg(r.error ?? '取消失败');
+            }
+          })
+          .catch(() => {
+            setBusy(false);
+            toastMsg('取消失败');
+          });
+      }}
+    >
+      {busy ? '取消中…' : '取消'}
+    </button>
+  );
+}
 
 export interface InspectorBodyProps {
   node: CanvasNode | undefined;
@@ -31,11 +70,13 @@ export interface InspectorBodyProps {
   runNode: (nodeId: string) => void;
   /** 当前画布全部节点(给 timeline 检查器查 shot 标题/Take 用) */
   nodes?: CanvasNode[];
+  /** 当前画布边(shot 检查器 × 自动绑定项时用来删对应入边) */
+  edges?: Edge[];
   /** nodeId → 最新成功 Take 产物路径(与节点卡同一份;视频增强等本地节点的产物兜底显示用) */
   takeResults?: Record<string, string>;
   /** 跳到时间线页面 */
   onOpenTimelinePage?: () => void;
-  /** 删除一条边(timeline 检查器「移出时间线」= 断开对应连线) */
+  /** 删除一条边(timeline / shot 检查器断开连线) */
   onRemoveEdge?: (sourceId: string, targetId: string) => void;
   /** 分镜表:铺节点(只建不跑) */
   onMaterializeStoryboard?: (sbNode: CanvasNode, aspect: string, tier: string) => void;
@@ -63,6 +104,7 @@ export function InspectorBody({
   assetCache,
   runNode,
   nodes,
+  edges = [],
   takeResults = {},
   onOpenTimelinePage,
   onRemoveEdge,
@@ -235,7 +277,9 @@ export function InspectorBody({
         }
         return null;
       })();
-      const noSuperRes = superRes === 'none' || scale <= 1;
+      const isSeedVr = superRes === 'seedvr2';
+      // Real-ESRGAN 的 ×1 等于不超分;SeedVR2 的 ×1 仍是原分辨率修复
+      const noSuperRes = superRes === 'none' || (!isSeedVr && scale <= 1);
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* 长任务进行中:检查器里给一块显眼的整体进度(节点卡可能不在视野内) */}
@@ -256,6 +300,7 @@ export function InspectorBody({
                   <i className="fill" style={{ width: `${Math.round((node.progress.pct ?? 0) * 100)}%` }}></i>
                 )}
               </span>
+              <VideoPostCancelButton nodeId={node.id} toastMsg={toastMsg} />
             </div>
           ) : null}
           {/* 产物预览置顶:增强结果优先于源视频,都没有时下面给「连一个镜头/视频素材」的提示。
@@ -292,12 +337,14 @@ export function InspectorBody({
             <div className="row g6">
               {[1, 2, 3, 4].map((s) => (
                 <span key={s} className={`chip${scale === s ? ' on' : ''}`} onClick={() => setData({ scale: s })}>
-                  {s === 1 ? '×1 · 仅修脸' : `×${s}`}
+                  {s === 1 ? (isSeedVr ? '×1 · 修复' : '×1 · 仅修脸') : `×${s}`}
                 </span>
               ))}
             </div>
             <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
-              ×1(仅修脸不超分)可完全避免超分引起的运动方格(POST_PROCESSING.md §5.4 方案 C)
+              {isSeedVr
+                ? 'SeedVR2 用 MLX 整段超分并保留音轨。×2 以上显存很高,5 秒片大约要数分钟;×1 只做原分辨率修复'
+                : '×1(仅修脸不超分)可完全避免超分引起的运动方格(POST_PROCESSING.md §5.4 方案 C)'}
             </div>
           </div>
           <div>
@@ -305,6 +352,7 @@ export function InspectorBody({
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
               {([
                 ['realesrgan', 'Real-ESRGAN'],
+                ['seedvr2', 'SeedVR2'],
                 ['none', '不超分'],
               ] as const).map(([v, label]) => (
                 <span key={v} className={`chip${superRes === v ? ' on' : ''}`} onClick={() => setData({ superRes: v })}>
@@ -313,7 +361,18 @@ export function InspectorBody({
               ))}
             </div>
           </div>
-          {!noSuperRes && (
+          {isSeedVr && (
+            <div>
+              <Lbl>超分模型</Lbl>
+              <div className="row g6">
+                <span className="chip on">SeedVR2 3B · 8bit</span>
+              </div>
+              <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>
+                mlxgen · AbstractFramework/seedvr2-3b-8bit。修脸仍可在超分后再跑,会明显更慢
+              </div>
+            </div>
+          )}
+          {!noSuperRes && !isSeedVr && (
             <div>
               <Lbl>超分模型</Lbl>
               <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -424,9 +483,9 @@ export function InspectorBody({
           )}
           <KVSection
             rows={[
-              ['引擎', 'Real-ESRGAN + GFPGAN/CodeFormer · 本地后处理'],
-              ['CPU', device === 'mps' ? 'Apple Silicon GPU(Metal)' : 'CPU(慢)'],
-              ['耗时', '每帧 1.2-1.5s:5s 片约 3-4 分钟 · 20s 片 10-12 分钟'],
+              ['引擎', isSeedVr ? 'mlxgen · SeedVR2 3B(视频超分)' : 'Real-ESRGAN + GFPGAN/CodeFormer · 本地后处理'],
+              ['CPU', isSeedVr ? 'MLX(设备选项只作用于后面的修脸)' : device === 'mps' ? 'Apple Silicon GPU(Metal)' : 'CPU(慢)'],
+              ['耗时', isSeedVr ? 'SeedVR2 3B ×2:5 秒片约数分钟,显存明显高于 Real-ESRGAN' : '每帧 1.2-1.5s:5s 片约 3-4 分钟 · 20s 片 10-12 分钟'],
             ]}
           />
           {applied.length > 0 ? (
@@ -818,6 +877,9 @@ export function InspectorBody({
           assetCache={assetCache}
           runNode={(id) => void runNode(id)}
           toastMsg={toastMsg}
+          nodes={nodes}
+          edges={edges}
+          onRemoveEdge={onRemoveEdge}
         />
       );
     }

@@ -11,8 +11,11 @@ import {
   docMarkers,
   sbStats,
   rowNeedsImage,
+  capabilityOf,
+  resolveImageModel,
 } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
+import { useToolModels } from '../tool-models-store';
 import {
   SHOT_MODE_LABEL,
   SHOT_SIZES,
@@ -37,6 +40,9 @@ interface NodeBodyProps {
 
 export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBodyProps) {
   const d = (n.data ?? {}) as Record<string, unknown>;
+  // 工具模型缺省解析(订阅式,缓存加载后自动重渲染):
+  // 节点未显式选模型时,卡片显示与检查器/提交期同口径的缺省模型,不再显示占位词
+  const toolModels = useToolModels();
   /** 产物路径:节点 data 优先,回退 Take 回填 */
   const productOf = (node: CanvasNode) =>
     String((node.data as Record<string, unknown> | undefined)?.resultPath ?? takeResults[node.id] ?? '');
@@ -214,7 +220,9 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
     }
     case 'image-gen': {
       const prompt = String(d.prompt ?? '');
-      const model = String(d.model ?? 'mlxgen');
+      // 未显式选模型 → 显示缺省解析结果(设置页工具模型 > 内置默认),与检查器同口径
+      const model =
+        String(d.model ?? '').trim() || resolveImageModel(toolModels, capabilityOf('image-gen')) || 'mlxgen';
       const w = Number(d.width ?? 1024);
       const h = Number(d.height ?? 1024);
       const seeds = (d.seeds as number[]) ?? [];

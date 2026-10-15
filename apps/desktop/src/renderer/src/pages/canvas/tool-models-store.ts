@@ -10,11 +10,28 @@
  * 复用同一次 IPC 拉取即可,不必再开第二条链路 —— 两个缓存必须**同进同出**,
  * 否则会出现「设置页开了开关、画布上新建 shot 却读不到」的时间差。
  */
+import { useSyncExternalStore } from 'react';
 import type { ToolModelBinding } from '@bigbotart/shared';
 
 let cache: ToolModelBinding | undefined;
 let accelDefaultEnabled = false;
 let loaded = false;
+
+/*
+ * ── 可订阅化(2026-10-14「文生图节点显示 z-image」事故修复)──
+ *
+ * 旧实现只有「拉取 + 同步读」:缓存首次加载发生在 runNode(点生成)或设置页保存时。
+ * 于是**冷启动后、首次生成之前**,检查器/节点卡用 `getToolModelsSync()` 读到的永远是
+ * undefined → 缺省解析落回内置默认 Z-Image-Turbo —— 用户明明在设置页把文生图默认
+ * 改成了别的模型,新建节点的模型框却显示 z-image(实际提交是对的,纯属显示说谎)。
+ *
+ * 修法:store 加订阅,`useToolModels()` 在首个订阅者出现时**自动触发加载**,
+ * 加载完成 / 设置页保存后广播,所有订阅者(检查器、节点卡)重渲染出真实缺省值。
+ */
+const listeners = new Set<() => void>();
+function emit(): void {
+  for (const l of listeners) l();
+}
 
 /** 首次调用拉取设置(之后命中缓存);失败按未配置处理(走内置默认) */
 export async function ensureToolModels(): Promise<ToolModelBinding | undefined> {
@@ -28,8 +45,24 @@ export async function ensureToolModels(): Promise<ToolModelBinding | undefined> 
       accelDefaultEnabled = false;
     }
     loaded = true;
+    emit();
   }
   return cache;
+}
+
+/**
+ * 订阅式读取(React 组件用):首个订阅者触发自动加载,缓存变化时重渲染。
+ * 返回值语义与 getToolModelsSync 相同(undefined = 未加载 / 未配置 → 走内置默认)。
+ */
+export function useToolModels(): ToolModelBinding | undefined {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      void ensureToolModels(); // 幂等:已加载时立即返回,不发重复 IPC
+      return () => listeners.delete(cb);
+    },
+    () => cache,
+  );
 }
 
 /** 同步读(可能为 undefined = 尚未加载 / 未配置;调用方按内置默认处理) */
@@ -50,6 +83,7 @@ export function getAccelDefaultEnabledSync(): boolean {
 export function setToolModelsCache(tm: ToolModelBinding | undefined): void {
   cache = tm;
   loaded = true;
+  emit();
 }
 
 /** 设置页切换「默认开启加速」后同步缓存 */
@@ -63,7 +97,7 @@ export function setAccelDefaultCache(enabled: boolean): void {
  * 失败一律返回 null = 不写 accel —— 绝不让「取不到配置」变成「写一个坏包进节点」。
  */
 export async function fetchAccelDefaultShotConfig(): Promise<
-  { enabled: true; packId: string; steps: 4 | 8 } | null
+  { enabled: true; packId: string; steps: number } | null
 > {
   await ensureToolModels();
   if (!accelDefaultEnabled) return null;

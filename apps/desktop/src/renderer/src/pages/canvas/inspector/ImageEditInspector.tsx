@@ -14,7 +14,7 @@ import { ImagePreview } from './ImagePreview';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
 import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
-import { getToolModelsSync } from '../tool-models-store';
+import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutputResolutionField, OutputSizeField, OutpaintPads, MaskField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
@@ -58,6 +58,25 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
  * (renderer 不能 import providers —— 包边界)。单测 `__tests__/edit-steps-default.test.ts` 锁一致性。
  */
 export const DEFAULT_EDIT_STEPS = 30;
+
+/**
+ * 按当前模型返回「图片编辑」的缺省采样步数(纯函数,供单测)。
+ *
+ * Qwen-Image-2.1-Turbo(2026-10 接入):8 步蒸馏,采样表内置于 checkpoint
+ * (`model_index.json` 的 `sample_sigmas`,8 项),引擎 `Config` 里
+ * `len(sigmas)` 覆盖 `num_inference_steps`、**锁步数=8、忽略 --steps**。
+ * 此前检查器一刀切写回 30 → Turbo 节点实跑 30、UI 显示 30,引擎再钳到 8 —
+ * 表面「无伤」,但「UI 与日志说真话」破,且 data 里多一个被引擎忽略的字段。
+ * 故 Turbo 显式给 8;其余走 DEFAULT_EDIT_STEPS(30)。
+ *
+ * ⚠️ 判定用与 provider `mlxgen.ts` 相同的正则(本地目录路径也命中);
+ * 不调 `isQwen21EditModel` —— 那是 provider 私有 API,renderer 不 import。
+ */
+export function defaultEditStepsForModel(model: string): number {
+  const repo = matchModel(model)?.repoId ?? model;
+  if (/qwen.*2\.1.*turbo/i.test(repo)) return 8;
+  return DEFAULT_EDIT_STEPS;
+}
 
 /**
  * 像素面积预算(`--output-resolution`)的默认值 —— 与 mlx-gen CLI 一致。
@@ -362,12 +381,18 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'instruction');
   // 未显式选模型时显示缺省解析结果(按当前 mode 对应的能力;2026-09-29 v1)
-  const model = String(d.model ?? '').trim() || (resolveImageModel(getToolModelsSync(), capabilityOf('image-edit', mode)) ?? '');
+  // 订阅式读取(2026-10-14):冷启动缓存未加载时不再误显内置默认(见 tool-models-store)
+  const toolModels = useToolModels();
+  const model = String(d.model ?? '').trim() || (resolveImageModel(toolModels, capabilityOf('image-edit', mode)) ?? '');
   const prompt = String(d.prompt ?? '');
   const inputAssetId = String(d.inputAssetId ?? '');
   const maskAssetId = String(d.maskAssetId ?? '');
   const imageStrength = Number(d.imageStrength ?? 0.5);
-  const steps = Number(d.steps ?? DEFAULT_EDIT_STEPS);
+  // 显示/写回的默认步数:**按当前 model 区分** —— Qwen-Image-2.1-Turbo 走 8 步
+  // (采样表内置,引擎锁步数=8、忽略 --steps;UI 必须说真话),其余走 DEFAULT_EDIT_STEPS。
+  // 滑块展示与 effect 写回都用这个值,避免「显示 30、实跑 8」或反过来的又一次事故。
+  const defaultStepsForModel = defaultEditStepsForModel(model);
+  const steps = Number(d.steps ?? defaultStepsForModel);
   /** 像素面积预算(仅 2.1 参考编辑有意义;未设置时用 CLI 默认 1024,不写回 data) */
   const outputResolution = Number(d.outputResolution ?? DEFAULT_OUTPUT_RESOLUTION);
   /* 显式输出尺寸(→ --width/--height)。**必须成对**才生效,与 provider 同口径:
@@ -400,7 +425,11 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   useEffect(() => {
     // 已有显式步数(用户调过 / 补写过)不再覆盖
     if (hasExplicitStepsRef.current) return;
-    setDataRef.current({ steps: DEFAULT_EDIT_STEPS });
+    // 按当前 model 选默认步数 —— Turbo 给 8(与 engine 锁步数对齐,见
+    // 顶部 defaultEditStepsForModel 注释),其余 30。`model` 变化会让 useMemo/recompute
+    // 拿到新值;但本 effect 依赖只放 nodeId,故**仅在切节点时**补写一次,
+    // 切模型不主动重写(避免覆盖用户已调过的滑块)。
+    setDataRef.current({ steps: defaultEditStepsForModel(model) });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上方注释:稳定依赖,防止自维持死循环
   }, [nodeId]);
   const outpaintSides = (d.outpaintSides as { top: number; right: number; bottom: number; left: number } | undefined)
@@ -720,12 +749,13 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
 
         {/* 采样步数:编辑原本没有该控件,导致编辑质量被静默固定在模型自身默认步数
             (实测 2026-09:flux.2-klein / z-image 不传 --steps 时都是 4 步,对去水印、改动作
-            这类细活明显不够)。现在默认 30 并**写回 data**(见上方 DEFAULT_EDIT_STEPS 注释),
-            滑块显示几步就实跑几步;拖动即覆盖。min 保留下限 4 以兼容存量节点里的小步数 */}
+            这类细活明显不够)。现在按 model 给默认(Turbo=8 / 其它=30)并**写回 data**
+            (见上方 defaultEditStepsForModel 注释),滑块显示几步就实跑几步;拖动即覆盖。
+            min 保留下限 4 以兼容存量节点里的小步数 */}
         <div className="f-sec">
           <div className="f-sec-h">
             <span className="lbl">采样</span>
-            <span className="mut" style={{ fontSize: 10.5 }}>默认 {DEFAULT_EDIT_STEPS} 步 · 拖动可覆盖</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>默认 {defaultStepsForModel} 步 · 拖动可覆盖</span>
           </div>
           <div className="f-row">
             <span className="f-lbl">steps</span>

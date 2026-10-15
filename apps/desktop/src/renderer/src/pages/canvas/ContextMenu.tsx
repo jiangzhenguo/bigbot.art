@@ -23,6 +23,10 @@ interface ContextMenuProps {
   onCtxChangeAsset?: (id: string) => void;
   /** 在 Finder 中显示节点产物(CanvasPage 解析真实路径 → IPC,toast 反馈) */
   onReveal: (id: string) => void;
+  /** 添加到聊天窗口(设为 Agent 对话的关注节点;与画布选中态解耦;已添加时变为「从聊天窗口移除」) */
+  onAddToChat?: (id: string) => void;
+  /** 已在聊天窗口中的节点 id 列表(决定菜单项显示「添加」还是「移除」) */
+  chatFocusIds?: string[];
 }
 
 /** 幽灵节点(尚无产物)在菜单里禁用导出类动作 */
@@ -35,7 +39,7 @@ function isCtxGhost(
   return !!n?.ghost;
 }
 
-export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDelete, onClose, onCtxChangeAsset, onReveal }: ContextMenuProps) {
+export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDelete, onClose, onCtxChangeAsset, onReveal, onAddToChat, chatFocusIds }: ContextMenuProps) {
   const ctxNode = ctx ? nodes.find((x) => x.id === ctx.id) : undefined;
   const isAssetNode = ctxNode?.kind === 'asset';
   return (
@@ -130,6 +134,25 @@ export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDel
         </svg>
         在 Finder 中显示
       </button>
+      <div className="ctx-sep"></div>
+      {/* 添加到聊天窗口:设为 Agent 对话的关注节点(点按选中不再自动绑定,这里显式添加) */}
+      {onAddToChat ? (
+        <button
+          className="pop-it"
+          data-od-id="ctx-add-to-chat"
+          onClick={() => {
+            if (!ctx) return;
+            const id = ctx.id;
+            onClose();
+            onAddToChat(id);
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+            <path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5Z" />
+          </svg>
+          {ctx && chatFocusIds?.includes(ctx.id) ? '从聊天窗口移除' : '添加到聊天窗口'}
+        </button>
+      ) : null}
       <div className="ctx-sep"></div>
       {isAssetNode && onCtxChangeAsset ? (
         <button

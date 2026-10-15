@@ -6,6 +6,14 @@ export const ICON_DOC = (
     <path d="M14 2v6h6M9 13h8M9 17h5" />
   </>
 );
+/** 分镜表:表格(一行 = 一个分镜) */
+export const ICON_STORYBOARD = (
+  <>
+    <rect x="2.5" y="4" width="19" height="16" rx="2" />
+    <path d="M2.5 9.3h19M2.5 14.6h19" />
+    <path d="M8.7 4v16M15.3 4v16" />
+  </>
+);
 export const ICON_DOC_S = (
   <>
     <path d="M6 2h9l5 5v15H6Z" />
@@ -112,6 +120,7 @@ export const ICON_WF_OUTPUT = (
 
 export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   doc: ICON_DOC,
+  storyboard: ICON_STORYBOARD,
   asset: ICON_ASSET,
   image: ICON_IMAGE,
   edit: ICON_EDIT,
@@ -132,6 +141,7 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
 
 export const TYPE_ICON: Record<string, React.ReactNode> = {
   document: ICON_DOC_S,
+  storyboard: ICON_STORYBOARD,
   asset: ICON_ASSET,
   'image-gen': ICON_IMAGE,
   'image-edit': ICON_EDIT,

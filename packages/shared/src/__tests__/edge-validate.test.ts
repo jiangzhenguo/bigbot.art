@@ -10,6 +10,8 @@ import {
   deriveAudioRefSource,
   validateRefsForSubmit,
   referenceMediaIssues,
+  referenceAnchorConflictIssues,
+  anchorReferenceConnectIssue,
   type EdgeNodeMin,
   type EdgeMin,
 } from '../edge-validate.js';
@@ -308,6 +310,37 @@ describe('D · 提交前防呆', () => {
   it('validateEdge:image-gen → shot ref-image 合法(参考图端口)', () => {
     const nodes = [imageNode('g'), shotNode('s')];
     expect(validateEdge(nodes, [], edge('g', 's', 'ref-image')).ok).toBe(true);
+  });
+
+  it('技能4:已有 first-frame 再连 ref-image ⇒ 拒绝(h3 互斥)', () => {
+    const nodes = [imageNode('env'), imageNode('card'), shotNode('s')];
+    const existing = [edge('env', 's', 'first-frame')];
+    const res = validateEdge(nodes, existing, edge('card', 's', 'ref-image'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]?.code).toBe('anchor-reference-conflict');
+    expect(res.errors[0]?.message).toContain('ref-image');
+    expect(res.errors[0]?.message).toContain('first-frame');
+  });
+
+  it('已有 ref-image 再连 first-frame ⇒ 拒绝', () => {
+    const nodes = [imageNode('env'), imageNode('card'), shotNode('s')];
+    const res = validateEdge(nodes, [edge('card', 's', 'ref-image')], edge('env', 's', 'first-frame'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]?.code).toBe('anchor-reference-conflict');
+  });
+
+  it('first-frame + ref-audio 不互斥', () => {
+    const audio = assetNode('a', 'audio');
+    const nodes = [imageNode('env'), audio, shotNode('s')];
+    expect(validateEdge(nodes, [edge('env', 's', 'first-frame')], edge('a', 's', 'ref-audio')).ok).toBe(true);
+  });
+
+  it('referenceAnchorConflictIssues:首帧与参考图同时存在 ⇒ error', () => {
+    const issues = referenceAnchorConflictIssues([{ role: 'first-frame' }, { role: 'ref-image' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('互斥');
+    expect(referenceAnchorConflictIssues([{ role: 'ref-image' }, { role: 'ref-image' }])).toEqual([]);
+    expect(anchorReferenceConnectIssue([], 's', 'ref-image')).toBeNull();
   });
 });
 

@@ -7,11 +7,15 @@ import {
   assembleZImagePrompt,
   rowNeedsImage,
   rowSeconds,
+  rowCell,
+  resolveMaterializeSeconds,
   tableToGfm,
   capabilityOf,
   resolveImageModel,
   fitImageSizeToGrid,
   classifyAspect,
+  normalizeShotDuration,
+  validateShotSubmitParams,
 } from '@bigbotart/shared';
 import type { VideoAspect } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
@@ -38,7 +42,7 @@ import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from 
 import { ensureToolModels, fetchAccelDefaultShotConfig } from './canvas/tool-models-store';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
-import { basenameOf, thumbSrc, previewUrlOf } from './canvas/media';
+import { basenameOf, thumbSrc, previewUrlOf, isVideoPath, isAudioPath } from './canvas/media';
 import { latestTakeResultByNode } from './canvas/inspector/useTakeResult';
 import { computeEdgeDerivations, nodesReducer } from './canvas/edge-dispatch';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
@@ -403,6 +407,26 @@ export default function CanvasPage({
   const toastMsg = useCallback((msg: string) => {
     setToast({ msg, n: Date.now() });
   }, []);
+
+  /* ── Agent 聊天「关注节点」列表(与画布选中态解耦,可多选)──
+     点按节点只选中(检查器),不绑给聊天窗口;关注节点由右键菜单「添加到聊天窗口」
+     累积设定(再点一次同一节点 = 移除),发送时还可叠输入框的 @ 提及(按消息级)。
+     取消关注走 chip 上的 ×(点按空白只清画布选区,不再动聊天关注)。 */
+  const [focusNodes, setFocusNodes] = useState<Array<{ id: string; title: string }>>([]);
+  const focusNodesRef = useRef<Array<{ id: string; title: string }>>([]);
+  focusNodesRef.current = focusNodes;
+  /** 右键「添加到聊天窗口」:切换式累积(已存在则移除);标题展示时随画布实时重取(见 focusNodes prop) */
+  const toggleChatFocus = useCallback(
+    (id: string) => {
+      const n = nodesRef.current.find((x) => x.id === id);
+      if (!n) return;
+      const exists = focusNodesRef.current.some((x) => x.id === id);
+      setFocusNodes((cur) => (exists ? cur.filter((x) => x.id !== id) : [...cur, { id: n.id, title: n.title }]));
+      setTab('chat'); // 明示结果:切到对话页签,让用户看到「关注」chip 变化
+      toastMsg(exists ? `已从聊天窗口移除 · 「${n.title}」` : `已添加到聊天窗口 · 关注「${n.title}」`);
+    },
+    [toastMsg],
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -1405,6 +1429,7 @@ export default function CanvasPage({
     }
     nextId.current = seedIdCounter(selfHeal.nodes);
     setSelectedIds([]);
+    setFocusNodes([]); // 换画布 = 换编辑对象:聊天关注节点属于上一张画布,一并解除
     setFlashId(null);
     requestAnimationFrame(() => {
       bootRef.current = false;
@@ -1667,9 +1692,8 @@ export default function CanvasPage({
   }, [projectId, activeCanvasId, applyCanvasSnapshot, refreshAssets]);
 
   /* Agent 对话面板:状态/副作用全部收敛到 useAgentChat(pages/agent/),这里只接线 */
-  /* 选中节点 ref(随对话请求注入,让 Agent 感知用户正在操作谁;带标题供用户气泡回显;渲染期同步保持稳定引用) */
-  const selectedNodeRef = useRef<{ id: string; title: string } | null>(null);
-  selectedNodeRef.current = selNode ? { id: selNode.id, title: selNode.title } : null;
+  /* 聊天关注节点列表经 focusNodesRef 注入(随对话请求带走,让 Agent 感知用户指定的操作对象;
+     与画布选中态解耦:右键「添加到聊天窗口」累积设定 + 输入框 @ 提及,点按选中不再注入) */
   /* ⚠️ 必须 useCallback 稳定引用:useAgentChat 里订阅 agent-event 的 effect 依赖它,
      内联箭头每次渲染都换新引用 → effect 反复清理重订;dev StrictMode 双挂载下会出现
      同一事件被两个监听器各收一次,导致收尾卡重复(真实事故:识别提示词显示 2 次)。 */
@@ -1681,7 +1705,7 @@ export default function CanvasPage({
     canvasId: activeCanvasId,
     onCanvasMutated: handleCanvasMutated,
     toastMsg,
-    selectedNodeRef,
+    focusNodesRef,
   });
 
   /* 视口自动持久化(防抖 400ms):平移/缩放停止后把 viewport 写回快照 ——
@@ -1728,6 +1752,30 @@ export default function CanvasPage({
       /* 拉取失败保持旧值(不静默清空,否则节点上的产物会「闪一下又没了」) */
     }
   }, [projectId]);
+
+  /** 聊天工具卡的产物媒体解析:节点 → 可显示媒体(bba-output/bba-asset)。
+   *  解析在渲染期进行(读 nodesRef + takeResults):提交成功那一刻产物可能还没跑完,
+   *  队列完成后 takeResults/nodes 更新,工具卡随重渲染自动补上媒体。 */
+  const resolveChatMedia = useCallback(
+    (nodeId: string): { url: string; kind: 'image' | 'video' | 'audio' } | null => {
+      const n = nodesRef.current.find((x) => x.id === nodeId);
+      if (!n) return null;
+      const d = (n.data ?? {}) as Record<string, unknown>;
+      let p = typeof d.resultPath === 'string' && d.resultPath ? d.resultPath : undefined;
+      // asset 节点:绑定资产的本地文件(与 revealNodeInFinder 同口径)
+      if (!p && n.kind === 'asset') {
+        const assetId = typeof d.assetId === 'string' ? d.assetId : '';
+        if (assetId) p = assetCache[assetId];
+      }
+      // Take 回填兜底(节点 data 缺 resultPath 时,如 Agent 提交的产物)
+      if (!p) p = takeResults[nodeId];
+      if (!p) return null;
+      const url = previewUrlOf(p);
+      if (!url) return null;
+      return { url, kind: isVideoPath(p) ? 'video' : isAudioPath(p) ? 'audio' : 'image' };
+    },
+    [assetCache, takeResults],
+  );
 
   /** 重生成某节点 ⇒ 全部下游生成节点标 stale(依赖过期;接力跑完逐个刷新,成功即清) */
   const markDownstreamStale = useCallback((nodeId: string) => {
@@ -2547,6 +2595,8 @@ export default function CanvasPage({
       });
       setGroups((gs) => pruneGroups(gs, nodesRef.current.filter((n) => !set.has(n.id)).map((n) => n.id)));
       setSelectedIds((cur) => cur.filter((s) => !set.has(s)));
+      // 聊天关注节点被删 → 一并解除(否则 chip 指向不存在的节点,发送时主进程按 id 查不到)
+      setFocusNodes((cur) => cur.filter((x) => !set.has(x.id)));
       toastMsg(
         ids.length > 1
           ? `已删除 ${ids.length} 个节点 · 相关连线已一并移除`
@@ -2948,7 +2998,8 @@ export default function CanvasPage({
         }
         const cfg = {
           scale: Number(d.scale ?? 2),
-          superRes: (d.superRes as 'realesrgan' | 'none' | undefined) ?? 'realesrgan',
+          superRes: (d.superRes as 'realesrgan' | 'seedvr2' | 'none' | undefined) ?? 'realesrgan',
+          seedvrModel: typeof d.seedvrModel === 'string' ? d.seedvrModel : undefined,
           srModel: d.srModel as never,
           faceModel: d.faceModel as never,
           faceWeight: d.faceWeight === undefined ? undefined : Number(d.faceWeight),
@@ -2980,10 +3031,15 @@ export default function CanvasPage({
           setVideoPostRunning([...videoPostRunningRef.current]);
         }
         if (!res.ok || !res.path) {
+          const cancelled = (res.error ?? '').includes('已取消');
           setNodes((ns) =>
-            ns.map((x) => (x.id === nodeId ? { ...x, progress: undefined, badge: `增强失败 · ${res.error ?? '未知错误'}` } : x)),
+            ns.map((x) =>
+              x.id === nodeId
+                ? { ...x, progress: undefined, badge: cancelled ? '已取消' : `增强失败 · ${res.error ?? '未知错误'}` }
+                : x,
+            ),
           );
-          toastMsg(`视频增强失败:${res.error ?? '未知错误'}`);
+          toastMsg(cancelled ? '已取消视频增强' : `视频增强失败:${res.error ?? '未知错误'}`);
           return;
         }
         const applied = res.stages ?? [];
@@ -3038,7 +3094,16 @@ export default function CanvasPage({
         role: string;
         localPath: string;
       };
-      const refs = (d.refs as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }> | undefined) ?? [];
+      /* ⚠️ shot 的引用必须按「此刻」的 nodes/edges 重新推导,不能直接读 d.refs(2026-10-12「技能2测试」):
+         接力(cascade)在上游 setNodes 写入新 resultPath 的同一 tick 就调 runNode,
+         而派生 effect 要等下一次渲染才跑 —— d.refs 里还是上一版产物路径,
+         于是上游重生成后,下游镜头仍用第一次生成的图作首帧。 */
+      const liveData =
+        n.kind === 'shot'
+          ? ((computeEdgeDerivations(nodesRef.current, edgesRef.current).nextNodes.find((x) => x.id === nodeId)?.data ??
+              d) as Record<string, unknown>)
+          : d;
+      const refs = (liveData.refs as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }> | undefined) ?? [];
       let references: RenderRef[] = refs
         .map((r): RenderRef | null => {
           const localPath = r.path ?? assetCache[r.assetId ?? ''];
@@ -3097,6 +3162,11 @@ export default function CanvasPage({
          - image-edit:多参考编辑(Qwen-Image-2.1 `qwen21.edit`,1-10 张;2026-09-29 接线,
            此前该分支只认 image-gen,image-edit 的参考图恒为空 → 2.1 被压成单图编辑) */
       if (n.kind === 'image-gen' || n.kind === 'image-edit') {
+        /* 2026-10-14「测试技能5」事故:资源节点绑了不存在的资产 id 时,旧 `if (p)` 把这条
+           ref-image 边**静默跳过**,references 为空照样提交 → 纯文生图假成功(用户视角:
+           连线画了、参考没用上)。现改为:任何一条边解析不到图就中止运行并指名原因,
+           与 Agent 侧 engine.submit 的拦截同口径。 */
+        const failedRefEdges: string[] = [];
         for (const e of edgesRef.current.filter((x) => x.to === nodeId && x.label === 'ref-image')) {
           const up = nodesRef.current.find((x) => x.id === e.from);
           const p = upstreamImagePath(up, e.label, assetCache);
@@ -3113,7 +3183,15 @@ export default function CanvasPage({
               role: 'ref-image',
               localPath: p,
             } as never);
+          } else {
+            failedRefEdges.push(up?.title ?? up?.id ?? e.from);
           }
+        }
+        if (failedRefEdges.length > 0) {
+          toastMsg(
+            `参考图未生效:${failedRefEdges.join('、')} 解析不到图片(资源节点未绑定有效资产,或上游还没生成),已取消本次运行——请修复连线或先让上游出图`,
+          );
+          return;
         }
       }
 
@@ -3122,7 +3200,7 @@ export default function CanvasPage({
          已显式绑定首帧(手动或连线派发)时不覆盖用户意图。 */
       let inheritedFrom: string | null = null;
       if (n.kind === 'shot') {
-        const shotMode = String(d.mode ?? 'text2video');
+        const shotMode = String(liveData.mode ?? 'text2video');
         const wantsFrameAnchor = shotMode === 'first-frame' || shotMode === 'first-last';
         const upShotId = edgesRef.current
           .filter((e) => e.to === nodeId)
@@ -3230,13 +3308,21 @@ export default function CanvasPage({
         const maskAssetId = String(d.maskAssetId ?? '');
         if (maskAssetId) maskPath = assetCache[maskAssetId];
       }
+      /* 缺省模型必须先算出来,下面的「无底图」闸和提交参数共用同一份。
+         create_node 不写 model,真正的模型在提交期按能力解析(指令编辑缺省 Qwen-Image-2.1)。
+         若只看 data.model,「只有 ref-image」的 2.1 编辑会被误拦成「没有输入图」。 */
+      const toolModels = isImage ? await ensureToolModels() : undefined;
+      const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
+      const resolvedModel = isImage
+        ? String(d.model ?? '').trim() ||
+          resolveImageModel(toolModels, capabilityOf(String(n.kind ?? ''), String(d.mode ?? 'instruction'), hasRefImages))
+        : undefined;
+
       if (n.kind === 'image-edit' && !inputPath) {
         /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」
            (Provider 侧 qwen21Refs = inputPath + ref-image 参考图,≥1 张即可);
            其它模型(qwen.edit / flux2.edit)CLI 层面必须给 --image-path,维持原拦截。 */
-        const model = String(d.model ?? '');
-        const isQwen21 = /qwen.*2\.1/i.test(model);
-        const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
+        const isQwen21 = /qwen.*2\.1/i.test(String(resolvedModel ?? ''));
         if (!(isQwen21 && hasRefImages)) {
           toastMsg('图片编辑需要输入图:连一个 shot / 图片节点 / asset,或在检查器填 Asset ID;(Qwen-Image-2.1 指令编辑可只连参考图)');
           return;
@@ -3263,14 +3349,33 @@ export default function CanvasPage({
         }
       }
 
-      /* 🆕 缺省模型解析(2026-09-29 v1 工具模型):节点未显式选模型时,
-         按能力取「设置页工具模型 > DEFAULT_TOOL_MODELS」;显式值永远优先。 */
-      const toolModels = isImage ? await ensureToolModels() : undefined;
-      const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
-      const resolvedModel = isImage
-        ? String(d.model ?? '').trim() ||
-          resolveImageModel(toolModels, capabilityOf(String(n.kind ?? ''), String(d.mode ?? 'instruction'), hasRefImages))
-        : undefined;
+      /* 镜头:提交前愈合时长 + 校验尺寸/时长(与 Agent engine.submit 同口径)。
+         非法参数在入队前拦下,避免 h3 在很远的地方 exit 1。 */
+      let shotData = d;
+      if (n.kind === 'shot') {
+        const dur = normalizeShotDuration(
+          { ...d, prompt: promptValue },
+          { label: n.title },
+        );
+        if (dur.changed) {
+          shotData = { ...d, ...dur.data };
+          setNodes((ns) =>
+            ns.map((x) =>
+              x.id === nodeId ? { ...x, data: { ...(x.data ?? {}), ...dur.data } } : x,
+            ),
+          );
+        }
+        const geom = validateShotSubmitParams({
+          width: shotData.width,
+          height: shotData.height,
+          seconds: shotData.seconds,
+          frames: shotData.frames,
+        });
+        if (geom.length > 0) {
+          toastMsg(`无法提交:${geom[0]}`);
+          return;
+        }
+      }
 
       const params = isImage
         ? {
@@ -3297,26 +3402,27 @@ export default function CanvasPage({
         : {
             kind: 'video',
             prompt: promptValue,
-            mode: d.mode,
-            width: d.width,
-            height: d.height,
-            seconds: Number(d.seconds ?? 0) > 0 ? Number(d.seconds) : undefined,
-            frames: Number(d.frames ?? 124),
-            steps: Number(d.steps ?? 20),
-            layers: Number(d.layers ?? 50),
-            reuse: Number(d.reuse ?? 1),
-            tier: d.tier,
-            seed: d.seed,
+            mode: liveData.mode,
+            width: shotData.width,
+            height: shotData.height,
+            seconds: Number(shotData.seconds ?? 0) > 0 ? Number(shotData.seconds) : undefined,
+            frames: Number(shotData.frames ?? 124),
+            steps: Number(shotData.steps ?? 20),
+            layers: Number(shotData.layers ?? 50),
+            reuse: Number(shotData.reuse ?? 1),
+            tier: shotData.tier,
+            seed: shotData.seed,
             // 参考视频音轨:true → h3 --ref-silent-video(只取画面),否则 --ref-video 连内嵌音轨一起注入
-            refVideoSilent: d.refVideoSilent === true,
+            refVideoSilent: shotData.refVideoSilent === true,
             // 🚀 加速 LoRA:传给主进程,提交时解析为 modelDir(-d)+ steps
-            accel: d.accel,
+            accel: shotData.accel,
           };
 
       setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', running: true, ghost: false } : x)));
+      /* takeId 提到 try 外:catch 里要把「提交被拒」的 queued Take 改判 failed(去重闸,2026-10-14) */
+      let takeId: string | undefined;
       try {
         // 先建 Take(queued),再提交任务带 takeId(主进程完成时自动写终态)· shot 与图片类节点(image-gen/edit/upscale)统一记录历史
-        let takeId: string | undefined;
         if (projectId) {
           const t = await window.bigbotart.takesCreate(projectId, {
             shotNodeId: nodeId,
@@ -3343,6 +3449,11 @@ export default function CanvasPage({
         toastMsg(`已提交 ${engine} 任务 · ${n.title}${inheritedFrom ? ` · 已继承「${inheritedFrom}」尾帧作首帧` : ''}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        /* 提交被拒(如同节点已有在途任务的去重闸,2026-10-14)时,上面已建的 queued Take
+           不能留着 —— 它永远等不到终态(孤儿记录)。就地改判 failed,检查器里可查原因。 */
+        if (takeId && projectId) {
+          void window.bigbotart.takesPatch(projectId, takeId, { status: 'failed', error: `提交被拒绝:${msg}` });
+        }
         setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: `提交失败 · ${msg}`, running: false } : x)));
         toastMsg(`提交失败:${msg}`);
       }
@@ -3460,6 +3571,16 @@ export default function CanvasPage({
         const rowNo = r + 1;
         const shotId = makeNodeId('shot');
         const p = assembleH3Prompt(row, tb.head, base);
+        const sec = resolveMaterializeSeconds(
+          rowSeconds(row, tb.head),
+          rowCell(row, tb.head, '画面描述'),
+          rowCell(row, tb.head, '提示词(可选)'),
+          p.text,
+        );
+        const dur = normalizeShotDuration(
+          { prompt: p.text, seconds: sec || undefined },
+          { label: `镜头 ${pad2(rowNo)}`, prompt: p.text },
+        );
         created.push({
           id: shotId,
           title: `镜头 ${pad2(rowNo)}`,
@@ -3475,7 +3596,8 @@ export default function CanvasPage({
             prompt: p.text,
             width: size.width,
             height: size.height,
-            seconds: rowSeconds(row, tb.head) || undefined,
+            seconds: dur.data.seconds,
+            frames: dur.data.frames,
             steps: 30,
             layers: 50,
             reuse: 1,
@@ -3503,10 +3625,10 @@ export default function CanvasPage({
               engine: 'mlxgen',
               // 🆕 不写 model(2026-09-29 v1):留给 runNode 按「工具模型 > 内置默认」缺省解析,
               // 否则批量铺出的节点全被写死,设置页默认值永远不生效
+              // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
               prompt: z.text,
               width: size.width,
               height: size.height,
-              steps: 24,
               guidance: 1.0,
               seeds: [42],
               promptFrom: { nodeId: sbNode.id, mode: 'row', row: rowNo } as PromptSource,
@@ -3590,6 +3712,18 @@ export default function CanvasPage({
           if (n.kind === 'shot') {
             const p = assembleH3Prompt(row, tb.head, base);
             data.prompt = p.text;
+            const sec = resolveMaterializeSeconds(
+              rowSeconds(row, tb.head),
+              rowCell(row, tb.head, '画面描述'),
+              rowCell(row, tb.head, '提示词(可选)'),
+              p.text,
+            );
+            const dur = normalizeShotDuration(
+              { ...data, prompt: p.text, seconds: sec || data.seconds },
+              { label: n.title, prompt: p.text },
+            );
+            data.seconds = dur.data.seconds;
+            data.frames = dur.data.frames;
           } else if (n.kind === 'image-gen') {
             const p = assembleZImagePrompt(row, tb.head, base);
             data.prompt = p.text;
@@ -3947,7 +4081,14 @@ export default function CanvasPage({
               }
             }}
             onEditSkill={() => onNavigate('skills')}
-            focusNode={selNode ? { id: selNode.id, title: selNode.title } : null}
+            focusNodes={focusNodes.map((f) => ({
+              id: f.id,
+              // 标题实时重取(重命名后 chip 同步更新);节点已被外部(Agent)删除时回退存量标题
+              title: nodes.find((n) => n.id === f.id)?.title ?? f.title,
+            }))}
+            onRemoveFocus={(id) => setFocusNodes((cur) => cur.filter((x) => x.id !== id))}
+            mentionNodes={nodes.map((n) => ({ id: n.id, title: n.title, kind: n.kind ?? '' }))}
+            resolveMedia={resolveChatMedia}
             inspector={
               <InspectorPane
                 tab={tab}
@@ -3973,9 +4114,11 @@ export default function CanvasPage({
                 onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
                 onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
                 onOpenTimelinePage={() => onNavigate('timeline')}
+                edges={edges}
                 onRemoveEdge={(srcId, dstId) => {
-                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
+                  // commitEdit 必须在 setEdges 之前(此刻 ref 仍是编辑前内容 = 撤销目标)
                   commitEdit('移除连线');
+                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
                 }}
                 running={!!selected && videoPostRunning.includes(selected)}
                 onRerunSelected={() => {
@@ -4011,6 +4154,8 @@ export default function CanvasPage({
         onClose={() => setCtx(null)}
         onCtxChangeAsset={openAssetPicker}
         onReveal={revealNodeInFinder}
+        onAddToChat={toggleChatFocus}
+        chatFocusIds={focusNodes.map((f) => f.id)}
       />
 
       {/* 连线角色选择(拖拽命中多端口组合:asset 图 → shot 首帧/参考图) */}

@@ -20,6 +20,8 @@ import {
 } from '../constants';
 import { clamp32, thumbImageSrc, previewUrlOf, outputUrlOf, VideoPoster, formatDurationSec } from '../media';
 import { takePromptOf, takeElapsedSec, takeRefreshSig, hasUnsettledTake } from './ImageTakeSection';
+import { findAutoRefEdgeSource } from '../ref-binding';
+import type { Edge } from '../types';
 
 export interface ShotInspectorProps {
   node: CanvasNode;
@@ -38,6 +40,10 @@ export interface ShotInspectorProps {
   assetCache: Record<string, string>;
   runNode: (nodeId: string) => void;
   toastMsg: (msg: string) => void;
+  /** 画布节点/边:自动绑定项点 × 时用来定位并删除对应入边 */
+  nodes?: CanvasNode[];
+  edges?: Edge[];
+  onRemoveEdge?: (sourceId: string, targetId: string) => void;
 }
 
 export function ShotInspector({
@@ -51,6 +57,9 @@ export function ShotInspector({
   assetCache,
   runNode,
   toastMsg,
+  nodes = [],
+  edges = [],
+  onRemoveEdge,
 }: ShotInspectorProps) {
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'text2video');
@@ -84,8 +93,8 @@ export function ShotInspector({
   const customHeight = Number(d.customHeight ?? 544);
   const seed = Number(d.seed ?? 42);
   const refs = (d.refs ?? []) as Array<{ assetId?: string; path?: string; role: string; auto?: boolean }>;
-  /** 🚀 加速 LoRA(蒸馏模型包):enabled + 包 id + 步数档(提交时由主进程解析 -d/--steps) */
-  const accel = (d.accel ?? {}) as { enabled?: boolean; packId?: string; steps?: 4 | 8 };
+  /** 🚀 模型包(加速/风格,互斥):enabled + 包 id + 步数(提交时由主进程解析 -d/--steps) */
+  const accel = (d.accel ?? {}) as { enabled?: boolean; packId?: string; steps?: number };
 
   /* 接续链画面规格继承:由连线派发写入 specFrom / specOverride(见 CanvasPage 统一边分派) */
   const specFromId = (d.specFrom as { nodeId?: string } | undefined)?.nodeId;
@@ -160,13 +169,13 @@ export function ShotInspector({
     refreshHist();
   }, [jobs, node.id, node.data, refreshHist]);
   const takes = hist?.takes ?? [];
-  // 🚀 加速 LoRA:设置页登记的蒸馏模型包清单(主进程回填 exists)
+  // 🚀 模型包(加速/风格):设置页登记的模型包清单(主进程回填 exists)
   const [packs, setPacks] = useState<AccelPack[]>([]);
   useEffect(() => {
     // 防御:主进程/preload 未重建时通道可能不存在(HMR 先于 main 热更的场景),缺失则降级空列表,不白屏
     const api = window.bigbotart;
     if (typeof api.accelList !== 'function') {
-      console.warn('[accel] accelList 通道不可用(主进程/preload 未重载?)· 加速 LoRA 降级为空列表');
+      console.warn('[accel] accelList 通道不可用(主进程/preload 未重载?)· 模型包降级为空列表');
       setPacks([]);
       return;
     }
@@ -174,6 +183,12 @@ export function ShotInspector({
   }, []);
   const defaultPackId = packs.find((p) => p.default)?.id ?? packs[0]?.id;
   const selPack = packs.find((p) => p.id === (accel.packId ?? defaultPackId));
+  /** 选中包的类型(缺省 accel,与主进程 packKind 同口径) */
+  const selKind: 'accel' | 'style' | 'style-accel' =
+    selPack?.kind === 'style' ? 'style' : selPack?.kind === 'style-accel' ? 'style-accel' : 'accel';
+  /** 该包的步数档集合:纯风格 20/30(融合权重需正常步数);加速类(含风格加速)4/8 */
+  const packStepsOptions = selKind === 'style' ? ([20, 30] as const) : ([4, 8] as const);
+  const packDefaultSteps = selPack?.steps ?? (selKind === 'style' ? 20 : 8);
   /** 最近一次生成实际用过的提示词(存档在 Take.params 里)——节点 prompt 为空时可用于找回 */
   const takePrompt = (() => {
     for (const t of takes) {
@@ -210,9 +225,9 @@ export function ShotInspector({
     });
   };
 
-  // 🚀 加速 LoRA 生效后的预计时间与执行步数(按实际步数相对档位预设步数缩放)
+  // 🚀 模型包生效后的预计时间与执行步数(按实际步数相对档位预设步数缩放;风格包步数接近档位,缩放自然≈1)
   const tierSteps = preset.steps;
-  const effSteps = accel.enabled ? (accel.steps ?? 8) : tierSteps;
+  const effSteps = accel.enabled ? (accel.steps ?? packDefaultSteps) : tierSteps;
   const etaText = accel.enabled
     ? `≈${Math.max(1, Math.round(preset.etaMin * (effSteps / tierSteps)))} 分钟`
     : preset.eta;
@@ -248,16 +263,32 @@ export function ShotInspector({
     });
     toastMsg(`已绑定${roleDef.label} · ${candidate.name}`);
   };
-  /** 移除:自动注入的项要登记停用,否则下一轮派发会重新加回来 */
+  /**
+   * 移除参考。
+   * 自动注入项(= 画布入边派发):必须删边,不能只写 refsSuppressed ——
+   * ref-image 是多值端口,按 role 停用挡不住,下一轮 derive 又加回来(2026-10-13 技能4)。
+   * 手动绑定项:只从 data.refs 去掉即可。
+   */
   const removeRef = (i: number) => {
     const target = refs[i];
-    const next = refs.filter((_, j) => j !== i);
-    if (target?.auto) {
-      setData({ refs: next, refsSuppressed: [...new Set([...suppressed, target.role])] });
+    if (!target) return;
+    if (target.auto) {
+      const srcId = findAutoRefEdgeSource(node.id, target, nodes, edges);
+      if (srcId && onRemoveEdge) {
+        // 删边后 derive 会清掉对应 auto ref;不要再 setData,避免多记一条历史
+        onRemoveEdge(srcId, node.id);
+        toastMsg(`已断开连线 · ${target.role}`);
+        return;
+      }
+      // 找不到边时退回旧停用语义(防御:脏数据 / 未接线的检查器)
+      setData({
+        refs: refs.filter((_, j) => j !== i),
+        refsSuppressed: [...new Set([...suppressed, target.role])],
+      });
       toastMsg(`已解除自动绑定 · ${target.role}`);
       return;
     }
-    setData({ refs: next });
+    setData({ refs: refs.filter((_, j) => j !== i) });
   };
   const setRefRole = (i: number, role: string) => setData({ refs: refs.map((r, j) => (j === i ? { ...r, role } : r)) });
   /** 恢复某角色的自动绑定(连线重新接管) */
@@ -465,9 +496,9 @@ export function ShotInspector({
         </div>
       </div>
 
-      {/* ── 🚀 加速 LoRA(蒸馏模型包):h3.c 不接受 --lora,加速 = 换蒸馏目录 + 4/8 步 ── */}
+      {/* ── 🧩 模型包(加速/风格,互斥):h3.c 不接受 --lora,一律换 -d 模型目录 ── */}
       <div className="f-sec" data-od-id="shot-accel-lora">
-        <div className="lbl">🚀 加速 LoRA</div>
+        <div className="lbl">🧩 模型包(加速 / 风格)</div>
         <div className="f-row">
           <span className="f-lbl">开关</span>
           <div className="f-chips">
@@ -481,7 +512,7 @@ export function ShotInspector({
               className={`chip${accel.enabled ? ' on' : ''}`}
               onClick={() =>
                 setData({
-                  accel: { enabled: true, packId: accel.packId ?? defaultPackId, steps: accel.steps ?? 8 },
+                  accel: { enabled: true, packId: accel.packId ?? defaultPackId, steps: accel.steps ?? packDefaultSteps },
                 })
               }
             >
@@ -492,31 +523,25 @@ export function ShotInspector({
         {accel.enabled ? (
           <>
             <div className="f-row">
-              <span className="f-lbl">步数</span>
-              <div className="f-chips">
-                {([4, 8] as const).map((s) => (
-                  <span
-                    key={s}
-                    className={`chip${(accel.steps ?? 8) === s ? ' on' : ''}`}
-                    onClick={() => setData({ accel: { ...accel, steps: s } })}
-                  >
-                    {s} 步{s === 8 ? ' · 推荐' : ''}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div className="f-row">
               <span className="f-lbl">模型包</span>
               {packs.length === 0 ? (
-                <span className="f-hint">暂无蒸馏模型包 · 去「设置 → 加速 LoRA」安装</span>
+                <span className="f-hint">暂无模型包 · 去「设置 → h3 模型包」安装</span>
               ) : (
                 <div className="f-chips">
                   {packs.map((p) => (
                     <span
                       key={p.id}
                       className={`chip${(accel.packId ?? defaultPackId) === p.id ? ' on' : ''}`}
-                      onClick={() => setData({ accel: { ...accel, packId: p.id } })}
+                      onClick={() => {
+                        const kind = p.kind === 'style' ? 'style' : p.kind === 'style-accel' ? 'style-accel' : 'accel';
+                        const opts = kind === 'style' ? [20, 30] : [4, 8];
+                        // 切包时步数落到新包档位:旧值不在新档位集合里就重置为该包推荐步数
+                        const cur = accel.steps ?? 0;
+                        const steps = (opts as number[]).includes(cur) ? cur : (p.steps ?? opts[0]!);
+                        setData({ accel: { ...accel, packId: p.id, steps } });
+                      }}
                     >
+                      {p.kind === 'style' ? '🎨 ' : p.kind === 'style-accel' ? '🎨⚡ ' : '⚡ '}
                       {p.name}
                       {p.default ? ' · 默认' : ''}
                     </span>
@@ -524,14 +549,45 @@ export function ShotInspector({
                 </div>
               )}
             </div>
+            <div className="f-row">
+              <span className="f-lbl">步数</span>
+              <div className="f-chips">
+                {packStepsOptions.map((s) => (
+                  <span
+                    key={s}
+                    className={`chip${(accel.steps ?? packDefaultSteps) === s ? ' on' : ''}`}
+                    onClick={() => setData({ accel: { ...accel, steps: s } })}
+                  >
+                    {s} 步{s === packDefaultSteps ? ' · 推荐' : ''}
+                  </span>
+                ))}
+              </div>
+            </div>
             <div className="f-hint">
-              开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '默认蒸馏模型包'} · --steps {accel.steps ?? 8} · 省 60-80% 时间
-              {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
-              · 加速不随接续链规格继承
+              {selKind === 'style' ? (
+                <>
+                  🎨 风格模型(画风 LoRA 已离线融合进权重,与加速包互斥—— 一个镜头只能选一个模型包)
+                  <br />
+                  开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '所选模型包'} · --steps {accel.steps ?? packDefaultSteps} · 不省时间(与基础模型同速)
+                </>
+              ) : selKind === 'style-accel' ? (
+                <>
+                  🎨⚡ 风格加速模型(画风 LoRA + turbo 双融合:画风与提速兼得,与其他模型包互斥)
+                  <br />
+                  开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '所选模型包'} · --steps {accel.steps ?? packDefaultSteps} · 省 60-80% 时间
+                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
+                </>
+              ) : (
+                <>
+                  开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '默认蒸馏模型包'} · --steps {accel.steps ?? packDefaultSteps} · 省 60-80% 时间
+                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
+                  · 加速不随接续链规格继承
+                </>
+              )}
             </div>
           </>
         ) : (
-          <div className="f-hint">蒸馏模型包 + 4/8 步出片(省 60-80% 时间)· 需设置页装有 turbo 模型包</div>
+          <div className="f-hint">模型包 = 换 -d 模型目录:⚡ 加速包(蒸馏 + 4/8 步,省 60-80% 时间)/ 🎨 风格包(画风融合,如 mystic,20/30 步,不提速)/ 🎨⚡ 风格加速包(双融合,如 mystic-turbo,4/8 步提速且带画风)· 需设置页装有模型包</div>
         )}
       </div>
 
@@ -547,8 +603,8 @@ export function ShotInspector({
               value={Number(d.frames ?? 124)}
               onChange={(e) => {
                 const f = Number(e.target.value);
-                if (Number.isFinite(f) && f > h3FramesForSeconds(10)) {
-                  toastMsg(`帧数超过 10 秒上限(≈${h3FramesForSeconds(10)} 帧) · 建议用时长设置或拆多镜头段落`);
+                if (Number.isFinite(f) && f > h3FramesForSeconds(SHOT_MAX_SECONDS)) {
+                  toastMsg(`帧数超过 ${SHOT_MAX_SECONDS} 秒上限(≈${h3FramesForSeconds(SHOT_MAX_SECONDS)} 帧) · 建议用时长设置或拆多镜头段落`);
                 }
                 // 直接改帧数 → 清空时长(避免 seconds 优先覆盖),帧数显式生效(h3 运行时会再对齐 5+17n)
                 setData({ frames: Number.isFinite(f) ? f : 0, seconds: 0 });
@@ -563,7 +619,7 @@ export function ShotInspector({
                 type="number"
                 value={effSteps}
                 disabled
-                title="加速 LoRA 已接管步数(真实推理时以 --steps 覆盖)"
+                title="模型包已接管步数(真实推理时以 --steps 覆盖)"
               />
             ) : (
               <input className="f-in" type="number" value={Number(d.steps ?? 20)} onChange={(e) => setData({ steps: Number(e.target.value) })} />
@@ -580,7 +636,7 @@ export function ShotInspector({
         </div>
         {accel.enabled ? (
           <div className="f-hint" style={{ marginTop: 6 }}>
-            加速 LoRA 已接管步数(--steps {effSteps})· 此处 S 显示为实际执行值,不可改;可在上方「加速 LoRA → 步数」切 4/8
+            模型包已接管步数(--steps {effSteps})· 此处 S 显示为实际执行值,不可改;可在上方「模型包 → 步数」切换
           </div>
         ) : null}
         <div className="f-row" style={{ marginTop: 6 }}>
@@ -597,7 +653,7 @@ export function ShotInspector({
             className="f-in"
             type="number"
             min={1}
-            max={10}
+            max={SHOT_MAX_SECONDS}
             value={secDraft}
             placeholder={`${Math.round(h3AlignFrames(Number(d.frames ?? 124)) / 24)}s`}
             style={{ width: 52 }}
@@ -661,6 +717,8 @@ export function ShotInspector({
           refs.map((r, i) => {
             const path = r.path ?? assetCache[r.assetId ?? ''];
             const def = roleDefs.find((rd) => rd.role === r.role);
+            const srcId = r.auto ? findAutoRefEdgeSource(node.id, r, nodes, edges) : null;
+            const srcTitle = srcId ? nodes.find((n) => n.id === srcId)?.title : '';
             const isShotSrc = !!r.path;
             // 缩略图:视频必须走抽帧封面(旧实现把 mp4 塞进 <img> = 必然 onerror,
             // 参考视频那一行因此只剩空框);图片仍用 <img>。
@@ -668,7 +726,11 @@ export function ShotInspector({
             const srcNote =
               r.role === 'ref-video'
                 ? (isShotSrc ? '视频产物 · 整段成片' : '视频素材')
-                : isShotSrc ? '上游镜头尾帧' : '';
+                : r.role === 'first-frame' && isShotSrc
+                  ? '上游镜头尾帧 / 图片产物'
+                  : isShotSrc
+                    ? '图片产物'
+                    : '';
             return (
               <div className="slot" key={`${r.assetId ?? r.path}-${i}`}>
                 {thumb?.kind === 'img' ? (
@@ -679,7 +741,7 @@ export function ShotInspector({
                   <span className="refprev" />
                 )}
                 <span className="grow">
-                  <div className="sname">{def?.label ?? r.role}{r.auto ? ' · 自动' : ''}</div>
+                  <div className="sname">{def?.label ?? r.role}{srcTitle ? ` · ${srcTitle}` : ''}{r.auto ? ' · 自动' : ''}</div>
                   {srcNote ? <div className="mut mono" style={{ fontSize: 9 }}>{srcNote}</div> : null}
                 </span>
                 <span className="sval">{r.assetId ? r.assetId.slice(0, 10) : '…'}</span>

@@ -12,6 +12,17 @@ describe('makeInitialData · image-crop', () => {
   });
 });
 
+describe('makeInitialData · image-gen(2026-10-14 Turbo 默认步数修复)', () => {
+  it('不写 model / steps:缺省全部留给「设置页工具模型 + defaultGenerateSteps」按模型解析', () => {
+    const d = makeInitialData({ id: 'g', kind: 'image-gen', name: '图片生成', sub: '' });
+    // 写死 model = 设置页默认永不生效(2026-09-29 审计);写死 steps:24 = Turbo(锁 8 步)
+    // 的 UI 与日志说谎(2026-10-14)—— 两个键都不允许回到初始数据里
+    expect('model' in d).toBe(false);
+    expect('steps' in d).toBe(false);
+    expect(d.engine).toBe('mlxgen');
+  });
+});
+
 describe('defaultDataFor · image-crop(快照缺数据时)', () => {
   it('与 makeInitialData 一致(渲染与生成可用默认值)', () => {
     expect(defaultDataFor('image-crop')).toEqual(makeInitialData({ id: '', kind: 'image-crop', name: '', sub: '' }));

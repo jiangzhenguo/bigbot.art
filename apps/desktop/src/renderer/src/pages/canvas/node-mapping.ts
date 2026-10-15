@@ -46,12 +46,13 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
     case 'image-gen':
       // 🆕 不写 model(2026-09-29 v1 工具模型):留给 runNode 缺省解析(工具模型 > 内置默认);
       // 写死会让设置页默认值永远不生效(审计 §4.1.1 🟥)
+      // 🆕 不写 steps(2026-10-14):缺省步数按解析出的模型走 defaultGenerateSteps
+      // (Turbo=8 / 2.1=40 / 其它=24);写死 24 会让 Turbo 的 UI 与日志说谎(引擎锁 8 步)
       return {
         engine: 'mlxgen',
         prompt: '',
         width: 1024,
         height: 1024,
-        steps: 24,
         guidance: 1.0,
         seeds: [42],
       };

@@ -124,6 +124,36 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect((twice.nextNodes.find((n) => n.id === 's1')!.data as { mode: string }).mode).toBe('text2video');
   });
 
+  it('手选首帧时,旧的 refsSuppressed 不再挡住 first-frame 入边(清晨阳台)', () => {
+    const nodes = [
+      node('env', 'image-gen', { resultPath: '/tmp/out/balcony.png' }),
+      node('s1', 'shot', {
+        mode: 'first-frame',
+        modeOverride: true,
+        refsSuppressed: ['first-frame', 'ref-image'],
+        refs: [],
+      }),
+    ];
+    const edges: Edge[] = [{ from: 'env', to: 's1', cls: '', label: 'first-frame' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const shot = nextNodes.find((n) => n.id === 's1')!;
+    const data = shot.data as { refs: Array<{ path?: string; role: string }>; refsSuppressed?: string[] };
+    expect(data.refs).toContainEqual({ path: '/tmp/out/balcony.png', role: 'first-frame', auto: true });
+    expect(data.refsSuppressed).not.toContain('first-frame');
+    expect(data.refsSuppressed).toContain('ref-image');
+  });
+
+  it('未手选模式时,refsSuppressed 仍挡住 first-frame', () => {
+    const nodes = [
+      node('env', 'image-gen', { resultPath: '/tmp/out/balcony.png' }),
+      node('s1', 'shot', { mode: 'first-frame', refsSuppressed: ['first-frame'], refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'env', to: 's1', cls: '', label: 'first-frame' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const refs = (nextNodes.find((n) => n.id === 's1')!.data as { refs: unknown[] }).refs;
+    expect(refs).toEqual([]);
+  });
+
   it('modeOverride=true 时 ref-image 边不改 mode', () => {
     const nodes = [
       node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),

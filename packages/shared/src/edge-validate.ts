@@ -41,7 +41,8 @@ export interface EdgeViolation {
     | 'single-port-conflict'
     | 'duplicate-edge'
     | 'ref-multi-source'
-    | 'ref-missing';
+    | 'ref-missing'
+    | 'anchor-reference-conflict';
   message: string;
   severity: EdgeSeverity;
   /** 单值端口冲突时指向被顶掉的旧边(供调用方做「替换语义」) */
@@ -302,6 +303,17 @@ export function validateEdge(
     return { ok: false, errors };
   }
 
+  // h3 互斥:shot 上 first/last-frame 与 ref-image/ref-video 不能同时存在。
+  // 2026-10-13「技能4」:Agent 把环境图连成首帧、角色卡连成 ref-image,mode 被切成首帧,
+  // 入队后 h3 才报 full references cannot be combined with frame anchors。
+  if (dst.kind === 'shot') {
+    const conflict = anchorReferenceConnectIssue(edges, target, lbl);
+    if (conflict) {
+      errors.push(conflict);
+      return { ok: false, errors };
+    }
+  }
+
   // 单值端口基数:同目标、同 label 已有入边(不同源)⇒ 冲突(可替换)
   if (SINGLE_VALUE_PORTS.has(lbl)) {
     const conflict = edges.find((e) => e.target === target && e.label === lbl && e.source !== source);
@@ -536,6 +548,46 @@ export function referenceMediaIssues(
     }
   }
   return out;
+}
+
+const FRAME_ANCHOR_LABELS = new Set(['first-frame', 'last-frame']);
+const FULL_REFERENCE_LABELS = new Set(['ref-image', 'ref-video']);
+
+/**
+ * 连线前互斥:shot 已有首/尾帧时拒绝再连参考图/参考视频,反之亦然。
+ * ref-audio 不参与(它和帧锚定可以共存)。
+ */
+export function anchorReferenceConnectIssue(
+  edges: EdgeMin[],
+  targetId: string,
+  newLabel: string,
+): EdgeViolation | null {
+  const inbound = edges.filter((e) => e.target === targetId);
+  const anchor = inbound.find((e) => FRAME_ANCHOR_LABELS.has(String(e.label ?? '')));
+  const reference = inbound.find((e) => FULL_REFERENCE_LABELS.has(String(e.label ?? '')));
+  if (FULL_REFERENCE_LABELS.has(newLabel) && anchor) {
+    return {
+      code: 'anchor-reference-conflict',
+      severity: 'error',
+      message:
+        `参考图/参考视频(${newLabel})与已有的首/尾帧锚定(${anchor.label},来自 ${anchor.source})互斥,h3 不能同时提交` +
+        `(full references cannot be combined with frame anchors)。` +
+        `关联生成请 canvas.disconnect 去掉「${anchor.source} → ${targetId}[${anchor.label}]」,再把环境图、角色卡、手部参考全部以 label="ref-image" 连上;` +
+        `若只要首帧生成,则不要连 ${newLabel}。`,
+    };
+  }
+  if (FRAME_ANCHOR_LABELS.has(newLabel) && reference) {
+    return {
+      code: 'anchor-reference-conflict',
+      severity: 'error',
+      message:
+        `首/尾帧锚定(${newLabel})与已有的参考(${reference.label},来自 ${reference.source})互斥,h3 不能同时提交` +
+        `(full references cannot be combined with frame anchors)。` +
+        `关联生成请继续用 ref-image,不要改连 ${newLabel};` +
+        `若确实要首帧模式,请先 canvas.disconnect 去掉全部 ref-image/ref-video 边(含「${reference.source} → ${targetId}[${reference.label}]」)。`,
+    };
+  }
+  return null;
 }
 
 /**

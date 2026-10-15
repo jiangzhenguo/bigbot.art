@@ -232,6 +232,16 @@ describe('guardEdge · 合法组合一律放行(不误伤)', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('技能4:shot 已有 first-frame 再连 ref-image 被拦', () => {
+    const env = imgGen('env');
+    const card = imgGen('card');
+    const s = shot();
+    const edges = [{ from: 'env', to: 's', label: 'first-frame' }];
+    const r = guardEdge(card, s, 'ref-image', [env, card, s], edges);
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('互斥');
+  });
+
   it('自连被拦(同一节点)', () => {
     const s = shot();
     const r = guardEdge(s, s, 'input', [s], []);

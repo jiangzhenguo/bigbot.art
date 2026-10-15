@@ -7,8 +7,8 @@
  */
 import React from 'react';
 import type { RenderJob, Asset, NodeKind } from '@bigbotart/shared';
-import type { CanvasNode, NodeInfo } from './types';
-import { InspectorBody } from './inspector/InspectorBody';
+import type { CanvasNode, Edge, NodeInfo } from './types';
+import { InspectorBody, VideoPostCancelButton } from './inspector/InspectorBody';
 
 /**
  * 「仅重跑该节点」可见的节点类型 —— 与 CanvasPage `runNode` 里**真有执行分支**的 kind 一一对应。
@@ -49,6 +49,7 @@ interface InspectorPaneProps {
   assetCache: Record<string, string>;
   runNode: (nodeId: string) => void;
   nodes: CanvasNode[];
+  edges: Edge[];
   /** nodeId → 最新成功 Take 产物路径(视频增强等本地节点产物兜底显示;与节点卡同一份) */
   takeResults?: Record<string, string>;
   onMaterializeStoryboard: (sbNode: CanvasNode, aspect: string, tier: string) => void;
@@ -83,6 +84,7 @@ export function InspectorPane({
   assetCache,
   runNode,
   nodes,
+  edges,
   takeResults,
   onMaterializeStoryboard,
   onUndoStoryboard,
@@ -126,6 +128,7 @@ export function InspectorPane({
           assetCache={assetCache}
           runNode={runNode}
           nodes={nodes}
+          edges={edges}
           takeResults={takeResults}
           onMaterializeStoryboard={onMaterializeStoryboard}
           onUndoStoryboard={onUndoStoryboard}
@@ -140,18 +143,26 @@ export function InspectorPane({
           asset(资源)节点是纯引用节点:没有推理/后处理可跑(runNode 里没有对应分支,
           点了会落到 h3c 视频提交分支);timeline / document 同理 —— 一律不显示按钮,
           避免给出一个点了没反应(或报错)的假入口。 */}
-      {selected && selNode?.kind && RERUNABLE_KINDS.has(selNode.kind) && (
-        <button
-          className="btn btn-s rerun-btn"
-          onClick={onRerunSelected}
-          // 长任务进行中禁止再次触发(否则并行起多个后处理,互相抢资源并覆盖产物)
-          disabled={running}
-          title={running ? '该节点正在增强中,请等待当前任务完成' : undefined}
-          data-od-id="rerun-btn"
-        >
-          {running ? '增强中…' : '仅重跑该节点'}
-        </button>
-      )}
+      {selected && selNode?.kind && RERUNABLE_KINDS.has(selNode.kind) &&
+        (running && selNode.kind === 'video-upscale' ? (
+          <div className="vpost-rerun">
+            <button className="btn btn-s rerun-btn" disabled data-od-id="rerun-btn" title="该节点正在增强中">
+              增强中…
+            </button>
+            <VideoPostCancelButton nodeId={selNode.id} toastMsg={toastMsg} className="btn btn-s rerun-btn" />
+          </div>
+        ) : (
+          <button
+            className="btn btn-s rerun-btn"
+            onClick={onRerunSelected}
+            // 长任务进行中禁止再次触发(否则并行起多个后处理,互相抢资源并覆盖产物)
+            disabled={running}
+            title={running ? '该节点正在增强中,请等待当前任务完成' : undefined}
+            data-od-id="rerun-btn"
+          >
+            {running ? '增强中…' : '仅重跑该节点'}
+          </button>
+        ))}
     </div>
   );
 }

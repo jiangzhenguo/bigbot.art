@@ -10,8 +10,8 @@ import { ImageTakeSection } from './ImageTakeSection';
 import { useTakeResult } from './useTakeResult';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
-import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
-import { getToolModelsSync } from '../tool-models-store';
+import { capabilityOf, resolveImageModel, defaultGenerateSteps } from '@bigbotart/shared';
+import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { AspectPresets, SeedEditor, StepsGuidanceField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
@@ -30,12 +30,17 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
   const { node, setData, jobs, projectId, runNode, toastMsg, onSelectTake } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   // 未显式选模型时显示缺省解析结果(设置页工具模型 > 内置默认;2026-09-29 v1)
-  const model = String(d.model ?? '').trim() || (resolveImageModel(getToolModelsSync(), capabilityOf('image-gen')) ?? '');
+  // ⚠️ 必须用订阅式 useToolModels(2026-10-14):getToolModelsSync 冷启动时缓存未加载,
+  //    会显示内置默认 z-image 而非设置页配置的模型(实际提交是对的,显示在说谎)。
+  const toolModels = useToolModels();
+  const model = String(d.model ?? '').trim() || (resolveImageModel(toolModels, capabilityOf('image-gen')) ?? '');
   const prompt = String(d.prompt ?? '');
   const negative = String(d.negativePrompt ?? '');
   const w = Number(d.width ?? 1024);
   const h = Number(d.height ?? 1024);
-  const steps = Number(d.steps ?? 24);
+  // 缺省步数按解析出的模型走(2026-10-14):Turbo=8 / Qwen-2.1=40 / 其它=24,
+  // 与 provider 同一份表(defaultGenerateSteps);节点创建不再写死 steps:24
+  const steps = Number(d.steps ?? defaultGenerateSteps(model));
   const guidance = Number(d.guidance ?? 1.0);
   const seeds = Array.isArray(d.seeds) ? (d.seeds as number[]) : [];
   // 产物路径:节点 data 优先,缺失时回退 Take 历史里最新成功产物(2026-09-29 事故修复)
