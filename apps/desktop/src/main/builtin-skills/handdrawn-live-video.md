@@ -12,12 +12,22 @@
 - 环境音由 h3.c 原生音频一并生成(视频+音频合一),在 prompt 末尾写环境音设计。
 - 本项目视频引擎即 h3.c(MiniMax-H3 本地部署),直接用 `engine.submit`;**提交给引擎的 prompt 用英文撰写**,但给用户确认的创意稿用用户输入的主语言呈现。
 
+## 连线硬规矩(必须是关联生成)
+
+本技能的成片是 **关联生成(Ref2VA,`mode=ref-image`)**,不是首帧生成。h3 不允许参考图和首/尾帧同时提交(`full references cannot be combined with frame anchors`),混连会被 `canvas.connect` 直接拒绝。
+
+1. 环境、手绘角色、手部都做成图片节点或使用用户图片。节点标题用「环境底图 / 角色卡 / 手部参考」,**不要**把环境图叫「首帧」。
+2. 三张图全部 `canvas.connect({ label: "ref-image" })` 连到唯一 shot。对应提示词里的 `<Picture 1/2/3>`。
+3. 连完后 `canvas.update_node` 写入 `mode: "ref-image"` 且 `modeOverride: true`,防止被自动切回文生或首帧。
+4. **禁止** `label: "first-frame"` 或 `"last-frame"`。环境图只是画面参考,不是帧锚定。
+5. `h3.write_prompt` 的 summary 任务类型只写 `[reference generation]`,不要写 `keyframe completion`。
+
 ## 任务流程
 
 1. **读需求**:`document.read` / `canvas.list_nodes` 查看需求与画布现状。用户没给场景创意时,缺的关键信息(实拍空间、接触对象或手部动作、情绪氛围、风格限制)用 `ask.user` 一次性补齐。
 2. **创意生成**:按「创意发明规则」全新创作一套组合(不复用旧创意),按「输出格式」整理成与用户输入主语言一致的创意稿,先发给用户确认。用户确认前,不提交任何生成。
-3. **铺节点**:确认后用 `storyboard.plan` 落一张单镜分镜表(0-3 / 3-6 / 6-10 / 10-13 / 13-15 秒五个区间),再 `storyboard.materialize`(aspect 16:9)铺出 shot 节点;若用户提供了实拍参考素材(`assets.list` / `assets.get` 确认),可先提交 `image-gen` 首帧节点请用户在画布查看确认。
-4. **逐镜生成**:把英文版最终 prompt 写入 shot 节点,`engine.submit` 先 `tier=preview` 试跑;用户在画布确认接触真实感、连续变形、慢半拍追拍和非恐怖手绘质感成立后,再提档(default 等)重跑出成片。不批量闭眼跑。
+3. **铺节点**:确认后用 `storyboard.plan` 落一张**只有 1 行**的分镜表——「时长(s)」填 **15**;0-3 / 3-6 / 6-10 / 10-13 / 13-15 五个区间**全部写进该行「画面描述」**,禁止拆成多行多 shot(拆行会让参数变成 4s 短片、文案却仍写 15 秒)。再 `storyboard.materialize`(aspect 16:9)铺出**一个** shot;`canvas.update_node` 确认 `data.seconds=15`。环境、角色、手部若还没有图,先建 `image-gen` 出图给用户在画布上看(标题按「连线硬规矩」,不要叫首帧)。
+4. **逐镜生成**:按「连线硬规矩」把环境底图、角色卡、手部参考全部连成 `ref-image` 并锁 `mode=ref-image`。再用 `h3.write_prompt` 把英文版最终 prompt 写入唯一 shot(会按节点 `seconds=15` 约束总时长),`engine.submit` 先 `tier=preview` 试跑;用户在画布确认接触真实感、连续变形、慢半拍追拍和非恐怖手绘质感成立后,再提档(default 等)重跑出成片。不批量闭眼跑。
 5. **交付**:单片无需 `timeline.export` 合成时,直接核对 shot 节点产物齐全(15 秒、16:9、有原生音频)即可交付;如用户要求加片头片尾或字幕再进合成。
 
 ## 创意理解约束(同语种)
@@ -66,6 +76,7 @@
 
 - prompt 可直接用于视频生成,不写成散文。
 - 给用户确认的创意稿用其主语言;**提交 `engine.submit` 时翻译为英文**,并逐段保留 11 段结构与全部禁止事项,创意内容不得缩水或即兴改写。
+- summary 以 `[reference generation]` 开头,不要写成 `keyframe completion`(那是首帧锚定,和本技能的参考图连线互斥)。
 - 0-3 秒必须通过接触让实拍与手绘的融合显而易见。
 - 相机不要把动画稳定居中:它慢半拍,在实体已经离开画面边缘后再平移、俯仰或前进。
 - 实体必须可追踪:每个新形态都保留上一形态的线、尾巴、色彩拖痕、身体曲线或图案母题。
@@ -97,3 +108,4 @@
 3. 不静默跳过失败镜头:失败必须告知用户原因并给出处理方案。
 4. 用户明确确认创意稿之前,不提交任何 `engine.submit` / image-gen 生成。
 5. 不复用旧创意元素;不引入恐怖编码、3DCG 或毛绒质感,即使用户描述含糊也按本 Skill 调性执行。
+6. **禁止首帧 + 参考图混连**。环境图、角色卡、手部参考只能走 `ref-image`;连了 `first-frame` 再连 `ref-image` 会被拒绝,且 h3 无法出片。

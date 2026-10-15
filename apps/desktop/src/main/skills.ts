@@ -173,21 +173,33 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
     name: '极简产品广告生成器',
     description: 'MiniMax 官方:基于产品图片和广告需求,完成卖点提炼、英文文案与节拍分镜设计,适用于电商推广',
     instructions: minimalistProductAd,
-    inject: 'summary',
+    /* ⚠️ 必须是 full(2026-10-14 由 summary 改,同 music-video-subtitle)。
+     * 「产品本体保真 / 有真实产品图禁止 image-gen 重画 / 单 shot 连续片 + preview 先行」
+     * 都写在中后段,summary 只见流程名。「技能5测试」实跑:Agent 用 image-gen 重新画了
+     * 用户的产品当首帧、3 镜闭眼连跑(还因双触发各跑了 2 遍)。 */
+    inject: 'full',
   },
   {
     id: 'handdrawn-live-video',
     name: '手绘实拍融合视频生成器',
     description: 'MiniMax 官方:基于场景创意,生成手绘动画与实拍接触变形的 15 秒创意短片',
     instructions: handdrawnLiveVideo,
-    inject: 'summary',
+    /* ⚠️ 必须是 full(2026-10-13「技能4」)。
+     * summary 前 160 字看不到「全部 ref-image、禁止 first-frame」;
+     * 实跑把环境图连成首帧、角色卡连成参考图,h3 报
+     * full references cannot be combined with frame anchors,界面 mode 停在首帧。 */
+    inject: 'full',
   },
   {
     id: 'music-video-subtitle',
     name: '音乐MV动态字幕生成器',
     description: 'MiniMax 官方:基于音乐和歌词,完成节奏拆解、镜头设计与动态字幕方案,适用于 AI MV 创作',
     instructions: musicVideoSubtitle,
-    inject: 'summary',
+    /* ⚠️ 必须是 full(2026-10-13)。
+     * 核心硬规矩「用户音乐必须连 shot.ref-audio,只写 prompt 不算用了音乐」若用 summary,
+     * 前 160 字只见适用场景,Agent 会跳过入库与连线直接文生视频 —— 用户反馈「没使用音乐生成视频」。
+     * 工具层另有 checkMasterAudioGate 硬拦,文档全量注入是第一道防线。 */
+    inject: 'full',
   },
   {
     id: 'co-op-game-intro',
@@ -197,7 +209,8 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
     /* ⚠️ 必须是 full(2026-10-12 由 summary 改,同 3d-animation-short)。
      * 真实事故「测试技能2」:summary 只见「先静帧再视频」流程名,Agent 跳过 PLAYER 角色卡、
      * 把一张主菜单静帧当唯一参考、7 镜 mode 停在文生并行提交 → 人物锁不住、成片接不齐。
-     * 核心规则(角色卡先行 / 1 静帧+1 镜头 / mode=ref-image)写在正文前段,必须全量注入。 */
+     * 核心规则(角色卡先行 / 1 静帧+1 镜头 / mode=ref-image /
+     * 主菜单静帧走 image-edit+Qwen-Image-2.1 锁 16:9)写在正文前段,必须全量注入。 */
     inject: 'full',
   },
 ];
@@ -275,6 +288,21 @@ const LEGACY_BUILTIN_FINGERPRINTS = new Set<string>([
   // 3d-animation-short:2026-10-09 第三次修订(16322 字,官方六段结构 + 逐字抄规则,
   // 但未写「提交即收尾 vs 多步流程」的关系 → Agent 会卡在「等出图」)
   'fnv1a-a90fae91-16322',
+  // co-op-game-intro:初版(20704 字,主菜单是「先出一张静帧」,无角色卡硬门)
+  'fnv1a-3c5b8bf8-20704',
+  // co-op-game-intro:2026-10-12 角色卡先行修订(21952 字)。主菜单仍写 image-gen+ref-image,
+  // 实跑落到 Klein 多参考,竖版角色卡把 16:9 请求改写成 800×1168。
+  'fnv1a-bbcf1b5f-21952',
+  // music-video-subtitle:初版(7829 字,只在文案谈 Master Audio、未强制 ref-audio 连线)
+  'fnv1a-16230625-7829',
+  // handdrawn-live-video:2026-10-13 之前(3486 字)。只写「可先做 image-gen 首帧」,
+  // 没锁 mode=ref-image,Agent 把环境图连成 first-frame、角色卡连成 ref-image。
+  'fnv1a-b7db5dd6-3486',
+  // minimalist-product-ad:2026-10-14 之前(8013 字)。锚定图/分镜静帧写死走 image-gen,
+  // 没有「有真实产品图 → 一律 image-edit 以原图为底图」分流 ——
+  // 「技能5测试」事故:用户传了键盘实拍图,Agent 却用 image-gen 重新画了一把键盘当首帧,
+  // 成片里的产品不是用户的产品。
+  'fnv1a-f9eda624-8013',
 ]);
 
 /** 导出供单测断言「历史版本识别」行为(生产代码不应改动它) */

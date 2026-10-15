@@ -136,6 +136,30 @@ describe('SkillStore 内置技能正文升级', () => {
     expect(store.get('3d-animation-short')?.inject).toBe('full');
   });
 
+  it('co-op-game-intro 主菜单静帧走编辑模型锁 16:9(技能2测试事故)', () => {
+    const store = new M.SkillStore();
+    const ins = store.get('co-op-game-intro')?.instructions ?? '';
+    expect(store.get('co-op-game-intro')?.inject).toBe('full');
+    expect(ins).toContain('image-edit');
+    expect(ins).toContain('Qwen/Qwen-Image-2.1');
+    expect(ins).toContain('width=1024');
+    expect(ins).toContain('height=576');
+    expect(ins).toContain('禁止**把主菜单建成 `image-gen`');
+    // 历史出厂版必须在白名单里,否则用户库(无 fingerprint 的旧正文)升不上来
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-3c5b8bf8-20704')).toBe(true);
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-bbcf1b5f-21952')).toBe(true);
+  });
+
+  it('handdrawn-live-video 全量注入并锁关联生成(技能4事故)', () => {
+    const store = new M.SkillStore();
+    const ins = store.get('handdrawn-live-video')?.instructions ?? '';
+    expect(store.get('handdrawn-live-video')?.inject).toBe('full');
+    expect(ins).toContain('mode=ref-image');
+    expect(ins).toContain('禁止首帧 + 参考图混连');
+    expect(ins).toContain('label: "ref-image"');
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-b7db5dd6-3486')).toBe(true);
+  });
+
   it('出厂正文含 h3 参考图能力表(事故修复内容确实在种子文件里)', () => {
     const store = new M.SkillStore();
     const ins = store.get('3d-animation-short')?.instructions ?? '';

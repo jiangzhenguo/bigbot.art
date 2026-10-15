@@ -18,6 +18,11 @@
    - 镜间连续性用上游 shot → 下游 `first-frame`(尾帧接续);**first-frame 与 ref-image 互斥**,接续镜不要两套同时连;
    - **串行提交**:上一镜 `succeeded` 再 `engine.submit` 下一镜,禁止一次丢进队列 7 镜。
 4. **镜头 01 主菜单待机可用 first-frame**(确认静帧直通);其余动作/过场镜优先 `ref-image` 锁角色卡。
+5. **主菜单静帧必须走编辑模型,禁止 image-gen 多参考**(2026-10-12「技能2测试」16:9 事故):
+   - 建 `image-edit`:`mode=instruction`,`model=Qwen/Qwen-Image-2.1`,`width=1024`,`height=576`(精确 16:9,且都是 32 的倍数)。
+   - 两张已出图的角色卡只 `canvas.connect` 到 `label=ref-image`(先 P1 再 P2)。**不要**再连 `input` 底图。
+   - **禁止**把主菜单建成 `image-gen`,也**禁止**改用 `flux.2-klein`。Klein 多参考默认按**第一张**参考图的宽高比出图,`--width/--height` 只当面积预算。竖版角色卡(832×1216)会把请求的 16:9 改写成竖图(实测请求 1280×720,产物 800×1168)。
+   - 禁止写 `1280×720`:720 不是 32 的倍数,Qwen-Image-2.1 编辑会直接拒绝。要更大的精确 16:9 用 `1536×864`。
 
 ## 默认创作目标
 
@@ -25,14 +30,14 @@
 
 1. 锁定视觉风格 + 玩家/游戏信息;
 2. **两张角色卡**(image-gen,用户确认);
-3. 一张经用户确认的 16:9 主菜单静帧(image-gen,角色卡经 `ref-image` 注入);
+3. 一张经用户确认的 16:9 主菜单静帧(`image-edit` + `Qwen/Qwen-Image-2.1`,1024×576,角色卡经 `ref-image` 注入);
 4. **一个** shot 节点回填完整视频 prompt(角色卡 + 静帧作 `ref-image`,mode=`ref-image`),经 h3.c 出片后 `timeline.export`。
 
 ## 任务流程
 
 1. **读需求与素材入库**:`document.read` / `canvas.list_nodes`;上传的 PLAYER 参考图先 `assets.import`。缺玩家名、游戏名、视觉风格时用 `ask.user` 补齐。
 2. **出角色卡(强制门)**:建「角色卡·PLAYER1」「角色卡·PLAYER2」两个 image-gen → 提交 → 用户确认。未确认前不得铺视频镜头。
-3. **主菜单确认静帧**:建/铺 image-gen 主菜单静帧,把两张角色卡 `canvas.connect`(label=`ref-image`)连上再提交;用户确认前不得进视频。
+3. **主菜单确认静帧**:建 `image-edit`(见核心硬规矩 §5:模型 `Qwen/Qwen-Image-2.1`、1024×576、`mode=instruction`),把两张角色卡 `canvas.connect`(label=`ref-image`)连上再 `engine.submit`。不要建成 image-gen。用户确认前不得进视频。
 4. **铺视频节点(默认单镜)**:建 **一个** shot(~15s,16:9,tier 先 preview)。把角色卡×2 + 确认静帧连为 `ref-image`,并 `update_node` 设 `mode=ref-image, modeOverride=true`。若分镜表被 materialize 成多行,删除多余 shot 或只提交主镜头,勿七镜齐发。
 5. **回填并提交视频**:按附录 B 把风格/角色锚点/玩家名/游戏名/UI/时间轴事件写成**一条**英文 prompt 写入该 shot,`engine.submit`;用 `engine.queue_status` 跟踪。先 preview,确认后再提档。
 6. **导出与核对**:`timeline.export`;核对角色卡、确认静帧、视频 Take、导出文件齐全再交付。
@@ -80,6 +85,7 @@
 - mode 仍是「文生」→ `update_node` 设 `mode=ref-image, modeOverride=true` 后重提;
 - 多镜队列卡死 / 成片接不齐 → 收敛为单镜 15s,或串行提交 + 尾帧接续;
 - 画面没体现用户风格 → 重写整体风格、色彩设计、人物风格、背景纹理、UI 颜色、按钮、图标和字体段落,而不是改动布局框架。
+- 主菜单出成竖图 / 不是 16:9 → 节点走了 image-gen + Klein 多参考(比例被第一张角色卡锚定)。删掉该节点,按核心硬规矩 §5 改成 `image-edit` + `Qwen/Qwen-Image-2.1` + `width=1024` `height=576` 后重提。
 
 ---
 
@@ -258,4 +264,4 @@ No third player, no female character unless explicitly requested by user, no dup
 2. **节点 id 一律用 `canvas.list_nodes` 现拉**,禁止凭记忆引用旧 id。
 3. **不静默跳过失败镜头/失败首图**:生成失败必须如实报告原因,给出修正方案(按「常见失败修正」改写 prompt)并经用户确认后重试。
 4. 首图未获用户确认前,禁止提交视频生成;「跳过确认」只对本次运行生效。
-5. 不虚构工具能力:本技能只涉及 image-gen 首帧与 h3.c 视频生成,不承诺 UI 可交互 Demo 或多页面界面。
+5. 不虚构工具能力:本技能只涉及 image-gen 角色卡、image-edit 主菜单静帧(Qwen-Image-2.1)与 h3.c 视频生成,不承诺 UI 可交互 Demo 或多页面界面。
