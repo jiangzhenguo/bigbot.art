@@ -427,6 +427,8 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp .vpost-progress .pbar.indet i{width:35%;animation:bba-indet 1.4s var(--ease-standard) infinite}
 .pg-canvas .insp .vpost-progress .vp-stage{flex:none;font-weight:700;color:var(--fg);font-variant-numeric:tabular-nums}
 .pg-canvas .insp .vpost-progress .vp-pct{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+.pg-canvas .insp .vpost-progress .vp-cancel{margin-top:8px;width:100%}
+.pg-canvas .insp .vpost-rerun{display:flex;flex-direction:column;align-items:center;gap:6px}
 .pg-canvas .md-preview{padding:2px 0 0}
 .pg-canvas .md-preview b{font-size:12.5px}
 .pg-canvas .md-preview p{margin:4px 0 0;color:var(--muted);font-size:11px;line-height:1.5}
@@ -643,7 +645,7 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .attach .x{color:var(--muted);display:inline-flex;padding:2px;border-radius:4px}
 .pg-canvas .attach .x:hover{color:var(--fg);background:color-mix(in oklab,var(--fg) 8%,transparent)}
 .pg-canvas .attach .x svg{width:10px;height:10px}
-.pg-canvas .input-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:4px;display:flex;flex-direction:column;gap:7px;transition:border-color var(--motion-fast)}
+.pg-canvas .input-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:4px;display:flex;flex-direction:column;gap:7px;transition:border-color var(--motion-fast);position:relative}
 .pg-canvas .input-box:focus-within{border-color:var(--meta)}
 .pg-canvas .input-box textarea{font-size:var(--text-sm);line-height:1.55;min-height:50px;max-height:120px}
 /* 输入框聚焦环:比全局 --focus-ring 窄(2px),配合 input-box 等距 padding,蓝框到黑边四边距离一致 */
@@ -659,6 +661,16 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .focus-tag:hover{border-color:var(--accent)}
 /* 用户气泡里的关注节点回显徽标(本轮实际带给 Agent 的节点) */
 .pg-canvas .msg-user .badge.ctx-node{background:color-mix(in oklab,var(--accent) 14%,transparent);color:var(--fg);cursor:pointer}
+/* 聊天里的内联媒体:用户附件气泡(图片/视频)与工具卡产物共用尺寸约束 */
+.pg-canvas .att-media-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.pg-canvas .att-media{max-width:100%;max-height:180px;border-radius:8px;display:block;background:#000}
+.pg-canvas .att-media-row .aud{width:100%}
+/* 工具卡内联产物媒体:左缘与上方参数文本(.tr-arg 的 23px 缩进)对齐,右缘与行内容右 padding(7px)对齐,
+   不再用 4px 左右margin 漂在文本左边(2026-10-15 用户反馈「视频/图片展示位置要对齐上面的文本」) */
+.pg-canvas .tr-media{max-width:calc(100% - 30px);max-height:200px;border-radius:8px;display:block;margin:6px 7px 2px 23px;background:#000}
+.pg-canvas .tr-row .aud{margin:6px 7px 2px 23px}
+/* @ 提及节点弹层:浮在输入框上方,宽度跟输入框走(覆盖 .pop 的 min-width) */
+.pg-canvas .mention-pop{bottom:calc(100% + 6px);left:0;right:0;min-width:0;max-height:240px;overflow:auto}
 .pg-canvas .toolrow{display:flex;gap:6px;margin-top:9px;align-items:center;flex-wrap:wrap;position:relative}
 .pg-canvas .toolrow .pop{bottom:calc(100% + 6px);left:0}
 .pg-canvas .composer-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:9px}

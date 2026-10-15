@@ -32,10 +32,10 @@ export interface ChatMsg {
   kind: 'user' | 'agent' | 'sys';
   /** 纯文本消息 */
   text?: string;
-  /** 用户消息携带的附件(展示用) */
-  attachments?: Array<{ name: string; kind: string }>;
-  /** 本轮发送时画布选中的「关注节点」(用户气泡回显徽标;recall 恢复时从 selectedNodeId/Title 还原) */
-  contextNode?: { id: string; title: string };
+  /** 用户消息携带的附件(展示用;localPath 用于气泡内联媒体预览,历史 recall 记录没有它则回退文件名徽标) */
+  attachments?: Array<{ name: string; kind: string; localPath?: string }>;
+  /** 本轮发送时引用的节点(常驻关注 + @ 提及;用户气泡回显徽标;recall 恢复时从 selectedNodeIds/Titles 还原) */
+  contextNodes?: Array<{ id: string; title: string }>;
   /** 模型思考内容(ThinkingBlock 折叠展示;不进记忆) */
   thinking?: string;
   /** 设计稿里的 data-od-id 标识 */
@@ -65,6 +65,12 @@ export interface ChatMsg {
   error?: { title: string; detail: string; retryText?: string };
   /** loading 占位(发送后到回复前) */
   loading?: boolean;
+}
+
+/** 聊天内联媒体(节点产物 / 附件解析结果;url 为 bba-asset:// 或 bba-output:// 可显示地址) */
+export interface ChatMedia {
+  url: string;
+  kind: 'image' | 'video' | 'audio';
 }
 
 export interface ModelOption {

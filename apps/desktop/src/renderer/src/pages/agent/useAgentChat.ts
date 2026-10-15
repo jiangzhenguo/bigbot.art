@@ -29,11 +29,12 @@ export interface UseAgentChatOptions {
   /** 工具改动画布后回调(CanvasPage 重拉节点) */
   onCanvasMutated: () => void;
   toastMsg: (msg: string) => void;
-  /** 画布当前选中节点(ref 稳定引用,避免选中变化重建 send;随对话请求注入让 Agent 感知,标题供用户气泡回显) */
-  selectedNodeRef?: RefObject<{ id: string; title: string } | null>;
+  /** 聊天关注节点列表(ref 稳定引用,避免关注变化重建 send;随对话请求注入让 Agent 感知,标题供用户气泡回显。
+   *  2026-10 起为多节点数组:右键「添加到聊天窗口」累积 + 发送时可再叠 @ 提及) */
+  focusNodesRef?: RefObject<Array<{ id: string; title: string }>>;
 }
 
-export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, selectedNodeRef }: UseAgentChatOptions) {
+export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, focusNodesRef }: UseAgentChatOptions) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -232,7 +233,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
 
   /* ══ 对话发送 / 打断 ══ */
   const send = useCallback(
-    (overrideText?: string, attachments?: Asset[]) => {
+    (overrideText?: string, attachments?: Asset[], mentions?: Array<{ id: string; title: string }>) => {
       const v = (overrideText ?? chatInput).trim();
       const atts = attachments ?? [];
       // 有附件时允许空文本发送
@@ -259,16 +260,20 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           return;
         }
       }
-      // 本轮关注节点:updater 外一次读取(StrictMode 双跑安全),记入用户消息供回显
-      const ctxNode = selectedNodeRef?.current ?? null;
+      // 本轮引用节点 = 常驻关注(右键添加) + 本条消息 @ 提及,按 id 去重;
+      // updater 外一次读取(StrictMode 双跑安全),记入用户消息供回显
+      const ctxNodes: Array<{ id: string; title: string }> = [];
+      for (const n of [...(focusNodesRef?.current ?? []), ...(mentions ?? [])]) {
+        if (!ctxNodes.some((x) => x.id === n.id)) ctxNodes.push(n);
+      }
       setMsgs((m) => [
         ...m,
         {
           id: ++msgId.current,
           kind: 'user',
           text: v || '(附件)',
-          attachments: atts.length ? atts.map((a) => ({ name: a.name, kind: a.kind })) : undefined,
-          contextNode: ctxNode ?? undefined,
+          attachments: atts.length ? atts.map((a) => ({ name: a.name, kind: a.kind, localPath: a.localPath })) : undefined,
+          contextNodes: ctxNodes.length ? ctxNodes : undefined,
         },
       ]);
       setChatInput('');
@@ -292,7 +297,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           canvasId: cid,
           text: v,
           attachments: atts.length ? atts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, localPath: a.localPath })) : undefined,
-          selectedNodeId: ctxNode?.id ?? undefined,
+          selectedNodeIds: ctxNodes.length ? ctxNodes.map((n) => n.id) : undefined,
         })
         .then((res) => {
           // 批次1 任务化:主进程立即回执 {ok:true,accepted:true},真正结果走 agent-event
@@ -321,7 +326,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
           setSending(false);
         });
     },
-    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, selectedNodeRef],
+    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, focusNodesRef],
   );
 
   /**
@@ -501,10 +506,14 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, s
             id: ++msgId.current,
             kind: r.role === 'user' ? 'user' : 'agent',
             text: r.content,
-            // 关注节点徽标还原(recall 留痕,2026-09 起新记录才有;旧记录无字段则不回显)
-            contextNode:
-              r.role === 'user' && r.selectedNodeId
-                ? { id: r.selectedNodeId, title: r.selectedNodeTitle ?? r.selectedNodeId }
+            // 关注/引用节点徽标还原(recall 留痕;多引用读数组字段,旧记录回退单值字段)
+            contextNodes:
+              r.role === 'user'
+                ? r.selectedNodeIds?.length
+                  ? r.selectedNodeIds.map((id, i) => ({ id, title: r.selectedNodeTitles?.[i] ?? id }))
+                  : r.selectedNodeId
+                    ? [{ id: r.selectedNodeId, title: r.selectedNodeTitle ?? r.selectedNodeId }]
+                    : undefined
                 : undefined,
           });
         }

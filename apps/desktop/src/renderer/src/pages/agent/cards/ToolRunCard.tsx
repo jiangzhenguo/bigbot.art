@@ -8,7 +8,8 @@
  * - 有 nodeId 的行带「定位 →」
  */
 import React, { useEffect, useRef, useState } from 'react';
-import type { ToolRun } from '../types';
+import type { ChatMedia, ToolRun } from '../types';
+import { AudioPlayer } from '../../canvas/media';
 
 const ARG_TRUNCATE = 240;
 
@@ -52,7 +53,23 @@ const CrossIcon = (
   </svg>
 );
 
-export function ToolRunCard({ runs, onLocate }: { runs: ToolRun[]; onLocate: (nodeId: string) => void }) {
+/** 行内产物媒体(成功且能解析到节点产物时;图片/视频缩略 + 音频播放器,与节点卡同一渲染通道) */
+function RunMedia({ media }: { media: ChatMedia }) {
+  if (media.kind === 'image') return <img className="tr-media" src={media.url} alt="" />;
+  if (media.kind === 'video') return <video className="tr-media" src={media.url} controls preload="metadata" />;
+  return <AudioPlayer src={media.url} compact />;
+}
+
+export function ToolRunCard({
+  runs,
+  onLocate,
+  resolveMedia,
+}: {
+  runs: ToolRun[];
+  onLocate: (nodeId: string) => void;
+  /** 节点 → 产物媒体(成功行内联显示生成结果;缺省不显示) */
+  resolveMedia?: (nodeId: string) => ChatMedia | null;
+}) {
   const errIdxs = runs.map((r, i) => (r.status === 'error' ? i : -1)).filter((i) => i >= 0);
   const hasErr = errIdxs.length > 0;
   const okCount = runs.filter((r) => r.status === 'success').length;
@@ -117,6 +134,10 @@ export function ToolRunCard({ runs, onLocate }: { runs: ToolRun[]; onLocate: (no
         {runs.map((r, i) => {
           const rowOpen = openRows.has(i);
           const cls = r.status === 'error' ? 'err' : r.status === 'running' ? 'running' : 'ok';
+          // 成功的产物类调用(engine.submit / frames.extract 等带 nodeId 的):内联显示节点产物。
+          // 解析在渲染期进行 —— 提交成功时产物可能还没跑完,队列完成后 nodes/takeResults 更新,
+          // 这里随重渲染自动补上媒体(不存快照,永远反映最新产物)。
+          const media = r.status === 'success' && r.nodeId && resolveMedia ? resolveMedia(r.nodeId) : null;
           return (
             <div className={`tr-row ${cls}${rowOpen ? ' open' : ''}`} key={`${r.name}-${i}`}>
               <button className="tr-rh" type="button" aria-expanded={rowOpen} onClick={() => toggleRow(i)}>
@@ -160,6 +181,7 @@ export function ToolRunCard({ runs, onLocate }: { runs: ToolRun[]; onLocate: (no
                   ) : null}
                 </div>
               ) : null}
+              {media ? <RunMedia media={media} /> : null}
             </div>
           );
         })}

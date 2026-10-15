@@ -7,6 +7,7 @@
  */
 import React, { useRef } from 'react';
 import type { AgentChatApi } from '../agent/useAgentChat';
+import type { ChatMedia } from '../agent/types';
 import { AgentChatView } from '../agent/AgentChatView';
 import { AgentComposer } from '../agent/AgentComposer';
 
@@ -28,8 +29,14 @@ interface AgentPaneProps {
   onGripKeyDown: (e: React.KeyboardEvent) => void;
   /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页 */
   onEditSkill?: () => void;
-  /** 画布当前选中节点(输入区「关注节点」chip;null = 未选中) */
-  focusNode?: { id: string; title: string } | null;
+  /** Agent 对话的「关注节点」列表(右键「添加到聊天窗口」累积设定,与画布选中态解耦;空 = 未关注) */
+  focusNodes?: Array<{ id: string; title: string }>;
+  /** chip 上的 × :移除某一个关注节点 */
+  onRemoveFocus?: (nodeId: string) => void;
+  /** 输入框 @ 提及的候选节点(当前画布全部节点) */
+  mentionNodes?: Array<{ id: string; title: string; kind: string }>;
+  /** 节点 → 产物媒体(聊天工具卡内联显示生成结果) */
+  resolveMedia?: (nodeId: string) => ChatMedia | null;
 }
 
 export function AgentPane({
@@ -47,7 +54,10 @@ export function AgentPane({
   onGripDoubleClick,
   onGripKeyDown,
   onEditSkill,
-  focusNode,
+  focusNodes,
+  onRemoveFocus,
+  mentionNodes,
+  resolveMedia,
 }: AgentPaneProps) {
   /* 面板容器 ref(原 CanvasPage 的 agentRef;拆分后无外部读取,收到本组件本地管理) */
   const agentRef = useRef<HTMLElement | null>(null);
@@ -89,10 +99,18 @@ export function AgentPane({
           onLocate={onLocate}
           onOpenSettings={onOpenSettings}
           onEditSkill={onEditSkill}
+          resolveMedia={resolveMedia}
         />
         {inspector}
-        {/* 输入区(pages/agent/AgentComposer);focusNode = 画布当前选中节点,发送时随消息注入 Agent 上下文 */}
-        <AgentComposer chat={chat} toastMsg={toastMsg} focusNode={focusNode} onLocate={onLocate} />
+        {/* 输入区(pages/agent/AgentComposer);focusNodes = 聊天关注节点(右键菜单累积设定),发送时随消息注入 Agent 上下文;mentionNodes = @ 提及候选 */}
+        <AgentComposer
+          chat={chat}
+          toastMsg={toastMsg}
+          focusNodes={focusNodes}
+          onLocate={onLocate}
+          onRemoveFocus={onRemoveFocus}
+          mentionNodes={mentionNodes}
+        />
       </aside>
 
       {/* Agent 面板宽度拖拽把手 */}

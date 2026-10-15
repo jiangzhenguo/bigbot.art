@@ -13,7 +13,9 @@
  * 防失控闸(全部宁可漏触发、不可误触发):
  *   ① 只认 source==='agent'(用户在画布手点的生成不唤醒 Agent);
  *   ② 只认 succeeded(失败走既有 Take/日志通道,不自动重试 —— 自动重试是另一种假成功温床);
- *   ③ 该画布有对话在跑时跳过(在跑的那轮经 buildContext 就能看到最新画布状态);
+ *   ③ 该画布有对话在跑时**不丢通知**:先挂到 deferred,等对话收尾(onChatSettled)再防抖唤醒
+ *      (2026-10-13「技能4」:Agent 同轮提交角色卡+场景卡,第一张完成唤醒后第二张被「在飞跳过」
+ *      永久丢掉 —— 旧注释「在飞那轮会看到最新画布」不成立,自动轮开始时第二张往往还没好);
  *   ④ 同一画布**连续**自动轮上限 maxRounds(用户发消息即重置计数);
  *   ⑤ 短防抖归集:一轮里批量提交的多个任务陆续完成时,合并成一次唤醒,而不是每完成一个
  *      就叫醒一次(每个唤醒都是一次真实 LLM 调用)。
@@ -46,6 +48,9 @@ export type AutoGateResult = { ok: true } | { ok: false; reason: string };
 /**
  * 闸门判定(纯函数)。reason 用于日志留痕 —— 跳过自动推进不是错误,但**不能静默**,
  * 否则「Agent 又没动」会回到最难查的「不知道是没触发还是被拦下」状态。
+ *
+ * 注意:`inFlight` 为 true 时 Controller 会改走 deferred 队列,不永久丢弃;
+ * 此函数仍返回失败 reason 供日志区分「立刻触发」与「延后触发」。
  */
 export function shouldAutoContinue(
   job: Pick<RenderJob, 'status' | 'source' | 'projectId' | 'canvasId'>,
@@ -55,7 +60,7 @@ export function shouldAutoContinue(
   if (job.status !== 'succeeded') return { ok: false, reason: `任务未成功(${job.status}),失败不自动重试` };
   if (job.source !== 'agent') return { ok: false, reason: '非 Agent 提交的任务(用户手点),不自动推进' };
   if (!job.projectId || !job.canvasId) return { ok: false, reason: '任务缺 projectId/canvasId,无归属上下文' };
-  if (st.inFlight) return { ok: false, reason: '该画布有对话进行中,跳过(进行中那轮会看到最新画布状态)' };
+  if (st.inFlight) return { ok: false, reason: '该画布有对话进行中,延后到对话收尾后再唤醒' };
   if (st.roundsUsed >= st.maxRounds) return { ok: false, reason: `连续自动推进已达上限 ${st.maxRounds} 轮` };
   return { ok: true };
 }
@@ -104,8 +109,16 @@ interface PendingBurst {
   timer: NodeJS.Timeout;
 }
 
+interface DeferredBurst {
+  projectId: string;
+  canvasId: string;
+  notices: AutoNotice[];
+}
+
 export class AutoContinueController {
   private pending = new Map<string, PendingBurst>();
+  /** 对话在飞期间攒下的完成通知;onChatSettled 后转入 pending 防抖 */
+  private deferred = new Map<string, DeferredBurst>();
   private rounds = new Map<string, number>();
   /** 达上限提示按画布只推一次(批量完成的任务陆续终态时不连刷同一文案);用户发消息重置 */
   private capNotified = new Set<string>();
@@ -122,15 +135,36 @@ export class AutoContinueController {
   /** 队列任务终态入口(onJobFinish 调用;每个终态任务都会进来,闸门在内部) */
   notifyJobFinished(job: RenderJob): void {
     const key = `${job.projectId ?? ''}:${job.canvasId ?? ''}`;
+    const inFlight = this.deps.isInFlight(key);
     const gate = shouldAutoContinue(job, {
       enabled: this.enabled && this.maxRounds > 0,
-      inFlight: this.deps.isInFlight(key),
+      inFlight,
       roundsUsed: this.rounds.get(key) ?? 0,
       maxRounds: this.maxRounds,
     });
     if (!gate.ok) {
-      /* 留痕口径:只对「本来可能触发」的任务(agent 来源)记录跳过原因,
-         用户手点的渲染是常态,刷屏没有意义;达上限额外走 onCapReached 让用户可见。 */
+      /* 对话在飞 + agent 成功:延后而不是丢掉(技能4 双图同提事故)。
+         其它跳过原因(手点/失败/上限/禁用)仍只记日志。 */
+      if (
+        job.source === 'agent' &&
+        job.status === 'succeeded' &&
+        job.projectId &&
+        job.canvasId &&
+        inFlight &&
+        this.enabled &&
+        this.maxRounds > 0 &&
+        (this.rounds.get(key) ?? 0) < this.maxRounds
+      ) {
+        this.pushDeferred(key, job.projectId, job.canvasId, {
+          nodeId: job.nodeId,
+          resultPath: job.resultPath,
+        });
+        this.deps.logger?.log(
+          'info',
+          `[auto-continue] 延后 ${job.id}: ${gate.reason}(对话结束后会补唤醒)`,
+        );
+        return;
+      }
       if (job.source === 'agent' && job.status === 'succeeded') {
         this.deps.logger?.log('info', `[auto-continue] 跳过 ${job.id}: ${gate.reason}`);
         if (/已达上限/.test(gate.reason) && job.projectId && job.canvasId && !this.capNotified.has(key)) {
@@ -140,8 +174,58 @@ export class AutoContinueController {
       }
       return;
     }
-    // 防抖归并:窗口内陆续完成的任务合并为一次唤醒
-    const notice: AutoNotice = { nodeId: job.nodeId, resultPath: job.resultPath };
+    this.scheduleNotice(key, job.projectId!, job.canvasId!, {
+      nodeId: job.nodeId,
+      resultPath: job.resultPath,
+    });
+  }
+
+  /**
+   * 对话收尾(executeAgentChat finally):把延后队列转入防抖唤醒。
+   * 技能4形态:自动轮因第一张图开始 → 第二张图在飞完成进 deferred → 本方法补触发。
+   */
+  onChatSettled(projectId: string, canvasId: string): void {
+    const key = `${projectId}:${canvasId}`;
+    const d = this.deferred.get(key);
+    if (!d || d.notices.length === 0) return;
+    this.deferred.delete(key);
+    this.deps.logger?.log(
+      'info',
+      `[auto-continue] 对话收尾,补唤醒 ${key} · ${d.notices.length} 个延后完成`,
+    );
+    for (const n of d.notices) this.scheduleNotice(key, d.projectId, d.canvasId, n);
+  }
+
+  /** 用户发来新消息:连续自动轮计数重置;待触发的防抖与延后队列一并取消 */
+  resetOnUserMessage(projectId: string, canvasId: string): void {
+    const key = `${projectId}:${canvasId}`;
+    this.rounds.delete(key);
+    this.capNotified.delete(key);
+    this.deferred.delete(key);
+    const cur = this.pending.get(key);
+    if (cur) {
+      clearTimeout(cur.timer);
+      this.pending.delete(key);
+    }
+  }
+
+  private pushDeferred(
+    key: string,
+    projectId: string,
+    canvasId: string,
+    notice: AutoNotice,
+  ): void {
+    const cur = this.deferred.get(key);
+    if (cur) cur.notices.push(notice);
+    else this.deferred.set(key, { projectId, canvasId, notices: [notice] });
+  }
+
+  private scheduleNotice(
+    key: string,
+    projectId: string,
+    canvasId: string,
+    notice: AutoNotice,
+  ): void {
     const cur = this.pending.get(key);
     if (cur) {
       cur.notices.push(notice);
@@ -149,23 +233,11 @@ export class AutoContinueController {
       cur.timer = setTimeout(() => this.fire(key), this.debounceMs);
     } else {
       this.pending.set(key, {
-        projectId: job.projectId!,
-        canvasId: job.canvasId!,
+        projectId,
+        canvasId,
         notices: [notice],
         timer: setTimeout(() => this.fire(key), this.debounceMs),
       });
-    }
-  }
-
-  /** 用户发来新消息:连续自动轮计数重置;待触发的防抖取消(用户这轮会看到最新画布) */
-  resetOnUserMessage(projectId: string, canvasId: string): void {
-    const key = `${projectId}:${canvasId}`;
-    this.rounds.delete(key);
-    this.capNotified.delete(key);
-    const cur = this.pending.get(key);
-    if (cur) {
-      clearTimeout(cur.timer);
-      this.pending.delete(key);
     }
   }
 
@@ -175,7 +247,12 @@ export class AutoContinueController {
     if (!p) return;
     this.pending.delete(key);
     if (this.deps.isInFlight(key)) {
-      this.deps.logger?.log('info', `[auto-continue] 触发时画布已有对话在进行,取消本次唤醒 ${key}`);
+      // 不丢:挂回 deferred,等 onChatSettled
+      for (const n of p.notices) this.pushDeferred(key, p.projectId, p.canvasId, n);
+      this.deps.logger?.log(
+        'info',
+        `[auto-continue] 触发时画布已有对话在进行,改延后 ${key}(对话结束后补唤醒)`,
+      );
       return;
     }
     const used = this.rounds.get(key) ?? 0;
@@ -195,5 +272,6 @@ export class AutoContinueController {
   dispose(): void {
     for (const p of this.pending.values()) clearTimeout(p.timer);
     this.pending.clear();
+    this.deferred.clear();
   }
 }

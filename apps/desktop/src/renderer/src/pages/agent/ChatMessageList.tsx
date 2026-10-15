@@ -13,7 +13,18 @@ import ThinkingBlock from './cards/ThinkingBlock';
 import ContinuityCard from './cards/ContinuityCard';
 import PlanCard from './cards/PlanCard';
 import SkillInjectCard from './cards/SkillInjectCard';
-import type { ChatMsg } from './types';
+import { AudioPlayer, previewUrlOf } from '../canvas/media';
+import type { ChatMedia, ChatMsg } from './types';
+
+/** 附件内联媒体(有 localPath 才能显示;历史 recall 记录没有路径 → 回退文件名徽标) */
+function AttachmentMedia({ a }: { a: { name: string; kind: string; localPath?: string } }) {
+  const url = a.localPath ? previewUrlOf(a.localPath) : null;
+  if (!url) return null;
+  if (a.kind === 'image') return <img className="att-media" src={url} alt={a.name} />;
+  if (a.kind === 'video') return <video className="att-media" src={url} controls preload="metadata" />;
+  if (a.kind === 'audio') return <AudioPlayer src={url} name={a.name} compact />;
+  return null;
+}
 
 export function ChatMessageList({
   msgs,
@@ -23,6 +34,7 @@ export function ChatMessageList({
   onAskPick,
   onAskReset,
   onEditSkill,
+  resolveMedia,
 }: {
   msgs: ChatMsg[];
   /** 发送一条用户消息(ask 点选 / 错误卡重试) */
@@ -35,6 +47,8 @@ export function ChatMessageList({
   onAskReset: (msgId: number) => void;
   /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页 */
   onEditSkill?: () => void;
+  /** 节点 → 产物媒体(工具卡内联显示生成结果;CanvasPage 按 nodes/takeResults 解析) */
+  resolveMedia?: (nodeId: string) => ChatMedia | null;
 }) {
   return (
     <>
@@ -42,20 +56,29 @@ export function ChatMessageList({
         if (m.kind === 'user') {
           return (
             <div className="msg-user" key={m.id}>
+              {/* 附件媒体内联预览(图片/视频/音频直接可看在气泡里,不再只是文件名) */}
+              {m.attachments?.some((a) => a.localPath) ? (
+                <div className="att-media-row">
+                  {m.attachments.map((a) => (
+                    <AttachmentMedia key={a.name} a={a} />
+                  ))}
+                </div>
+              ) : null}
               {m.text}
-              {m.contextNode || m.attachments?.length ? (
+              {m.contextNodes?.length || m.attachments?.length ? (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>
-                  {m.contextNode ? (
+                  {m.contextNodes?.map((cn) => (
                     <span
+                      key={cn.id}
                       className="badge ctx-node"
                       data-od-id="msg-context-node"
                       style={{ fontSize: '10px' }}
-                      title={`本轮发送时已附带节点「${m.contextNode.title}」的详情作为 Agent 上下文 · 点按定位到节点`}
-                      onClick={() => onLocate(m.contextNode!.id)}
+                      title={`本轮发送时已附带节点「${cn.title}」的详情作为 Agent 上下文 · 点按定位到节点`}
+                      onClick={() => onLocate(cn.id)}
                     >
-                      ◎ 关注:{m.contextNode.title}
+                      ◎ 关注:{cn.title}
                     </span>
-                  ) : null}
+                  ))}
                   {m.attachments?.map((a) => (
                     <span key={a.name} className="badge" style={{ fontSize: '10px' }}>
                       {a.kind === 'image' ? '🖼' : a.kind === 'video' ? '🎬' : a.kind === 'audio' ? '🎵' : '📄'} {a.name}
@@ -108,8 +131,8 @@ export function ChatMessageList({
           );
         }
         if (m.toolRuns) {
-          // 工具聚合卡:一轮调用一张卡(设计文档 §3)
-          return <ToolRunCard key={m.id} runs={m.toolRuns} onLocate={onLocate} />;
+          // 工具聚合卡:一轮调用一张卡(设计文档 §3);resolveMedia 让成功行内联显示产物(图片/视频/音频)
+          return <ToolRunCard key={m.id} runs={m.toolRuns} onLocate={onLocate} resolveMedia={resolveMedia} />;
         }
         if (m.skill) {
           // 技能注入卡(配置事件;设计稿 trc-skill,与工具卡并列但独立计数)

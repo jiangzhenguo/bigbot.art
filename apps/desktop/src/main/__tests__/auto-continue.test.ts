@@ -7,8 +7,8 @@
  * 本测试锁四件事:
  *  1. 闸门:只认「succeeded + source=agent + 有归属画布」;失败/用户手点/缺归属一律不唤醒
  *  2. 防抖:同画布陆续完成的多个任务归并成一次唤醒(每次唤醒都是真实 LLM 调用)
- *  3. 防失控:连续自动轮上限;在飞对话时跳过;用户发消息重置计数并取消待触发
- *  4. 不静默:该跳过却可能被误解为「没触发」的路径,都有日志留痕(红线 R6)
+ *  3. 防失控:连续自动轮上限;在飞对话时延后到收尾再补唤醒(技能4双图同提);用户发消息重置计数并取消待触发/延后
+ *  4. 不静默:该跳过/延后却可能被误解为「没触发」的路径,都有日志留痕(红线 R6)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -63,10 +63,10 @@ describe('shouldAutoContinue 闸门', () => {
     expect(shouldAutoContinue(job({ canvasId: undefined }), GATE_BASE).ok).toBe(false);
     expect(shouldAutoContinue(job({ projectId: undefined }), GATE_BASE).ok).toBe(false);
   });
-  it('有对话在飞时跳过', () => {
+  it('有对话在飞时闸门返回延后(Controller 会挂 deferred,不永久丢)', () => {
     const r = shouldAutoContinue(job({}), { ...GATE_BASE, inFlight: true });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain('进行中');
+    if (!r.ok) expect(r.reason).toMatch(/延后|进行中/);
   });
   it('连续自动轮达上限后不再触发', () => {
     const r = shouldAutoContinue(job({}), { ...GATE_BASE, roundsUsed: 5, maxRounds: 5 });
@@ -168,13 +168,39 @@ describe('AutoContinueController', () => {
     expect(triggers).toHaveLength(0);
   });
 
-  it('触发时刻画布已有对话在飞 → 取消本次唤醒并留痕', () => {
+  it('触发时刻画布已有对话在飞 → 改延后,对话收尾后补唤醒', () => {
     const { ctl, triggers, logs, setInFlight } = makeController({});
-    ctl.notifyJobFinished(job({}));
+    ctl.notifyJobFinished(job({ nodeId: 'n1' }));
     setInFlight(true); // 防抖窗口内用户发了一条消息,对话开始
     vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
     expect(triggers).toHaveLength(0);
-    expect(logs.some((l) => l.includes('取消本次唤醒'))).toBe(true);
+    expect(logs.some((l) => l.includes('改延后'))).toBe(true);
+    setInFlight(false);
+    ctl.onChatSettled(P, C);
+    vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]!.notices.map((n) => (n as { nodeId: string }).nodeId)).toEqual(['n1']);
+  });
+
+  it('技能4事故:第一张完成已唤醒、第二张在飞完成 → 对话收尾后补唤醒第二张', () => {
+    const { ctl, triggers, logs, setInFlight } = makeController({});
+    // 第一张:正常防抖唤醒
+    ctl.notifyJobFinished(job({ id: 'job-1', nodeId: 'card-1' }));
+    vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]!.notices.map((n) => (n as { nodeId: string }).nodeId)).toEqual(['card-1']);
+    // 自动轮开始(在飞)
+    setInFlight(true);
+    // 第二张在自动轮进行中完成 → 旧实现永久跳过;现挂 deferred
+    ctl.notifyJobFinished(job({ id: 'job-2', nodeId: 'card-2', resultPath: '/tmp/scene.png' }));
+    expect(logs.some((l) => l.includes('延后') && l.includes('job-2'))).toBe(true);
+    expect(triggers).toHaveLength(1); // 还不能立刻再唤醒
+    // 自动轮结束
+    setInFlight(false);
+    ctl.onChatSettled(P, C);
+    vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
+    expect(triggers).toHaveLength(2);
+    expect(triggers[1]!.notices.map((n) => (n as { nodeId: string }).nodeId)).toEqual(['card-2']);
   });
 
   it('连续自动轮达上限:不再触发,走 onCapReached 让用户可见', () => {
@@ -218,11 +244,26 @@ describe('AutoContinueController', () => {
     expect(triggers).toHaveLength(0);
   });
 
-  it('agent 任务被跳过(在飞)时有日志留痕(不静默,R6)', () => {
-    const { ctl, logs, setInFlight } = makeController({});
+  it('agent 任务在飞完成时记延后日志(不静默,R6),收尾后能补唤醒', () => {
+    const { ctl, triggers, logs, setInFlight } = makeController({});
     setInFlight(true);
-    ctl.notifyJobFinished(job({}));
-    expect(logs.some((l) => l.includes('[auto-continue] 跳过'))).toBe(true);
+    ctl.notifyJobFinished(job({ id: 'job-x' }));
+    expect(logs.some((l) => l.includes('[auto-continue] 延后'))).toBe(true);
+    setInFlight(false);
+    ctl.onChatSettled(P, C);
+    vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
+    expect(triggers).toHaveLength(1);
+  });
+
+  it('用户发消息:延后队列一并清空(用户这轮会看到最新画布)', () => {
+    const { ctl, triggers, setInFlight } = makeController({});
+    setInFlight(true);
+    ctl.notifyJobFinished(job({ nodeId: 'n1' }));
+    ctl.resetOnUserMessage(P, C);
+    setInFlight(false);
+    ctl.onChatSettled(P, C);
+    vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS + 1);
+    expect(triggers).toHaveLength(0);
   });
 });
 
@@ -269,5 +310,17 @@ describe('executeAgentChat 占坑时序', () => {
     expect(addAt).toBeGreaterThan(-1);
     expect(awaitAt).toBeGreaterThan(addAt);
     expect(body).toContain('[auto-continue] 自动推进放弃:该画布有对话正在进行');
+  });
+
+  it('finally:先 delete inFlight 再 onChatSettled(技能4 延后补唤醒时序)', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const code = readFileSync(resolve(here, '../index.ts'), 'utf8');
+    const start = code.indexOf('async function executeAgentChat');
+    const end = code.indexOf('async function runAutoContinueRound');
+    const body = code.slice(start, end);
+    const delAt = body.indexOf('inFlightChats.delete(flightKey)');
+    const settleAt = body.indexOf('autoContinue.onChatSettled(opts.projectId, opts.canvasId)');
+    expect(delAt).toBeGreaterThan(-1);
+    expect(settleAt).toBeGreaterThan(delAt);
   });
 });

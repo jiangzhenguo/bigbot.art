@@ -7,6 +7,7 @@
 import React from 'react';
 import type { AgentChatApi } from './useAgentChat';
 import ChatMessageList from './ChatMessageList';
+import type { ChatMedia } from './types';
 
 export function AgentChatView({
   chat,
@@ -14,6 +15,7 @@ export function AgentChatView({
   onLocate,
   onOpenSettings,
   onEditSkill,
+  resolveMedia,
 }: {
   chat: AgentChatApi;
   /** 页签切到检查器时隐藏消息流(composer 保持可见,与原布局一致) */
@@ -22,6 +24,8 @@ export function AgentChatView({
   onOpenSettings: () => void;
   /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页(可为空 = 不显示入口) */
   onEditSkill?: () => void;
+  /** 节点 → 产物媒体(工具卡内联显示生成结果) */
+  resolveMedia?: (nodeId: string) => ChatMedia | null;
 }) {
   const { msgs, send, askPick, askReset, chatRef, pinToBottom, model, modelOverridden } = chat;
 
@@ -50,6 +54,7 @@ export function AgentChatView({
           onAskPick={askPick}
           onAskReset={askReset}
           onEditSkill={onEditSkill}
+          resolveMedia={resolveMedia}
         />
       </div>
     </>
