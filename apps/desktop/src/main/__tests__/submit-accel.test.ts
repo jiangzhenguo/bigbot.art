@@ -62,9 +62,11 @@ function makeStore() {
   } as unknown as import('../store.js').ProjectStore & { __snapshot: typeof snapshot };
 }
 
-/** 假的 AccelStore:按需返回解析结果(null = 包不可用) */
-function makeAccel(resolved: { modelDir: string; steps: number } | null) {
-  return { resolveAccel: () => resolved } as unknown as import('../lora.js').AccelStore;
+/** 假的 AccelStore:按需返回解析结果(null = 包不可用);kind 缺省 accel(与真实 resolveAccel 同形) */
+function makeAccel(resolved: { modelDir: string; steps: number; kind?: 'accel' | 'style' } | null) {
+  return {
+    resolveAccel: () => (resolved ? { kind: 'accel' as const, ...resolved } : null),
+  } as unknown as import('../lora.js').AccelStore;
 }
 
 /** 记录 queue.submit 收到的参数 */
@@ -75,6 +77,9 @@ function makeQueue() {
       submits.push(req);
       return { providerTaskId: 'fake-1' };
     },
+    // engine.submit 的「同节点在途任务预查」(2026-10-14 双提交事故)需要它
+    list: () => [],
+    cancel: () => {},
     __submits: submits,
   };
 }
@@ -112,12 +117,23 @@ describe('engine.submit · 加速 LoRA 必须真的解析', () => {
     expect(params.steps).toBe(8); // 覆盖节点上的 30
   });
 
+  it('风格包(kind=style,2026-10 mystic 接入)→ modelDir/steps 落地且 kind 透传给 provider(ETA 不打折)', async () => {
+    const queue = makeQueue();
+    const h = makeHandlers(makeAccel({ modelDir: '/models/MiniMax-H3-mystic', steps: 20, kind: 'style' }), queue);
+    const res = await h.call('engine.submit', { nodeId: SHOT_ID }, ctx);
+    expect(res.ok).toBe(true);
+    const params = queue.__submits[0]?.params as Record<string, unknown>;
+    expect(params.modelDir).toBe('/models/MiniMax-H3-mystic');
+    expect(params.steps).toBe(20);
+    expect((params.accel as { kind?: string }).kind).toBe('style');
+  });
+
   it('包不可用 → 明确报错,不静默退回默认模型', async () => {
     const queue = makeQueue();
     const h = makeHandlers(makeAccel(null), queue);
     const res = await h.call('engine.submit', { nodeId: SHOT_ID }, ctx);
     expect(res.ok).toBe(false);
-    expect(res.result).toContain('加速 LoRA');
+    expect(res.result).toContain('模型包');
     expect(res.result).toContain('设置页');
     // 关键:不能入队 —— 否则就是"以为在加速,其实没加速"
     expect(queue.__submits).toHaveLength(0);

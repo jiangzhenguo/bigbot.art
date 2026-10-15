@@ -143,6 +143,8 @@ export class H3cProvider implements Provider {
       reuse: Number(p.reuse ?? 1),
       frames: Number(p.frames ?? 124),
       seconds: Number(p.seconds ?? 0) > 0 ? Number(p.seconds) : undefined,
+      width: Number(p.width ?? 768),
+      height: Number(p.height ?? 768),
       refVideo,
       refVideoSilent: p.refVideoSilent === true,
     });
@@ -180,12 +182,14 @@ export class H3cProvider implements Provider {
     const taskId = `h3c-${Date.now()}`;
     this.outPaths.set(taskId, outPath);
     // 粗估 ETA:按档位 etaMin + 分辨率系数(544²≈1x,576²≈1.7x,704²≈3.3x);
-    // 加速 LoRA(蒸馏模型包)省时:4 步 ≈×0.2,8 步 ≈×0.35(手册 §3.1 实测)
+    // 加速模型包(蒸馏)省时:4 步 ≈×0.2,8 步 ≈×0.35(手册 §3.1 实测);
+    // ⚠️ 风格包(kind='style',mystic 等)换的是画风不是速度 —— ETA 不打折,
+    //    否则用户会以为「选了风格包还变快了」,实际步数没变、耗时与基础模型相同。
     const tier = String(p.tier ?? 'default') as keyof typeof TIER_PRESETS;
     const baseEtaMin = TIER_PRESETS[tier]?.etaMin ?? 15;
     const areaFactor = Math.max(0.5, (Number(p.width ?? 544) * Number(p.height ?? 544)) / (544 * 544));
-    const accel = (p.accel ?? undefined) as { enabled?: boolean; steps?: number } | undefined;
-    const accelOn = accel?.enabled === true && !!modelDir;
+    const accel = (p.accel ?? undefined) as { enabled?: boolean; steps?: number; kind?: string } | undefined;
+    const accelOn = accel?.enabled === true && !!modelDir && accel?.kind !== 'style';
     const accelFactor = accelOn ? (accel?.steps === 4 ? 0.2 : 0.35) : 1;
     const etaSec = Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor) * accelFactor);
     this.progress.set(taskId, { startedAt: Date.now(), etaSec });

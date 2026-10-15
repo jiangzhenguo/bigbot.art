@@ -116,6 +116,32 @@ describe('validateParams · A:带音轨参考视频的时长下限(h3.c:1146)', 
   });
 });
 
+describe('validateParams · D:尺寸/时长硬约束(validateShotSubmitParams)', () => {
+  const base = { steps: 30, layers: 50, reuse: 1, frames: 124, width: 864, height: 480, seconds: 5 };
+
+  it('合法 864×480 / 5s → 通过', () => {
+    expect(validateParams(base)).toEqual([]);
+  });
+
+  it('15s 合法(引擎上限)', () => {
+    expect(validateParams({ ...base, seconds: 15, frames: 362 })).toEqual([]);
+  });
+
+  it('非 32 倍数 → 拒绝', () => {
+    const issues = validateParams({ ...base, width: 865, height: 480 });
+    expect(issues.some((i) => i.includes('32'))).toBe(true);
+  });
+
+  it('时长 16s → 拒绝', () => {
+    const issues = validateParams({ ...base, seconds: 16 });
+    expect(issues.some((i) => i.includes('上限') || i.includes('15'))).toBe(true);
+  });
+
+  it('未传 width/height → 不触发尺寸闸(兼容旧调用)', () => {
+    expect(validateParams({ steps: 30, layers: 50, reuse: 1, frames: 124 })).toEqual([]);
+  });
+});
+
 describe('validateParams · C:reuse 配极少步数(与 h3 warning 同口径)', () => {
   const base = { steps: 30, layers: 50, reuse: 1, frames: 124 };
 

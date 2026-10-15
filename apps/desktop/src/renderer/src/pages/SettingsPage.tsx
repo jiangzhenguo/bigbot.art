@@ -1078,10 +1078,49 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       });
   };
 
-  /* ---- 🚀 加速 LoRA(蒸馏模型包)---- */
+  /* ---- 🧩 h3 模型包(加速 / 风格 / 风格加速)---- */
   const [accelPacks, setAccelPacks] = useState<AccelPack[]>([]);
   const [accelMsg, setAccelMsg] = useState<string | null>(null);
-  const [accelForm, setAccelForm] = useState({ name: '', path: '', steps: 8 as 4 | 8 });
+  const [accelForm, setAccelForm] = useState<{ name: string; path: string; steps: number; kind: 'accel' | 'style' | 'style-accel' }>({ name: '', path: '', steps: 8, kind: 'accel' });
+  /* 风格包(mystic 等)下载+融合构建:状态 / 进行中 / 最新进度消息 */
+  const [styleStatus, setStyleStatus] = useState<Record<string, import('@bigbotart/shared').StyleModelStatus>>({});
+  const [styleBuilding, setStyleBuilding] = useState<string | null>(null);
+  const [styleProgress, setStyleProgress] = useState<Record<string, string>>({});
+  const refreshStyleStatus = (packId: string): void => {
+    const api = window.bigbotart;
+    if (typeof api.styleModelStatus !== 'function') return;
+    void api
+      .styleModelStatus(packId)
+      .then((s) => setStyleStatus((m) => ({ ...m, [packId]: s })))
+      .catch(() => {});
+  };
+  const startStyleBuild = (packId: string): void => {
+    setStyleBuilding(packId);
+    setStyleProgress((m) => ({ ...m, [packId]: t('构建启动…') }));
+    void window.bigbotart
+      .styleModelBuild(packId)
+      .then((r) => {
+        setStyleBuilding(null);
+        if (!r.ok) setStyleProgress((m) => ({ ...m, [packId]: t('构建失败:{e}', { e: r.error ?? '?' }) }));
+        refreshStyleStatus(packId);
+        refreshAccel(); // 构建完成后包目录就绪状态变化
+      })
+      .catch(() => setStyleBuilding(null));
+  };
+  useEffect(() => {
+    const api = window.bigbotart;
+    if (typeof api.onStyleModelProgress !== 'function') return;
+    const off = api.onStyleModelProgress((ev) => {
+      setStyleProgress((m) => ({ ...m, [ev.packId]: `${ev.message}` }));
+      if (ev.stage === 'done' || ev.stage === 'error' || ev.stage === 'cancelled') {
+        setStyleBuilding(null);
+        refreshStyleStatus(ev.packId);
+        refreshAccel();
+      }
+    });
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const refreshAccel = (): void => {
     // 防御:主进程/preload 未重建时通道可能不存在(HMR 先于 main 热更),缺失则降级空列表,不白屏
     const api = window.bigbotart;
@@ -1090,7 +1129,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       setAccelPacks([]);
       return;
     }
-    void api.accelList().then(setAccelPacks).catch(() => setAccelPacks([]));
+    void api.accelList()
+      .then((packs) => {
+        setAccelPacks(packs);
+        // 风格类包顺带拉一次构建状态(mystic / mystic-turbo 的「下载+融合」入口按它渲染)
+        for (const p of packs) if (p.kind === 'style' || p.kind === 'style-accel') refreshStyleStatus(p.id);
+      })
+      .catch(() => setAccelPacks([]));
   };
   useEffect(() => {
     refreshAccel();
@@ -1103,7 +1148,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
     void window.bigbotart.accelInstall(accelForm).then((r) => {
       if (r.ok) {
         setAccelPacks(r.packs ?? []);
-        setAccelForm({ name: '', path: '', steps: 8 });
+        setAccelForm({ name: '', path: '', steps: 8, kind: 'accel' });
         setAccelMsg(t('已安装「{name}」· 登记完成(文件未拷贝)', { name: accelForm.name.trim() }));
       } else {
         setAccelMsg(r.error ?? t('安装失败'));
@@ -1242,7 +1287,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               data-panel="lora"
               onClick={() => setGroup('lora')}
             >
-              {t('🚀 加速 LoRA')}
+              {t('🧩 h3 模型包')}
             </a>
             <a
               className="side-link"
@@ -2121,20 +2166,20 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
             </div>
 
-            {/* 🚀 加速 LoRA(蒸馏模型包):h3.c 不接受 --lora,加速 = 蒸馏目录(-d)+ 4/8 步 */}
+            {/* 🧩 h3 模型包(加速 / 风格):h3.c 不接受 --lora,一律换 -d 模型目录;风格包 = 画风 LoRA 离线融合 */}
             <div className="group" data-group="lora" data-od-id="settings-lora" hidden={group !== 'lora'}>
               <div className="gh">
-                <b>{t('🚀 加速 LoRA')}</b>
+                <b>{t('🧩 h3 模型包')}</b>
                 <span className="spacer" />
                 <span className="mono mut" style={{ fontSize: 11 }}>
-                  {t('蒸馏模型包 · h3.c -d 加速目录(非 .safetensors)')}
+                  {t('加速(蒸馏)/ 风格(LoRA 融合)· h3.c -d 目录(非 .safetensors)')}
                 </span>
               </div>
               <div className="srow">
                 <div className="grow">
-                  <b>{t('蒸馏模型包管理')}</b>
+                  <b>{t('模型包管理')}</b>
                   <div className="sub">
-                    {t('镜头开启「加速 LoRA」时 -d 换用所选包目录 + 4/8 步 · 默认包在镜头未选包时兜底(手册 §8)')}
+                    {t('镜头开启「模型包」时 -d 换用所选包目录:⚡ 加速包 = 蒸馏 + 4/8 步(省 60-80% 时间);🎨 风格包 = 画风 LoRA 融合 + 20/30 步(不提速);🎨⚡ 风格加速包 = 双融合 + 4/8 步(画风与提速兼得)。三者互斥,一个镜头只能选一个(手册 §8/§9)')}
                   </div>
                 </div>
                 <span className="badge ok">
@@ -2143,18 +2188,19 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               </div>
               {/* 🆕 总开关(2026-10-09):与上面「默认包」是两件事 —— 默认包 = 用哪个包,
                   本开关 = 建 shot 时**开不开**加速。此前只有「用哪个包」没有「开不开」,
-                  于是新建的镜头一律不带 accel,用户以为装了加速包就自动加速(真实事故) */}
+                  于是新建的镜头一律不带 accel,用户以为装了加速包就自动加速(真实事故)。
+                  ⚠️ 只作用于加速包:风格包(不提速、改画风)不会被自动铺到新镜头。 */}
               <div className="srow">
                 <div className="grow">
                   <b>{t('新建镜头默认开启加速')}</b>
                   <div className="sub">
                     {t(
-                      '开启后,新建的镜头节点自动带上加速配置(用上面选定的默认包);单个镜头仍可在检查器里单独关闭。已存在的镜头不受影响。',
+                      '开启后,新建的镜头节点自动带上加速配置(用上面选定的默认加速包);单个镜头仍可在检查器里单独关闭。已存在的镜头不受影响。',
                     )}
                   </div>
-                  {accelDefaultEnabled && accelPacks.filter((p) => p.exists).length === 0 && (
+                  {accelDefaultEnabled && accelPacks.filter((p) => p.exists && p.kind !== 'style').length === 0 && (
                     <div className="sub" style={{ color: 'var(--warn, #b8860b)' }}>
-                      {t('⚠️ 当前没有可用模型包(目录缺失),新建镜头不会真正启用加速')}
+                      {t('⚠️ 当前没有可用加速包(目录缺失),新建镜头不会真正启用加速')}
                     </div>
                   )}
                 </div>
@@ -2171,39 +2217,86 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   <div className="grow mut">{t('还没有模型包 · 在下方安装(如手册 §1.2 的 MiniMax-H3-turbo-T8test 目录)')}</div>
                 </div>
               ) : (
-                accelPacks.map((p) => (
-                  <div className="mdl-row" key={p.id}>
-                    <div className="grow">
-                      <b>
-                        {p.name}
-                        {p.default ? t(' · 默认') : ''}
-                      </b>
-                      <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                        {p.path} · {t('推荐 {n} 步', { n: p.steps ?? 8 })}
+                accelPacks.map((p) => {
+                  const pKind = p.kind === 'style' ? 'style' : p.kind === 'style-accel' ? 'style-accel' : 'accel';
+                  const isStyleLike = pKind !== 'accel';
+                  const st = isStyleLike ? styleStatus[p.id] : undefined;
+                  const building = styleBuilding === p.id;
+                  return (
+                    <div className="mdl-row" key={p.id} style={{ flexWrap: 'wrap' }}>
+                      <div className="grow">
+                        <b>
+                          {pKind === 'style' ? '🎨 ' : pKind === 'style-accel' ? '🎨⚡ ' : '⚡ '}
+                          {p.name}
+                          {p.default ? t(' · 默认') : ''}
+                          <span className="mut" style={{ fontSize: 11, marginLeft: 6 }}>
+                            {pKind === 'style' ? t('风格') : pKind === 'style-accel' ? t('风格加速') : t('加速')}
+                          </span>
+                        </b>
+                        <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                          {p.path} · {t('推荐 {n} 步', { n: p.steps ?? 8 })}
+                        </div>
+                        {/* 风格类包构建状态:LoRA/基础模型/脚本缺什么直接列出(不假装能构建) */}
+                        {isStyleLike && st && !st.mergedReady && st.buildable && st.missing.length > 0 && (
+                          <div className="sub" style={{ fontSize: 11, color: 'var(--warn, #b8860b)' }}>
+                            {t('构建待备:{list}', { list: st.missing.join(' · ') })}
+                          </div>
+                        )}
+                        {isStyleLike && styleProgress[p.id] && (
+                          <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                            {styleProgress[p.id]}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                    {p.exists ? (
-                      <span className="badge ok">{t('就绪')}</span>
-                    ) : (
-                      <span className="badge err">{t('目录缺失')}</span>
-                    )}
-                    {!p.default && (
-                      <button className="btn btn-s btn-sm" onClick={() => setDefaultAccel(p.id)}>
-                        {t('设默认')}
+                      {p.exists ? (
+                        <span className="badge ok">{t('就绪')}</span>
+                      ) : isStyleLike && st?.buildable ? (
+                        building ? (
+                          <button className="btn btn-s btn-sm" onClick={() => void window.bigbotart.styleModelCancel()}>
+                            {t('取消构建')}
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-s btn-sm"
+                            data-od-id={`style-build-${p.id}`}
+                            disabled={styleBuilding !== null}
+                            title={t('下载 LoRA(HF/Civitai)并用 merge_lora_h3.py 离线融合进基础模型副本 · 需基础模型已就绪 + 约 123GB 磁盘 + 20-60 分钟')}
+                            onClick={() => startStyleBuild(p.id)}
+                          >
+                            {t('下载 + 融合构建')}
+                          </button>
+                        )
+                      ) : (
+                        <span className="badge err">{t('目录缺失')}</span>
+                      )}
+                      {!p.default && (
+                        <button className="btn btn-s btn-sm" onClick={() => setDefaultAccel(p.id)}>
+                          {t('设默认')}
+                        </button>
+                      )}
+                      <button className="btn btn-s btn-sm" onClick={() => removeAccel(p.id)}>
+                        {t('删除')}
                       </button>
-                    )}
-                    <button className="btn btn-s btn-sm" onClick={() => removeAccel(p.id)}>
-                      {t('删除')}
-                    </button>
-                  </div>
-                ))
+                    </div>
+                  );
+                })
               )}
               <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
                 <b>{t('安装模型包')}</b>
                 <div className="row g8" style={{ flexWrap: 'wrap' }}>
+                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('类型')}</span>
+                  {(['accel', 'style', 'style-accel'] as const).map((k) => (
+                    <span
+                      key={k}
+                      className={`chip${accelForm.kind === k ? ' on' : ''}`}
+                      onClick={() => setAccelForm((f) => ({ ...f, kind: k, steps: k === 'style' ? 20 : 8 }))}
+                    >
+                      {k === 'style' ? t('🎨 风格') : k === 'style-accel' ? t('🎨⚡ 风格加速') : t('⚡ 加速')}
+                    </span>
+                  ))}
                   <span className="input-w">
                     <input
-                      placeholder={t('名称,如 MiniMax-H3-turbo-T8test')}
+                      placeholder={accelForm.kind === 'style' ? t('名称,如 MiniMax-H3-mystic') : accelForm.kind === 'style-accel' ? t('名称,如 MiniMax-H3-mystic-turbo') : t('名称,如 MiniMax-H3-turbo-T8test')}
                       value={accelForm.name}
                       onChange={(e) => setAccelForm((f) => ({ ...f, name: e.target.value }))}
                     />
@@ -2211,13 +2304,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   <span className="input-w">
                     <input
                       className="mono"
-                      placeholder="/path/to/turbo-model-dir"
+                      placeholder="/path/to/model-dir"
                       value={accelForm.path}
                       onChange={(e) => setAccelForm((f) => ({ ...f, path: e.target.value }))}
                     />
                   </span>
                   <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('推荐步数')}</span>
-                  {([4, 8] as const).map((s) => (
+                  {(accelForm.kind === 'style' ? ([20, 30] as const) : ([4, 8] as const)).map((s) => (
                     <span
                       key={s}
                       className={`chip${accelForm.steps === s ? ' on' : ''}`}
@@ -2236,7 +2329,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   </div>
                 ) : (
                   <div className="mut" style={{ fontSize: 11 }}>
-                    {t('目录须存在且含 FL2VA/(turbo 目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora, 此为蒸馏模型包加速(手册 §8)')}
+                    {t('目录须存在且含 FL2VA/(模型目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora,加速/风格都是换 -d 模型目录(手册 §8/§9)')}
                   </div>
                 )}
               </div>

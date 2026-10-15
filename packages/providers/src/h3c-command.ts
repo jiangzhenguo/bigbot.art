@@ -7,7 +7,7 @@
  * - 档位防呆:禁用 layers40+reuse3+token-reduction 组合等
  */
 
-import type { QualityTier } from '@bigbotart/shared';
+import { validateShotSubmitParams, type QualityTier } from '@bigbotart/shared';
 
 export interface H3CliOptions {
   modelDir: string;
@@ -153,20 +153,37 @@ export function outputSeconds(opts: Pick<H3CliOptions, 'frames' | 'seconds'>): n
 /**
  * 参数组合统一防呆(提交前调用,返回所有违规说明;空数组 = 安全)。
  *
- * 覆盖三件事:
+ * 覆盖:
  *  ① 档位危险组合(layers≤40 + reuse≥3):易出鬼影/振铃 —— **拒绝**;
  *  ② 带内嵌音轨的参考视频 + 输出时长不足 2 秒(h3.c:1146 硬规则)—— **拒绝**,
  *     并给出「忽略音轨」这条绕法(--ref-silent-video 不走 truncate 分支,短时长合法);
- *  ③ reuse 配极少步数:模型新鲜评估太少,画质/多样性下降 —— **警告**(沿用 h3 自己的判断)。
+ *  ③ reuse 配极少步数:模型新鲜评估太少,画质/多样性下降 —— **警告**(沿用 h3 自己的判断);
+ *  ④ 尺寸/时长硬约束(32 倍数、面积上限、单段 ≤15s / 帧 5..362)—— **拒绝**
+ *     (shared.validateShotSubmitParams;传入 width/height 时生效)。
  *
  * ② 为什么必须拦:带音轨的 ref-video 端口现在已经全链路打通(asset / 上游镜头 / 视频增强都可连),
  * 而 preview 档只有 22 帧(≈0.92s)—— 组合起来必炸,且 h3 的报错发生在**入队之后**,
  * 错误信息(`video soundtrack 2 requires at least 2 seconds`)看不出该怎么改。真实事故 2026-09。
  */
 export function validateParams(
-  opts: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse' | 'frames' | 'seconds' | 'refVideo' | 'refVideoSilent'>,
+  // width/height 可选(H3CliOptions 里是必填,Pick 会继承必填 ⇒ 老用例只传 steps/frames 会编译失败;
+  // 运行时本就以 `width != null` 判生效,类型口径对齐成 Partial)
+  opts: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse' | 'frames' | 'seconds' | 'refVideo' | 'refVideoSilent'> &
+    Pick<Partial<H3CliOptions>, 'width' | 'height'>,
 ): string[] {
   const issues = validateTier(opts);
+
+  // ④ 尺寸 + 时长(有宽高时才拦;旧调用方只传 steps/frames 的用例保持兼容)
+  if (opts.width != null || opts.height != null) {
+    issues.push(
+      ...validateShotSubmitParams({
+        width: opts.width,
+        height: opts.height,
+        seconds: opts.seconds,
+        frames: opts.frames,
+      }),
+    );
+  }
 
   // ② 带音轨参考视频的时长下限
   const hasAudioRefVideo = !!opts.refVideo && opts.refVideoSilent !== true;

@@ -105,6 +105,7 @@ const api: BigBotArtApi = {
   videoPostProbe: () => ipcRenderer.invoke('video-post-probe'),
   videoPostRunning: () => ipcRenderer.invoke('video-post-running'),
   videoPostLastProgress: () => ipcRenderer.invoke('video-post-last-progress'),
+  videoPostCancel: (input) => ipcRenderer.invoke('video-post-cancel', input),
   onVideoPostProgress: (cb) => {
     const listener = (_e: unknown, p: unknown) => cb(p as never);
     ipcRenderer.on('video-post-progress', listener);
@@ -120,6 +121,14 @@ const api: BigBotArtApi = {
   accelSetDefaultEnabled: (enabled) => ipcRenderer.invoke('accel-set-default-enabled', enabled),
   accelGetDefaultEnabled: () => ipcRenderer.invoke('accel-get-default-enabled'),
   accelDefaultShotConfig: () => ipcRenderer.invoke('accel-default-shot-config'),
+  styleModelStatus: (packId: string) => ipcRenderer.invoke('style-model-status', packId),
+  styleModelBuild: (packId: string) => ipcRenderer.invoke('style-model-build', packId),
+  styleModelCancel: () => ipcRenderer.invoke('style-model-cancel'),
+  onStyleModelProgress: (cb) => {
+    const listener = (_e: unknown, ev: unknown) => cb(ev as never);
+    ipcRenderer.on('style-model-progress', listener);
+    return () => ipcRenderer.removeListener('style-model-progress', listener);
+  },
   llmLocalModels: (kind: 'lmstudio' | 'ollama' | 'pimlx') => ipcRenderer.invoke('llm-local-models', kind),
   llmLoadModel: (kind: 'lmstudio' | 'ollama' | 'pimlx', modelId: string) =>
     ipcRenderer.invoke('llm-load-model', kind, modelId),

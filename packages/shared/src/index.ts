@@ -253,6 +253,8 @@ export interface BigBotArtApi {
   videoPostRunning(): Promise<import('./domain').VideoPostRun[]>;
   /** 最近一次进度(挂载时立即恢复显示,不必等下一个 tick;无任务时 null) */
   videoPostLastProgress(): Promise<{ nodeId: string; stageLabel: string; detail?: string } | null>;
+  /** 取消进行中的视频增强。给定 nodeId 只停该节点(含已排队尚未启动的那次);不给则停全部。 */
+  videoPostCancel(input?: { nodeId?: string }): Promise<{ ok: boolean; error?: string }>;
   // 系统 / 文件
   /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
   revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;
@@ -272,14 +274,14 @@ export interface BigBotArtApi {
   credentialSet(providerId: string, apiKey: string): Promise<{ ok: boolean; error?: string }>;
   /** 删除供应商凭据 */
   credentialDelete(providerId: string): Promise<{ ok: boolean }>;
-  // 加速 LoRA(蒸馏模型包)管理 —— h3.c 加速 = 蒸馏模型目录(-d)+ 4/8 步,非挂载 LoRA
-  /** 列出已安装的加速模型包(主进程回填 exists 目录校验;设置页列表用) */
+  // h3 模型包管理 —— h3.c 不接受 --lora;加速包 = 蒸馏模型目录(-d)+ 4/8 步,风格包 = 风格 LoRA 离线融合目录 + 正常步数
+  /** 列出已安装的模型包(主进程回填 exists 目录校验;设置页列表用) */
   accelList(): Promise<import('./domain').AccelPack[]>;
-  /** 安装加速模型包:校验目录存在且含 FL2VA/ 后登记入 settings.accelPacks */
-  accelInstall(input: { name: string; path: string; steps?: number }): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
+  /** 安装模型包:校验目录存在且含 FL2VA/ 后登记入 settings.accelPacks;kind 缺省 accel */
+  accelInstall(input: { name: string; path: string; steps?: number; kind?: import('./domain').AccelPackKind }): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
   /** 删除登记(只注销,不删磁盘) */
   accelRemove(id: string): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
-  /** 设默认包(id=null 清除默认);镜头开启加速未选包时用默认包 */
+  /** 设默认包(id=null 清除默认);镜头启用模型包未选包时用默认包 */
   accelSetDefault(id: string | null): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
   /**
    * 新建 shot 是否默认开启加速 LoRA(设置页总开关)。
@@ -295,7 +297,16 @@ export interface BigBotArtApi {
    * 选包逻辑只在主进程 AccelStore 一处实现,渲染层「+」弹层直接取这份结果写入节点,
    * 避免两个建 shot 入口各写一份「选哪个包」的判断而分叉。
    */
-  accelDefaultShotConfig(): Promise<{ enabled: true; packId: string; steps: 4 | 8 } | null>;
+  accelDefaultShotConfig(): Promise<{ enabled: true; packId: string; steps: number } | null>;
+  // 风格模型包(mystic 等)下载 + 融合构建 —— LoRA 下载到本地后用 merge_lora_h3.py 离线融合进基础模型副本
+  /** 风格包构建状态:LoRA 文件 / 基础模型 / 融合脚本 / 产物目录各自就绪情况 */
+  styleModelStatus(packId: string): Promise<import('./style-model').StyleModelStatus>;
+  /** 执行下载 + 融合构建(长任务;进度经 onStyleModelProgress 推送;防重入) */
+  styleModelBuild(packId: string): Promise<{ ok: boolean; error?: string }>;
+  /** 取消进行中的构建(杀当前子进程;半成品目录保留,重跑会先清 transformer 保证幂等) */
+  styleModelCancel(): Promise<{ ok: boolean }>;
+  /** 订阅风格包构建进度;返回退订函数 */
+  onStyleModelProgress(cb: (ev: import('./style-model').StyleModelProgress) => void): () => void;
   // Agent 内核
   agentStatus(): Promise<AgentProcessState>;
   agentStart(modelSource?: import('./domain').LlmSource): Promise<AgentProcessState>;
@@ -373,3 +384,5 @@ export * from './edge-validate.js';
 export * from './document.js';
 export * from './tool-models.js';
 export * from './project-package.js';
+export * from './style-model.js';
+export * from './shot-duration.js';

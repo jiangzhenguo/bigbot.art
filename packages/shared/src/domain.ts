@@ -421,10 +421,17 @@ export interface FrameGrabParams {
  * 字段全部可选,缺省走 POST_PROCESSING.md §9 的「标准(无方格问题)」配方。
  */
 export interface VideoUpscaleParams {
-  /** 放大倍数:1=只修脸不放大(方案 C)/ 2=2x(默认)/ 3 / 4 */
+  /** 放大倍数:1=只修脸不放大(方案 C)/ 2=2x(默认)/ 3 / 4。SeedVR2 下 1=原分辨率修复 */
   scale?: number;
-  /** 超分引擎:realesrgan=单独 Real-ESRGAN 超分(默认) / none=不超分(仅修脸,等价 scale=1) */
-  superRes?: 'realesrgan' | 'none';
+  /**
+   * 超分引擎:
+   * realesrgan=PyTorch Real-ESRGAN(默认) /
+   * seedvr2=mlxgen SeedVR2 视频超分(MLX,默认 3B 8bit) /
+   * none=不超分(仅修脸,等价 scale=1)
+   */
+  superRes?: 'realesrgan' | 'seedvr2' | 'none';
+  /** SeedVR2 模型(superRes=seedvr2 时;缺省 AbstractFramework/seedvr2-3b-8bit) */
+  seedvrModel?: string;
   /** Real-ESRGAN 模型(见 POST_PROCESSING.md §2.1):
    *  realesrgan-x4plus=真人/照片(默认,anim evideov3 对真人会产生方格)
    *  realesr-animevideov3=动漫/插画 / realesrgan-x4plus-anime=动漫插画 */
@@ -466,7 +473,9 @@ export interface VideoUpscaleRequest {
   nodeId?: string;
   /** 放大倍数(缺省 2) */
   scale?: number;
-  superRes?: 'realesrgan' | 'none';
+  superRes?: VideoUpscaleParams['superRes'];
+  /** SeedVR2 仓库 id / 别名(缺省 3B 8bit) */
+  seedvrModel?: string;
   srModel?: VideoUpscaleParams['srModel'];
   faceModel?: VideoUpscaleParams['faceModel'];
   faceWeight?: number;
@@ -539,33 +548,44 @@ export interface VideoPostTooling {
   codeformerWeight: boolean;
   /** ffmpeg / ffprobe 可用 */
   ffmpeg: boolean;
+  /** mlxgen CLI 可执行(SeedVR2 视频超分) */
+  mlxgen?: boolean;
+  mlxgenPath?: string;
+  /** 默认 SeedVR2 3B 8bit 权重已在 HF 缓存 */
+  seedvr2?: boolean;
   /** 缺失项人读摘要(空数组 = 全部就绪) */
   missing: string[];
 }
 
 /**
- * 镜头加速档(🚀 加速 LoRA)。
- * h3.c CLI 不接受 --lora;加速 = 换蒸馏模型包目录(-d)+ 少步数(4/8 步),
- * 见 docs/MiniMax-H3-加速-LoRA-使用手册.md §8。
+ * 镜头模型包配置(加速 / 风格,二者互斥 —— 都是替换 `h3 -d` 的模型目录,一个镜头只能用一个包)。
+ * h3.c CLI 不接受 --lora;「LoRA」一律离线融合成完整模型目录后换 -d:
+ *  - 加速包 = 蒸馏模型目录(turbo)+ 少步数(4/8 步),见 docs/MiniMax-H3-加速-LoRA-使用手册.md §8;
+ *  - 风格包 = 风格 LoRA 融合目录(如 MiniMax-H3-mystic)+ 正常步数(20/30),**不省时间**。
  */
 export interface ShotAccel {
-  /** 本镜头是否开启加速 */
+  /** 本镜头是否启用模型包 */
   enabled?: boolean;
-  /** 使用的蒸馏模型包 id(设置页 accelPacks);缺省 = 默认包 */
+  /** 使用的模型包 id(设置页 accelPacks);缺省 = 默认包 */
   packId?: string;
-  /** 加速步数档:4(边缘略糊) / 8(质量甜点,推荐) */
-  steps?: 4 | 8;
+  /** 步数:加速包 4(边缘略糊)/ 8(质量甜点,推荐);风格包 20/30(融合权重需正常步数) */
+  steps?: number;
 }
 
-/** 加速 LoRA 蒸馏模型包(设置页安装/管理;仅登记,不删磁盘) */
+/** h3 模型包类型:accel=蒸馏加速包(turbo,4/8 步) / style=风格 LoRA 融合包(mystic 等,正常步数) / style-accel=风格+加速双融合包(mystic-turbo,4/8 步提速且带画风) */
+export type AccelPackKind = 'accel' | 'style' | 'style-accel';
+
+/** h3 模型包(设置页安装/管理;仅登记,不删磁盘)。`kind` 缺省 = 'accel'(兼容存量数据) */
 export interface AccelPack {
   id: string;
   name: string;
   /** 可传给 `h3 -d` 的模型目录(含 FL2VA/) */
   path: string;
-  /** 推荐步数档 */
-  steps?: 4 | 8;
-  /** 是否默认包(镜头开启加速未选包时用) */
+  /** 推荐步数档(accel:4|8;style:20|30) */
+  steps?: number;
+  /** 包类型;缺省(老数据无此字段)= 'accel' */
+  kind?: AccelPackKind;
+  /** 是否默认包(镜头启用模型包未选包时用) */
   default?: boolean;
   installedAt?: string;
   /** 列表时主进程回填:目录当前是否存在(存在但缺 FL2VA/ 视为 invalid) */
@@ -594,7 +614,7 @@ export interface ShotParams {
   reuse: number;
   tier: QualityTier;
   seed: number;
-  /** 🚀 加速 LoRA:开启则提交时用蒸馏模型包 + 4/8 步(见 ShotAccel) */
+  /** 🚀 模型包:开启则提交时换用所选包目录(-d)+ 包步数(见 ShotAccel;accel 加速 / style 风格互斥) */
   accel?: ShotAccel;
   /** 引用绑定:资产 id 或直连文件路径 → 角色(映射 --ref-image / --first-frame / --ref-video 等)
    *  - assetId:资产中心的引用(由连线自动注入或手动添加)
@@ -969,8 +989,20 @@ export interface AppSettings {
   lmStudioModel?: string;
   /** 默认档位:时间线/生成默认 tier */
   defaultTier?: QualityTier;
-  /** 🚀 加速 LoRA 蒸馏模型包库(设置页安装/管理;h3.c -d 用的 turbo 目录,非 .safetensors) */
+  /** 🚀 h3 模型包库(设置页安装/管理;h3.c -d 用的模型目录,非 .safetensors;kind=accel 加速 / style 风格) */
   accelPacks?: AccelPack[];
+  /**
+   * 预置包 v2 迁移标记(2026-10):v2 起 PRESEED 新增 style 包(MiniMax-H3-mystic)。
+   * 老库的 accelPacks 已存在 ⇒ ensureSeeded 不会重跑,需要一次性把 v2 新预置**追加**进去;
+   * 此标记为 true 表示迁移已做过 —— 用户之后删除 mystic 不会被复活(只迁一次)。
+   */
+  accelPreseedV2?: boolean;
+  /**
+   * 预置包 v3 迁移标记(2026-10-13):v3 起 PRESEED 新增 style-accel 双融合包
+   * (MiniMax-H3-mystic-turbo = mystic 画风 + turbo 提速融进同一目录,推荐 8 步)。
+   * 与 v2 同口径:只迁一次,用户删除不复活。
+   */
+  accelPreseedV3?: boolean;
   /**
    * 🚀 新建 shot 是否默认开启加速 LoRA(设置页「加速 LoRA › 默认开启」)。
    *
@@ -1080,6 +1112,9 @@ export interface RecallMessage {
   /** role=user 时,本轮随消息附带的画布选中节点(渲染层回显「关注节点」徽标;可选,旧记录无此字段) */
   selectedNodeId?: string;
   selectedNodeTitle?: string;
+  /** role=user 时,本轮随消息附带的**多个**关注/引用节点(2026-10 多引用;与上面单值字段并存,旧记录无此字段) */
+  selectedNodeIds?: string[];
+  selectedNodeTitles?: string[];
   createdAt: string;
 }
 
@@ -1110,6 +1145,9 @@ export interface AgentChatRequest {
   attachments?: Array<{ id: string; name: string; kind: string; localPath: string }>;
   /** 画布当前选中节点 id(可选;主进程把节点详情摘要附进本轮 user 消息,让 Agent 感知用户在操作谁) */
   selectedNodeId?: string;
+  /** 本轮引用的多个节点 id(2026-10:右键「添加到聊天窗口」+ 输入框 @ 提及,可多个并存;
+   *  与 selectedNodeId 并存兼容旧调用方;两者都给时合并去重) */
+  selectedNodeIds?: string[];
 }
 /** ask.user 结构化提问选项(🆕 支持副说明与推荐徽标;worker 已把字符串归一化为对象) */
 export interface AskOption {

@@ -7,6 +7,7 @@ import {
   DEFAULT_TOOL_MODELS,
   MODEL_CAPABILITIES,
   capabilityOf,
+  defaultGenerateSteps,
   normalizeModelId,
   resolveImageModel,
   supportsCapability,
@@ -160,5 +161,36 @@ describe('真源自洽性(防表漂移)', () => {
     for (const list of Object.values(MODEL_CAPABILITIES)) {
       for (const c of list) expect(caps.has(c), c).toBe(true);
     }
+  });
+});
+
+describe('defaultGenerateSteps:缺省步数按模型(2026-10-14 Turbo=8 修复)', () => {
+  it('Qwen-Image-2.1-Turbo → 8(采样表内置,引擎锁步,UI 必须说真话)', () => {
+    expect(defaultGenerateSteps('Qwen/Qwen-Image-2.1-Turbo')).toBe(8);
+    expect(defaultGenerateSteps('qwen-image-2.1-turbo')).toBe(8);
+    // 本地目录路径也要命中(provider 传的就是目录名)
+    expect(defaultGenerateSteps('/Users/x/ai/models/Qwen-Image-2.1-Turbo')).toBe(8);
+  });
+
+  it('Qwen-Image-2.1 其余(bf16 / Uncensored)→ 40(官方推荐)', () => {
+    expect(defaultGenerateSteps('Qwen/Qwen-Image-2.1')).toBe(40);
+    expect(defaultGenerateSteps('Qwen-Image-2.1-Uncensored-MLX')).toBe(40);
+    expect(defaultGenerateSteps('/Users/x/ai/models/Qwen-Image-2.1-bf16')).toBe(40);
+  });
+
+  it('其它模型 / 空值 → 24(既有默认,存量行为不变)', () => {
+    expect(defaultGenerateSteps('AbstractFramework/z-image-turbo-8bit')).toBe(24);
+    expect(defaultGenerateSteps('AbstractFramework/flux.2-klein-9b-8bit')).toBe(24);
+    expect(defaultGenerateSteps(undefined)).toBe(24);
+    expect(defaultGenerateSteps('')).toBe(24);
+  });
+
+  it('防表漂移:provider generate 分支的缺省步数必须调本函数', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(
+      new URL('../../../providers/src/mlxgen.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain('defaultGenerateSteps(repoModel)');
   });
 });

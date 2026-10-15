@@ -145,3 +145,25 @@ export function resolveImageModel(
   const v = toolModels?.image?.[cap];
   return v && v.trim() ? v : DEFAULT_TOOL_MODELS[cap];
 }
+
+/**
+ * 文生图的缺省采样步数(按模型;2026-10-14「Turbo 默认步数应为 8」修复)。
+ *
+ * 背景:节点创建时曾把 `steps: 24` 写死进 data(审计 §4.1.1 同款错误)——
+ * 于是「节点没显式选步数」与「用户就是要 24 步」无法区分,Turbo(8 步蒸馏,
+ * 采样表内置于 checkpoint、引擎锁 8 步)拿到的永远是 24,UI 与日志都在说谎。
+ * 现在节点创建**不写 steps**,缺省值全部走这里:
+ *  - Qwen-Image-2.1-Turbo → 8(引擎反正锁 8,UI 必须说真话)
+ *  - Qwen-Image-2.1 其余(bf16 等)→ 40(官方推荐)
+ *  - 其它(z-image-turbo 等)→ 24(既有默认,存量行为不变)
+ *
+ * ⚠️ 判定用与 provider `mlxgen.ts` 相同的正则(本地目录路径也能命中,
+ * 如 ~/ai/models/Qwen-Image-2.1-Turbo);provider 的 generate 分支也调本函数,
+ * 禁止再抄出第三份表。
+ */
+export function defaultGenerateSteps(model: string | undefined): number {
+  const m = String(model ?? '');
+  if (/qwen.*2\.1.*turbo/i.test(m)) return 8;
+  if (/qwen.*2\.1/i.test(m)) return 40;
+  return 24;
+}

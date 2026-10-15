@@ -606,7 +606,111 @@ ffmpeg -y -f concat -safe 0 -i list.txt -c copy final.mp4
 
 ---
 
-## 9. 参考链接
+---
+
+## 9. 风格模型包(MiniMax-H3-mystic 等,2026-10 接入)
+
+> 与 §8 的**加速包**并列的第二类 h3 模型包:**风格包**。
+> 加速包换的是「速度」(蒸馏 + 4/8 步),风格包换的是「画风」(LoRA 离线融合 + 正常步数,**不提速**)。
+> 二者**互斥**:都是替换 `h3 -d` 的模型目录,一个镜头同一时刻只能选一个包。
+
+### 9.1 原理:h3.c 不接受 --lora,风格 LoRA 必须离线融合
+
+h3.c CLI 源码里没有 `--lora`(0 hit)。风格 LoRA 的使用方式是**离线烤进权重**:
+
+```
+python3 /Users/jiangzhenguo/ai/h3/merge_lora_h3.py \
+  --lora <LoRA.safetensors> --src <基础模型>/<FL2VA|Ref2VA>/transformer \
+  --dst <产物>/<FL2VA|Ref2VA>/transformer --strength 1.0
+```
+
+- 脚本是「copy + 就地 patch」:保持 shard 布局,BF16 权重上转 F32 加 delta(B@A × scale × strength)再 RNE 回 BF16,h3.c 直接可加载。
+- **FL2VA 与 Ref2VA 是两个独立 transformer,要各融一次**(mystic 提供对应的两个 LoRA 文件)。
+- ⚠️ **幂等红线**:对已融合的目录重跑会把 delta **再叠加一次**(双重 LoRA ⇒ 画面过饱和/崩坏)。重跑前必须先删产物侧的 `transformer/` 再重新融合(BigBotArt 的构建管线已内置这一步)。
+- 融合是强度烤死的(strength 1.0)。LoRA 作者建议的运行时强度 0.5-0.9 在离线融合方案里调不了;要更弱的风格就得用对应 strength 重融一份新目录。
+
+### 9.2 MiniMax-H3-mystic:数据源与本机落点
+
+| 项 | 值 |
+|---|---|
+| LoRA 来源(FL2VA) | HuggingFace `lynaNSFW/mysticxxx_MM_H3` → `MysticXXX_MMH3-V4.safetensors`(约 148MB,免登录) |
+| LoRA 来源(Ref2VA) | Civitai `[MMH3] Mystic XXX` v4.0 → `MysticXXX_MMH3-V4-ref2va.safetensors`(约 131MB,**NSFW 模型,匿名下载可能被 403 拦,需登录后手动下**) |
+| LoRA 落盘目录 | `/Users/jiangzhenguo/ai/h3/mysticxxx-lora/` |
+| 融合产物(-d 目标) | `/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic`(约 123GB) |
+| 推荐步数 | **20 / 30**(融合权重需正常步数;4/8 步是给蒸馏包的,别混用) |
+
+### 9.3 BigBotArt 内的使用
+
+- **设置页「h3 模型包」**:mystic 是预置登记(kind=style,20 步);目录缺失时行内出现「下载 + 融合构建」按钮(下载两个 LoRA → clonefile 复制基础模型非 transformer 组件 → 两个 transformer 各融一次,进度实时推送,可取消;需基础模型 144GB 已就绪 + 约 123GB 空闲磁盘 + 20-60 分钟)。
+- **镜头检查器「模型包」小节**:开启后选 🎨 mystic,步数档自动切为 20/30;提交时 `-d` 换 mystic 目录、`--steps` 用所选步数。**ETA 不打折**(风格包不提速,与基础模型同速)。
+- 「新建镜头默认开启加速」总开关**只作用于加速包**:风格包改画风不提速,不会被自动铺到新镜头,按镜头显式选择。
+- Agent 侧同口径:`accel.list` 能看到 mystic(标注「风格」),`data.accel={enabled:true, packId:'mystic', steps:20}` 即可逐镜启用。
+
+### 9.4 手动构建(不走 App 内管线时)
+
+```bash
+# ① 下载 LoRA(FL2VA 走 HF;Ref2VA 走 Civitai,可能要登录)
+curl -fL -C - -o /Users/jiangzhenguo/ai/h3/mysticxxx-lora/MysticXXX_MMH3-V4.safetensors \
+  https://huggingface.co/lynaNSFW/mysticxxx_MM_H3/resolve/main/MysticXXX_MMH3-V4.safetensors
+# Civitai:https://civitai.com/api/download/models/3266628?fileId=3156453
+
+# ② 复制基础模型骨架(APFS clonefile 省空间;transformer 由融合脚本自己 copy+patch)
+for SUB in FL2VA Ref2VA; do
+  mkdir -p /Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic/$SUB
+  for f in /Users/jiangzhenguo/ai/h3/MiniMax-H3/$SUB/*; do
+    [ "$(basename "$f")" = transformer ] && continue
+    cp -Rc "$f" /Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic/$SUB/
+  done
+done
+
+# ③ 融合(各一次;重跑前先 rm -rf 产物侧 transformer!)
+python3 /Users/jiangzhenguo/ai/h3/merge_lora_h3.py \
+  --lora /Users/jiangzhenguo/ai/h3/mysticxxx-lora/MysticXXX_MMH3-V4.safetensors \
+  --src /Users/jiangzhenguo/ai/h3/MiniMax-H3/FL2VA/transformer \
+  --dst /Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic/FL2VA/transformer --strength 1.0
+python3 /Users/jiangzhenguo/ai/h3/merge_lora_h3.py \
+  --lora /Users/jiangzhenguo/ai/h3/mysticxxx-lora/MysticXXX_MMH3-V4-ref2va.safetensors \
+  --src /Users/jiangzhenguo/ai/h3/MiniMax-H3/Ref2VA/transformer \
+  --dst /Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic/Ref2VA/transformer --strength 1.0
+
+# ④ 验证
+/Users/jiangzhenguo/ai/h3/h3.c/h3 --info -d /Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic
+```
+
+### 9.5 MiniMax-H3-mystic-turbo(风格 + 加速双融合,2026-10-13)
+
+> 「带 LoRA 的加速模式」:把 mystic 画风 LoRA **和** turbo 提速 LoRA **先后**融进同一份权重,
+> 出片既有 mystic 画风又吃 turbo 的 4/8 步提速。BigBotArt 里登记为第三类包 **🎨⚡ 风格加速包**(kind=`style-accel`)。
+
+| 项 | 值 |
+|---|---|
+| 构建配方 | base + `MysticXXX_MMH3-V4(.safetensors)` + `minimax_h3_turbo_v4_step600_ema.safetensors`(FL2VA);base + `MysticXXX_MMH3-V4-ref2va` + 同一 turbo 文件(Ref2VA) |
+| turbo LoRA 来源 | HuggingFace `larryvrh/MiniMax-H3-Turbo-Lora`(v4 step600,~570MB) |
+| 产物目录 | `/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic-turbo`(约 123GB) |
+| 推荐步数 | **8**(turbo 语义;4 步更快但边缘略糊) |
+| 配方验证 | 本机做过张量级逐位比对:`mystic-turbo/Ref2VA` == `mystic/Ref2VA` + turbo(u16 diff = 0) |
+
+**构建顺序是关键**:每个 transformer 先融风格、**再融 turbo**(顺序两次 `merge_lora_h3.py`,第二次的 `--src` 仍是**基础模型**、`--dst` 是已融风格的产物 —— 脚本跳过 copy 直接在其上 patch)。⚠️ 与 §9.1 的幂等红线配套:**删除产物 transformer 每个 transformer 只做一次**(两次 merge 之前),两次 merge 之间删 = 把风格成果清掉,不删直接重跑 = 整串 LoRA 叠加两遍。App 内「下载 + 融合构建」管线已按此实现;手动构建把 §9.4 第 ③ 步换成:
+
+```bash
+for SUB in FL2VA Ref2VA; do
+  DST=/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic-turbo/$SUB/transformer
+  rm -rf "$DST"   # 每个 transformer 只删这一次!
+  STYLE=MysticXXX_MMH3-V4.safetensors; [ $SUB = Ref2VA ] && STYLE=MysticXXX_MMH3-V4-ref2va.safetensors
+  python3 /Users/jiangzhenguo/ai/h3/merge_lora_h3.py \
+    --lora /Users/jiangzhenguo/ai/h3/mysticxxx-lora/$STYLE \
+    --src /Users/jiangzhenguo/ai/h3/MiniMax-H3/$SUB/transformer --dst "$DST" --strength 1.0
+  python3 /Users/jiangzhenguo/ai/h3/merge_lora_h3.py \
+    --lora /Users/jiangzhenguo/ai/h3/turbo-lora/minimax_h3_turbo_v4_step600_ema.safetensors \
+    --src /Users/jiangzhenguo/ai/h3/MiniMax-H3/$SUB/transformer --dst "$DST" --strength 1.0
+done
+```
+
+「新建镜头默认开启加速」总开关**包含**风格加速包(带 turbo 提速;把它设为默认包即视为认可画风)。
+
+---
+
+## 10. 参考链接
 
 - h3.c GitHub: https://github.com/antirez/h3.c
 - CodeFormer GitHub: https://github.com/sczhou/CodeFormer
@@ -617,6 +721,6 @@ ffmpeg -y -f concat -safe 0 -i list.txt -c copy final.mp4
 ---
 
 **编写日期**：2026-09-19
-**BigBotArt 集成说明**：2026-09-19（v0.1，对应 §8）
+**BigBotArt 集成说明**：2026-09-19（v0.1，对应 §8）· 2026-10-13（v0.2，新增 §9 风格模型包 mystic；§9.5 mystic-turbo 双融合）
 **适用版本**：h3.c 2026-09-17 / CodeFormer 1.0 / GFPGAN 1.4 / Real-ESRGAN animevideov3 / BigBotArt workspace
 **实测环境**：M5 Pro 64GB Apple Silicon Mac / macOS
