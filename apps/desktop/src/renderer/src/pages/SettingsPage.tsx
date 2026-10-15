@@ -75,7 +75,7 @@ interface PvCatalogEntry {
   models: Array<{ id: string; note?: string }>;
 }
 
-/** 供应商目录:设计稿 PV_CATALOG 8 项(文案 1:1)+ 追加 6 项 */
+/** 供应商目录:设计稿 PV_CATALOG 8 项(文案 1:1)+ 追加项(含 Grok/xAI) */
 const PV_CATALOG: PvCatalogEntry[] = [
   { id: 'custom', av: '自', name: '自定义云服务', sub: 'OpenAI 兼容端点', host: '', models: [] },
   { id: 'deepseek', av: 'D', name: 'DeepSeek', sub: 'deepseek-chat / reasoner', host: 'https://api.deepseek.com/v1', models: [
@@ -108,6 +108,10 @@ const PV_CATALOG: PvCatalogEntry[] = [
   // api.kimi.com/coding 端点,配到 moonshot.cn 必 401(2026-10 实测)
   { id: 'kimi-coding', av: 'K', name: 'Kimi 编程套餐', sub: 'kimi.com 会员 · kimi-for-coding/k3', host: 'https://api.kimi.com/coding/v1', models: [
     { id: 'kimi-for-coding', note: '编程' }, { id: 'k3', note: 'K3' }, { id: 'k3-256k', note: 'K3 · 长上下文' },
+  ] },
+  // xAI Grok:OpenAI 兼容 Chat Completions(https://api.x.ai/v1);Key 在 console.x.ai 申请
+  { id: 'grok', av: 'G', name: 'Grok（xAI）', sub: 'grok-4.7 / 4.6 / 4.5 · 工具调用', host: 'https://api.x.ai/v1', models: [
+    { id: 'grok-4.7', note: '旗舰 · 对话/编程' }, { id: 'grok-4.6', note: '均衡' }, { id: 'grok-4.5', note: '高速' },
   ] },
   { id: 'zcode', av: 'Z', name: 'zcode', sub: 'OpenAI 兼容', host: '', models: [] },
   { id: 'openai', av: 'O', name: 'OpenAI', sub: 'gpt 系列', host: 'https://api.openai.com/v1', models: [] },
@@ -792,7 +796,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       avatar: c.av,
       sub: c.sub,
       host: c.host,
-      models: [],
+      // 目录预置模型直接落盘,免先「添加模型」才可选(仍可再拉远端清单补全)
+      models: c.models.map((m) => m.id),
       enabled: false,
       hasKey: false,
     };

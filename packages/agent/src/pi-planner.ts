@@ -4,7 +4,7 @@
  * 模式(按优先级):
  * 1. 远端 OpenAI 兼容(env 或显式参数):
  *    BIGBOTART_LLM_BASE_URL / BIGBOTART_LLM_API_KEY / BIGBOTART_LLM_MODEL
- *    例:DeepSeek(baseUrl https://api.deepseek.com/v1)、GLM、Kimi、MiniMax 均兼容
+ *    例:DeepSeek(baseUrl https://api.deepseek.com/v1)、GLM、Kimi、MiniMax、Grok(xAI) 均兼容
  * 2. 本地 LM Studio(Ornith-1.5)
  * 3. 以上均不可用 → 回退 deterministicPlanner(骨架期闭环不中断)
  *

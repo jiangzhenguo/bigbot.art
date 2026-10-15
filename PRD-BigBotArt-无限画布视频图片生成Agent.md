@@ -137,7 +137,7 @@
 Agent 编排层集成 **[Pi Agent Harness](https://github.com/earendil-works/pi)(earendil-works/pi)** 作为 LLM/Agent 内核,使用统一多 Provider LLM API(`@earendil-works/pi-ai`)与工具调用/状态管理运行时(`@earendil-works/pi-agent-core`):
 
 - **集成方式(已确认:子进程隔离)**:BigBotArt server 以**子进程**方式运行 pi(便于版本隔离/升级/故障隔离),通过 stdio/本地端口通信;BigBotArt 把"创建画布节点 / 提交引擎任务 / 查询进度 / 读取资产"暴露为 pi 的 Tools 供 Agent 调用,实现 Agent ↔ 画布 ↔ 引擎双向闭环。
-- **网络端接口(云端 provider,全支持)**:pi-ai 内置 OpenAI / Anthropic / Google / Azure OpenAI / OpenAI Codex,并支持 **OpenAI 兼容设置接入任意云端点**(DeepSeek / 智谱 GLM / 月之暗面 Kimi / MiniMax / Qwen 等国内云模型均可用);统一鉴权与 token/成本跟踪;仅暴露支持工具调用(function calling)的模型。
+- **网络端接口(云端 provider,全支持)**:pi-ai 内置 OpenAI / Anthropic / Google / Azure OpenAI / OpenAI Codex,并支持 **OpenAI 兼容设置接入任意云端点**(DeepSeek / 智谱 GLM / 月之暗面 Kimi / MiniMax / Qwen / Grok(xAI) 等均可用);统一鉴权与 token/成本跟踪;仅暴露支持工具调用(function calling)的模型。
 - **LLM 来源:五档单选(设置页 → LLM 来源,单选即当前 Agent 对话的 LLM)**:
 
   | 来源 | 端点/方式 | 说明 |
@@ -154,7 +154,7 @@ Agent 编排层集成 **[Pi Agent Harness](https://github.com/earendil-works/pi)
   - **任意 OpenAI 兼容本地端点**:vLLM / llama.cpp 等,通过 pi-ai 的 OpenAI Compatibility 设置接入。
 - **三个本地来源均支持"选择加载模型"**:每行内嵌「加载模型:当前模型 ▾」选择器,下拉列出该运行时发现的全部模型,仅列**支持工具调用**的模型;**加载即启用**——选中后进入加载态(状态徽章"加载模型中…"),完成后自动把该来源单选为当前 LLM。
 - **显存占用预估**:模型条目格式 `文件体积 · 显存 ≈ 占用 · 备注`;预估口径 = 权重 + KV cache + Metal 开销,基准 64GB 统一内存,与生成引擎(h3.c / mlxgen 分槽位)共享;每个本地来源行内有显存仪表条,≥ 48GB(75%)变警示色。
-- **云端供应商管理(参考 dsh 流程)**:**供应商列表**(每行 = 字母标 + 名称 + `Host · 模型数` + 启用开关 + 展开,停用整行降透明度);**添加供应商**弹层双列网格——自定义云服务 / DeepSeek / 硅基流动 / 阿里云百炼 / 火山引擎 / 腾讯混元 / OpenRouter / 英伟达 NIM / MiniMax / Kimi / OpenAI / Claude 等,全部 OpenAI 兼容,已添加置灰;**供应商详情**(行内展开):API Key(**存 macOS 钥匙串**,显示 `••••`)、API Host 可编辑、「检查」连接(返回 v1 兼容性 + 模型数)、模型列表(可移除);**添加模型**:打开即 `GET {host}/v1/models` 拉取全量清单(加载态 → 列表),头部刷新按钮重新拉取,信息栏显示 `GET {host}/v1/models · N 个模型 · 刚刚更新`,已添加模型置灰,「全选」只选未添加项;自定义云服务无法枚举时兜底为手动输入模型 ID。**API Key 绝不落盘 settings.json、不进入日志、不回传渲染进程**。
+- **云端供应商管理(参考 dsh 流程)**:**供应商列表**(每行 = 字母标 + 名称 + `Host · 模型数` + 启用开关 + 展开,停用整行降透明度);**添加供应商**弹层双列网格——自定义云服务 / DeepSeek / 硅基流动 / 阿里云百炼 / 火山引擎 / 腾讯混元 / OpenRouter / 英伟达 NIM / MiniMax / Kimi / Grok(xAI) / OpenAI / Claude 等,全部 OpenAI 兼容,已添加置灰;**供应商详情**(行内展开):API Key(**存 macOS 钥匙串**,显示 `••••`)、API Host 可编辑、「检查」连接(返回 v1 兼容性 + 模型数)、模型列表(可移除);**添加模型**:打开即 `GET {host}/v1/models` 拉取全量清单(加载态 → 列表),头部刷新按钮重新拉取,信息栏显示 `GET {host}/v1/models · N 个模型 · 刚刚更新`,已添加模型置灰,「全选」只选未添加项;自定义云服务无法枚举时兜底为手动输入模型 ID。**API Key 绝不落盘 settings.json、不进入日志、不回传渲染进程**。
 - **画布 Agent 模型选择器**:读取"已加载的本地模型 + 已启用供应商的模型"真实清单(项目级覆盖入口,非写死列表)。
 - **本地 MLX 可部署模型清单(引擎引导时可选,详见 §5.2.4)**:Ornith-1.5(9B/35B-A3B,OptiQ-4bit 等)、Qwen2.5/3 系列、GLM-4 系列、DeepSeek 系列、Llama 3.x、Mistral/Mixtral、Phi 系列、Gemma 3、MiniCPM 等 mlx-community 量化版均可选。
 - **切换规则(已确认:全局默认 + 项目级覆盖)**:LLM 来源支持**全局默认**(设置页五档单选)+ **项目级覆盖**(每项目可单独指定,如 Agent 用本地 Ornith、特殊任务切云端);未配置本地模型时自动回退云端,或纯模板+手工(AI-optional)。
@@ -339,7 +339,7 @@ Agent 编排层集成 **[Pi Agent Harness](https://github.com/earendil-works/pi)
 |---|---|---|
 | 1 | 技术路线 | **独立新项目**(§8),H3Mise 仅作领域/协议设计参考 + M3 提供项目导入 |
 | 2 | 产品命名 | **BigBotArt** |
-| 3 | LLM/Agent 内核 | **Pi Agent Harness**(§5.2.0):**五档来源单选**——本地 LM Studio(默认 **Ornith-1.5**)/ 本地 Ollama / 本地 pi-mlx / OpenAI 兼容端点(vLLM·llama.cpp)/ 云端供应商(DeepSeek/硅基流动/百炼/火山/混元/OpenRouter/NIM/MiniMax/Kimi/OpenAI/Claude 等,凭据存钥匙串) |
+| 3 | LLM/Agent 内核 | **Pi Agent Harness**(§5.2.0):**五档来源单选**——本地 LM Studio(默认 **Ornith-1.5**)/ 本地 Ollama / 本地 pi-mlx / OpenAI 兼容端点(vLLM·llama.cpp)/ 云端供应商(DeepSeek/硅基流动/百炼/火山/混元/OpenRouter/NIM/MiniMax/Kimi/Grok(xAI)/OpenAI/Claude 等,凭据存钥匙串) |
 | 4 | 3D 导演台 | M1 只做"运镜参考小样(h3 低档)",真 3D 素体摆放后置 M4 |
 | 5 | 音频 | **带声直出**:h3.c 生成内嵌音轨 MP4,Provider/时间线保留音轨,不做独立音频引擎 |
 | 6 | MLX 运行时安装 | **产品内置一键引导**(§5.8):自动探测运行时 → 引导安装 + 模型下载 + 验证闭环 |
