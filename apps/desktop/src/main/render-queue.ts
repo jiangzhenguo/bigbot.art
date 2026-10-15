@@ -56,6 +56,25 @@ export class RenderQueue {
 
   /** 提交任务入队;返回队列任务 id(兼容 RenderJobHandle.providerTaskId 语义) */
   submit(req: RenderRequest & { takeId?: string }): RenderJobHandle {
+    /*
+     * ── 同节点去重(2026-10-14「技能5测试」双提交事故)──
+     *
+     * 事故形态:静帧出图成功这一刻,**渲染层 cascade 接力**与**主进程 auto-continue
+     * 唤醒的 Agent** 对同一个 shot 各提交了一次(间隔约 28s),两条 h3 任务各跑几十分钟,
+     * 后到者覆盖 resultPath/currentTakeId。两边的提交方都不查重,这里是唯一收口:
+     * 同 nodeId 已有 queued/running 任务 → 拒绝入队(抛错,Agent 工具层与渲染层
+     * runNode 的 try/catch 都会把它翻译成可见失败,不留假成功)。
+     * 要重跑请先 cancel 在途任务,或等它出终态。
+     */
+    const dup = this.jobs.find(
+      (j) => j.nodeId === req.nodeId && (j.status === 'queued' || j.status === 'running'),
+    );
+    if (dup) {
+      throw new Error(
+        `节点 ${req.nodeId} 已有任务 ${dup.id} ${dup.status === 'running' ? '正在渲染' : '排队中'},拒绝重复入队` +
+          `(同一节点同一时刻只允许一个任务;要重跑请先取消在途任务)`,
+      );
+    }
     const provider = req.provider ?? (req.slot === 'video' ? 'h3c' : 'mlxgen');
     const now = new Date().toISOString();
     const job: QueuedJob = {
