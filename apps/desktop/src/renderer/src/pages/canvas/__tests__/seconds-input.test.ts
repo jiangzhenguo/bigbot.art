@@ -59,7 +59,7 @@ describe('parseSecondsInput — 合法值正常落盘', () => {
   });
 
   it('各档位秒数都能解析', () => {
-    for (const s of [1, 2, 3, 4, 6, 8, 10]) {
+    for (const s of [1, 2, 3, 4, 6, 8, 10, 15]) {
       const r = parseSecondsInput(String(s));
       expect(r.keep).toBe(false);
       expect(r.seconds).toBe(s);
@@ -78,16 +78,17 @@ describe('parseSecondsInput — 合法值正常落盘', () => {
 });
 
 describe('parseSecondsInput — 上限截断', () => {
-  it('超过 10 秒 → 截断到 10 并标记 clamped(调用方据此提示用户)', () => {
+  it('超过 15 秒 → 截断到 15 并标记 clamped(调用方据此提示用户)', () => {
     const r = parseSecondsInput('30');
     expect(r.keep).toBe(false);
     expect(r.seconds).toBe(SHOT_MAX_SECONDS);
+    expect(SHOT_MAX_SECONDS).toBe(15);
     expect(r.clamped).toBe(true);
   });
 
-  it('正好 10 秒 → 不算截断', () => {
-    const r = parseSecondsInput('10');
-    expect(r.seconds).toBe(10);
+  it('正好 15 秒 → 不算截断', () => {
+    const r = parseSecondsInput('15');
+    expect(r.seconds).toBe(15);
     expect(r.clamped).toBe(false);
   });
 });

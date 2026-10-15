@@ -4,6 +4,7 @@ import {
   SHOT_SIZES as SHARED_SHOT_SIZES,
   HIDDEN_NODE_KINDS,
   isHiddenNodeKind,
+  SHOT_MAX_SECONDS as SHARED_SHOT_MAX_SECONDS,
   type VideoAspect,
 } from '@bigbotart/shared';
 import type { NodeTag, CanvasNode, Edge, NodeInfo } from './types';
@@ -19,10 +20,10 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'doc', kind: 'document', name: '提示词 / 文档', sub: 'Markdown · 五段式/六段式' },
   { id: 'storyboard', kind: 'storyboard', name: '分镜表', sub: '脚本 · 一行 = 一个分镜' },
   { id: 'asset', kind: 'asset', name: '资产引用', sub: '角色 / 环境 / 物品 · 资产中心' },
-  { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · Z-Image-Turbo' },
+  { id: 'image', kind: 'image-gen', name: '图片生成', sub: 'mlxgen · 默认模型按「设置 → 工具模型」' },
   { id: 'edit', kind: 'image-edit', name: '图片编辑', sub: '指令 / I2I / Inpaint / Outpaint' },
   { id: 'upscale', kind: 'image-upscale', name: '图片增强', sub: 'SeedVR2 超分' },
-  { id: 'vupscale', kind: 'video-upscale', name: '视频增强', sub: '超分 + 合修脸 · Real-ESRGAN/GFPGAN' },
+  { id: 'vupscale', kind: 'video-upscale', name: '视频增强', sub: '超分 + 合修脸 · Real-ESRGAN / SeedVR2' },
   { id: 'crop', kind: 'image-crop', name: '图片裁切', sub: '按画幅裁剪 · 1:1 → 9:16' },
   { id: 'stitch', kind: 'image-stitch', name: '图片拼接', sub: '多图横排/竖排/网格 · ffmpeg' },
   { id: 'split', kind: 'image-split', name: '图片拆分', sub: '长图切片 · 九宫格切图' },
@@ -172,8 +173,8 @@ export function h3FramesForSeconds(seconds: number): number {
   return h3AlignFrames(seconds * 24);
 }
 
-/** 时长输入框单段上限(h3.c 硬约束;与 ShotInspector 的 max 一致) */
-export const SHOT_MAX_SECONDS = 10;
+/** 时长输入框单段上限(= h3 引擎对齐后 ≈15s;与 shared.SHOT_MAX_SECONDS 同口径) */
+export const SHOT_MAX_SECONDS = SHARED_SHOT_MAX_SECONDS;
 
 /**
  * 解析时长输入框的一次按键(纯函数,便于单测)。
