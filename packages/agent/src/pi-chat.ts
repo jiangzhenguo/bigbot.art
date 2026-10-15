@@ -15,6 +15,7 @@ import type { LlmSource, AskOption } from '@bigbotart/shared';
 import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
+import { fetchImageNeedsConfirm, userCorpusFromChat } from './web-gate.js';
 
 /**
  * 最大工具调用轮数(LLM ↔ 工具往返)。
@@ -657,6 +658,15 @@ function describeAction(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case 'canvas.delete_node':
       return `删除节点 ${args.nodeId ?? ''}`;
+    case 'web.fetch_image': {
+      const url = String(args.url ?? '').trim();
+      try {
+        const u = new URL(url);
+        return `下载图片 ${`${u.host}${u.pathname}`.slice(0, 80)}`;
+      } catch {
+        return `下载图片 ${url.slice(0, 80)}`;
+      }
+    }
     case 'storyboard.materialize':
       return `按分镜表 ${args.nodeId ?? ''} 铺节点`;
     case 'timeline.export':
@@ -844,6 +854,8 @@ export class PiChatSession {
       }
       this.pendingConfirm = null;
     }
+    // 图片下载确认只认用户原文(本轮 + 历史 user),不认系统记录里回放的搜索链接
+    const imageAuthCorpus = userCorpusFromChat(params.text, params.context.messages);
     const messages: Message[] = [
       ...params.context.messages.map((m) => {
         if (m.role === 'assistant') {
@@ -1213,21 +1225,23 @@ export class PiChatSession {
       }
 
       // 敏感操作确认闸(结构兜底):未授权时一个都不执行,改发 ask.user 确认卡
-      // —— 防模型绕过 prompt 直接 delete/materialize/export/submit
-      // 已授权过的签名(用户点过「确认执行」的同 name+args 操作)直接放行,不再二次拦截
-      const sensitiveCalls = calls.filter(
-        (c) =>
-          SENSITIVE_TOOLS.has(c.name) &&
-          !this.approvedSensitive.has(
-            PiChatSession.sensitiveSig(c.name, (c.arguments ?? {}) as Record<string, unknown>),
-          ),
-      );
+      // —— 防模型绕过 prompt 直接 delete;图片下载另加一条:地址没在用户原文里出现过就先确认
+      // 已授权过的签名(用户点过确认的同 name+args 操作)直接放行,不再二次拦截
+      const sensitiveCalls = calls.filter((c) => {
+        const args = (c.arguments ?? {}) as Record<string, unknown>;
+        if (this.approvedSensitive.has(PiChatSession.sensitiveSig(c.name, args))) return false;
+        if (SENSITIVE_TOOLS.has(c.name)) return true;
+        return c.name === 'web.fetch_image' && fetchImageNeedsConfirm(args, imageAuthCorpus);
+      });
       if (sensitiveCalls.length > 0 && !sensitiveApproved && !signal.aborted) {
         const lines = sensitiveCalls.slice(0, 5).map((c) => describeAction(c.name, (c.arguments ?? {}) as Record<string, unknown>));
         const more = sensitiveCalls.length > 5 ? `\n- … 共 ${sensitiveCalls.length} 项` : '';
-        const question = `即将执行 ${sensitiveCalls.length} 项不可轻易撤销的操作:${lines.map((l) => `\n- ${l}`).join('')}${more}\n\n确认继续吗?`;
-        const confirmLabel = '确认执行';
-        const cancelLabel = '先不执行';
+        const onlyFetch = sensitiveCalls.every((c) => c.name === 'web.fetch_image');
+        const confirmLabel = onlyFetch ? '下载' : '确认执行';
+        const cancelLabel = onlyFetch ? '先不下载' : '先不执行';
+        const question = onlyFetch
+          ? `即将下载 ${sensitiveCalls.length} 张网络图片到当前项目(进入资产库并出现在画布上):${lines.map((l) => `\n- ${l}`).join('')}${more}\n\n确认下载吗?`
+          : `即将执行 ${sensitiveCalls.length} 项不可轻易撤销的操作:${lines.map((l) => `\n- ${l}`).join('')}${more}\n\n确认继续吗?`;
         this.pendingConfirm = {
           options: [confirmLabel, cancelLabel],
           calls: sensitiveCalls.map((c) => ({ name: c.name, args: (c.arguments ?? {}) as Record<string, unknown> })),
@@ -1235,10 +1249,15 @@ export class PiChatSession {
         this.lastAskQuestion = question; // 确认卡问题也记入:模型复述它时按重复提问驳回
         const ask = {
           question,
-          options: [
-            { label: confirmLabel, sub: '按上述清单执行,产物变更/删除不可自动恢复' },
-            { label: cancelLabel, sub: '不执行,返回继续讨论方案', recommended: true },
-          ],
+          options: onlyFetch
+            ? [
+                { label: confirmLabel, sub: '下载到项目资产并在画布上新建资源节点' },
+                { label: cancelLabel, sub: '不下载', recommended: true },
+              ]
+            : [
+                { label: confirmLabel, sub: '按上述清单执行,产物变更/删除不可自动恢复' },
+                { label: cancelLabel, sub: '不执行,返回继续讨论方案', recommended: true },
+              ],
         };
         return { reply: question, thinking: collectThinking(), toolCalls, ask };
       }
