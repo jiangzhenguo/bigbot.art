@@ -15,11 +15,13 @@ import {
   tableToGfm,
   assembleH3Prompt,
   assembleZImagePrompt,
-  rowNeedsImage,
   rowSeconds,
   resolveMaterializeSeconds,
   rowCell,
   SB_SIZE,
+  planStoryboardMaterializeRows,
+  existingShotByRow,
+  summarizeMaterializePlans,
   chunkText,
   chunkNav,
   validateEdge,
@@ -770,11 +772,21 @@ export class ToolHandlers {
          的 packId/steps 完全一致(逐行各取一次会在用户中途改设置时产出参数不齐的一批)。
          未开启/无可用包 → null,不写 accel(存量行为不变)。 */
       const defaultAccel = this.accel?.defaultShotAccel() ?? null;
-      tb.rows.forEach((row, r) => {
-        const rowNo = r + 1;
-        if (doneRows.has(rowNo)) return;
+      /* 智能铺表(2026-10-15):有角色卡/场景卡 → Ref2VA;后续镜接续上一镜尾帧 → FL2VA;
+         不再机械「每行一个 image-gen」。策略见 planStoryboardMaterializeRows。 */
+      const plans = planStoryboardMaterializeRows({
+        head: tb.head,
+        rows: tb.rows,
+        doneRows,
+        canvasNodes: cur.nodes,
+      });
+      if (!plans.length) return { ok: true, result: '当前行均已铺出 · 新增行后可追加铺' };
+      const shotIdByRow = existingShotByRow(cur.nodes, nodeId);
+      for (const plan of plans) {
+        const r = plan.rowNo - 1;
+        const row = tb.rows[r] ?? [];
         const shotId = nid('shot');
-        const p = assembleH3Prompt(row, tb.head, base);
+        const p = assembleH3Prompt(row, tb.head, base, plan.subjects);
         /* 时长:列值与画面/提示词里的总时长标记取大(技能4:列写 4、文案写单镜15秒 → 15) */
         const sec = resolveMaterializeSeconds(
           rowSeconds(row, tb.head),
@@ -784,49 +796,64 @@ export class ToolHandlers {
         );
         const dur = normalizeShotDuration(
           { engine: 'h3c', prompt: p.text, seconds: sec || undefined },
-          { label: `镜头 ${String(rowNo).padStart(2, '0')}`, prompt: p.text },
+          { label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`, prompt: p.text },
         );
         cur.nodes.push({
-          id: shotId, kind: 'shot', label: `镜头 ${String(rowNo).padStart(2, '0')}`,
+          id: shotId, kind: 'shot', label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`,
           position: { x: anchorX + 560, y: anchorY + r * 186 }, width: 250,
           data: {
             /* ⚠️ engine 必须与渲染层「+」弹层建 shot 同口径(h3c)。这里曾长期写死 'mock',
                后果是「用分镜表铺节点」得到的永远是 ffmpeg 占位片 —— 2026-10-09「测试1」
                事故:8 个镜头全部落 outputs/mock/,用户以为在跑真模型,实际上没走 h3。
                演示态由 settings.renderMode 决定(mock 只在 demo 模式启用),节点不该自己写死。 */
-            engine: 'h3c', mode: 'text2video', prompt: p.text,
+            engine: 'h3c',
+            mode: plan.shotMode,
+            ...(plan.modeOverride ? { modeOverride: true } : {}),
+            prompt: p.text,
             width: size.width, height: size.height,
             seconds: Number(dur.data.seconds),
             frames: Number(dur.data.frames),
             steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
             ...(defaultAccel ? { accel: defaultAccel } : {}),
-            promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
+            promptFrom: { nodeId, mode: 'row', row: plan.rowNo } as PromptSource,
           } as CanvasNode['data'],
           createdAt: now, updatedAt: now,
         });
         cur.edges.push({ id: nid('edge'), source: nodeId, target: shotId, label: 'prompt' });
         created++;
-        if (rowNeedsImage(row, tb.head)) {
+        shotIdByRow.set(plan.rowNo, shotId);
+
+        if (plan.strategy === 'continue' && plan.continueFromRow != null) {
+          const prevId = shotIdByRow.get(plan.continueFromRow);
+          if (prevId) {
+            cur.edges.push({ id: nid('edge'), source: prevId, target: shotId, label: 'first-frame' });
+          }
+        }
+        for (const refId of plan.refNodeIds) {
+          if (cur.nodes.some((n) => n.id === refId)) {
+            cur.edges.push({ id: nid('edge'), source: refId, target: shotId, label: 'ref-image' });
+          }
+        }
+        if (plan.createKeyframe) {
           imgs++;
           const imgId = nid('img');
           const z = assembleZImagePrompt(row, tb.head, base);
           cur.nodes.push({
-            id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
+            id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(plan.rowNo).padStart(2, '0')}`,
             position: { x: anchorX + 300, y: anchorY + r * 186 }, width: 232,
             data: {
               // 🆕 不写 model(2026-09-29 v1 工具模型):留给提交时缺省解析
               // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
               engine: 'mlxgen', prompt: z.text,
               width: size.width, height: size.height, guidance: 1.0, seeds: [42],
-              promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
+              promptFrom: { nodeId, mode: 'row', row: plan.rowNo } as PromptSource,
             } as CanvasNode['data'],
             createdAt: now, updatedAt: now,
           });
           cur.edges.push({ id: nid('edge'), source: nodeId, target: imgId, label: 'prompt' });
           cur.edges.push({ id: nid('edge'), source: imgId, target: shotId, label: 'first-frame' });
         }
-      });
-      if (!created && !imgs) return { ok: true, result: '当前行均已铺出 · 新增行后可追加铺' };
+      }
       sb.data = { ...sd, lastTable: gfm } as CanvasNode['data'];
       sb.updatedAt = now;
       cur.updatedAt = now;
@@ -834,7 +861,9 @@ export class ToolHandlers {
       this.store.saveCanvasSnapshot(cur);
       return {
         ok: true,
-        result: `已从分镜表铺出 ${created} shot${imgs ? ` + ${imgs} image-gen` : ''}(共 ${created + imgs} 节点)· 未触发运行 · 改表后需「重新同步」`,
+        result:
+          `已从分镜表铺出 ${summarizeMaterializePlans(plans)}(共 ${created + imgs} 节点)· 未触发运行 · ` +
+          `有参考卡的镜走 Ref2VA;后续镜接续上一镜尾帧(FL2VA)· 改表后需「重新同步」`,
       };
     },
     'canvas.create_node': async (a, ctx) => {

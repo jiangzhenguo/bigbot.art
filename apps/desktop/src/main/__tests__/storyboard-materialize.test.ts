@@ -25,7 +25,7 @@ process.env.BIGBOTART_HOME = tmpHome;
 const PROJECT = 'p-sb';
 const CANVAS = 'c-sb';
 
-/** 分镜表 markdown:两行,「需配图」列均为「是」→ 每行铺 shot + image-gen */
+/** 分镜表 markdown:两行均「需配图=是」——无参考卡时首镜建静帧、次镜接续(不再每行一个 image-gen) */
 const MARKDOWN = [
   '# 分镜表',
   '',
@@ -130,7 +130,8 @@ describe('storyboard.materialize · shot 引擎(事故 A:不得写死 mock)', ()
     const shot = nodes.find((n) => n.kind === 'shot')!;
     // 演示态由 settings.renderMode 统一决定,节点自身不该声明 mock
     expect(shot.data.engine).not.toBe('mock');
-    expect(shot.data.mode).toBe('text2video');
+    // 无参考卡 + 需配图 → 首镜走 first-frame(静帧直通),不是纯 text2video
+    expect(shot.data.mode).toBe('first-frame');
   });
 });
 
@@ -169,11 +170,77 @@ describe('storyboard.materialize · 加速默认(事故 B)', () => {
   });
 });
 
+describe('storyboard.materialize · 智能连线(不再机械每行静帧)', () => {
+  it('无参考卡:仅首镜建 image-gen,次镜接续上一镜(first-frame)', async () => {
+    const { h, store } = makeHandlers(undefined);
+    const res = await h.call('storyboard.materialize', { nodeId: 'sb-1' }, ctx);
+    expect(res.ok).toBe(true);
+    const snap = store.__snapshot as {
+      nodes: Array<{ id: string; kind: string; data: Record<string, unknown> }>;
+      edges: Array<{ source: string; target: string; label?: string }>;
+    };
+    const shots = snap.nodes.filter((n) => n.kind === 'shot');
+    const imgs = snap.nodes.filter((n) => n.kind === 'image-gen');
+    expect(shots.length).toBe(2);
+    expect(imgs.length).toBe(1); // 不再 2 个
+    const shot1 = shots.find((s) => (s.data.promptFrom as { row?: number })?.row === 1)!;
+    const shot2 = shots.find((s) => (s.data.promptFrom as { row?: number })?.row === 2)!;
+    expect(shot2.data.mode).toBe('first-frame');
+    expect(snap.edges.some((e) => e.source === shot1.id && e.target === shot2.id && e.label === 'first-frame')).toBe(
+      true,
+    );
+  });
+
+  it('有角色卡+场景卡:首镜 Ref2VA 绑定,不建静帧;次镜接续', async () => {
+    const { h, store } = makeHandlers(undefined);
+    store.__snapshot.nodes.push(
+      {
+        id: 'char-1',
+        kind: 'image-gen',
+        label: '角色卡·红衣',
+        position: { x: 0, y: 0 },
+        data: { resultPath: '/tmp/char.png' },
+      } as never,
+      {
+        id: 'scene-1',
+        kind: 'image-gen',
+        label: '场景卡·机翼',
+        position: { x: 0, y: 40 },
+        data: { resultPath: '/tmp/scene.png' },
+      } as never,
+    );
+    const res = await h.call('storyboard.materialize', { nodeId: 'sb-1' }, ctx);
+    expect(res.ok).toBe(true);
+    const snap = store.__snapshot as {
+      nodes: Array<{ id: string; kind: string; label?: string; data: Record<string, unknown> }>;
+      edges: Array<{ source: string; target: string; label?: string }>;
+    };
+    expect(snap.nodes.filter((n) => n.kind === 'image-gen' && String(n.label ?? '').includes('分镜静帧')).length).toBe(
+      0,
+    );
+    const shot1 = snap.nodes.find(
+      (n) => n.kind === 'shot' && (n.data.promptFrom as { row?: number })?.row === 1,
+    )!;
+    const shot2 = snap.nodes.find(
+      (n) => n.kind === 'shot' && (n.data.promptFrom as { row?: number })?.row === 2,
+    )!;
+    expect(shot1.data.mode).toBe('ref-image');
+    expect(snap.edges.filter((e) => e.target === shot1.id && e.label === 'ref-image').map((e) => e.source).sort()).toEqual(
+      ['char-1', 'scene-1'],
+    );
+    expect(snap.edges.some((e) => e.source === shot1.id && e.target === shot2.id && e.label === 'first-frame')).toBe(
+      true,
+    );
+    // 接续镜不得再挂 ref-image(与 first-frame 互斥)
+    expect(snap.edges.filter((e) => e.target === shot2.id && e.label === 'ref-image')).toHaveLength(0);
+  });
+});
+
 describe('storyboard.materialize · image-gen 缺省模型(问题 2 回归)', () => {
   it('image-gen 不写死 model —— 留给提交期按「工具模型 > 内置默认」解析', async () => {
     const { nodes } = await materialize(undefined);
     const imgs = nodes.filter((n) => n.kind === 'image-gen');
-    expect(imgs.length).toBe(2);
+    expect(imgs.length).toBe(1); // 仅首镜静帧
     for (const n of imgs) {
       // 写死会让「设置页选的模型」失效(事故 2 的形态:用户设了 2.1 却以为跑的是 z-image)
       expect(n.data.model).toBeUndefined();

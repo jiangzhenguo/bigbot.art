@@ -386,3 +386,4 @@ export * from './tool-models.js';
 export * from './project-package.js';
 export * from './style-model.js';
 export * from './shot-duration.js';
+export * from './storyboard-materialize.js';

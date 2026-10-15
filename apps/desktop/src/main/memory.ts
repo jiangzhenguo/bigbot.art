@@ -380,7 +380,8 @@ export class MemoryStore {
         '分镜表(storyboard)是核心流程:表格一行 = 一个分镜,可编辑(增删行/粘贴导入);',
         '用户说「把这篇小说/需求做成短片」时:先用 storyboard.plan 生成分镜表(可传 nodeId 读文档节点,或直接给 brief),',
         '默认分步只出表(让用户确认/改表),用户要求直接铺节点时传 autoMaterialize=true;',
-        '已有分镜表要铺节点用 storyboard.materialize;改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
+        '已有分镜表要铺节点用 storyboard.materialize(智能连线:有角色卡/场景卡 → 首镜 Ref2VA 绑定参考;后续镜 FL2VA 接续上一镜尾帧;无卡时仅序列起点按「需配图」建静帧——不要事后再机械给每行补 image-gen);',
+        '改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
         '铺节点只创建节点、不触发运行 —— 生成用 engine.submit 逐节点或批跑,指令明确时直接执行,不必再确认。'].join('\n'),
     );
     // ①c 当前画布激活技能(Agent 指令段注入;full=全量 / summary=摘要+skills.read 提示。

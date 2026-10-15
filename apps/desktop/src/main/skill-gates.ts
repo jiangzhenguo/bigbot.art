@@ -11,6 +11,7 @@
  * 判定全是纯函数;engine.submit 在提交前调用 `checkSkillSubmitGates`。
  */
 import type { CanvasEdge, CanvasNode } from '@bigbotart/shared';
+import { isCharacterCardNode } from '@bigbotart/shared';
 
 /** 需要角色卡先行的技能 → 至少几张已出图的角色卡 */
 export const SKILL_CHARACTER_CARD_MIN: Record<string, number> = {
@@ -24,12 +25,11 @@ export const SKILL_REQUIRE_REF_AUDIO = new Set<string>(['music-video-subtitle'])
 /** 画布已有用户真实素材时,产品画面必须 image-edit(原图底图)、禁止 image-gen 重画的技能 */
 export const SKILL_REQUIRE_PHOTO_EDIT = new Set<string>(['minimalist-product-ad']);
 
-const CARD_LABEL_RE = /角色卡|角色设定|character\s*card/i;
-const CARD_KINDS = new Set(['image-gen', 'image-edit', 'asset']);
 const GATED_KINDS = new Set(['shot', 'image-gen', 'image-edit']);
 
+/** 与 shared `isCharacterCardNode` 同口径(角色卡标题识别) */
 export function isCharacterCard(node: CanvasNode): boolean {
-  return CARD_KINDS.has(String(node.kind ?? '')) && CARD_LABEL_RE.test(String(node.label ?? ''));
+  return isCharacterCardNode(node);
 }
 
 function hasOutput(node: CanvasNode): boolean {

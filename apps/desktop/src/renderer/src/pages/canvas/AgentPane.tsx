@@ -1,9 +1,8 @@
 /**
- * AgentPane — 右侧 Agent 面板(tabs + 对话页签 + 检查器插槽 + 输入区 + 宽度拖拽把手)
+ * AgentPane — 右侧 Agent 对话面板(常驻 · 无检查器页签)
  *
- * 拆分自 CanvasPage 的 <aside class="agent"> 区块(含 agent-grip)。
- * 对话内容由 useAgentChat 提供(AgentChatView/AgentComposer 已是独立组件);
- * 检查器页签内容通过 inspector 插槽传入(InspectorPane),保持本组件薄。
+ * 对齐 Open Design canvas.html:Agent 对话独立占右侧,检查器拆到左侧 insp-panel。
+ * 对话内容由 useAgentChat 提供(AgentChatView/AgentComposer)。
  */
 import React, { useRef } from 'react';
 import type { AgentChatApi } from '../agent/useAgentChat';
@@ -14,12 +13,8 @@ import { AgentComposer } from '../agent/AgentComposer';
 interface AgentPaneProps {
   chat: AgentChatApi;
   agentW: number;
-  tab: 'chat' | 'insp';
-  onTabChange: (t: 'chat' | 'insp') => void;
   onOpenSettings: () => void;
   onLocate: (nodeId: string) => void;
-  /** 检查器页签内容(由 CanvasPage 组合 InspectorPane 传入) */
-  inspector: React.ReactNode;
   toastMsg: (msg: string) => void;
   /** 点击面板空白处关闭右键菜单 */
   onBackgroundClick: () => void;
@@ -42,11 +37,8 @@ interface AgentPaneProps {
 export function AgentPane({
   chat,
   agentW,
-  tab,
-  onTabChange,
   onOpenSettings,
   onLocate,
-  inspector,
   toastMsg,
   onBackgroundClick,
   gripRef,
@@ -59,7 +51,6 @@ export function AgentPane({
   mentionNodes,
   resolveMedia,
 }: AgentPaneProps) {
-  /* 面板容器 ref(原 CanvasPage 的 agentRef;拆分后无外部读取,收到本组件本地管理) */
   const agentRef = useRef<HTMLElement | null>(null);
   return (
     <>
@@ -72,37 +63,22 @@ export function AgentPane({
         style={{ width: agentW }}
         onClick={onBackgroundClick}
       >
-        <div className="agent-tabs">
-          <button
-            className={`atab${tab === 'chat' ? ' on' : ''}`}
-            data-od-id="tab-chat"
-            onClick={() => onTabChange('chat')}
-          >
+        <div className="agent-head">
+          <span className="lbl" data-od-id="agent-panel-title">
             Agent 对话
-          </button>
-          <button
-            className={`atab${tab === 'insp' ? ' on' : ''}`}
-            data-od-id="tab-inspector"
-            onClick={() => onTabChange('insp')}
-          >
-            检查器
-          </button>
+          </span>
           <span className="spacer"></span>
           <span className="row g6 mono mut" style={{ fontSize: '10.5px' }}>
             <span className="dot ok"></span>pi · 运行中
           </span>
         </div>
-        {/* Agent 对话页签(pages/agent/AgentChatView);检查器 pane 由外层 InspectorPane 提供 */}
         <AgentChatView
           chat={chat}
-          hidden={tab !== 'chat'}
           onLocate={onLocate}
           onOpenSettings={onOpenSettings}
           onEditSkill={onEditSkill}
           resolveMedia={resolveMedia}
         />
-        {inspector}
-        {/* 输入区(pages/agent/AgentComposer);focusNodes = 聊天关注节点(右键菜单累积设定),发送时随消息注入 Agent 上下文;mentionNodes = @ 提及候选 */}
         <AgentComposer
           chat={chat}
           toastMsg={toastMsg}

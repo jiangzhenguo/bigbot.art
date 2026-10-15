@@ -1,8 +1,8 @@
 /**
- * AgentChatView — Agent 对话页签的展示层(agent-llm 行 + 消息流)
+ * AgentChatView — Agent 对话面板的展示层(agent-llm 行 + 消息流)
  *
  * 纯展示:所有对话状态/副作用来自 useAgentChat(见 ./useAgentChat.ts);
- * 输入区单独在 ./AgentComposer.tsx(检查器 pane 夹在两者中间,由 CanvasPage 排版)。
+ * 输入区单独在 ./AgentComposer.tsx。
  */
 import React from 'react';
 import type { AgentChatApi } from './useAgentChat';
@@ -11,15 +11,12 @@ import type { ChatMedia } from './types';
 
 export function AgentChatView({
   chat,
-  hidden,
   onLocate,
   onOpenSettings,
   onEditSkill,
   resolveMedia,
 }: {
   chat: AgentChatApi;
-  /** 页签切到检查器时隐藏消息流(composer 保持可见,与原布局一致) */
-  hidden: boolean;
   onLocate: (nodeId: string) => void;
   onOpenSettings: () => void;
   /** 技能注入卡「查看 / 编辑指令 →」:跳转技能页(可为空 = 不显示入口) */
@@ -39,7 +36,6 @@ export function AgentChatView({
       <div
         className="chat"
         ref={chatRef}
-        style={{ display: hidden ? 'none' : undefined }}
         onScroll={(e) => {
           // 距底 80px 内视为贴底:跟随新消息;往上翻则松开
           const el = e.currentTarget;

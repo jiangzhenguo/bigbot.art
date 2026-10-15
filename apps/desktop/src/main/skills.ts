@@ -52,7 +52,7 @@ const BUILTIN_SKILLS: Array<{ id: string; name: string; description: string; ins
    提取 {主题}/{旁白}/{时长},缺项用 ask.user 补齐。
 2. 规划分镜:storyboard.plan,brief 给 {主题}+{旁白} 融合后的文案,basePrompt 用下方措辞段;
    默认分步只出表,不直接铺节点。
-3. 铺节点:storyboard.materialize(aspect=9:16,tier=preview);「需配图=是」的行自动多建 image-gen 首帧。
+3. 铺节点:storyboard.materialize(aspect=9:16,tier=preview);有角色卡/场景卡时自动 Ref2VA 绑定,后续镜接续上一镜尾帧;无卡时仅序列起点按需配图建静帧。
    保持 5 镜头结构,不新增不合并。
 4. 提交生成:逐节点 engine.submit,每次先 ask.user 确认档位与范围,不批量闭眼跑。
 5. 收尾:timeline.export,核对 5 镜产物齐全。

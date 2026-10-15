@@ -13,6 +13,8 @@ import {
   sbStats,
   rowNeedsImage,
   rowSeconds,
+  planStoryboardMaterializeRows,
+  summarizeMaterializePlans,
 } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
@@ -53,8 +55,22 @@ export default function StoryboardInspector({
   const matRows = sbMaterializedRows(node.id, nodes);
   const imgCnt = sbImgCount(node.id, nodes);
   const dirty = sbDirty(node, nodes);
-  const pending = rows.map((_, i) => i).filter((r) => !matRows.includes(r));
-  const addImg = pending.filter((r) => rowNeedsImage(rows[r], head)).length;
+  /* matRows 是 1-based promptFrom.row;计划层同口径,避免 0/1 混用导致「永远有待铺行」 */
+  const layPlans = planStoryboardMaterializeRows({
+    head,
+    rows,
+    doneRows: matRows,
+    canvasNodes: nodes.map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      label: n.title,
+      title: n.title,
+      data: (n.data ?? {}) as Record<string, unknown>,
+    })),
+  });
+  const pending = layPlans.map((p) => p.rowNo - 1);
+  const addImg = layPlans.filter((p) => p.createKeyframe).length;
+  const planHint = layPlans.length ? summarizeMaterializePlans(layPlans) : '';
 
   const [view, setView] = useState<'tbl' | 'src'>('tbl');
   const [mode, setMode] = useState<'step' | 'auto'>('step');
@@ -248,12 +264,12 @@ export default function StoryboardInspector({
             <div className="psrc-h">
               <b>{matRows.length ? '将追加创建' : '将创建'} {addN} 个节点</b>
               <span className="mono">
-                {pending.length} shot · {addImg} image-gen · {addImg} 条 first-frame 边 · {aspect} · {tier === 'preview' ? '预览档' : '默认档'}
+                {planHint || `${pending.length} shot`} · {aspect} · {tier === 'preview' ? '预览档' : '默认档'}
               </span>
             </div>
             <ul>
-              <li>每行一个 <span className="mono">shot</span>,提示词按 H3 五段式组装,<span className="mono">promptFrom = {'{ nodeId, mode:\'row\', row }'}</span> 记来源</li>
-              <li>「需配图 = 是」的行额外建 <span className="mono">image-gen</span>(Z-Image 六段式),并连 <span className="mono">first-frame</span> 边做静帧直通</li>
+              <li>每行一个 <span className="mono">shot</span>;画布上有「角色卡/场景卡」时首镜(及硬切后)自动 <span className="mono">ref-image</span> 绑定(Ref2VA)</li>
+              <li>后续镜把上一镜以 <span className="mono">first-frame</span> 接续(FL2VA,尾帧当首帧);无参考卡时仅序列起点按「需配图」建静帧</li>
               <li>时长取每行「时长(s)」列;画幅与档位为全局默认,仅作用于本次铺出的节点</li>
               <li><b>只创建节点,不触发运行</b> —— 生成须逐节点或批跑,避免误烧资源;一次原子操作,可整体撤销(⌘Z)</li>
             </ul>

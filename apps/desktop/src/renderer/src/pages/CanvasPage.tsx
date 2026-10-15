@@ -5,10 +5,12 @@ import {
   resolvePromptFromSource,
   assembleH3Prompt,
   assembleZImagePrompt,
-  rowNeedsImage,
   rowSeconds,
   rowCell,
   resolveMaterializeSeconds,
+  planStoryboardMaterializeRows,
+  existingShotByRow,
+  summarizeMaterializePlans,
   tableToGfm,
   capabilityOf,
   resolveImageModel,
@@ -62,6 +64,17 @@ import {
   type Rect,
 } from './canvas/selection';
 import { panOffset, wheelIntent, zoomFactorFor } from './canvas/wheel-intent';
+import {
+  clampInspWidth,
+  DEFAULT_INSP_W,
+  ensureWorldBoxVisible,
+  leftChromeWidth,
+  lerpView,
+  PANEL_EDGE,
+  PANEL_TOP,
+  REVEAL_ANIM_MS,
+  rightChromeWidth,
+} from './canvas/viewport-ensure';
 import { Toolbar } from './canvas/Toolbar';
 import { Palette } from './canvas/Palette';
 import { StageView } from './canvas/StageView';
@@ -155,8 +168,11 @@ export default function CanvasPage({
      整数组替换且数量不变时旧 observer 会盯住已卸载 DOM,新节点 h 缺失 → 连线端点到节点顶部 */
   const roRef = useRef<ResizeObserver | null>(null);
   const gripRef = useRef<HTMLButtonElement | null>(null);
+  const inspGripRef = useRef<HTMLButtonElement | null>(null);
   const agentRef = useRef<HTMLElement | null>(null);
   const minimapRef = useRef<HTMLDivElement | null>(null);
+  /** 选中避让(revealNode)的稳定入口;拖拽 pointerup 比 revealNode 定义更早,故提前占位 */
+  const revealNodeRef = useRef<(id: string) => void>(() => {});
   const toastTimer = useRef<number | null>(null);
   const queueTimer = useRef<number | null>(null);
   /** 队列状态补种入口(挂载/重载画布后把「正在生成」重新标回节点;订阅 effect 里赋值) */
@@ -334,7 +350,8 @@ export default function CanvasPage({
   const [palCollapsed, setPalCollapsed] = useState(false);
   const [agentW, setAgentW] = useState(344);
   const [agentResizing, setAgentResizing] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'insp'>('chat');
+  const [inspW, setInspW] = useState(DEFAULT_INSP_W);
+  const [inspResizing, setInspResizing] = useState(false);
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
   /** 正在重命名的节点 id(null = 无;节点头部显示内联输入框,Electron 不支持 window.prompt) */
@@ -422,7 +439,6 @@ export default function CanvasPage({
       if (!n) return;
       const exists = focusNodesRef.current.some((x) => x.id === id);
       setFocusNodes((cur) => (exists ? cur.filter((x) => x.id !== id) : [...cur, { id: n.id, title: n.title }]));
-      setTab('chat'); // 明示结果:切到对话页签,让用户看到「关注」chip 变化
       toastMsg(exists ? `已从聊天窗口移除 · 「${n.title}」` : `已添加到聊天窗口 · 关注「${n.title}」`);
     },
     [toastMsg],
@@ -608,6 +624,42 @@ export default function CanvasPage({
     setZoomPctLive(Math.round(v.z * 100));
   }, []);
 
+  /** 程序化避让动画的 rAF id;用户手势(平移/缩放/拖节点)必须取消,避免抢控制权 */
+  const viewAnimRef = useRef<number | null>(null);
+  const cancelViewAnim = useCallback(() => {
+    if (viewAnimRef.current == null) return;
+    cancelAnimationFrame(viewAnimRef.current);
+    viewAnimRef.current = null;
+  }, []);
+
+  /**
+   * 平滑过渡到目标视口(选中避让用)。走 applyViewLive 逐帧,收尾 commitView 落盘。
+   * 不用 CSS transition:--vx/--vy 未 @property 注册时 transform 不会插值,只会瞬移。
+   */
+  const animateViewTo = useCallback(
+    (target: { x: number; y: number; z: number }, durationMs: number = REVEAL_ANIM_MS) => {
+      cancelViewAnim();
+      const from = { ...viewRef.current };
+      if (from.x === target.x && from.y === target.y && from.z === target.z) {
+        commitView(target);
+        return;
+      }
+      const t0 = performance.now();
+      const step = (now: number) => {
+        const p = Math.min(1, (now - t0) / durationMs);
+        applyViewLive(lerpView(from, target, p));
+        if (p < 1) {
+          viewAnimRef.current = requestAnimationFrame(step);
+        } else {
+          viewAnimRef.current = null;
+          commitView(target);
+        }
+      };
+      viewAnimRef.current = requestAnimationFrame(step);
+    },
+    [applyViewLive, cancelViewAnim, commitView],
+  );
+
   /**
    * 小地图拖动结束:把命令式写入的视口同步回 state(P3 收尾)。
    * 必要性:持久化 effect 依赖 view 分量,若不同步则「用小地图拖过的视角」
@@ -628,6 +680,11 @@ export default function CanvasPage({
     /** 拖动前各节点的原始坐标(按下时冻结;缺席的节点不动) */
     origins: Map<string, { x: number; y: number }>;
     moved: boolean;
+    /**
+     * 本次按下是否新建立了单选 —— pointerup 且未拖动时触发检查器避让。
+     * 主路径是 beginNodeDrag(不经 selectNode),必须在这里记一笔,否则避让永远不跑。
+     */
+    revealOnUp: boolean;
   } | null>(null);
   /** 拖动开始时的内容(撤销要回到的位置):拖拽过程中每帧 setState 只写状态,不动历史 */
   const dragPrevRef = useRef<HistoryContent | null>(null);
@@ -644,7 +701,11 @@ export default function CanvasPage({
       const d = dragRef.current;
       if (!d) return;
       const z = viewRef.current.z;
-      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) {
+        d.moved = true;
+        // 用户在拖节点 → 取消避让动画,避免和手势抢视口
+        cancelViewAnim();
+      }
       markViewportAnimating();
       const dx = (e.clientX - d.sx) / z;
       const dy = (e.clientY - d.sy) / z;
@@ -676,6 +737,11 @@ export default function CanvasPage({
         setHistVer((v) => v + 1);
       }
       dragPrevRef.current = null;
+      // 点选(未拖动)且本次建立了单选 → 避让检查器;经 beginNodeDrag 的主路径靠这里触发
+      if (!d.moved && d.revealOnUp && d.ids.length >= 1) {
+        const id = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0]! : d.ids[0]!;
+        requestAnimationFrame(() => revealNodeRef.current(id));
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -683,7 +749,7 @@ export default function CanvasPage({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [markViewportAnimating]);
+  }, [cancelViewAnim, markViewportAnimating]);
 
   /* ── 「+」按钮 → 拖拽连接到已有节点(松开命中目标即建边)──
    * 拖动期间:跟手画临时虚线 + 命中节点高亮(可连=绿,不可连=红);
@@ -862,6 +928,7 @@ export default function CanvasPage({
   /** 空格按下的**渲染态**(仅用于把光标切成抓手;平移判定仍以 spaceDownRef 为准) */
   const [spacePanning, setSpacePanning] = useState(false);
   const beginPan = (e: React.PointerEvent) => {
+    cancelViewAnim();
     panStartRef.current = {
       sx: e.clientX,
       sy: e.clientY,
@@ -1014,6 +1081,7 @@ export default function CanvasPage({
     (deltaX: number, deltaY: number, zoomable: boolean) => {
       const stage = stageRef.current;
       if (!stage) return;
+      cancelViewAnim();
 
       if (!zoomable) {
         /* 双指滑动 = 平移:偏移量与缩放无关(视口变换是 translate(x,y) scale(z),
@@ -1063,7 +1131,7 @@ export default function CanvasPage({
         commitView({ ...viewRef.current });
       }, 200);
     },
-    [applyViewLive, commitView],
+    [applyViewLive, cancelViewAnim, commitView],
   );
 
   useEffect(() => {
@@ -1095,7 +1163,7 @@ export default function CanvasPage({
     };
   }, [onWheelPan]);
 
-  /* ── Agent 面板宽度 ── */
+  /* ── Agent / 检查器面板宽度 ── */
   const agentMax = useCallback(
     () => Math.min(620, Math.round(window.innerWidth * 0.5)),
     [],
@@ -1119,37 +1187,105 @@ export default function CanvasPage({
     [agentMax],
   );
 
+  const setInspWidth = useCallback((w: number, commit: boolean) => {
+    const nw = clampInspWidth(w);
+    setInspW(nw);
+    if (inspGripRef.current) inspGripRef.current.style.left = `${12 + nw - 6}px`;
+    if (commit) {
+      try {
+        localStorage.setItem('bba-insp-w', String(nw));
+      } catch {
+        /* 忽略存储异常 */
+      }
+    }
+    return nw;
+  }, []);
+
   useEffect(() => {
-    let saved = 344;
+    let savedAgent = 344;
+    let savedInsp = DEFAULT_INSP_W;
     try {
-      const raw = parseInt(localStorage.getItem('bba-agent-w') ?? '', 10);
-      if (!Number.isNaN(raw)) saved = raw;
+      const rawA = parseInt(localStorage.getItem('bba-agent-w') ?? '', 10);
+      if (!Number.isNaN(rawA)) savedAgent = rawA;
+      const rawI = parseInt(localStorage.getItem('bba-insp-w') ?? '', 10);
+      if (!Number.isNaN(rawI)) savedInsp = rawI;
     } catch {
       /* 忽略存储异常 */
     }
-    setAgentWidth(saved, false);
-    const onResize = () => setAgentWidth(agentWRef.current, false);
+    setAgentWidth(savedAgent, false);
+    setInspWidth(savedInsp, false);
+    const onResize = () => {
+      setAgentWidth(agentWRef.current, false);
+      setInspWidth(inspWRef.current, false);
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [setAgentWidth]);
+  }, [setAgentWidth, setInspWidth]);
 
   const agentWRef = useRef(agentW);
   agentWRef.current = agentW;
+  const inspWRef = useRef(inspW);
+  inspWRef.current = inspW;
+  const palCollapsedRef = useRef(palCollapsed);
+  palCollapsedRef.current = palCollapsed;
 
   const agentDragRef = useRef<{ sx: number; w: number } | null>(null);
+  const inspDragRef = useRef<{ sx: number; w: number } | null>(null);
+
+  /**
+   * 把节点平移进「不被检查器/节点面板/Agent 挡住」的安全区。
+   * 选中节点、拖宽检查器、展开节点面板后调用。
+   */
+  const revealNode = useCallback(
+    (id: string) => {
+      const n = nodesRef.current.find((x) => x.id === id);
+      const stage = stageRef.current;
+      if (!n || !stage) return;
+      const next = ensureWorldBoxVisible({
+        box: { x: n.x, y: n.y, w: n.w, h: n.h ?? SEL_UNMEASURED_H },
+        view: viewRef.current,
+        stage: { w: stage.clientWidth, h: stage.clientHeight },
+        insets: {
+          left: leftChromeWidth({
+            inspOpen: true,
+            inspW: inspWRef.current,
+            palCollapsed: palCollapsedRef.current,
+          }),
+          top: PANEL_TOP,
+          right: rightChromeWidth(agentWRef.current),
+          bottom: PANEL_EDGE,
+        },
+      });
+      if (!next) return;
+      animateViewTo(next);
+    },
+    [animateViewTo],
+  );
+  revealNodeRef.current = revealNode;
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
-      const d = agentDragRef.current;
-      if (!d) return;
-      setAgentWidth(d.w + (d.sx - e.clientX), false);
+      const ad = agentDragRef.current;
+      if (ad) setAgentWidth(ad.w + (ad.sx - e.clientX), false);
+      const id = inspDragRef.current;
+      if (id) setInspWidth(id.w + (e.clientX - id.sx), false);
     };
     const onUp = () => {
-      if (!agentDragRef.current) return;
-      agentDragRef.current = null;
-      setAgentWidth(agentWRef.current, true);
-      setAgentResizing(false);
-      gripRef.current?.classList.remove('on');
+      if (agentDragRef.current) {
+        agentDragRef.current = null;
+        setAgentWidth(agentWRef.current, true);
+        setAgentResizing(false);
+        gripRef.current?.classList.remove('on');
+      }
+      if (inspDragRef.current) {
+        inspDragRef.current = null;
+        setInspWidth(inspWRef.current, true);
+        setInspResizing(false);
+        inspGripRef.current?.classList.remove('on');
+        // 拖宽后检查器可能盖住选中节点 → 再避让一次
+        const sel = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0]! : null;
+        if (sel) revealNodeRef.current(sel);
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -1157,7 +1293,7 @@ export default function CanvasPage({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [setAgentWidth]);
+  }, [setAgentWidth, setInspWidth]);
 
   /* ── 定位到节点(闪一下) ── */
   const locate = useCallback((id: string) => {
@@ -1172,6 +1308,7 @@ export default function CanvasPage({
    * 注意**不做组扩张** —— 点节点只选中它自己(检查器要能看单个节点的参数),
    * 组的整体性体现在拖动/删除/复制这些「批量动作」上(见 beginNodeDrag / deleteSelection)。
    * 想选整组:双击组框或点节点上的组徽标 → selectGroup()。
+   * 选中后平移视口,避免左侧检查器遮住该节点。
    */
   const selectNode = useCallback((id: string | null) => {
     setSelectedIds(id ? [id] : []);
@@ -1181,7 +1318,8 @@ export default function CanvasPage({
       if (m[id] || !info) return m;
       return { ...m, [id]: info };
     });
-    setTab('insp');
+    // rAF:等 insp-open / 面板布局进一帧后再量 stage,避让更准
+    requestAnimationFrame(() => revealNodeRef.current?.(id));
   }, []);
 
   /** 选中整组(点组徽标 / 双击组框 / 右键组操作) */
@@ -1190,7 +1328,6 @@ export default function CanvasPage({
       const g = groupsRef.current.find((x) => x.id === groupId);
       if (!g) return;
       setSelectedIds([...g.members]);
-      setTab('insp');
     },
     [],
   );
@@ -1207,18 +1344,24 @@ export default function CanvasPage({
     (node: CanvasNode, e: React.PointerEvent) => {
       if (e.button !== 0) return;
       const additive = e.shiftKey;
+      const prevSel = selectedIdsRef.current;
       let nextSel: string[];
       if (additive) {
-        const cur = selectedIdsRef.current;
+        const cur = prevSel;
         nextSel = cur.includes(node.id) ? cur.filter((x) => x !== node.id) : [...cur, node.id];
         setSelectedIds(nextSel);
-      } else if (selectedIdsRef.current.includes(node.id)) {
+      } else if (prevSel.includes(node.id)) {
         // 已选中:保持选区不变,准备整体拖动
-        nextSel = selectedIdsRef.current;
+        nextSel = prevSel;
       } else {
         nextSel = [node.id];
         setSelectedIds(nextSel);
       }
+      // 新建立的单选 → pointerup 未拖动时做检查器避让(主路径不经 selectNode)
+      const revealOnUp =
+        !additive &&
+        nextSel.length === 1 &&
+        (prevSel.length !== 1 || prevSel[0] !== nextSel[0]);
       // 拖动前把选区扩张到整组(组内任一成员参与拖动 = 整组动)
       const dragIds = expandSelectionToGroups(groupsRef.current, nextSel);
       if (additive) {
@@ -1229,7 +1372,14 @@ export default function CanvasPage({
       for (const n of nodesRef.current) {
         if (dragIds.includes(n.id)) origins.set(n.id, { x: n.x, y: n.y });
       }
-      dragRef.current = { ids: dragIds, sx: e.clientX, sy: e.clientY, origins, moved: false };
+      dragRef.current = {
+        ids: dragIds,
+        sx: e.clientX,
+        sy: e.clientY,
+        origins,
+        moved: false,
+        revealOnUp,
+      };
       dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
       // 挂 dragging 类(合成层提升);即使未真正移动也会在 pointerup 清空
       setDraggingIds(dragIds);
@@ -3549,9 +3699,21 @@ export default function CanvasPage({
         toastMsg('分镜表缺少表格块 · 无法铺节点');
         return;
       }
+      /* sbMaterializedRows = promptFrom.row 集合,与 Agent 同口径为 1-based */
       const done = sbMaterializedRows(sbNode.id, nodesRef.current);
-      const pending = tb.rows.map((_, i) => i).filter((r) => !done.includes(r));
-      if (!pending.length) {
+      const plans = planStoryboardMaterializeRows({
+        head: tb.head,
+        rows: tb.rows,
+        doneRows: done,
+        canvasNodes: nodesRef.current.map((n) => ({
+          id: n.id,
+          kind: n.kind,
+          label: n.title,
+          title: n.title,
+          data: (n.data ?? {}) as Record<string, unknown>,
+        })),
+      });
+      if (!plans.length) {
         toastMsg('当前行均已铺出 · 新增行后可追加铺');
         return;
       }
@@ -3566,11 +3728,19 @@ export default function CanvasPage({
       const created: CanvasNode[] = [];
       const newEdges: Edge[] = [];
       let imgs = 0;
-      pending.forEach((r) => {
+      const shotIdByRow = existingShotByRow(
+        nodesRef.current.map((n) => ({
+          id: n.id,
+          kind: n.kind,
+          data: (n.data ?? {}) as Record<string, unknown>,
+        })),
+        sbNode.id,
+      );
+      for (const plan of plans) {
+        const r = plan.rowNo - 1;
         const row = tb.rows[r] ?? [];
-        const rowNo = r + 1;
         const shotId = makeNodeId('shot');
-        const p = assembleH3Prompt(row, tb.head, base);
+        const p = assembleH3Prompt(row, tb.head, base, plan.subjects);
         const sec = resolveMaterializeSeconds(
           rowSeconds(row, tb.head),
           rowCell(row, tb.head, '画面描述'),
@@ -3579,11 +3749,11 @@ export default function CanvasPage({
         );
         const dur = normalizeShotDuration(
           { prompt: p.text, seconds: sec || undefined },
-          { label: `镜头 ${pad2(rowNo)}`, prompt: p.text },
+          { label: `镜头 ${pad2(plan.rowNo)}`, prompt: p.text },
         );
         created.push({
           id: shotId,
-          title: `镜头 ${pad2(rowNo)}`,
+          title: `镜头 ${pad2(plan.rowNo)}`,
           w: 250,
           x: SHOT_X,
           y: anchorY + r * ROW_STEP,
@@ -3592,7 +3762,8 @@ export default function CanvasPage({
           tag: NODE_TYPES.find((t) => t.id === 'shot'),
           data: {
             engine: 'mock', // 骨架期 mock;引导向导就绪后切 h3c
-            mode: 'text2video',
+            mode: plan.shotMode,
+            ...(plan.modeOverride ? { modeOverride: true } : {}),
             prompt: p.text,
             width: size.width,
             height: size.height,
@@ -3604,17 +3775,28 @@ export default function CanvasPage({
             tier,
             seed: 42 + r,
             refs: [],
-            promptFrom: { nodeId: sbNode.id, mode: 'row', row: rowNo } as PromptSource,
+            promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
           },
         } as CanvasNode);
         newEdges.push({ from: sbNode.id, to: shotId, cls: '', label: 'prompt' });
-        if (rowNeedsImage(row, tb.head)) {
+        shotIdByRow.set(plan.rowNo, shotId);
+
+        if (plan.strategy === 'continue' && plan.continueFromRow != null) {
+          const prevId = shotIdByRow.get(plan.continueFromRow);
+          if (prevId) newEdges.push({ from: prevId, to: shotId, cls: '', label: 'first-frame' });
+        }
+        for (const refId of plan.refNodeIds) {
+          if (nodesRef.current.some((n) => n.id === refId) || created.some((n) => n.id === refId)) {
+            newEdges.push({ from: refId, to: shotId, cls: '', label: 'ref-image' });
+          }
+        }
+        if (plan.createKeyframe) {
           imgs++;
           const imgId = makeNodeId('img');
           const z = assembleZImagePrompt(row, tb.head, base);
           created.push({
             id: imgId,
-            title: `图片生成 · 分镜静帧 ${pad2(rowNo)}`,
+            title: `图片生成 · 分镜静帧 ${pad2(plan.rowNo)}`,
             w: 232,
             x: IMG_X,
             y: anchorY + r * ROW_STEP,
@@ -3631,13 +3813,13 @@ export default function CanvasPage({
               height: size.height,
               guidance: 1.0,
               seeds: [42],
-              promptFrom: { nodeId: sbNode.id, mode: 'row', row: rowNo } as PromptSource,
+              promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
             },
           } as CanvasNode);
           newEdges.push({ from: sbNode.id, to: imgId, cls: '', label: 'prompt' });
           newEdges.push({ from: imgId, to: shotId, cls: '', label: 'first-frame' });
         }
-      });
+      }
       const ids = created.map((c) => c.id);
       setNodes((ns) => [
         ...ns.map((n) => (n.id === sbNode.id ? { ...n, data: { ...(n.data ?? {}), lastTable: gfm } } : n)),
@@ -3646,7 +3828,9 @@ export default function CanvasPage({
       setEdges((es) => [...es, ...newEdges]);
       commitEdit('分镜表铺节点');
       if (ids[0]) setSelectedIds([ids[0]]);
-      toastMsg(`已铺 ${pending.length} shot${imgs ? ` + ${imgs} image-gen` : ''} · ${pending.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`);
+      toastMsg(
+        `已铺 ${summarizeMaterializePlans(plans)} · ${plans.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`,
+      );
     },
     [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelectedIds, toastMsg, commitEdit],
   );
@@ -3863,7 +4047,7 @@ export default function CanvasPage({
    * 用户不必为了取消选中再左键点一下空白(那还会顺带关掉「+」弹层)。
    *
    * 只清选区,不动历史栈 —— 选中态不是编辑内容,不进撤销/重做。
-   * 保留检查器当前 tab(与「点空白清空选区」的既有行为一致,避免面板跳变)。
+   * 清空后左侧检查器随选区关闭(与「点空白清空选区」同口径)。
    */
   const handleWorldContextMenu = useCallback((e: React.MouseEvent) => {
     /* 先禁掉 Chromium 默认菜单,再判空选区 —— 顺序不能反:空选区时也要拦默认菜单,
@@ -3910,8 +4094,14 @@ export default function CanvasPage({
      用它会让百分比卡住。 */
   const zoomPct = `${zoomPctLive}%`;
   return (
-    <div className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}${viewportAnimating ? ' animating' : ''}`}>
-      <div className={`app${palCollapsed ? ' palette-collapsed' : ''}`} data-od-id="canvas-app">
+    <div
+      className={`pg-canvas${agentResizing ? ' agent-resizing' : ''}${inspResizing ? ' insp-resizing' : ''}${viewportAnimating ? ' animating' : ''}`}
+    >
+      <div
+        className={`app${palCollapsed ? ' palette-collapsed' : ''}${selected ? ' insp-open' : ''}`}
+        data-od-id="canvas-app"
+        style={{ ['--insp-w' as string]: `${inspW}px` }}
+      >
         <Toolbar
           projectName={projectName}
           onNavigate={onNavigate}
@@ -3952,11 +4142,91 @@ export default function CanvasPage({
         />
 
         <div className="work">
+          {/* 左:检查器(选中节点时在节点面板左侧弹出) */}
+          <InspectorPane
+            open={!!selected}
+            inspW={inspW}
+            selected={selected}
+            selNode={selNode}
+            inspectTitle={inspectTitle}
+            selInfo={selInfo}
+            onClose={() => selectNode(null)}
+            gripRef={inspGripRef}
+            onGripPointerDown={(e) => {
+              if (e.button !== 0 || !selected) return;
+              inspDragRef.current = { sx: e.clientX, w: inspW };
+              inspGripRef.current?.classList.add('on');
+              setInspResizing(true);
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+            onGripDoubleClick={() => {
+              setInspWidth(DEFAULT_INSP_W, true);
+              toastMsg('检查器宽度已重置为默认');
+              if (selected) requestAnimationFrame(() => revealNodeRef.current?.(selected));
+            }}
+            onGripKeyDown={(e) => {
+              if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                setInspWidth(inspW + 16, true);
+                if (selected) requestAnimationFrame(() => revealNodeRef.current?.(selected));
+              } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                setInspWidth(inspW - 16, true);
+              }
+            }}
+            infoMap={infoMap}
+            setInfoMap={setInfoMap}
+            setNodes={setNodes}
+            onCommitEdit={commitEdit}
+            toastMsg={toastMsg}
+            projectId={projectId}
+            activeCanvasId={activeCanvasId}
+            jobs={jobs}
+            assetsList={assetsList}
+            assetCache={assetCache}
+            runNode={(id) => void runNode(id)}
+            nodes={nodes}
+            takeResults={takeResults}
+            onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}
+            onUndoStoryboard={(sbNode) => undoStoryboard(sbNode)}
+            onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
+            onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
+            onOpenTimelinePage={() => onNavigate('timeline')}
+            edges={edges}
+            onRemoveEdge={(srcId, dstId) => {
+              // commitEdit 必须在 setEdges 之前(此刻 ref 仍是编辑前内容 = 撤销目标)
+              commitEdit('移除连线');
+              setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
+            }}
+            running={!!selected && videoPostRunning.includes(selected)}
+            onRerunSelected={() => {
+              if (!selected) return;
+              if (videoPostRunningRef.current.has(selected)) {
+                toastMsg('该节点正在增强中,请等待当前任务完成');
+                return;
+              }
+              // 长任务(视频增强)自带「已开始 + 节点进度」提示,这里不再抢着报「已提交重跑」
+              const selKind = nodes.find((x) => x.id === selected)?.kind;
+              const isLongTask = selKind === 'video-upscale';
+              void runNode(selected);
+              if (!isLongTask) toastMsg(`已提交重跑 · ${inspectTitle}`);
+            }}
+            onOpenAssetPicker={openAssetPicker}
+          />
+
           {/* 左:节点面板 */}
           <Palette
             collapsed={palCollapsed}
-            onCollapse={() => setPalCollapsed(true)}
-            onExpand={() => setPalCollapsed(false)}
+            onCollapse={() => {
+              setPalCollapsed(true);
+              // 面板收起后左侧变窄,一般不必避让;展开才可能挡节点
+            }}
+            onExpand={() => {
+              setPalCollapsed(false);
+              const sel = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0]! : null;
+              if (sel) requestAnimationFrame(() => revealNodeRef.current?.(sel));
+            }}
             onAddByDoubleClick={addFromPaletteDbl}
           />
 
@@ -4048,12 +4318,10 @@ export default function CanvasPage({
             }
           />
 
-          {/* 右:Agent 面板 + 检查器 */}
+          {/* 右:Agent 对话(常驻) */}
           <AgentPane
             chat={chat}
             agentW={agentW}
-            tab={tab}
-            onTabChange={setTab}
             onOpenSettings={() => onNavigate('settings')}
             onLocate={locate}
             toastMsg={toastMsg}
@@ -4089,53 +4357,6 @@ export default function CanvasPage({
             onRemoveFocus={(id) => setFocusNodes((cur) => cur.filter((x) => x.id !== id))}
             mentionNodes={nodes.map((n) => ({ id: n.id, title: n.title, kind: n.kind ?? '' }))}
             resolveMedia={resolveChatMedia}
-            inspector={
-              <InspectorPane
-                tab={tab}
-                selected={selected}
-                selNode={selNode}
-                inspectTitle={inspectTitle}
-                selInfo={selInfo}
-                infoMap={infoMap}
-                setInfoMap={setInfoMap}
-                setNodes={setNodes}
-                onCommitEdit={commitEdit}
-                toastMsg={toastMsg}
-                projectId={projectId}
-                activeCanvasId={activeCanvasId}
-                jobs={jobs}
-                assetsList={assetsList}
-                assetCache={assetCache}
-                runNode={(id) => void runNode(id)}
-                nodes={nodes}
-                takeResults={takeResults}
-                onMaterializeStoryboard={(sbNode, aspect, tier) => materializeStoryboard(sbNode, aspect, tier)}
-                onUndoStoryboard={(sbNode) => undoStoryboard(sbNode)}
-                onResyncStoryboard={(sbNode) => resyncStoryboard(sbNode)}
-                onPlanStoryboard={(docNode) => void onPlanStoryboard(docNode)}
-                onOpenTimelinePage={() => onNavigate('timeline')}
-                edges={edges}
-                onRemoveEdge={(srcId, dstId) => {
-                  // commitEdit 必须在 setEdges 之前(此刻 ref 仍是编辑前内容 = 撤销目标)
-                  commitEdit('移除连线');
-                  setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
-                }}
-                running={!!selected && videoPostRunning.includes(selected)}
-                onRerunSelected={() => {
-                  if (!selected) return;
-                  if (videoPostRunningRef.current.has(selected)) {
-                    toastMsg('该节点正在增强中,请等待当前任务完成');
-                    return;
-                  }
-                  // 长任务(视频增强)自带「已开始 + 节点进度」提示,这里不再抢着报「已提交重跑」
-                  const selKind = nodes.find((x) => x.id === selected)?.kind;
-                  const isLongTask = selKind === 'video-upscale';
-                  void runNode(selected);
-                  if (!isLongTask) toastMsg(`已提交重跑 · ${inspectTitle}`);
-                }}
-                onOpenAssetPicker={openAssetPicker}
-              />
-            }
           />
         </div>
 

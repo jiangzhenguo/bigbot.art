@@ -20,6 +20,7 @@ import {
   tableToGfm,
   STORYBOARD_HEAD,
   SB_SIZE,
+  planStoryboardMaterializeRows,
 } from '@bigbotart/shared';
 import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 
@@ -103,20 +104,28 @@ export const deterministicPlanner: Planner = async (params) => planDeterministic
 
 /* ═══ plan-storyboard:确定性模板(分镜表) ═══ */
 
-/** 自动档:按表格铺出 shot/image-gen 节点与连线(与渲染层 materialize 同构) */
+/** 自动档:按表格铺出 shot/image-gen 节点与连线(与渲染层 / Agent materialize 同构) */
 export function buildStoryboardMaterialized(
   storyboardId: string,
   head: string[],
   rows: string[][],
   basePrompt?: string,
+  canvasNodes?: CanvasNode[],
 ): { images: CanvasNode[]; shots: CanvasNode[]; edges: CanvasEdge[] } {
   const images: CanvasNode[] = [];
   const shots: CanvasNode[] = [];
   const edges: CanvasEdge[] = [];
   const size = SB_SIZE['16:9']!;
-  rows.forEach((row, r) => {
-    const rowNo = r + 1;
-    const promptText = assembleH3Prompt(row, head, basePrompt).text;
+  const plans = planStoryboardMaterializeRows({
+    head,
+    rows,
+    canvasNodes: canvasNodes ?? [],
+  });
+  const shotIdByRow = new Map<number, string>();
+  for (const plan of plans) {
+    const r = plan.rowNo - 1;
+    const row = rows[r] ?? [];
+    const promptText = assembleH3Prompt(row, head, basePrompt, plan.subjects).text;
     const sec = resolveMaterializeSeconds(
       rowSeconds(row, head),
       rowCell(row, head, '画面描述'),
@@ -125,16 +134,17 @@ export function buildStoryboardMaterialized(
     );
     const dur = normalizeShotDuration(
       { prompt: promptText, seconds: sec || undefined },
-      { label: `镜头 ${String(rowNo).padStart(2, '0')}`, prompt: promptText },
+      { label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`, prompt: promptText },
     );
     const shot: CanvasNode = {
       id: nid('shot'),
       kind: 'shot',
       position: { x: 880, y: 80 + r * 186 },
-      label: `镜头 ${String(rowNo).padStart(2, '0')}`,
+      label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`,
       data: {
         engine: 'mock',
-        mode: 'text2video',
+        mode: plan.shotMode,
+        ...(plan.modeOverride ? { modeOverride: true } : {}),
         prompt: promptText,
         width: size.width,
         height: size.height,
@@ -146,19 +156,28 @@ export function buildStoryboardMaterialized(
         tier: 'default',
         seed: 42 + r,
         refs: [],
-        promptFrom: { nodeId: storyboardId, mode: 'row', row: rowNo },
+        promptFrom: { nodeId: storyboardId, mode: 'row', row: plan.rowNo },
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     shots.push(shot);
+    shotIdByRow.set(plan.rowNo, shot.id);
     edges.push({ id: nid('edge'), source: storyboardId, target: shot.id, label: 'prompt' });
-    if (rowNeedsImage(row, head)) {
+
+    if (plan.strategy === 'continue' && plan.continueFromRow != null) {
+      const prevId = shotIdByRow.get(plan.continueFromRow);
+      if (prevId) edges.push({ id: nid('edge'), source: prevId, target: shot.id, label: 'first-frame' });
+    }
+    for (const refId of plan.refNodeIds) {
+      edges.push({ id: nid('edge'), source: refId, target: shot.id, label: 'ref-image' });
+    }
+    if (plan.createKeyframe) {
       const img: CanvasNode = {
         id: nid('img'),
         kind: 'image-gen',
         position: { x: 620, y: 80 + r * 186 },
-        label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
+        label: `图片生成 · 分镜静帧 ${String(plan.rowNo).padStart(2, '0')}`,
         data: {
           engine: 'mlxgen',
           // 🆕 不写 model(2026-09-29 v1 工具模型)/ steps(2026-10-14 按模型缺省,Turbo=8):
@@ -169,7 +188,7 @@ export function buildStoryboardMaterialized(
           height: size.height,
           guidance: 1.0,
           seeds: [42],
-          promptFrom: { nodeId: storyboardId, mode: 'row', row: rowNo },
+          promptFrom: { nodeId: storyboardId, mode: 'row', row: plan.rowNo },
         },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -178,7 +197,7 @@ export function buildStoryboardMaterialized(
       edges.push({ id: nid('edge'), source: storyboardId, target: img.id, label: 'prompt' });
       edges.push({ id: nid('edge'), source: img.id, target: shot.id, label: 'first-frame' });
     }
-  });
+  }
   return { images, shots, edges };
 }
 
