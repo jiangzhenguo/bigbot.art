@@ -53,6 +53,10 @@ function makeStore(nodes: CanvasNode[]): { store: unknown; snapshot: Snap } {
 const shot = (id: string, label: string, prompt = ''): CanvasNode =>
   ({ id, kind: 'shot', label, position: { x: 0, y: 0 }, data: { engine: 'h3c', prompt } }) as unknown as CanvasNode;
 
+/** 图片节点仍走 update_node 写 prompt;shot 的成功写入用例改挂在这里,避免和镜头闸门缠在一起 */
+const image = (id: string, label: string, prompt = ''): CanvasNode =>
+  ({ id, kind: 'image-gen', label, position: { x: 0, y: 0 }, data: { engine: 'mlxgen', prompt } }) as unknown as CanvasNode;
+
 function handlersWith(nodes: CanvasNode[]) {
   const { store, snapshot } = makeStore(nodes);
   const h = new ToolHandlers(store as never, {} as never, {} as never, {} as never, {} as never, {} as never);
@@ -70,7 +74,7 @@ beforeAll(async () => {
 
 describe('canvas.update_node — 字符串化 data(事故现场形态)', () => {
   it('data 传 JSON 字符串 → prompt 真的落进节点(修复前这里静默跳过)', async () => {
-    const { h, snapshot } = handlersWith([shot('new9-nhz9', '镜头（视频）')]);
+    const { h, snapshot } = handlersWith([image('new9-nhz9', '产品图')]);
     const payload = JSON.stringify({ prompt: '# Camera 运镜\nStatic medium shot, gently pushing in.' });
     const res = await call(h, 'canvas.update_node', { nodeId: 'new9-nhz9', data: payload });
     expect(res.ok).toBe(true);
@@ -80,9 +84,9 @@ describe('canvas.update_node — 字符串化 data(事故现场形态)', () => {
   });
 
   it('标题当 nodeId 也能写入(与标题容错叠加)', async () => {
-    const { h, snapshot } = handlersWith([shot('shot-real-id', '镜头 03')]);
+    const { h, snapshot } = handlersWith([image('img-real-id', '产品图')]);
     const res = await call(h, 'canvas.update_node', {
-      nodeId: '镜头 03',
+      nodeId: '产品图',
       data: JSON.stringify({ prompt: '风景' }),
     });
     expect(res.ok).toBe(true);
@@ -113,7 +117,7 @@ describe('canvas.update_node — 字符串化 data(事故现场形态)', () => {
 
 describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独立字符串)', () => {
   it('顶层 prompt 直接写入 data.prompt(不经 data 对象,规避序列化)', () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头（视频）')]);
+    const { h, snapshot } = handlersWith([image('n1', '产品图')]);
     const long = '# 场景\n中式庭院,深色木质雕花门…\n\n# 动作\n人物站立,双手交叠…';
     return call(h, 'canvas.update_node', { nodeId: 'n1', prompt: long }).then((res) => {
       expect(res.ok).toBe(true);
@@ -122,7 +126,7 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
   });
 
   it('顶层 prompt 与 data.prompt 同时给 → 顶层优先', () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头')]);
+    const { h, snapshot } = handlersWith([image('n1', '产品图')]);
     return call(h, 'canvas.update_node', {
       nodeId: 'n1',
       prompt: '顶层内容',
@@ -136,7 +140,7 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
   });
 
   it('只给顶层 prompt、不给 data 也能写(最小调用)', () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头')]);
+    const { h, snapshot } = handlersWith([image('n1', '产品图')]);
     return call(h, 'canvas.update_node', { nodeId: 'n1', prompt: 'hi' }).then((res) => {
       expect(res.ok).toBe(true);
       expect((snapshot.canvases[0]!.nodes[0]!.data as { prompt?: string }).prompt).toBe('hi');
@@ -152,7 +156,7 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
   });
 
   it('顶层 prompt 支持多行与特殊字符(真实提示词形态)', () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头')]);
+    const { h, snapshot } = handlersWith([image('n1', '产品图')]);
     const md = '# Camera 运镜\nStatic medium shot, gently pushing in.\n\n含"引号"与\\反斜杠';
     return call(h, 'canvas.update_node', { nodeId: 'n1', prompt: md }).then((res) => {
       expect(res.ok).toBe(true);
@@ -160,8 +164,8 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
     });
   });
 
-  it('旧的 data.prompt 写法仍然有效(向后兼容)', () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头')]);
+  it('旧的 data.prompt 写法仍然有效(向后兼容,图片节点)', () => {
+    const { h, snapshot } = handlersWith([image('n1', '产品图')]);
     return call(h, 'canvas.update_node', { nodeId: 'n1', data: { prompt: '旧写法' } }).then((res) => {
       expect(res.ok).toBe(true);
       expect((snapshot.canvases[0]!.nodes[0]!.data as { prompt?: string }).prompt).toBe('旧写法');
@@ -169,8 +173,8 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
   });
 
   it('标题当 nodeId + 顶层 prompt 也能写(与容错叠加)', () => {
-    const { h, snapshot } = handlersWith([shot('real-id', '镜头 03')]);
-    return call(h, 'canvas.update_node', { nodeId: '镜头 03', prompt: 'x' }).then((res) => {
+    const { h, snapshot } = handlersWith([image('real-id', '产品图')]);
+    return call(h, 'canvas.update_node', { nodeId: '产品图', prompt: 'x' }).then((res) => {
       expect(res.ok).toBe(true);
       expect((snapshot.canvases[0]!.nodes[0]!.data as { prompt?: string }).prompt).toBe('x');
     });
@@ -179,13 +183,13 @@ describe('canvas.update_node — 顶层 prompt 参数(B 方案:长文本走独�
 
 describe('canvas.update_node — 正常对象路径(不回归)', () => {
   it('对象 data 合并进现有字段(未提及的键保留)', async () => {
-    const { h, snapshot } = handlersWith([shot('n1', '镜头', 'old')]);
+    const { h, snapshot } = handlersWith([image('n1', '产品图', 'old')]);
     const res = await call(h, 'canvas.update_node', { nodeId: 'n1', data: { prompt: 'new', width: 544 } });
     expect(res.ok).toBe(true);
     const d = snapshot.canvases[0]!.nodes[0]!.data as { prompt?: string; width?: number; engine?: string };
     expect(d.prompt).toBe('new');
     expect(d.width).toBe(544);
-    expect(d.engine).toBe('h3c'); // 原有字段保留
+    expect(d.engine).toBe('mlxgen'); // 原有字段保留
   });
 
   it('只改 label 不传 data 也能成功', async () => {
@@ -208,5 +212,38 @@ describe('canvas.update_node — 正常对象路径(不回归)', () => {
     const res = await call(h, 'canvas.update_node', { nodeId: 'ghost', data: { prompt: 'x' } });
     expect(res.ok).toBe(false);
     expect(res.result).toContain('不存在');
+  });
+});
+
+describe('canvas.update_node — shot 提示词闸门', () => {
+  it('顶层 prompt 写到镜头上被拒绝,标题和原提示词都不变', async () => {
+    const { h, snapshot } = handlersWith([shot('n1', '镜头 03', '原有')]);
+    const res = await call(h, 'canvas.update_node', { nodeId: 'n1', prompt: '新提示词', label: '改名' });
+    expect(res.ok).toBe(false);
+    expect(res.result).toContain('h3.write_prompt');
+    const node = snapshot.canvases[0]!.nodes[0]!;
+    expect(node.label).toBe('镜头 03');
+    expect((node.data as { prompt?: string }).prompt).toBe('原有');
+  });
+
+  it('data.prompt 与 width 一起写 → 整单拒绝,宽高也不落', async () => {
+    const { h, snapshot } = handlersWith([shot('n1', '镜头', '原有')]);
+    const res = await call(h, 'canvas.update_node', {
+      nodeId: 'n1',
+      data: JSON.stringify({ prompt: '风景', width: 800 }),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.result).toContain('h3.write_prompt');
+    const d = snapshot.canvases[0]!.nodes[0]!.data as { prompt?: string; width?: number };
+    expect(d.prompt).toBe('原有');
+    expect(d.width).toBeUndefined();
+  });
+
+  it('只改时长不带 prompt → 放行', async () => {
+    const { h, snapshot } = handlersWith([shot('n1', '镜头')]);
+    const res = await call(h, 'canvas.update_node', { nodeId: 'n1', data: { seconds: 5 } });
+    expect(res.ok).toBe(true);
+    expect(res.result).not.toContain('h3.write_prompt');
+    expect((snapshot.canvases[0]!.nodes[0]!.data as { seconds?: number }).seconds).toBe(5);
   });
 });
