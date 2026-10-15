@@ -147,6 +147,87 @@ describe('planVideoPostStages — 阶段计划', () => {
     const s = VP.planVideoPostStages(VP.normalizeVideoPost({ inputPath: '/x.mp4', faceModel: 'codeformer', fidelityWeight: 0.9 }));
     expect(s.some((x) => x.includes('CodeFormer') && x.includes('0.9'))).toBe(true);
   });
+
+  it('SeedVR2 取代 Real-ESRGAN,×1 仍然跑修复', () => {
+    const up = VP.normalizeVideoPost({ inputPath: '/x.mp4', superRes: 'seedvr2', scale: 2 });
+    expect(up.doSeedVr).toBe(true);
+    expect(up.doSuperRes).toBe(false);
+    expect(up.seedvrModel).toBe(VP.SEEDVR2_VIDEO_MODEL);
+    const stages = VP.planVideoPostStages(up);
+    expect(stages[0]).toContain('SeedVR2');
+    expect(stages.join(' ')).not.toContain('Real-ESRGAN');
+    const restore = VP.normalizeVideoPost({ inputPath: '/x.mp4', superRes: 'seedvr2', scale: 1 });
+    expect(restore.doSeedVr).toBe(true);
+    expect(restore.doSuperRes).toBe(false);
+  });
+});
+
+describe('SeedVR2 视频超分命令', () => {
+  it('×2 带非安全显存档和 29/8 分块,且是视频路径不是图片路径', () => {
+    const n = VP.normalizeVideoPost({ inputPath: '/in.mp4', superRes: 'seedvr2', scale: 2 });
+    const args = VP.buildSeedVrVideoArgs('/in.mp4', '/out.mp4', n);
+    expect(args[0]).toBe('upscale');
+    expect(args[args.indexOf('--model') + 1]).toBe('AbstractFramework/seedvr2-3b-8bit');
+    expect(args[args.indexOf('--video-path') + 1]).toBe('/in.mp4');
+    expect(args).not.toContain('--image-path');
+    expect(args[args.indexOf('--resolution') + 1]).toBe('2x');
+    expect(args[args.indexOf('--output') + 1]).toBe('/out.mp4');
+    expect(args).toContain('--force-unsafe-video-memory');
+    expect(args[args.indexOf('--temporal-chunk-size') + 1]).toBe('29');
+    expect(args[args.indexOf('--temporal-chunk-overlap') + 1]).toBe('8');
+    expect(args).toContain('--low-ram');
+    expect(args).toContain('--json-events');
+    expect(args).not.toContain('--prompt');
+    expect(args).not.toContain('--drop-audio');
+  });
+
+  it('×1 修复不带非安全显存档', () => {
+    const n = VP.normalizeVideoPost({ inputPath: '/in.mp4', superRes: 'seedvr2', scale: 1 });
+    const args = VP.buildSeedVrVideoArgs('/in.mp4', '/out.mp4', n);
+    expect(args[args.indexOf('--resolution') + 1]).toBe('1x');
+    expect(args).not.toContain('--force-unsafe-video-memory');
+  });
+
+  it('未知模型名回落到 3B 8bit', () => {
+    const n = VP.normalizeVideoPost({ inputPath: '/in.mp4', superRes: 'seedvr2', seedvrModel: '/tmp/evil' });
+    expect(n.seedvrModel).toBe(VP.SEEDVR2_VIDEO_MODEL);
+  });
+
+  it('SeedVR2 之后的修脸固定 ×1 且不再跑 Real-ESRGAN', () => {
+    const n = VP.normalizeVideoPost({ inputPath: '/in.mp4', superRes: 'seedvr2', scale: 2, faceModel: 'gfpgan' });
+    const face = VP.faceOnlyAfterSeedVr(n);
+    const args = VP.buildPostArgs('/mid.mp4', '/out.mp4', face);
+    expect(args[args.indexOf('-s') + 1]).toBe('1');
+    expect(args[args.indexOf('--sr') + 1]).toBe('none');
+    expect(args[args.indexOf('--face') + 1]).toBe('gfpgan');
+  });
+
+  it('解析 json-events,忽略普通日志', () => {
+    expect(VP.parseSeedVrEvent('loading weights')).toBeNull();
+    expect(VP.parseSeedVrEvent('{"phase":"denoise","step":2,"total_steps":8}')).toEqual({
+      phase: 'denoise',
+      progress: undefined,
+      step: 2,
+      total: 8,
+    });
+  });
+
+  it('缺 mlxgen 或权重时 SeedVR2 提交被拦下,Real-ESRGAN 不受影响', () => {
+    const base = {
+      realesrgan: true,
+      faceFixScript: true,
+      python: true,
+      gfpganWeight: true,
+      codeformerWeight: true,
+      ffmpeg: true,
+      missing: [] as string[],
+    };
+    const seed = VP.normalizeVideoPost({ inputPath: '/x.mp4', superRes: 'seedvr2', faceModel: 'none' });
+    expect(VP.checkToolingFor(seed, { ...base, mlxgen: false, seedvr2: true })).toContain('mlxgen');
+    expect(VP.checkToolingFor(seed, { ...base, mlxgen: true, seedvr2: false })).toContain('SeedVR2');
+    const esr = VP.normalizeVideoPost({ inputPath: '/x.mp4', faceModel: 'none' });
+    expect(VP.checkToolingFor(esr, { ...base, mlxgen: false, seedvr2: false })).toBeNull();
+  });
 });
 
 describe('buildPostArgs / buildPostSpawn — PyTorch 统一管线命令行', () => {
@@ -439,6 +520,58 @@ describe('运行态真源(防「退出画布再进入后可重复发起」)', ()
     expect(r.ok).toBe(false);
     expect(VP.listRunningVideoPost()).toEqual([]);
   });
+
+  it('没有任务时取消会说明原因', () => {
+    expect(VP.cancelVideoPost('nobody')).toEqual({ ok: false, error: '该节点没有正在进行的增强' });
+  });
+
+  it('入队后立刻取消:还没拉起子进程也返回已取消,运行态清空', async (ctx) => {
+    if (!hasFfmpeg || !srcVideo) return ctx.skip();
+    const p = VP.videoUpscale({
+      inputPath: srcVideo,
+      nodeId: 'cancel-queued',
+      superRes: 'none',
+      scale: 1,
+      faceModel: 'none',
+      deblock: true,
+    });
+    // videoUpscale 把真正执行排进微任务;同一轮同步取消,信号在 spawn 之前就已中止
+    expect(VP.cancelVideoPost('cancel-queued')).toEqual({ ok: true });
+    const r = await p;
+    expect(r).toEqual({ ok: false, error: '已取消' });
+    expect(VP.listRunningVideoPost()).toEqual([]);
+  });
+
+  it('进行中取消:子进程被终止,结果是已取消而不是阶段失败', async (ctx) => {
+    if (!hasFfmpeg || !srcVideo) return ctx.skip();
+    const long = join(outDir, 'long-cancel.mp4');
+    const made = spawnSync(
+      'ffmpeg',
+      ['-y', '-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=24:duration=8', '-pix_fmt', 'yuv420p', long],
+      { stdio: 'ignore' },
+    );
+    if (made.status !== 0 || !existsSync(long)) return ctx.skip();
+    const p = VP.videoUpscale({
+      inputPath: long,
+      nodeId: 'cancel-live',
+      superRes: 'none',
+      scale: 1,
+      faceModel: 'none',
+      deblock: true,
+    });
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !VP.listRunningVideoPost().some((r) => r.nodeId === 'cancel-live')) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(VP.listRunningVideoPost().map((r) => r.nodeId)).toContain('cancel-live');
+    expect(VP.cancelVideoPost('cancel-live').ok).toBe(true);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe('已取消');
+    expect(VP.listRunningVideoPost()).toEqual([]);
+    // 取消别人不该误报成功
+    expect(VP.cancelVideoPost('cancel-live').ok).toBe(false);
+  }, 60_000);
 });
 
 describe('videoUpscale — 输入校验(不依赖工具链)', () => {

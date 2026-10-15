@@ -18,6 +18,7 @@ import {
   type RenderRequest,
   type RenderJobHandle,
   type RenderStatus,
+  defaultGenerateSteps,
 } from '@bigbotart/shared';
 
 const execFileP = promisify(execFile);
@@ -339,14 +340,10 @@ export class MlXGenProvider implements Provider {
     if (kind === 'generate') {
       cmd.push('--width', String(p.width ?? 768), '--height', String(p.height ?? 768));
       // Qwen-Image-2.1 官方推荐 40 步且无 guidance(guidance 1.0 时负向 pass 整体跳过);
-      // 其余模型维持 24 步 + guidance 1.0 的既有默认(见 mlxgen 各模型 README)
-      // 按 **repoModel 正则**判 2.1 族(不能只匹配某一个 repoId:本地路径时 model 是目录,
-      // 且 2.1 现有 bf16 与历史 8bit 两个标识,漏一个就会让 40 步默认静默回落成 24)
-      // Turbo(2026-10):8 步蒸馏,采样表(sample_sigmas)内置于 checkpoint,
-      // 引擎会把步数锁成 len(sigmas)=8、忽略 --steps —— 默认给 8 让 UI/日志说真话
-      const isQwen21Turbo = /qwen.*2\.1.*turbo/i.test(repoModel);
-      const isQwen21 = /qwen.*2\.1/i.test(repoModel);
-      const defSteps = isQwen21Turbo ? 8 : isQwen21 ? 40 : 24;
+      // 其余模型维持 24 步 + guidance 1.0 的既有默认(见 mlxgen 各模型 README);
+      // Turbo(2026-10)8 步蒸馏,采样表内置于 checkpoint、引擎锁 8 步 —— 缺省给 8 说真话。
+      // 缺省步数唯一真源是 shared 的 defaultGenerateSteps(检查器显示同表,禁止再抄一份)。
+      const defSteps = defaultGenerateSteps(repoModel);
       // ⚠️ 根因记录(2026-09,真实事故:klein exit 2 且表现为「同参数一次成一次败」):
       // FLUX.2 Klein 是**蒸馏**模型,裸 `mflux-generate-flux2` 只对 FLUX.2 **base** 模型接受
       // `--guidance`;给 klein 传会被 argparse 直接拒绝并退出:

@@ -3,7 +3,7 @@
  *
  * 实现 h3 出片后处理流水线(见 /Users/jiangzhenguo/ai/h3/POST_PROCESSING.md):
  *   ① 去块(deblock)   — ffmpeg `deblock` + 高码率重编码,消灭 h264 压缩块(超分前做,否则块被放大成方格)
- *   ② 超分(upscale)   — Real-ESRGAN 逐帧(basicsr.RealESRGANer,PyTorch + MPS),真人用 realesrgan-x4plus
+ *   ② 超分(upscale)   — Real-ESRGAN 逐帧(basicsr.RealESRGANer,PyTorch + MPS),或 SeedVR2(mlxgen 视频超分)
  *   ③ 修脸(faceFix)   — GFPGAN / CodeFormer 逐帧人脸修复(face_fix_video.py,mps)
  *
  * 与 frames.ts / stitch.ts 的分工:那两个模块是**秒级纯 ffmpeg**,本模块是**分钟级**
@@ -13,11 +13,11 @@
  *   - 进度按阶段回调(拆帧/超分/修脸/拼回),驱动节点 badge。
  *
  * 产物落 ${OUTPUTS_DIR}/video-post/(bba-output 协议可读)。
- * R2 红线:本模块是**本地后处理**,不加载 h3 模型、不做扩散推理,不涉及 BIGBOTART_DRYRUN 开关;
- * 但它消耗真实算力(分钟级),故只由用户显式点击/提交触发,绝不在后台自动跑。
+ * R2 红线:不加载 h3、不读 BIGBOTART_DRYRUN。Real-ESRGAN 是本地后处理;
+ * SeedVR2 会经 mlxgen 加载 MLX 超分模型(用户点运行才启动),同样不在后台自动跑。
  */
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, existsSync, copyFileSync, unlinkSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, copyFileSync, unlinkSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
 import type {
@@ -101,6 +101,27 @@ function ensureFacexlibWeights(): void {
 
 /** 可用的 Real-ESRGAN 模型(POST_PROCESSING.md §2.1) */
 export const SR_MODELS = ['realesrgan-x4plus', 'realesr-animevideov3', 'realesrgan-x4plus-anime'] as const;
+/** SeedVR2 视频超分默认包(本机 HF 缓存已有的 3B 8bit;与图片节点 image-upscale 同口径) */
+export const SEEDVR2_VIDEO_MODEL = 'AbstractFramework/seedvr2-3b-8bit';
+/** 允许传给 `mlxgen upscale --model` 的 SeedVR2 标识(未知值回落默认包,防任意路径) */
+const SEEDVR_MODEL_ALIASES: Record<string, string> = {
+  seedvr2: SEEDVR2_VIDEO_MODEL,
+  'seedvr2-3b': SEEDVR2_VIDEO_MODEL,
+  'AbstractFramework/seedvr2-3b-8bit': SEEDVR2_VIDEO_MODEL,
+  'AbstractFramework/seedvr2-3b-4bit': 'AbstractFramework/seedvr2-3b-4bit',
+  'AbstractFramework/seedvr2-7b-8bit': 'AbstractFramework/seedvr2-7b-8bit',
+  'AbstractFramework/seedvr2-7b-4bit': 'AbstractFramework/seedvr2-7b-4bit',
+  'ByteDance-Seed/SeedVR2-3B': 'ByteDance-Seed/SeedVR2-3B',
+  'ByteDance-Seed/SeedVR2-7B': 'ByteDance-Seed/SeedVR2-7B',
+  'seedvr2-7b': 'seedvr2-7b',
+  'seedvr2-7b-sharp': 'seedvr2-7b-sharp',
+};
+
+/** 归一化 SeedVR2 模型名;不在白名单里的一律用 3B 8bit */
+export function resolveSeedVrModel(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  return SEEDVR_MODEL_ALIASES[s] ?? SEEDVR2_VIDEO_MODEL;
+}
 /** 修脸模型 */
 export const FACE_MODELS = ['gfpgan', 'codeformer', 'none'] as const;
 
@@ -123,8 +144,13 @@ export const VIDEO_POST_DEFAULTS = {
 
 export interface NormalizedVideoPost {
   scale: number;
-  /** 实际是否跑 Real-ESRGAN(scale>1 且 superRes !== 'none') */
+  superRes: 'realesrgan' | 'seedvr2' | 'none';
+  /** 实际是否跑 Real-ESRGAN(scale>1 且 superRes=realesrgan) */
   doSuperRes: boolean;
+  /** 实际是否跑 SeedVR2(mlxgen 视频超分/修复) */
+  doSeedVr: boolean;
+  /** 传给 mlxgen --model 的 SeedVR2 标识 */
+  seedvrModel: string;
   srModel: string;
   /** 实际是否跑修脸 */
   doFaceFix: boolean;
@@ -148,7 +174,9 @@ export function normalizeVideoPost(req: VideoUpscaleRequest): NormalizedVideoPos
   const d = VIDEO_POST_DEFAULTS;
   const scaleRaw = Number(req.scale ?? d.scale);
   const scale = [1, 2, 3, 4].includes(Math.round(scaleRaw)) ? Math.round(scaleRaw) : d.scale;
-  const superRes = req.superRes === 'none' ? 'none' : 'realesrgan';
+  const superRes = req.superRes === 'none' ? 'none' : req.superRes === 'seedvr2' ? 'seedvr2' : 'realesrgan';
+  // SeedVR2 的 ×1 是原分辨率修复,仍然要跑;Real-ESRGAN 的 ×1 才是「不超分」
+  const doSeedVr = superRes === 'seedvr2';
   const doSuperRes = superRes === 'realesrgan' && scale > 1;
   const faceRaw = String(req.faceModel ?? d.faceModel);
   const doFaceFix = faceRaw === 'gfpgan' || faceRaw === 'codeformer';
@@ -167,7 +195,10 @@ export function normalizeVideoPost(req: VideoUpscaleRequest): NormalizedVideoPos
   };
   return {
     scale,
+    superRes,
     doSuperRes,
+    doSeedVr,
+    seedvrModel: resolveSeedVrModel(req.seedvrModel),
     srModel,
     doFaceFix,
     faceModel: faceRaw === 'codeformer' ? 'codeformer' : 'gfpgan',
@@ -200,7 +231,8 @@ export function buildDeblockVf(): string {
 export function planVideoPostStages(n: NormalizedVideoPost): string[] {
   const stages: string[] = [];
   if (n.deblock) stages.push(`去块(ffmpeg deblock · CRF ${n.deblockCrf})`);
-  if (n.doSuperRes) stages.push(`Real-ESRGAN ×${n.scale}(${n.srModel})`);
+  if (n.doSeedVr) stages.push(`SeedVR2 ×${n.scale}(${n.seedvrModel})`);
+  else if (n.doSuperRes) stages.push(`Real-ESRGAN ×${n.scale}(${n.srModel})`);
   if (n.doFaceFix) {
     stages.push(
       n.faceModel === 'gfpgan'
@@ -237,6 +269,109 @@ export function buildPostArgs(
   args.push('--device', n.device);
   args.push('--crf', String(n.crf));
   return args;
+}
+
+/**
+ * SeedVR2 已经放大过之后,修脸必须按 ×1、且不再跑 Real-ESRGAN。
+ * 否则 PyTorch 管线会按节点上的 scale 再放大一次。
+ */
+export function faceOnlyAfterSeedVr(n: NormalizedVideoPost): NormalizedVideoPost {
+  return { ...n, scale: 1, superRes: 'none', doSuperRes: false, doSeedVr: false };
+}
+
+/**
+ * `mlxgen upscale` 视频命令(纯函数)。
+ *
+ * 放大超过 1× 时引擎的安全档会直接拒绝(只允许原分辨率修复),
+ * 所以显式带 `--force-unsafe-video-memory`,并用文档里验证过的 29/8 分块。
+ * 缓存上限钉在 8GB,与引擎视频安全档的默认值一致。
+ */
+export function buildSeedVrVideoArgs(inputPath: string, outputPath: string, n: NormalizedVideoPost): string[] {
+  const args = [
+    'upscale',
+    '--model', n.seedvrModel,
+    '--video-path', inputPath,
+    '--resolution', `${n.scale}x`,
+    '--color-correction', 'wavelet',
+    '--low-ram',
+    '--mlx-cache-limit-gb', '8',
+    '--json-events',
+    '--output', outputPath,
+  ];
+  if (n.scale > 1) {
+    args.push('--temporal-chunk-size', '29', '--temporal-chunk-overlap', '8', '--force-unsafe-video-memory');
+  }
+  return args;
+}
+
+/** mlxgen --json-events 的一行(纯函数);非 JSON 或没有进度字段则忽略 */
+export function parseSeedVrEvent(line: string): { phase?: string; progress?: number; step?: number; total?: number } | null {
+  const t = line.trim();
+  if (!t.startsWith('{')) return null;
+  try {
+    const ev = JSON.parse(t) as { phase?: unknown; progress?: unknown; step?: unknown; total_steps?: unknown };
+    const phase = typeof ev.phase === 'string' ? ev.phase : undefined;
+    const progress = typeof ev.progress === 'number' && Number.isFinite(ev.progress) ? ev.progress : undefined;
+    const step = typeof ev.step === 'number' && Number.isFinite(ev.step) ? ev.step : undefined;
+    const total = typeof ev.total_steps === 'number' && Number.isFinite(ev.total_steps) ? ev.total_steps : undefined;
+    if (!phase && progress == null && step == null) return null;
+    return { phase, progress, step, total };
+  } catch {
+    return null;
+  }
+}
+
+const SEEDVR_PHASE_LABEL: Record<string, string> = {
+  start: '加载 SeedVR2',
+  load: '加载 SeedVR2',
+  denoise: 'SeedVR2 修复',
+  decode: '解码',
+  save: '写出视频',
+  complete: '完成',
+};
+
+/** 登录 shell 里找 mlxgen(Electron 的 PATH 常常没有 ~/.local/bin) */
+export function resolveMlxgenBin(): string | undefined {
+  const override = process.env.BIGBOTART_MLXGEN_BIN?.trim();
+  if (override) return existsSync(override) ? override : undefined;
+  try {
+    const out = execFileSync('sh', ['-lc', 'command -v mlxgen'], { encoding: 'utf-8', timeout: 5000 }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 默认 3B 8bit 包在 HF 缓存里是否真有权重(符号链接能解析、体积 > 1MB) */
+export function seedvr2WeightsReady(repoId: string = SEEDVR2_VIDEO_MODEL): boolean {
+  const hub = process.env.HF_HOME
+    ? join(process.env.HF_HOME, 'hub')
+    : join(homedir(), '.cache', 'huggingface', 'hub');
+  const root = join(hub, `models--${repoId.replace(/[\/:]/g, '--')}`, 'snapshots');
+  const walk = (dir: string, depth: number): boolean => {
+    if (depth > 4 || !existsSync(dir)) return false;
+    let names: string[] = [];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return false;
+    }
+    for (const name of names) {
+      const p = join(dir, name);
+      try {
+        const st = statSync(p);
+        if (st.isDirectory()) {
+          if (walk(p, depth + 1)) return true;
+        } else if (name.endsWith('.safetensors') && st.size > 1_000_000) {
+          return true;
+        }
+      } catch {
+        /* 悬空链接 = 权重没下完 */
+      }
+    }
+    return false;
+  };
+  return walk(root, 0);
 }
 
 /** 后处理脚本启动参数(纯函数便于单测):cwd 固定到 GFPGAN 根(facexlib 相对权重目录依赖它) */
@@ -282,6 +417,8 @@ export function estimateVideoPostSeconds(durationSec: number, fps: number, n: No
   let sec = 0;
   if (n.doFaceFix) sec += frames * 1.35;
   if (n.doSuperRes) sec += frames * 0.35;
+  // SeedVR2 3B 官方 5 秒档:1× 约 0.5s/帧,2× 约 3.6s/帧(539s / 149 帧)
+  if (n.doSeedVr) sec += frames * (n.scale <= 1 ? 0.6 : 3.6 * (n.scale / 2));
   if (n.deblock) sec += durationSec * 0.05;
   return Math.round(sec);
 }
@@ -359,6 +496,11 @@ export function probeVideoPostTooling(): VideoPostTooling {
   if (!gfpganWeight) missing.push('GFPGAN 权重缺失(GFPGANv1.4.pth)');
   const codeformerWeight = exists(join(TOOL_PATHS.weightsDir, 'codeformer.pth'));
   if (!codeformerWeight) missing.push('CodeFormer 权重缺失(codeformer.pth)');
+  const mlxgenPath = resolveMlxgenBin();
+  const mlxgen = Boolean(mlxgenPath);
+  if (!mlxgen) missing.push('mlxgen 未安装(SeedVR2 视频超分需要)');
+  const seedvr2 = seedvr2WeightsReady();
+  if (!seedvr2) missing.push(`SeedVR2 权重未就绪(${SEEDVR2_VIDEO_MODEL})`);
   // facexlib 检测/parsing 权重:缺了不会报错,但会触发联网下载(国内链路极慢,表现为卡住)
   const fxDir = facexlibWeightsDir();
   const fxMissing = FACEXLIB_WEIGHT_FILES.filter((f) => !exists(join(fxDir, f)));
@@ -377,6 +519,9 @@ export function probeVideoPostTooling(): VideoPostTooling {
     gfpganWeight,
     codeformerWeight,
     ffmpeg: true, // ffmpeg/ffprobe 在 frames.ts/stitch.ts 已是既有硬依赖
+    mlxgen,
+    mlxgenPath,
+    seedvr2,
     missing,
   };
 }
@@ -399,6 +544,12 @@ export function checkToolingFor(n: NormalizedVideoPost, t: VideoPostTooling): st
     if (n.faceModel === 'gfpgan' && !t.gfpganWeight) return 'GFPGAN 权重未就绪:~/ai/weights/GFPGANv1.4.pth 不存在';
     if (n.faceModel === 'codeformer' && !t.codeformerWeight) return 'CodeFormer 权重未就绪:~/ai/weights/codeformer.pth 不存在';
   }
+  if (n.doSeedVr) {
+    if (!t.mlxgen) return 'mlxgen 未就绪:SeedVR2 视频超分需要 mlxgen(在 mlx-gen 仓库执行 uv tool install --editable .)';
+    if (n.seedvrModel === SEEDVR2_VIDEO_MODEL && !t.seedvr2) {
+      return `SeedVR2 权重未就绪:请在设置页下载 ${SEEDVR2_VIDEO_MODEL},或执行 mlxgen download --model ${SEEDVR2_VIDEO_MODEL}`;
+    }
+  }
   return null;
 }
 
@@ -418,7 +569,10 @@ export function buildStagePlan(n: NormalizedVideoPost, inputPath: string): Video
     // ffmpeg 重编码:约 3-5% 实时,给个下限避免权重为 0
     plan.push({ kind: 'deblock', label: '去块', weight: Math.max(2, dur * 0.15) });
   }
-  if (n.doSuperRes) {
+  if (n.doSeedVr) {
+    const per = n.scale <= 1 ? 0.6 : 3.6 * (n.scale / 2);
+    plan.push({ kind: 'seedvr', label: `SeedVR2 ×${n.scale}`, weight: Math.max(8, frames * per) });
+  } else if (n.doSuperRes) {
     plan.push({ kind: 'superres', label: `超分 ×${n.scale}`, weight: Math.max(3, frames * 0.35) });
   }
   if (n.doFaceFix) {
@@ -436,7 +590,7 @@ export type VideoPostProgress = Omit<VideoPostProgressEvent, 'nodeId'>;
 
 /** 阶段权重(按耗时占比给整体进度加权;粗估即可,目的是跨阶段单调递增) */
 export interface VideoPostStagePlanItem {
-  kind: 'deblock' | 'superres' | 'facefix';
+  kind: 'deblock' | 'superres' | 'seedvr' | 'facefix';
   label: string;
   weight: number;
 }
@@ -570,6 +724,30 @@ let postChain: Promise<unknown> = Promise.resolve();
 const liveChildren = new Set<ChildProcess>();
 
 /**
+ * 每个在排队或运行中的增强任务一个 AbortController。
+ * 同一节点可能还有排在串行链后面的下一次,所以按 nodeId 存一组,取消时整组中止。
+ * 检查器「取消」走这里:只 abort 信号,由 runChild 去 SIGTERM 对应子进程,
+ * 不会误杀别的节点正在跑的进程。
+ */
+const runControllers = new Map<string, Set<AbortController>>();
+
+function trackRun(key: string, ac: AbortController): void {
+  let set = runControllers.get(key);
+  if (!set) {
+    set = new Set();
+    runControllers.set(key, set);
+  }
+  set.add(ac);
+}
+
+function untrackRun(key: string, ac: AbortController): void {
+  const set = runControllers.get(key);
+  if (!set) return;
+  set.delete(ac);
+  if (set.size === 0) runControllers.delete(key);
+}
+
+/**
  * 运行中的后处理任务(主进程真源)。
  * 渲染层的「运行中」标记是组件本地 state,退出画布再进入就丢了 ——
  * 所以状态必须由主进程持有,渲染层挂载时来查(videoPostRunning IPC)。
@@ -588,8 +766,11 @@ export function lastVideoPostProgress(): { nodeId: string; stageLabel: string; d
 
 let lastProgress: { nodeId: string; stageLabel: string; detail?: string } | null = null;
 
-/** 取消所有在跑的后处理子进程(主进程退出 / 用户取消) */
+/** 取消所有在跑的后处理子进程(主进程退出) */
 export function cancelAllVideoPost(): void {
+  for (const set of runControllers.values()) {
+    for (const ac of set) ac.abort();
+  }
   for (const c of liveChildren) {
     try {
       c.kill('SIGTERM');
@@ -601,6 +782,25 @@ export function cancelAllVideoPost(): void {
 }
 
 /**
+ * 取消一次视频增强。
+ * 给定 nodeId 只停该节点(含已排队、尚未拉起子进程的那次);
+ * 不给 nodeId 则停掉全部。没有对应任务时返回失败,避免界面把「没在跑」当成已取消。
+ */
+export function cancelVideoPost(nodeId?: string): { ok: boolean; error?: string } {
+  if (!nodeId) {
+    if (runControllers.size === 0 && liveChildren.size === 0) {
+      return { ok: false, error: '没有正在进行的增强' };
+    }
+    cancelAllVideoPost();
+    return { ok: true };
+  }
+  const set = runControllers.get(nodeId);
+  if (!set || set.size === 0) return { ok: false, error: '该节点没有正在进行的增强' };
+  for (const ac of set) ac.abort();
+  return { ok: true };
+}
+
+/**
  * 视频增强主入口:按 去块 → 超分 → 修脸 顺序执行,返回最终产物路径。
  * 中间产物写在 video-post/tmp-<ts>/ 下的临时文件,全部成功后才产出最终 mp4
  * (任一步失败 → 直接返回错误,不留半成品)。
@@ -609,18 +809,26 @@ export function videoUpscale(
   req: VideoUpscaleRequest,
   opts: VideoPostOptions = {},
 ): Promise<VideoUpscaleResult> {
-  const run = postChain.then(() => doVideoUpscale(req, opts));
+  const nodeId = String(req.nodeId ?? '');
+  // 控制器在入队时就建好:用户在「准备中」点取消,排在链上还没 spawn 的任务也能停。
+  const ac = new AbortController();
+  if (opts.signal) {
+    if (opts.signal.aborted) ac.abort();
+    else opts.signal.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+  const key = nodeId || `__anon-${Date.now()}`;
+  trackRun(key, ac);
+  const run = postChain.then(() => doVideoUpscale(req, { ...opts, signal: ac.signal }));
   postChain = run.catch(() => undefined);
   // 无论成功/失败/取消,都要注销运行态 —— 否则运行中标记会永远残留,
   // 让节点再也无法重新发起(比"能重复点"更糟)。finally 覆盖全部 return 分支。
-  const nodeId = String(req.nodeId ?? '');
-  if (nodeId) {
-    return run.finally(() => {
+  return run.finally(() => {
+    untrackRun(key, ac);
+    if (nodeId) {
       runningRuns.delete(nodeId);
-      lastProgress = null;
-    });
-  }
-  return run;
+      if (lastProgress?.nodeId === nodeId) lastProgress = null;
+    }
+  });
 }
 
 async function doVideoUpscale(
@@ -662,7 +870,7 @@ async function doVideoUpscale(
   const workDir = join(VIDEO_POST_DIR, `tmp-${stamp}`);
   const finalPath = join(VIDEO_POST_DIR, `${prefix}-post-${stamp}.mp4`);
   try {
-    if (n.deblock || (n.doSuperRes && n.doFaceFix)) mkdirSync(workDir, { recursive: true });
+    if (n.deblock || ((n.doSuperRes || n.doSeedVr) && n.doFaceFix)) mkdirSync(workDir, { recursive: true });
   } catch (e) {
     return { ok: false, error: `无法创建临时目录:${(e as Error).message}` };
   }
@@ -716,18 +924,64 @@ async function doVideoUpscale(
     ];
     const r = await runChild('ffmpeg', args, opts.signal);
     stopDeblockBeat();
-    if (!r.ok) return { ok: false, error: `去块失败:${r.error}` };
+    if (!r.ok) return childFailure('去块失败', r.error);
     if (opts.signal?.aborted) return { ok: false, error: '已取消' };
     cur = out;
     applied.push(`去块(CRF ${n.deblockCrf})`);
     completeStage();
   }
 
+  /* ②a SeedVR2:mlxgen 整段视频超分/修复,保留源音轨。
+     后面还要修脸时先写临时文件,避免 PyTorch 管线覆盖未完成产物。 */
+  if (n.doSeedVr) {
+    const bin = tooling.mlxgenPath || resolveMlxgenBin();
+    if (!bin) return { ok: false, error: 'mlxgen 未就绪:SeedVR2 视频超分需要 mlxgen' };
+    const label = `SeedVR2 ×${n.scale}`;
+    emit(label, '加载模型…', undefined);
+    const out = n.doFaceFix ? join(workDir, `seedvr-${stamp}.mp4`) : finalPath;
+    const seedIdx = plan.findIndex((it) => it.kind === 'seedvr');
+    const runStart = Date.now();
+    let lastDetail = '加载模型…';
+    const onLine = (line: string): void => {
+      const ev = parseSeedVrEvent(line);
+      if (!ev) return;
+      const within =
+        ev.total && ev.total > 0 && ev.step != null
+          ? Math.min(1, ev.step / ev.total)
+          : ev.progress != null
+            ? Math.min(1, Math.max(0, ev.progress))
+            : undefined;
+      const phase = SEEDVR_PHASE_LABEL[ev.phase ?? ''] ?? ev.phase ?? 'SeedVR2';
+      lastDetail = ev.step != null && ev.total ? `${phase} ${ev.step}/${ev.total}` : phase;
+      const elapsed = Math.round((Date.now() - runStart) / 1000);
+      tracker.report({
+        stageLabel: label,
+        detail: `${lastDetail} · 已 ${fmtDur(elapsed)}`,
+        overallHint: within == null ? tracker.currentOverall() : tracker.overallAt(seedIdx >= 0 ? seedIdx : tracker.currentStage, within),
+        stageProgress: within,
+        stagesDone: seedIdx >= 0 ? seedIdx : tracker.currentStage,
+      });
+    };
+    const stopBeat = startHeartbeat(label, opts.onProgress, (s2) => {
+      tracker.report({ stageLabel: label, detail: `${lastDetail} · ${s2}` });
+    });
+    const r = await runChild(bin, buildSeedVrVideoArgs(cur, out, n), opts.signal, undefined, undefined, onLine);
+    stopBeat();
+    if (!r.ok) return childFailure('SeedVR2 超分失败', r.error);
+    if (opts.signal?.aborted) return { ok: false, error: '已取消' };
+    if (!existsSync(out)) return { ok: false, error: 'SeedVR2 退出成功但未找到产物文件' };
+    cur = out;
+    applied.push(`SeedVR2 ×${n.scale}(${n.seedvrModel})`);
+    completeStage();
+  }
+
   /* ②+③ 超分 + 修脸:同一条 PyTorch 管线(基础脚本 video_post.py)。
-     合并的意义:只拆一次帧、只拼一次回,省掉两轮 PNG 落盘/读盘与一次完整编解码。 */
-  if (n.doSuperRes || n.doFaceFix) {
+     合并的意义:只拆一次帧、只拼一次回。
+     SeedVR2 已经放大过时,这里只修脸(scale 固定 1,不再跑 Real-ESRGAN)。 */
+  const torchN = n.doSeedVr ? faceOnlyAfterSeedVr(n) : n;
+  if (torchN.doSuperRes || torchN.doFaceFix) {
     ensureFacexlibWeights(); // facexlib 检测/parsing 权重兜底(缺失会触发联网慢下)
-    const spawnInfo = buildPostSpawn(cur, finalPath, n);
+    const spawnInfo = buildPostSpawn(cur, finalPath, torchN);
     const runStart = Date.now();
     // 脚本按 `PROGRESS <stage> <done> <total>` 上报;映射到对应阶段的整体权重
     const stageIdxOf: Record<string, number> = {};
@@ -745,7 +999,7 @@ async function doVideoUpscale(
         // 真实阶段索引(不能用 tracker.currentStage:合并管线里超分/修脸是**同一条命令**
         // 跑完的,completeStage 未必在此刻已推进)
         const idx = stageIdxOf[kind] ?? tracker.currentStage;
-        const label = kind === 'superres' ? `超分 ×${n.scale}` : n.faceModel === 'gfpgan' ? '修脸 GFPGAN' : '修脸 CodeFormer';
+        const label = kind === 'superres' ? `超分 ×${torchN.scale}` : torchN.faceModel === 'gfpgan' ? '修脸 GFPGAN' : '修脸 CodeFormer';
         const within = pr.total > 0 ? pr.done / pr.total : 0;
         const elapsed = Math.round((Date.now() - runStart) / 1000);
         const doneFrames = pr.done;
@@ -778,10 +1032,10 @@ async function doVideoUpscale(
     });
     const r = await runChild(spawnInfo.cmd, spawnInfo.args, opts.signal, undefined, spawnInfo.cwd, onLine);
     stopBeat();
-    if (!r.ok) return { ok: false, error: `超分/修脸失败:${r.error}` };
+    if (!r.ok) return childFailure('超分/修脸失败', r.error);
     if (opts.signal?.aborted) return { ok: false, error: '已取消' };
-    if (n.doSuperRes) applied.push(`超分 ×${n.scale}(${n.srModel} · PyTorch)`);
-    if (n.doFaceFix) {
+    if (torchN.doSuperRes) applied.push(`超分 ×${torchN.scale}(${torchN.srModel} · PyTorch)`);
+    if (torchN.doFaceFix) {
       applied.push(
         n.faceModel === 'gfpgan' ? `GFPGAN 修脸(强度 ${n.faceWeight})` : `CodeFormer 修脸(保真 ${n.fidelityWeight})`,
       );
@@ -840,6 +1094,12 @@ function cleanupDir(dir: string): void {
   }
 }
 
+/** 子进程失败:用户取消时原样返回「已取消」,不要再包一层阶段前缀(检查器据此区分取消和失败)。 */
+function childFailure(prefix: string, error: string | undefined): VideoUpscaleResult {
+  if ((error ?? '').includes('已取消')) return { ok: false, error: '已取消' };
+  return { ok: false, error: `${prefix}:${error ?? '未知错误'}` };
+}
+
 /** 跑一个子进程,收集 stderr 尾部(失败诊断),支持 AbortSignal 取消与自定义 cwd。
  *  onLine 给定时,逐行回调 stdout+stderr —— 修脸脚本按 `[idx/total]` 打印进度,据此驱动真实进度条
  *  (否则 124 帧 1536² 要跑十几分钟,UI 上「什么都没发生」,看起来像瞬间完成/卡死)。 */
@@ -865,6 +1125,25 @@ function runChild(
       return resolveP({ ok: false, error: `${cmd} 无法启动:${(e as Error).message}` });
     }
     liveChildren.add(child);
+    // 监听必须紧挨 spawn:晚挂的话,取消落在这个窗口里子进程会变成孤儿,close 也报不成「已取消」。
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* 已退出 */
+      }
+      // mlxgen / python 有时不吃 SIGTERM,1.5s 后补 SIGKILL,避免 GPU 一直被占着。
+      killTimer = setTimeout(() => {
+        try {
+          if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+        } catch {
+          /* 已退出 */
+        }
+      }, 1500);
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
     let errAcc = '';
     // onLine:按行切分(stdout 与 stderr 都要 —— 脚本的进度走 stdout,报错走 stderr)
     if (onLine) {
@@ -889,15 +1168,8 @@ function runChild(
       errAcc += d.toString();
       if (errAcc.length > 8192) errAcc = errAcc.slice(-8192);
     });
-    const onAbort = () => {
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        /* 已退出 */
-      }
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
     const done = (r: { ok: boolean; error?: string }) => {
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
       liveChildren.delete(child);
       resolveP(r);
