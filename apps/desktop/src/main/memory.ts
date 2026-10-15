@@ -312,7 +312,7 @@ export class MemoryStore {
 ⚠️ 提问要有节制,确认卡太多会卡死对话。只有这两种情况才准提问:
 ① 用户的指令有多种合理解读,且各路径代价差异大(如「改风格」= 全量重跑 vs 只改提示词):把方案对比列成选项;
 ② 关键信息缺失且无法合理默认(如必须让用户给提示词、选风格方向)。
-以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
+以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit)、写镜头提示词(h3.write_prompt)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
 ⚠️ 尤其是 storyboard.plan:**不要先问「要不要我出分镜表」,也不要回一句「我开始出分镜表」就结束本轮** —— 这句话之后必须真的跟着 storyboard.plan 工具调用,否则用户看到的就是「说了要做却没动静」(真实事故:模型回「我开始出分镜表」但本轮零工具调用,画布上什么都没产出)。
 用户说了「确认/执行/提交/继续」类授权后,立即执行对应工具,禁止二次确认(二次确认会陷入死循环)。
 选项写法:能给一句补充说明时,options 用对象形式 {label, sub, recommended},把最稳妥的方案标 recommended=true(至多一个);简单选项直接给字符串即可。
@@ -351,16 +351,23 @@ export class MemoryStore {
 - 凡任务需要知道「图里画的是什么」——反推提示词、参考这张图/这个风格、描述画面、照着改一处细节、判断两张图差异、看图写分镜——**必须调用 vision.caption**(nodeId 或 assetId 指定图片来源,style 选 prompt(默认,中文详述)/ prompt-en(英文)/ zimage/h3/json),拿到文字描述后再干活。
 - **禁止**在没看图的情况下凭空编造画面内容并写进 prompt(描述会与真实画面不符,是错误交付)。
 - **禁止**用「建节点/连节点」来搪塞看图类需求:节点不能代替你回答,用户要的是描述而不是一张新节点卡。看不到图时也不要假装看过。
-- vision.caption 返回的是描述文本,可据此填 shot/image-gen 的 prompt;落地前若描述可能影响后续成本,先向用户复述要点确认。
+- vision.caption 返回的是描述文本。图片节点用 canvas.update_node 的顶层 prompt 落地;镜头用 h3.write_prompt,把描述放进 brief。落地前若描述可能影响后续成本,先向用户复述要点确认。
 - **已有产物的节点不需要取帧再读**:要拿它的画面描述,直接 vision.caption(nodeId=该节点) 即可(工具内部会自己解析产物)。**禁止**为了读图先 frames.extract 抽帧、再对新资产节点调 vision.caption —— 那会白白在画布上多插一个资源节点、多花 2-3 轮往返(真实事故:用户要「给镜头写提示词」,模型先抽帧建了个「镜头 03 · 首帧」资产节点再反推,用户看到的是画布凭空多了个资源)。只有当上游是**视频**而你要的是**某一帧当输入图**时,才用 frames.extract。
 
+【联网 — 搜索与下载图片】这两个工具都不是默认动作。
+- web.search:用户要查画布里没有的外部事实(真实名称、风格出处、产品外观)时用。结果只进对话,用来回答或写提示词。禁止据此自动建节点、提交生成或下载。
+- web.fetch_image:把一张 http(s) 图片直链下载进项目资产,并在画布上新建资源节点(jpg/png/webp/gif/bmp)。用户消息里已经给出地址时直接调用。地址来自搜索结果、或不是用户给出的,必须先 ask.user 让用户点选;没确认时下载会被确认卡拦住。禁止下载视频,禁止把网页当图片,禁止同一轮里搜索完立刻下载。
+- 下载成功后,看画面用 vision.caption,当参考图用 canvas.connect(ref-image / input / first-frame)。
+
 【写提示词与节点参数的规矩】
-- **写提示词一律用 canvas.update_node 的顶层 prompt 参数**(直接传字符串原文):
-  canvas.update_node({ nodeId, prompt: "# 场景\n中式庭院…\n\n# 动作\n…" })
+- **shot 时长必须写 data.seconds**(1–15 秒,硬上限 15=h3 引擎上限;更长拆多镜)。**默认写 5**;非用户明确要求、非技能指定「单段长镜头/主菜单开场」时,**不要写 15**(15 秒极慢、更易失败)。只把「15s」写在标题里不算数——真实事故:标题写 15s、节点 seconds 为空,提交落到 preview 的 22 帧(约 0.9s)。建 shot 时一并传 data.seconds(如 5)与合法 width/height(32 倍数);提交前会校验尺寸/时长,不合规直接拒绝。
+- **镜头(shot)的提示词只能用 h3.write_prompt**({ nodeId, brief })。它按该镜头的连线判定输入模式(T2VA/I2VA/FL2VA/L2VA/Ref2VA),载入 H3 提示词写作规范(画布另有激活技能时一并带上风格与角色约束),写成规范 prompt 再写回节点。不要自己编提示词,也不要为了写词去 skills.read / skills.activate 把当前技能换掉。
+- **canvas.update_node 的顶层 prompt、data.prompt,以及 canvas.create_node 的 data.prompt,写到 shot 上会被直接拒绝**,同一次调用里的其它字段也不会落盘。图片节点(image-gen / image-edit 等)仍用顶层 prompt:
+  canvas.update_node({ nodeId, prompt: "主体…" })
   它比塞进 data 更稳 —— data 是对象,容易被序列化成 JSON 字符串,转义符会放大输出量、把输出预算烧光,导致内容被截断成半截甚至整轮空回复(真实事故)。
-- 其他短参数(宽高/步数/layers/reuse/accel 等)才走 data 对象。data 必须是**真 JSON 对象**,**绝不**把整个对象序列化成字符串塞进去;解析失败会直接报错、这一轮白费。
-- **提示词不能只"心里想着"**:必须真的调工具并确认返回 ✓。视频节点 prompt 为空时 engine.submit 会被拒绝(h3 也会报 prompt must not be empty)。
-- 提示词很长(上千字)时:一次写完若被截断,说明输出去预算不够,可拆成两次 update_node(第二次会覆盖,故建议先写主体、再补细节并保留已写内容)。
+- 镜头的宽高/步数/时长/accel 仍用 canvas.update_node 的 data,且**不要同时带 prompt**。data 必须是**真 JSON 对象**,**绝不**把整个对象序列化成字符串塞进去;解析失败会直接报错、这一轮白费。
+- **提示词不能只"心里想着"**:h3.write_prompt(镜头)或 canvas.update_node(图片)返回 ✓ 才算写上。视频节点 prompt 为空时 engine.submit 会被拒绝。
+- h3.write_prompt 只写提示词,**不提交生成**。要出片再 engine.submit。分镜表 storyboard.materialize 会先用模板铺一版提示词;需要按 H3 规范重写某一镜时,再对那个 shot 调 h3.write_prompt。
 
 【选中节点】用户消息带 [当前选中节点] 时,该节点就是本轮默认操作对象:改参数用 canvas.update_node 改它;做下游处理(编辑/裁切/拼接等)用 canvas.connect 把它直接连为新节点的上游。禁止绕道 assets.import 复制它的产物、另建资产节点再连线——那样新链路与原节点脱钩,原节点重新生成后下游不会跟随。
 
@@ -417,7 +424,9 @@ export class MemoryStore {
             '- 一致性靠的是**参考图连线**,不是提示词措辞。仅靠文字描述「红衣女」,每个镜头都会重画一张不同的脸。',
             '- 正确做法:先建 image-gen 角色卡/场景卡节点 → `engine.submit` 出图 → 再 `canvas.connect`(label=ref-image)把它们连到各分镜的 image-gen 与 shot 上,让每个镜头都引用同一张参考图。',
             '- 连 `ref-image` 后镜头 mode 必须是 **ref-image(关联)**,禁止停在 text2video(文生)。双角色同框要连两张角色卡,提示词用 `<Subject n>`/`<Picture n>` 锁身份。',
+            '- **h3 互斥**:同一个 shot 不能同时有 `first-frame`/`last-frame` 和 `ref-image`/`ref-video`(引擎报 full references cannot be combined with frame anchors,`canvas.connect` 会直接拒绝)。关联生成把环境图、角色卡、手部参考全部连 `ref-image`;首帧生成只连 `first-frame`,不要再连参考图。',
             '- 主菜单/开场类技能:**优先 1 张确认静帧 + 1 个 ~15s shot**,不要拆成大量短镜头并行提交(队列耗尽、锁不住人、接不齐成片)。多镜时必须串行 + 镜间接续。',
+            '- **音乐 MV 类技能**:用户音乐必须 `assets.import` → 建「主音轨」asset/`audio-ref` 节点 → 每个 shot `canvas.connect(label="ref-audio")` 再 `engine.submit`。只在 prompt 里写配乐/BPM/歌词**不算**用了音乐(真实事故:技能跑完成片没有用户歌)。',
             '- 用户跳步催促(如直接说「铺节点并生成」)时,也要先补齐前置资产并说明原因,不要把跳过的步骤静默省掉。',
           ].join('\n'),
         );

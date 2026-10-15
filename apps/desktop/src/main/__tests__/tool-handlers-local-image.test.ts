@@ -230,6 +230,27 @@ describe('buildImageSubmitParams(image 类节点提交参数)', () => {
     if (!r.ok) expect(r.error).toContain('没有输入图');
   });
 
+  it('2.1 缺省模型:无 input 但有 ref-image → 放行(create_node 不写 model,提交期才解析成 2.1)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('g1', 'image-gen', { resultPath: '/o/p1.png' }),
+        node('g2', 'image-gen', { resultPath: '/o/p2.png' }),
+        node('e', 'image-edit', { mode: 'instruction', prompt: '16:9 主菜单', width: 1024, height: 576 }),
+      ],
+      edges: [edge('g1', 'e', 'ref-image'), edge('g2', 'e', 'ref-image')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[2]!, assets({}));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.params.model).toBe('Qwen/Qwen-Image-2.1');
+      expect(r.params.kind).toBe('instruction');
+      expect(r.params.width).toBe(1024);
+      expect(r.params.height).toBe(576);
+      expect(r.params.inputPath).toBeUndefined();
+    }
+  });
+
   it('2.1 指令编辑:无 input 但有 ref-image 参考图 → 放行(qwen21.edit 允许无底图)', async () => {
     const { buildImageSubmitParams } = await import('../tool-handlers');
     const canvas = {

@@ -71,14 +71,15 @@ const SYSTEM_PROMPT = `你是 BigBotArt 的视频导演 Agent。把用户的创�
 5. report 用一句话说明拆镜思路,写给人类用户看。`;
 
 /** 系统提示:分镜表(plan-storyboard) */
-const STORYBOARD_SYSTEM_PROMPT = `你是 BigBotArt 的分镜导演 Agent。把用户的创作需求拆成一张分镜表(表格的一行 = 一个分镜)。
+const STORYBOARD_SYSTEM_PROMPT = `你是 BigBotArt 的分镜导演 Agent。把用户的创作需求拆成一张分镜表(表格的一行 = 一个分镜 = 一个 shot 节点)。
 
 规则:
 1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 提示词?: string}], "report": string(写给人类的一句话)}
-2. 每个镜头 2-6 秒;短剧 3-8 行,长片按时长切片。
-3. 涉及人物时在「画面描述」显式锁定身份:同一人物全程长相/服装一致、面部不变形。
-4. 「需配图」默认 true(该行需要关键帧/首帧图);对白较多或纯转场镜头可为 false。
-5. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。`;
+2. 每个镜头默认 2-6 秒;短剧 3-8 行。单段硬上限 15 秒。
+3. ⚠️ **单镜长片不要拆行**:需求写「单镜 / 只铺1个shot / 一条 Ns 视频 / 按 0-3、3-6…区间组织提示词」时,**只输出 1 行**,「时长」填总秒数(如 15),五个时间区间全部写进该行「画面描述」。区间是提示词结构,不是多个分镜行 —— 拆成多行会导致时长列变短片、文案仍写总时长(真实事故)。
+4. 涉及人物时在「画面描述」显式锁定身份:同一人物全程长相/服装一致、面部不变形。
+5. 「需配图」默认 true(该行需要关键帧/首帧图);对白较多或纯转场镜头可为 false。
+6. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。`;
 
 /** 解析后的 LLM 端点配置 */
 export interface LlmEndpoint {

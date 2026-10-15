@@ -247,6 +247,14 @@ describe('MemoryStore.buildContext · 【提问规则】的「直接执行」清
     // 点名「回一句就开始、然后结束本轮」这个具体形态
     expect(ctx.systemPrompt).toContain('也不要回一句「我开始出分镜表」就结束本轮');
   });
+
+  it('镜头提示词指向 h3.write_prompt,并声明 update_node 写 shot prompt 会被拒绝', () => {
+    const pid = `p-h3-prompt-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '写提示词');
+    expect(ctx.systemPrompt).toContain('h3.write_prompt');
+    expect(ctx.systemPrompt).toMatch(/一律直接执行,不要确认[^。]*h3\.write_prompt/);
+    expect(ctx.systemPrompt).toContain('写到 shot 上会被直接拒绝');
+  });
 });
 
 describe('MemoryStore.buildContext · 【提交即收尾】的受控例外(2026-10-09 「测试3」事故)', () => {

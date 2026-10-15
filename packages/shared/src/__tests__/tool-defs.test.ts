@@ -57,4 +57,30 @@ describe('工具清单完整性', () => {
   it('工具名唯一', () => {
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it('h3.write_prompt 是镜头提示词入口,update_node 声明 shot 会被拒绝', () => {
+    expect(names).toContain('h3.write_prompt');
+    const write = toolDefinitions().find((t) => t.name === 'h3.write_prompt')!;
+    const params = write.parameters as { required?: string[] };
+    expect(params.required).toContain('nodeId');
+    expect(write.description).toContain('Ref2VA');
+    expect(write.description).toContain('不提交生成');
+    const update = toolDefinitions().find((t) => t.name === 'canvas.update_node')!;
+    expect(update.description).toContain('h3.write_prompt');
+    const create = toolDefinitions().find((t) => t.name === 'canvas.create_node')!;
+    expect(create.description).toContain('shot 不要写 prompt');
+  });
+
+  it('web.search / web.fetch_image 在清单里,且名字不含短横线', () => {
+    expect(names).toContain('web.search');
+    expect(names).toContain('web.fetch_image');
+    const search = toolDefinitions().find((t) => t.name === 'web.search')!;
+    const fetchImg = toolDefinitions().find((t) => t.name === 'web.fetch_image')!;
+    const searchParams = search.parameters as { required?: string[] };
+    const fetchParams = fetchImg.parameters as { required?: string[] };
+    expect(searchParams.required).toContain('query');
+    expect(fetchParams.required).toContain('url');
+    expect(search.description).toContain('只进对话');
+    expect(fetchImg.description).toContain('不下载视频');
+  });
 });

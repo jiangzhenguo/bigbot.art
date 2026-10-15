@@ -11,6 +11,7 @@ import { AgentManager } from '@bigbotart/agent';
 import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
 import { AccelStore } from './lora';
+import { H3StyleModelBuilder } from './h3-style-model';
 import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots, isValidOutputRelName } from './assets';
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
@@ -19,11 +20,12 @@ import { exportProject, importProjectFromFile } from './project-package';
 import { coverOf, listProjectCovers, setCoverAsset, clearCover, isUsableCoverFile } from './project-cover';
 import { extractFrame, extractAudio, cropImage } from './frames';
 import { stitchImages, splitImage } from './stitch';
-import { videoUpscale, probeVideoPostTooling, cancelAllVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
+import { videoUpscale, probeVideoPostTooling, cancelVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
 import { RenderQueue } from './render-queue';
 import { AutoContinueController, buildAutoContinueText, buildAutoRecallNote } from './auto-continue';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
+import { requestH3PromptCompletion } from './h3-prompt';
 import { TakeStore } from './takes';
 import { runDataMigration } from './migrate';
 import { DATA_DIR } from './workspace-paths';
@@ -84,6 +86,8 @@ function describeToolAction(name: string, args: Record<string, unknown>, nodeId?
       return `已创建节点 ${nodeId ? `${nodeId} ` : ''}· ${j(args.kind)}「${j(args.label)}」`;
     case 'canvas.update_node':
       return `已更新节点 ${j(args.nodeId)}`;
+    case 'h3.write_prompt':
+      return `已按 H3 规范写回镜头提示词 ${j(args.nodeId)}`;
     case 'canvas.delete_node':
       return `已删除节点 ${j(args.nodeId)} 及其连线`;
     case 'canvas.connect':
@@ -107,11 +111,12 @@ function describeToolAction(name: string, args: Record<string, unknown>, nodeId?
   }
 }
 
-/** 选中节点详情摘要(附进本轮 user 消息,风格对齐 canvas.get_node 但只挑关键信息控制长度)。
- *  顶部带指令性说明:选中 = 用户指着它,是本轮默认操作对象——
+/** 选中/引用节点详情摘要(附进本轮 user 消息,风格对齐 canvas.get_node 但只挑关键信息控制长度)。
+ *  顶部带指令性说明:引用 = 用户指着它,是本轮默认操作对象——
  *  真实事故:用户选中 image-gen 节点说「编辑这个图片」,Agent 绕道 assets.import 复制产物
- *  新建资产节点再连线,没有直接把选中节点连为上游。 */
-function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: CanvasNode[]): string {
+ *  新建资产节点再连线,没有直接把选中节点连为上游。
+ *  2026-10 起支持多节点(右键「添加到聊天窗口」+ 输入框 @ 提及),index/total 用于标注序号。 */
+function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: CanvasNode[], index?: number, total?: number): string {
   const idToLabel = new Map(nodes.map((n) => [n.id, n.label || n.id]));
   const ins = edges
     .filter((e) => e.target === node.id)
@@ -130,9 +135,14 @@ function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: Canv
     const j = JSON.stringify(d);
     if (j && j !== '{}') dataNote = `\ndata:${j.slice(0, 200)}${j.length > 200 ? '…' : ''}`;
   }
+  const multi = total !== undefined && total > 1;
+  const header = multi ? `[用户引用的节点 ${index! + 1}/${total}]` : '[当前选中节点]';
+  const directive = multi
+    ? `⚠️ 用户在本轮消息里引用了 ${total} 个节点,这是其中之一:除非用户明确指向别处,本轮操作对象就在它们之中;`
+    : `⚠️ 用户正选中这个节点:除非用户明确指向别处,本轮操作对象就是它;`;
   return (
-    `[当前选中节点]「${node.label}」 · ${node.kind} · id=${node.id}\n` +
-    `⚠️ 用户正选中这个节点:除非用户明确指向别处,本轮操作对象就是它;` +
+    `${header}「${node.label}」 · ${node.kind} · id=${node.id}\n` +
+    directive +
     `需要它的产物时直接用 canvas.connect 把它连为下游节点的上游,禁止绕道 assets.import 复制产物、另建资产节点。` +
     dataNote +
     (ins.length ? `\n入边:\n${ins.join('\n')}` : '') +
@@ -185,6 +195,13 @@ const registry = createRegistry({
 
 const settings = new SettingsStore();
 const accel = new AccelStore(settings);
+/** 风格模型包(mystic 等)下载 + 融合构建;进度推送到渲染层设置页 */
+const styleModels = new H3StyleModelBuilder((ev) => {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('style-model-progress', ev);
+  }
+  logger.log(ev.stage === 'error' ? 'error' : 'info', `[style-model] ${ev.packId} ${ev.stage}: ${ev.message}`);
+});
 
 /* ── 数据迁移:平铺文件 → workspaces/<pid>/ 子目录(2026-09-29) ──
  * ⚠️ 必须在**任何 Store 构造之前**执行:ProjectStore 的构造函数就会读画布文件,
@@ -239,6 +256,23 @@ const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, 
   takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
   // 🆕 工具模型(v1):图片节点缺省模型 + 看图通道,实时从 SettingsStore 读(改设置即生效,免重启)
   getToolModels: () => settings.get().toolModels,
+  completeH3Prompt: async (projectId, messages) => {
+    try {
+      const project = store.getProject(projectId);
+      const llm = project?.llmOverride ?? settings.get().llm;
+      const ep = await resolveLlmEndpoint(settings.get(), llm);
+      const result = await requestH3PromptCompletion(
+        { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model },
+        messages,
+      );
+      if (!result.ok) logger.log('warn', `[h3.write_prompt] ${result.error}`);
+      return result;
+    } catch (e) {
+      const error = `写提示词的模型不可用:${(e as Error).message}`;
+      logger.log('warn', `[h3.write_prompt] ${error}`);
+      return { ok: false, error };
+    }
+  },
   resolveVisionOverride: async () => {
     const tm = settings.get().toolModels;
     // ① 本地引擎通道(mlx-gen `mlxgen-caption`,2026-10):不需要任何 server 在跑,优先于端点绑定
@@ -641,17 +675,19 @@ ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
   if (anchorIssues.length > 0) {
     throw new Error(`提交被拒绝:${anchorIssues.map((i) => i.message).join('; ')}`);
   }
-  // 🚀 加速 LoRA:开启且 real 模式时把蒸馏模型包解析成实际 modelDir(-d)+ steps(h3.c 不接受 --lora,见手册 §8)
+  // 🚀 模型包(加速/风格):开启且 real 模式时把所选包解析成实际 modelDir(-d)+ steps(h3.c 不接受 --lora,见手册 §8)
   // demo 模式走 mock 占位,不解析(避免包缺失在演示路径误报)
   const accelReq = (params.accel ?? undefined) as { enabled?: boolean; packId?: string; steps?: number } | undefined;
   if (accelReq?.enabled && req.slot === 'video' && settings.get().renderMode === 'real') {
     const resolved = accel.resolveAccel(accelReq);
     if (!resolved) {
-      throw new Error('加速 LoRA 开启但模型包不可用(未安装或目录缺失) · 请到设置页「加速 LoRA」检查');
+      throw new Error('模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或在镜头检查器里关闭模型包');
     }
     params.modelDir = resolved.modelDir;
     params.steps = resolved.steps;
-    logger.log('info', `submit-render accel: -d ${resolved.modelDir} --steps ${resolved.steps}`);
+    // kind 透传给 provider:风格包 ETA 不打加速折扣(它换的是画风不是速度)
+    params.accel = { ...accelReq, kind: resolved.kind };
+    logger.log('info', `submit-render 模型包[${resolved.kind}]: -d ${resolved.modelDir} --steps ${resolved.steps}`);
   }
   /* ⚠️ 把解析结果**回写 Take**(2026-10-09 事故修复)。
    *
@@ -1019,6 +1055,9 @@ ipcMain.handle('video-post-probe', () => probeVideoPostTooling());
 // 运行中的后处理任务(渲染层挂载时恢复运行态用 —— 只靠组件 state 会因退出画布而丢失)
 ipcMain.handle('video-post-running', () => listRunningVideoPost());
 ipcMain.handle('video-post-last-progress', () => lastVideoPostProgress());
+// 检查器「取消」:按节点中止排队或运行中的增强(去块 / SeedVR2 / 修脸子进程一起停)
+ipcMain.handle('video-post-cancel', (_e, input?: { nodeId?: string }) =>
+  cancelVideoPost(typeof input?.nodeId === 'string' && input.nodeId ? input.nodeId : undefined));
 
 // ---------- IPC:在系统文件管理器中显示(Finder) ----------
 // 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;
@@ -1074,14 +1113,18 @@ ipcMain.handle('get-settings', async () => {
 });
 ipcMain.handle('set-settings', (_e, patch) => settings.patch(patch));
 
-// ---------- IPC:加速 LoRA(蒸馏模型包)管理 ----------
+// ---------- IPC:h3 模型包(加速 / 风格)管理 ----------
 ipcMain.handle('accel-list', () => accel.list());
-ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number }) => accel.install(input));
+ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number; kind?: 'accel' | 'style' }) => accel.install(input));
 ipcMain.handle('accel-remove', (_e, id: string) => accel.remove(id));
 ipcMain.handle('accel-set-default', (_e, id: string | null) => accel.setDefault(id));
 ipcMain.handle('accel-set-default-enabled', (_e, enabled: boolean) => accel.setDefaultEnabled(enabled));
 ipcMain.handle('accel-get-default-enabled', () => accel.isDefaultEnabled());
 ipcMain.handle('accel-default-shot-config', () => accel.defaultShotAccel());
+// 风格模型包(mystic 等):下载 LoRA + 离线融合构建(分钟~小时级长任务,进度事件 style-model-progress)
+ipcMain.handle('style-model-status', (_e, packId: string) => styleModels.status(packId));
+ipcMain.handle('style-model-build', (_e, packId: string) => styleModels.build(packId));
+ipcMain.handle('style-model-cancel', () => styleModels.cancel());
 
 // ---------- IPC:LLM 来源(五档) ----------
 ipcMain.handle('llm-local-models', (_e, kind: 'lmstudio' | 'ollama' | 'pimlx') => {
@@ -1175,6 +1218,8 @@ async function executeAgentChat(opts: {
   text: string;
   attachments?: AgentChatRequest['attachments'];
   selectedNodeId?: string;
+  /** 本轮引用的多个节点(右键「添加到聊天窗口」+ @ 提及);与 selectedNodeId 合并去重 */
+  selectedNodeIds?: string[];
   auto?: boolean;
 }): Promise<AgentChatResponse> {
   const flightKey = `${opts.projectId}:${opts.canvasId}`;
@@ -1229,16 +1274,21 @@ async function executeAgentChat(opts: {
   let attNote = '';
   let selNote = '';
   if (!opts.auto) {
-    // 记录用户消息到 recall(附件名 + 当轮关注节点一并留痕,渲染层据此回显「关注:节点」徽标)
+    // 记录用户消息到 recall(附件名 + 当轮关注/引用节点一并留痕,渲染层据此回显「关注:节点」徽标)
     const atts = opts.attachments ?? [];
     const visibleText = opts.text + (atts.length ? ` 📎${atts.map((a) => a.name).join('、')}` : '');
-    const selNode = opts.selectedNodeId && ctxSnap ? ctxSnap.nodes.find((x) => x.id === opts.selectedNodeId) : undefined;
+    // 多引用合并去重:selectedNodeIds(新)优先,selectedNodeId(旧契约)兜底
+    const selIds = [...new Set([...(opts.selectedNodeIds ?? []), ...(opts.selectedNodeId ? [opts.selectedNodeId] : [])])];
+    const selNodes = ctxSnap ? selIds.map((id) => ctxSnap.nodes.find((x) => x.id === id)).filter((n): n is CanvasNode => !!n) : [];
     memory.addRecall(opts.projectId, {
       canvasId: opts.canvasId,
       role: 'user',
       content: visibleText,
-      selectedNodeId: selNode?.id,
-      selectedNodeTitle: selNode?.label,
+      // 单值字段保留(旧渲染层/旧读取方兼容);数组字段是 2026-10 多引用的真源
+      selectedNodeId: selNodes[0]?.id,
+      selectedNodeTitle: selNodes[0]?.label,
+      selectedNodeIds: selNodes.length ? selNodes.map((n) => n.id) : undefined,
+      selectedNodeTitles: selNodes.length ? selNodes.map((n) => n.label) : undefined,
     });
     logger.log('info', `agent.chat 开始 · "${opts.text.slice(0, 60)}"${atts.length ? ` · 附件 ${atts.length} 个` : ''}`);
 
@@ -1271,8 +1321,10 @@ async function executeAgentChat(opts: {
           .join('\n')}]`
       : '';
 
-    // 选中节点注入:用户正在操作哪个节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
-    selNote = selNode && ctxSnap ? `\n\n${describeSelectedNode(selNode, ctxSnap.edges, ctxSnap.nodes)}` : '';
+    // 引用节点注入:用户本轮指着哪些节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
+    selNote = selNodes.length && ctxSnap
+      ? `\n\n${selNodes.map((n, i) => describeSelectedNode(n, ctxSnap.edges, ctxSnap.nodes, i, selNodes.length)).join('\n\n')}`
+      : '';
   } else {
     logger.log('info', `[auto-continue] 自动推进轮开始 · "${opts.text.slice(0, 60).replace(/\n/g, ' ')}"`);
     // 通知渲染层切入「执行中」(loading 气泡 + 输入锁定);done/failed 终局事件照旧收尾
@@ -1361,6 +1413,9 @@ async function executeAgentChat(opts: {
       const remaining = [...activeToolCtx.values()].at(-1) ?? null;
       currentToolCtx = remaining;
     }
+    /* 对话收尾后补跑延后的生成完成通知(技能4:同轮双提交,第二张在飞完成不能丢)。
+       必须在 inFlightChats.delete 之后,否则 onChatSettled 立刻 fire 又会判在飞。 */
+    autoContinue.onChatSettled(opts.projectId, opts.canvasId);
   }
 }
 
@@ -1394,6 +1449,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
     text: req.text,
     attachments: req.attachments,
     selectedNodeId: req.selectedNodeId,
+    selectedNodeIds: req.selectedNodeIds,
   });
 });
 

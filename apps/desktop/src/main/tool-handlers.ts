@@ -2,7 +2,7 @@
  * 工具桥 — Agent 可调用的工具 handler 集合
  * worker 通过反向 JSON-RPC 调主进程,主进程路由到这里执行,结果回传 worker
  *
- * 七域:canvas / engine / assets / skills / timeline / memory / continuity
+ * 八域:canvas / engine / assets / web / skills / timeline / memory / continuity
  * 设计原则:每个工具返回 { ok, result(人读摘要), nodeId? } — 渲染层据此画工具卡
  */
 import type { CanvasNode, CanvasEdge, CanvasSnapshot } from '@bigbotart/shared';
@@ -17,6 +17,8 @@ import {
   assembleZImagePrompt,
   rowNeedsImage,
   rowSeconds,
+  resolveMaterializeSeconds,
+  rowCell,
   SB_SIZE,
   chunkText,
   chunkNav,
@@ -25,10 +27,14 @@ import {
   deriveShotRefsFromEdges,
   validateRefsForSubmit,
   referenceMediaIssues,
+  referenceAnchorConflictIssues,
   capabilityOf,
   resolveImageModel,
   defaultShotAspectForRole,
   SHOT_SIZES,
+  normalizeShotDuration,
+  snapShotDimensions,
+  validateShotSubmitParams,
   type VideoAspect,
   type DerivedRef,
   type PromptSource,
@@ -43,8 +49,22 @@ import type { RenderQueue } from './render-queue';
 import type { AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
+import { unlinkSync } from 'node:fs';
 import { cropImage, extractFrame, extractAudio } from './frames';
+import { downloadImage, imageLabelFromUrl, searchWeb, type WebDeps } from './web-fetch';
 import { captionImage, type VisionRoute } from './vision';
+import { checkSkillSubmitGates } from './skill-gates';
+import {
+  H3_PROMPT_WRITING_SPEC,
+  SHOT_PROMPT_VIA_CREATE,
+  buildH3WriteMessages,
+  classifyH3PromptMode,
+  describeInboundRefs,
+  extractPromptText,
+  rejectDirectShotPrompt,
+  shotCreateCarriesPrompt,
+  type CompleteH3Prompt,
+} from './h3-prompt';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
 export { toolDefinitions } from '@bigbotart/shared';
@@ -72,6 +92,13 @@ const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
   : undefined;
 
 const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
+
+/** 可选数字参数:缺省 / 空串 / 非数字 → undefined,不把 NaN 写进坐标 */
+function finiteNum(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 /**
  * 节点 data 里的**布尔开关字段**清单。
@@ -416,7 +443,10 @@ export function buildImageSubmitParams(
     if (!params.inputPath) {
       /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」;
          其它模型必须给输入图,维持原拦截(与渲染层 runNode 同口径) */
-      const model = String(d.model ?? '');
+      // 用解析后的模型,不能只看节点上的 data.model。
+      // create_node 故意不写 model,缺省在上面才解析成 Qwen/Qwen-Image-2.1;
+      // 只看 d.model 会把「只有 ref-image」的 2.1 编辑误拦成「没有输入图」。
+      const model = String(params.model ?? d.model ?? '');
       const isQwen21 = /qwen.*2\.1/i.test(model);
       const hasRefs = node.kind === 'image-edit' && resolveRefImagePaths(canvas, node, assetPath).length > 0;
       if (node.kind === 'image-upscale' || !(isQwen21 && hasRefs)) {
@@ -482,6 +512,8 @@ export class ToolHandlers {
   private takes?: TakeStore;
   private getToolModels?: () => ToolModelBinding | undefined;
   private resolveVisionOverride?: () => Promise<VisionRoute | undefined>;
+  /** 镜头提示词的无工具写作调用(主进程注入当前项目的 LLM;测试注入桩) */
+  private completeH3Prompt?: CompleteH3Prompt;
 
   constructor(
     private store: ProjectStore,
@@ -498,6 +530,10 @@ export class ToolHandlers {
       getToolModels?: () => ToolModelBinding | undefined;
       /** 🆕 看图通道覆盖(v1):settings.toolModels.{captionLocal,vision} → VisionRoute;未配置返回 undefined(走 auto/env 回退链) */
       resolveVisionOverride?: () => Promise<VisionRoute | undefined>;
+      /** 联网搜索/图片下载的 fetch 与 DNS(测试注入;缺省走真实网络) */
+      web?: WebDeps;
+      /** h3.write_prompt 的写作调用;未注入时工具明确失败,不自己编提示词 */
+      completeH3Prompt?: CompleteH3Prompt;
     } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
@@ -505,7 +541,11 @@ export class ToolHandlers {
     this.takes = opts.takes;
     this.getToolModels = opts.getToolModels;
     this.resolveVisionOverride = opts.resolveVisionOverride;
+    this.webDeps = opts.web ?? {};
+    this.completeH3Prompt = opts.completeH3Prompt;
   }
+
+  private webDeps: WebDeps = {};
 
   /** 工具路由表 */
   private handlers: Record<string, Handler> = {
@@ -735,6 +775,17 @@ export class ToolHandlers {
         if (doneRows.has(rowNo)) return;
         const shotId = nid('shot');
         const p = assembleH3Prompt(row, tb.head, base);
+        /* 时长:列值与画面/提示词里的总时长标记取大(技能4:列写 4、文案写单镜15秒 → 15) */
+        const sec = resolveMaterializeSeconds(
+          rowSeconds(row, tb.head),
+          rowCell(row, tb.head, '画面描述'),
+          rowCell(row, tb.head, '提示词(可选)'),
+          p.text,
+        );
+        const dur = normalizeShotDuration(
+          { engine: 'h3c', prompt: p.text, seconds: sec || undefined },
+          { label: `镜头 ${String(rowNo).padStart(2, '0')}`, prompt: p.text },
+        );
         cur.nodes.push({
           id: shotId, kind: 'shot', label: `镜头 ${String(rowNo).padStart(2, '0')}`,
           position: { x: anchorX + 560, y: anchorY + r * 186 }, width: 250,
@@ -745,7 +796,8 @@ export class ToolHandlers {
                演示态由 settings.renderMode 决定(mock 只在 demo 模式启用),节点不该自己写死。 */
             engine: 'h3c', mode: 'text2video', prompt: p.text,
             width: size.width, height: size.height,
-            seconds: rowSeconds(row, tb.head) || undefined,
+            seconds: Number(dur.data.seconds),
+            frames: Number(dur.data.frames),
             steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
             ...(defaultAccel ? { accel: defaultAccel } : {}),
             promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
@@ -763,8 +815,9 @@ export class ToolHandlers {
             position: { x: anchorX + 300, y: anchorY + r * 186 }, width: 232,
             data: {
               // 🆕 不写 model(2026-09-29 v1 工具模型):留给提交时缺省解析
+              // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
               engine: 'mlxgen', prompt: z.text,
-              width: size.width, height: size.height, steps: 24, guidance: 1.0, seeds: [42],
+              width: size.width, height: size.height, guidance: 1.0, seeds: [42],
               promptFrom: { nodeId, mode: 'row', row: rowNo } as PromptSource,
             } as CanvasNode['data'],
             createdAt: now, updatedAt: now,
@@ -842,6 +895,41 @@ export class ToolHandlers {
       // 布尔字段归一化(与 update_node 同口径):模型常把 true 写成 "true",
       // 而渲染层判定全是严格 `=== true`(见 BOOLEAN_DATA_FIELDS 注释)
       data = normalizeBooleanFields(data) as typeof data;
+      /*
+       * ── asset 节点:assetId 必须真实存在(2026-10-14「测试技能5」事故)──
+       *
+       * 模型曾在 assets.import 之后凭记忆**编造**了一个不存在的资产 id
+       * (asset-c7aab6029a87,库里真实 id 是 asset-1791945001082-lqcr),
+       * 旧实现零校验照样建节点、返回「✓ 已创建」—— 画布资源节点永远「资产未加载」,
+       * 下游 ref-image 连线在提交时被静默吞掉,参考图根本没进生成命令。
+       * 这里在写入点拦下,并把真实候选列出来让模型照抄(与 storyboard.materialize
+       * 的「幻觉 id → 列出真实分镜表」同一手法)。
+       */
+      if (kind === 'asset') {
+        const bindId = String((data as Record<string, unknown>).assetId ?? '').trim();
+        if (!bindId) {
+          return {
+            ok: false,
+            result:
+              '创建资源(asset)节点必须在 data.assetId 里绑定一个真实资产 id。' +
+              '先用 assets.list 查看现有资产,或 assets.import 导入后用返回的 id 原样照抄。',
+          };
+        }
+        if (!this.assets.get(bindId)) {
+          const all = this.assets.list();
+          const candidates = all
+            .slice(0, 15)
+            .map((x) => `- ${x.id} [${x.kind}] ${x.name}`)
+            .join('\n');
+          return {
+            ok: false,
+            result:
+              `资产 ${bindId} 在资产库中不存在,节点未创建(禁止绑定凭空编造的 id)。\n` +
+              `请用 assets.import 返回的 id 或 assets.list 里的真实 id 原样照抄。` +
+              (candidates ? `\n当前资产库 ${all.length} 项(前 15):\n${candidates}` : '\n当前资产库为空,请先 assets.import 导入。'),
+          };
+        }
+      }
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
@@ -856,7 +944,11 @@ export class ToolHandlers {
        *
        * 只在 data **缺 width/height** 时补,且档位取 data.tier(缺省 default)。
        */
+      let durationNote = '';
       if (kind === 'shot') {
+        if (shotCreateCarriesPrompt(data)) {
+          return { ok: false, result: SHOT_PROMPT_VIA_CREATE };
+        }
         const dd = data as Record<string, unknown>;
         const explicitW = Number(dd.width ?? 0);
         const explicitH = Number(dd.height ?? 0);
@@ -884,6 +976,18 @@ export class ToolHandlers {
             data = { engine: 'h3c', aspect, width: size.width, height: size.height, tier, ...dd } as Record<string, unknown>;
           }
         }
+        // 显式尺寸规整:模型常照抄参考图尺寸(实测 2752×1536 直接进 data),
+        // 创建不规整 → 提交才被 validateShotSubmitParams 拒,白烧往返(2026-10-15「骑士小猫」)
+        const snapped = snapShotDimensions(data as Record<string, unknown>);
+        data = snapped.data;
+        if (snapped.note) durationNote = ` · ${snapped.note}`;
+        // 时长归一化(2026-10-13):标题写「15s」却不写 data.seconds → 提交落到 preview 22 帧
+        const dur = normalizeShotDuration(
+          { engine: 'h3c', ...(data as Record<string, unknown>) },
+          { label },
+        );
+        data = dur.data;
+        if (dur.note) durationNote += ` · ${dur.note}`;
       }
 
       const now = new Date().toISOString();
@@ -898,7 +1002,7 @@ export class ToolHandlers {
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已创建节点「${label}」(${kind})${refsNote}`, nodeId: node.id };
+      return { ok: true, result: `已创建节点「${label}」(${kind})${refsNote}${durationNote}`, nodeId: node.id };
     },
     'canvas.update_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
@@ -909,7 +1013,6 @@ export class ToolHandlers {
       if (!hit.ok) return { ok: false, result: hit.error };
       const node = hit.node;
       const nodeId = node.id;
-      if (a.label !== undefined) node.label = String(a.label);
       let refsNote = '';
       // 参数规整:本地小模型常把嵌套对象序列化成 JSON 字符串再传(见 normalizeDataArg)。
       // 原实现 `typeof a.data === 'object'` 对字符串为 false → 整段 patch 被**静默跳过**
@@ -925,24 +1028,50 @@ export class ToolHandlers {
       // 552 字符处截断),下一轮重试又截断,最终 0 工具调用 / 0 字回复。
       // 顶层 `prompt` 是**纯字符串参数**,模型没有"要不要序列化"的歧义空间,直击根因。
       //
-      // 兼容:旧的 `data.prompt` 写法**保留有效**(见下方合并顺序),但工具描述里标注为不推荐。
+      // 图片节点:旧的 `data.prompt` 写法仍有效(顶层优先)。shot 的 prompt 在下面整单拒绝。
       const topPrompt = (a as { prompt?: unknown }).prompt;
       if (typeof topPrompt === 'string') {
         patch = { ...(patch ?? {}), prompt: topPrompt };
       } else if (topPrompt !== undefined) {
         return { ok: false, result: `prompt 必须是字符串,收到 ${Array.isArray(topPrompt) ? '数组' : typeof topPrompt}。` };
       }
+      // 镜头提示词只能走 h3.write_prompt。拒绝必须发生在任何字段写入之前,
+      // 否则「prompt + width」会被收成半次成功(宽高落了、提示词没有,或反过来)。
+      const blockedPrompt = rejectDirectShotPrompt(node.kind, patch);
+      if (blockedPrompt) return { ok: false, result: blockedPrompt };
+      if (a.label !== undefined) node.label = String(a.label);
+      let durationNote = '';
       if (patch) {
         // 布尔字段归一化:模型常把 true 写成 "true",而渲染层全是严格 `=== true` 判定
         // (见 BOOLEAN_DATA_FIELDS 注释,2026-10-09 modeOverride 事故)
         const norm = normalizeBooleanFields({ ...(node.data as Record<string, unknown>), ...patch });
-        const next = { ...norm };
+        let next = { ...norm };
         // 方案 B:refs 由连线推导,直写 refs 一律忽略(消除双写漂移)
         if ('refs' in patch) {
           delete next.refs;
           refsNote = ' · refs 由连线推导已忽略(用 canvas.connect/disconnect 管理参考)';
         }
+        // 尺寸规整(与 create_node 同口径):shot 的 width/height 落盘前 snap 到 h3 合法档
+        // (32 倍数 + 面积上限),否则非法尺寸要到 engine.submit 才被拒,白烧往返(2026-10-15)
+        if (node.kind === 'shot' && ('width' in patch || 'height' in patch)) {
+          const snapped = snapShotDimensions(next);
+          next = snapped.data;
+          if (snapped.note) durationNote += ` · ${snapped.note}`;
+        }
+        // 改了时长相关字段或标题时,把 seconds/frames 对齐(写了 >15 截到 15、补 frames)
+        if (node.kind === 'shot' && ('seconds' in patch || 'frames' in patch || a.label !== undefined)) {
+          const dur = normalizeShotDuration(next, { label: node.label });
+          next = dur.data;
+          if (dur.note) durationNote += ` · ${dur.note}`;
+        }
         node.data = next as CanvasNode['data'];
+      } else if (node.kind === 'shot' && a.label !== undefined) {
+        // 只改标题但标题里带「15s」→ 也要回填时长
+        const dur = normalizeShotDuration((node.data ?? {}) as Record<string, unknown>, { label: node.label });
+        if (dur.changed) {
+          node.data = dur.data as CanvasNode['data'];
+          if (dur.note) durationNote = ` · ${dur.note}`;
+        }
       }
       node.updatedAt = new Date().toISOString();
       cur.updatedAt = node.updatedAt;
@@ -953,6 +1082,10 @@ export class ToolHandlers {
       const missed = patch
         ? Object.keys(patch).filter((k) => {
             if (k === 'refs') return false; // 有意忽略,不算未生效
+            // seconds/frames 可能被 normalizeShotDuration 改写(截断/对齐),不算未生效
+            if (k === 'seconds' || k === 'frames') return false;
+            // shot 的 width/height 可能被 snapShotDimensions 规整(32 倍数/面积上限),不算未生效
+            if (node.kind === 'shot' && (k === 'width' || k === 'height')) return false;
             /* ⚠️ 期望值必须取**归一化后**的 patch,不能拿原始 patch 比(2026-10-09)。
                布尔字段在写入前被 normalizeBooleanFields 转过:
                patch 里是 "true"(字符串)、节点里存的是 true(布尔),
@@ -965,7 +1098,110 @@ export class ToolHandlers {
       if (missed.length > 0) {
         return { ok: false, result: `更新未生效(写入后校验失败):${missed.join('、')} 没有落进节点。请重试或检查参数类型。` };
       }
-      return { ok: true, result: `已更新节点「${node.label}」${refsNote}`, nodeId };
+      return { ok: true, result: `已更新节点「${node.label}」${refsNote}${durationNote}`, nodeId };
+    },
+    'h3.write_prompt': async (a, ctx) => {
+      if (!this.completeH3Prompt) {
+        return { ok: false, result: 'h3.write_prompt 未接上文本补全,无法写镜头提示词。' };
+      }
+      const rawId = String(a.nodeId ?? '');
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const hit = resolveNodeRefOrError(cur.nodes, rawId);
+      if (!hit.ok) return { ok: false, result: hit.error };
+      const node = hit.node;
+      if (node.kind !== 'shot') {
+        return {
+          ok: false,
+          result: `「${node.label || node.id}」是 ${node.kind},不是镜头。h3.write_prompt 只写 shot 的视频提示词;图片提示词用 canvas.update_node 的顶层 prompt。`,
+        };
+      }
+      const byId = new Map(cur.nodes.map((n) => [n.id, n]));
+      const inbounds = cur.edges
+        .filter((e) => e.target === node.id)
+        .map((e) => ({
+          label: e.label,
+          sourceTitle: byId.get(e.source)?.label || e.source,
+        }));
+      const mode = classifyH3PromptMode(inbounds);
+      const stored = this.skills.get('h3-prompt-writing')?.instructions?.trim();
+      const spec = stored || H3_PROMPT_WRITING_SPEC;
+      const activeId = this.memory.getActiveSkillId(ctx.projectId, ctx.canvasId);
+      let skillName: string | undefined;
+      let skillInstructions: string | undefined;
+      if (activeId && activeId !== 'h3-prompt-writing') {
+        const sk = this.skills.get(activeId);
+        const text = sk?.instructions?.trim();
+        if (sk && text) {
+          skillName = sk.name;
+          skillInstructions = text;
+        }
+      }
+      const d = (node.data ?? {}) as { prompt?: unknown; seconds?: unknown };
+      const rawSec = Number(d.seconds);
+      const seconds = Number.isFinite(rawSec) && rawSec > 0 ? rawSec : 5;
+      const existing = typeof d.prompt === 'string' ? d.prompt.trim() : '';
+      const briefArg = typeof a.brief === 'string' ? a.brief.trim() : '';
+      const brief = briefArg || existing || (node.label || '').trim();
+      if (!brief) return { ok: false, result: '请提供 brief:这一镜要拍什么。' };
+      const messages = buildH3WriteMessages({
+        spec,
+        mode,
+        title: node.label || node.id,
+        seconds,
+        brief,
+        previous: briefArg && existing ? existing : undefined,
+        refsText: describeInboundRefs(inbounds),
+        skillName,
+        skillInstructions,
+      });
+      const done = await this.completeH3Prompt(ctx.projectId, messages);
+      if (!done.ok) return { ok: false, result: done.error };
+      const extracted = extractPromptText(done.text);
+      if (!extracted.ok) return { ok: false, result: extracted.error };
+      // ⚠️ 写回必须基于「此刻最新」的画布快照:completeH3Prompt 是数十秒级的 LLM 调用,
+      // 进入工具时加载的 cur 在这期间常被渲染层/队列的新保存顶掉版本(saveCanvasSnapshot
+      // 的版本防护会拒绝整体覆盖)——实测「骑士小猫」项目连续 11 次「快照被拒绝」,
+      // 模型每次都重新生成提示词再写,白烧数分钟。改为:LLM 完成后重新加载 →
+      // 在最新快照上落 prompt → 立即保存;仍被拒(并发写)时重载重试,全程不重新生成。
+      const WRITE_RETRY = 3;
+      let savedNode: CanvasNode | null = null;
+      for (let attempt = 0; attempt < WRITE_RETRY && !savedNode; attempt += 1) {
+        const fresh = this.store.loadProjectCanvases(ctx.projectId).canvases.find((c) => c.id === ctx.canvasId);
+        if (!fresh) return { ok: false, result: '画布不存在' };
+        const target = fresh.nodes.find((n) => n.id === node.id);
+        if (!target) {
+          return { ok: false, result: `节点「${node.label || node.id}」(${node.id})已不存在(可能被删除),提示词未写回。` };
+        }
+        const prev = (target.data as { prompt?: unknown } | undefined)?.prompt;
+        target.data = { ...(target.data as Record<string, unknown>), prompt: extracted.text } as CanvasNode['data'];
+        target.updatedAt = new Date().toISOString();
+        fresh.updatedAt = target.updatedAt;
+        const saved = this.store.saveCanvasSnapshot(fresh);
+        if (saved && saved.ok === false) {
+          // 回滚内存修改,避免把未落盘的新 prompt 留在被拒绝的快照对象上
+          target.data = { ...(target.data as Record<string, unknown>), prompt: prev } as CanvasNode['data'];
+          continue;
+        }
+        savedNode = target;
+      }
+      if (!savedNode) {
+        return {
+          ok: false,
+          result: `提示词已生成,但写回画布失败(快照被拒绝,已重载重试 ${WRITE_RETRY} 次)。节点上的旧提示词未改。`,
+        };
+      }
+      const written = String((savedNode.data as { prompt?: string }).prompt ?? '');
+      if (written !== extracted.text) {
+        return { ok: false, result: '提示词写回后校验失败,节点上的 prompt 与生成结果不一致。' };
+      }
+      return {
+        ok: true,
+        result:
+          `已按 ${mode} 写回镜头「${savedNode.label || savedNode.id}」的提示词(${written.length} 字)。尚未提交生成;需要出片时再 engine.submit。\n\n${written}`,
+        nodeId: savedNode.id,
+      };
     },
     'canvas.delete_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
@@ -1072,9 +1308,35 @@ export class ToolHandlers {
       if (!submitHit.ok) return { ok: false, result: submitHit.error };
       const node = submitHit.node;
       const nodeId = node.id;
+      const gate = checkSkillSubmitGates(
+        this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId),
+        node,
+        cur.nodes,
+        cur.edges,
+      );
+      if (!gate.ok) return { ok: false, result: gate.reason };
       if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'frame-grab' || node.kind === 'video-upscale') {
         // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
+      }
+      /*
+       * ── 同节点在途任务预查(2026-10-14「技能5测试」双提交事故)──
+       *
+       * 渲染层 cascade 接力与 Agent 自动推进曾对同一 shot 各提交一次(间隔 28s),
+       * 两条 h3 任务各跑几十分钟。queue.submit 已有同 nodeId 去重硬闸(抛错),
+       * 这里提前用友好文案返回 —— 更重要的是**先于 takes.append**:硬闸抛错时
+       * 若 Take 已落 queued,会留下一条永远等不到终态的孤儿记录(违反 R6)。
+       */
+      const inFlight = this.queue
+        .list()
+        .find((j) => j.nodeId === nodeId && (j.status === 'queued' || j.status === 'running'));
+      if (inFlight) {
+        return {
+          ok: false,
+          result:
+            `「${node.label || nodeId}」已有任务${inFlight.status === 'running' ? '正在渲染' : '排队中'}(${inFlight.id}),不重复提交。` +
+            `等它完成即可;确要重跑,先 engine.cancel({"jobId":"${inFlight.id}"}) 再提交。`,
+        };
       }
       const isImage = node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale' || node.kind === 'asset';
       // 方案 B+D:shot 的参考引用由连线推导(不再信任 agent 直写的 data.refs),提交前防呆拦截
@@ -1089,6 +1351,17 @@ export class ToolHandlers {
           Array.isArray(d.refs) ? (d.refs as DerivedRef[]) : undefined,
           Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : undefined,
         );
+        // 存量脏图(技能4:首帧 + ref-image 已经写进画布)在入队前拒绝。
+        // 渲染层 submit-render 有同一道闸,本工具直连 queue.submit,漏了就会等到 h3 exit 1。
+        const anchorIssues = referenceAnchorConflictIssues(refs);
+        if (anchorIssues.length > 0) {
+          return {
+            ok: false,
+            result:
+              `提交被拒绝:${anchorIssues.map((i) => i.message).join('; ')} ` +
+              `请 canvas.disconnect 去掉其中一侧后再提交。关联生成:环境图/角色卡/手部参考全部改为 label="ref-image",不要留 first-frame。`,
+          };
+        }
         // 愈合存量「有 ref-image 边但 mode 仍文生」(测试技能2);写回节点让 UI/Take 一致
         const healed = healShotModeFromRefs(d, refs);
         if (healed) {
@@ -1106,6 +1379,10 @@ export class ToolHandlers {
         if (warns.length > 0) warnNote = ` · 警告:${warns.map((i) => i.message).join('; ')}`;
         const now = new Date().toISOString();
         const resolved: Array<{ asset: import('@bigbotart/shared').Asset; role: string; localPath: string }> = [];
+        /* 与下方 image-gen 分支同口径(2026-10-14):asset 节点绑了不存在的资产 id 时,
+           旧实现 `if (!as) continue` 会把这条参考**静默吞掉**,references 为空照样提交 ——
+           连线画了、参考没进命令。这里改为指名拒绝。 */
+        const missingRefAssets: string[] = [];
         for (const r of refs) {
           /* 音频参考的视频源 → 现场抽音轨(「视频节点 → 音频参考」连接器,2026-10-08)。
              派生层登记的是**视频路径**(纯函数不能有 ffmpeg 副作用),提交这一步换成 wav;
@@ -1120,7 +1397,10 @@ export class ToolHandlers {
           }
           if (r.assetId) {
             const as = this.assets.get(r.assetId);
-            if (!as) continue;
+            if (!as) {
+              missingRefAssets.push(`${r.role} ← 资产 ${r.assetId}(资产库中不存在)`);
+              continue;
+            }
             resolved.push({ asset: as, role: r.role, localPath: as.localPath });
           } else if (refPath) {
             resolved.push({
@@ -1138,6 +1418,14 @@ export class ToolHandlers {
           }
         }
         references = resolved;
+        if (missingRefAssets.length > 0) {
+          return {
+            ok: false,
+            result:
+              `提交被拒绝:${missingRefAssets.length} 条参考指向不存在的资产:${missingRefAssets.join('; ')}。` +
+              `请用 canvas.update_node 把源资源节点的 data.assetId 改成 assets.list 里的真实 id(或 canvas.disconnect 去掉该连线)后再提交。`,
+          };
+        }
         const mediaIssues = referenceMediaIssues(resolved.map((x) => ({ role: x.role, kind: x.asset.kind, path: x.localPath })));
         if (mediaIssues.length > 0) {
           return { ok: false, result: `提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}` };
@@ -1147,9 +1435,43 @@ export class ToolHandlers {
       // mlxgen 侧对不支持的模型给指引报错。2026-09-29:此前只认 image-gen,
       // Agent 连到 image-edit 的参考图被静默丢弃,2.1 的 qwen21.edit 永远只有 1 张图)
       if (node.kind === 'image-gen' || node.kind === 'image-edit') {
-        const refPaths = resolveRefImagePaths(cur, node, (id) => this.assets.get(id)?.localPath);
+        const assetPathFn = (id: string) => this.assets.get(id)?.localPath;
+        /*
+         * ── 连线必须真的解析出图(2026-10-14「测试技能5」事故)──
+         *
+         * 资源节点绑了不存在的资产 id 时,resolveRefImagePaths 的 .filter(Boolean) 会
+         * 把这条边**静默吞掉**:references 为空、任务照样「成功」,生成的是纯文生图 ——
+         * 用户看到的是「连线画了、参考没用上」。这里逐边解析,任何一条 ref-image 边
+         * 解析不到图片就拒绝提交,并指名是哪个源节点、为什么。
+         */
+        const refEdges = cur.edges.filter((e) => e.target === nodeId && e.label === 'ref-image');
+        const resolvedRefs: string[] = [];
+        const failedRefs: string[] = [];
+        for (const e of refEdges) {
+          const src = cur.nodes.find((n) => n.id === e.source);
+          const p = resolveNodeImagePath(src, e.label, assetPathFn);
+          if (p) resolvedRefs.push(p);
+          else {
+            const srcLabel = src?.label || e.source;
+            const why = !src
+              ? '源节点不存在'
+              : src.kind === 'asset'
+                ? `绑定的资产 ${String((src.data as Record<string, unknown> | undefined)?.assetId ?? '(未绑定)')} 在资产库中不存在`
+                : '源节点还没有图片产物(未生成)';
+            failedRefs.push(`「${srcLabel}」(${why})`);
+          }
+        }
+        if (failedRefs.length > 0) {
+          return {
+            ok: false,
+            result:
+              `提交被拒绝:${failedRefs.length} 条 ref-image 连线解析不到参考图:${failedRefs.join('、')}。` +
+              `请修复后再提交——资产节点用 canvas.update_node 把 data.assetId 改成 assets.list 里的真实 id;` +
+              `图片节点先 engine.submit 让它出图;不需要该参考就 canvas.disconnect 去掉这条边。`,
+          };
+        }
         const now = new Date().toISOString();
-        for (const p of refPaths) {
+        for (const p of resolvedRefs) {
           references.push({
             asset: {
               id: `ref:${basenameOf(p)}`,
@@ -1170,22 +1492,44 @@ export class ToolHandlers {
       if (node.kind === 'shot' && !String((node.data as { prompt?: string }).prompt ?? '').trim()) {
         return {
           ok: false,
-          result: `「${node.label || nodeId}」的提示词为空,无法提交(生成视频必须有 prompt)。请先用 canvas.update_node 写 data.prompt(注意 data 要传**对象**,不要传 JSON 字符串),再 engine.submit。`,
+          result: `「${node.label || nodeId}」的提示词为空,无法提交(生成视频必须有 prompt)。请先 h3.write_prompt({ nodeId: "${nodeId}", brief: "这一镜要拍什么" }),再 engine.submit。`,
         };
       }
       // image 类节点:kind 推导 + input 连线解析(直传 node.data 会让 image-edit 缺省成 generate 丢输入图)
       let submitParams: Record<string, unknown> = (node.data as Record<string, unknown>) ?? {};
+      let durationHealNote = '';
+      if (node.kind === 'shot') {
+        // 提交前再愈合一次时长(存量脏节点:标题写 15s、data.seconds=0、frames=22)
+        const dur = normalizeShotDuration(submitParams, { label: node.label });
+        if (dur.changed) {
+          node.data = { ...(node.data as Record<string, unknown>), ...dur.data } as CanvasNode['data'];
+          node.updatedAt = new Date().toISOString();
+          cur.updatedAt = node.updatedAt;
+          cur.version += 1;
+          this.store.saveCanvasSnapshot(cur);
+          submitParams = { ...submitParams, ...dur.data };
+          if (dur.note) durationHealNote = ` · ${dur.note}`;
+        }
+        // 尺寸 + 时长硬校验:不合法直接拒绝,禁止入队后才被 h3 exit 1
+        const geom = validateShotSubmitParams(submitParams);
+        if (geom.length > 0) {
+          return {
+            ok: false,
+            result: `「${node.label || nodeId}」提交被拒绝(尺寸/时长不合规):${geom.join('; ')}。请先 canvas.update_node 改 width/height/seconds 再 engine.submit。`,
+          };
+        }
+      }
       if (node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale') {
         const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath, this.getToolModels?.());
         if (!built.ok) return { ok: false, result: built.error };
         submitParams = built.params;
       }
-      /* 🚀 加速 LoRA 解析(2026-10-09 事故修复)。
+      /* 🚀 模型包(加速/风格)解析(2026-10-09 事故修复)。
        *
        * 问题:本工具**直接** `queue.submit`,绕过了渲染层的 `submit-render` IPC ——
        * 而 accel → `modelDir`(-d)+ `steps` 的解析只写在那个 IPC 里。
-       * 后果:Agent 提交的视频即使节点开着加速(h3c.ts 只认 `params.modelDir`),
-       * 也**永远走默认模型 + 默认步数**,加速静默失效 —— 与检查器显示的状态不符。
+       * 后果:Agent 提交的视频即使节点开着模型包(h3c.ts 只认 `params.modelDir`),
+       * 也**永远走默认模型 + 默认步数**,模型包静默失效 —— 与检查器显示的状态不符。
        * 这里补齐,与 index.ts 的 submit-render 同口径、同报错文案。 */
       const accelReq = submitParams.accel as { enabled?: boolean; packId?: string; steps?: number } | undefined;
       if (accelReq?.enabled && !isImage) {
@@ -1193,11 +1537,13 @@ export class ToolHandlers {
         if (!resolved) {
           return {
             ok: false,
-            result: '加速 LoRA 开启但模型包不可用(未安装或目录缺失) · 请到设置页「加速 LoRA」检查,或先用 canvas.update_node 关闭该节点的 data.accel',
+            result: '模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或先用 canvas.update_node 关闭该节点的 data.accel',
           };
         }
         submitParams.modelDir = resolved.modelDir;
         submitParams.steps = resolved.steps;
+        // kind 透传给 provider:风格包 ETA 不打加速折扣(与 submit-render 同口径)
+        submitParams.accel = { ...accelReq, kind: resolved.kind };
       }
       /* ⚠️ 提交必须带全 projectId/canvasId/takeId,缺一个就会「生成成功但画布上什么都没有」
          (2026-09-28 真实事故):Agent 侧此前只传 provider/nodeId/slot/params/references,
@@ -1226,7 +1572,7 @@ export class ToolHandlers {
         params: submitParams,
         references,
       });
-      return { ok: true, result: `已提交生成任务(${handle.providerTaskId})${warnNote}`, nodeId };
+      return { ok: true, result: `已提交生成任务(${handle.providerTaskId})${warnNote}${durationHealNote}`, nodeId };
     },
     'engine.queue_status': async () => {
       const jobs = this.queue.list();
@@ -1239,19 +1585,26 @@ export class ToolHandlers {
       return { ok: true, result: `已取消任务 ${jobId}` };
     },
 
-    /* ── 加速 LoRA 域 ── */
+    /* ── 模型包域(加速 / 风格) ── */
     'accel.list': async () => {
       const packs = this.accel?.list() ?? [];
       if (packs.length === 0) {
-        return { ok: true, result: '未安装加速 LoRA 蒸馏模型包 · 请先到设置页「加速 LoRA」安装;未开启加速时用常规档位生成' };
+        return { ok: true, result: '未安装 h3 模型包 · 请先到设置页「h3 模型包」安装;未开启时用常规档位生成' };
       }
       const lines = packs.map((p) => {
-        const parts = [`- ${p.id} [${p.name}]`, p.steps ? `steps=${p.steps}` : 'steps=默认'];
+        const kind = p.kind === 'style' ? '风格' : p.kind === 'style-accel' ? '风格加速' : '加速';
+        const parts = [`- ${p.id} [${p.name}](${kind})`, p.steps ? `steps=${p.steps}` : 'steps=默认'];
         if (p.default) parts.push('· 默认');
         if (p.exists === false) parts.push('· ⚠️ 目录缺失,不可用');
         return parts.join(' ');
       });
-      return { ok: true, result: `已安装加速 LoRA 蒸馏模型包:\n${lines.join('\n')}\n(镜头 data.accel={enabled:true, packId, steps} 开启;packId 用上面 id)` };
+      return {
+        ok: true,
+        result:
+          `已安装 h3 模型包:\n${lines.join('\n')}\n` +
+          `(镜头 data.accel={enabled:true, packId, steps} 启用;packId 用上面 id。` +
+          `加速包=蒸馏提速(4/8 步);风格包=画风融合(如 mystic,20/30 步,不提速);风格加速包=双融合(如 mystic-turbo,4/8 步提速且带画风)。三者互斥,一个镜头只能选一个包)`,
+      };
     },
 
     /* ── assets 域 ── */
@@ -1266,7 +1619,10 @@ export class ToolHandlers {
       return { ok: true, result: `${asset.name}: ${asset.kind} · ${asset.localPath}` };
     },
     // 资产导入:headless paths 仅允许应用数据/产物目录;任意本机文件必须 openDialog=true
-    'assets.import': async (a) => {
+    // ⚠️ 必须带 projectId(2026-10-14「测试技能5」事故):此前裸调用,用户经 Agent 导入的素材
+    //    全部落进**全局库**,项目资源库(workspaces/<pid>/assets.json)里什么都没有。
+    //    与 web.fetch_image / frames.extract 同口径。
+    'assets.import': async (a, ctx) => {
       const paths = Array.isArray(a.paths)
         ? (a.paths as unknown[]).filter((p): p is string => typeof p === 'string' && p.length > 0)
         : [];
@@ -1277,8 +1633,8 @@ export class ToolHandlers {
       let res;
       try {
         res = openDialog
-          ? await this.assets.importFromDialog()
-          : await this.assets.importFromPaths(paths);
+          ? await this.assets.importFromDialog(ctx.projectId)
+          : await this.assets.importFromPaths(paths, { projectId: ctx.projectId });
       } catch (e) {
         return { ok: false, result: `导入失败: ${(e as Error).message}` };
       }
@@ -1295,13 +1651,90 @@ export class ToolHandlers {
       );
       const failLines = res.failed.map((f) => `- ❌ ${f.name}: ${f.error}`);
       const summary = [
-        `导入完成:${res.assets.length} 个成功,${res.failed.length} 个失败`,
+        `导入完成:${res.assets.length} 个成功,${res.failed.length} 个失败(已归属当前项目资源库)`,
         ...okLines,
         ...failLines,
+        // 防幻觉:模型曾把资产 id 改写成不存在的值再建资源节点(2026-10-14 测试技能5 事故)
+        '⚠️ 上面每行的 id 是资产的真实 id,建资源节点时 canvas.create_node(kind="asset", data={"assetId":"<原样照抄>"}) 必须逐字使用,禁止凭记忆改写;',
+        '画布上引用该素材的正确做法:canvas.create_node(kind="asset") 绑定后 canvas.connect 连到下游(ref-image/input/first-frame)。',
       ].join('\n');
       return {
         ok: res.failed.length === 0,
         result: summary + (res.failed.length > 0 && res.assets.length > 0 ? '\n(部分失败但有资产已加入)' : ''),
+      };
+    },
+
+    /* ── web 域:联网搜索(只读)与图片直链下载 ── */
+    'web.search': async (a) => {
+      const query = String(a.query ?? '');
+      const found = await searchWeb(query, a.limit, this.webDeps);
+      if (!found.ok) return { ok: false, result: found.error };
+      return { ok: true, result: found.text };
+    },
+    'web.fetch_image': async (a, ctx) => {
+      const url = String(a.url ?? '').trim();
+      if (!url) return { ok: false, result: '需要图片的 http(s) 直链(参数 url)' };
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const got = await downloadImage(url, this.webDeps);
+      if (!got.ok) return { ok: false, result: got.error };
+      let assetId: string | undefined;
+      try {
+        const imported = await this.assets.importFromPaths([got.path], { projectId: ctx.projectId });
+        if (imported.assets.length > 0) assetId = imported.assets[0]!.id;
+        else {
+          const why = imported.failed[0]?.error ?? '未知错误';
+          return { ok: false, result: `图片已下载但导入资产库失败:${why}` };
+        }
+      } catch (e) {
+        console.error('[web.fetch_image] 导入资产库异常', (e as Error).message);
+        return { ok: false, result: `图片已下载但导入资产库异常:${(e as Error).message}` };
+      } finally {
+        try {
+          unlinkSync(got.path);
+        } catch (e) {
+          console.error('[web.fetch_image] 清理暂存失败', (e as Error).message);
+        }
+      }
+      if (!assetId) return { ok: false, result: '图片已下载但没有得到资产 id' };
+      const label = String(a.label ?? '').trim() || imageLabelFromUrl(url);
+      const now = new Date().toISOString();
+      const x = finiteNum(a.x);
+      const y = finiteNum(a.y);
+      const node: CanvasNode = {
+        id: nid('asset'),
+        kind: 'asset',
+        label,
+        position: {
+          x: x ?? 80 + cur.nodes.length * 60,
+          y: y ?? 80,
+        },
+        width: 236,
+        data: {
+          assetId,
+          mediaType: 'image',
+          webSource: { url, fetchedAt: now },
+        } as CanvasNode['data'],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now);
+      if (!appended.ok) {
+        return {
+          ok: false,
+          result: `图片已下载并导入资产库(资产 id:${assetId}),但画布快照保存连续被拒绝,资源节点未创建。请重试 web.fetch_image 或用 assets.import 后的 id 手动 canvas.create_node。`,
+        };
+      }
+      return {
+        ok: true,
+        result:
+          `已下载图片并建成画布资源节点「${label}」(${Math.round(got.bytes / 1024)}KB)\n` +
+          `- 节点 id:${node.id}(画布操作用它:canvas.get_node / canvas.connect)\n` +
+          `- 资产 id:${assetId}(vision.caption 的 assetId 用这个)\n` +
+          `- 来源:${url}\n` +
+          `看画面:vision.caption(nodeId="${node.id}")。当作参考:canvas.connect 到下游的 ref-image / input / first-frame。`,
+        nodeId: node.id,
       };
     },
 
@@ -1467,10 +1900,13 @@ export class ToolHandlers {
         createdAt: now,
         updatedAt: now,
       };
-      cur.nodes.push(node);
-      cur.updatedAt = now;
-      cur.version += 1;
-      this.store.saveCanvasSnapshot(cur);
+      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now);
+      if (!appended.ok) {
+        return {
+          ok: false,
+          result: `帧已抽出并导入资产库(帧:${basenameOf(res.path)},资产 id:${assetId ?? '无'}),但画布快照保存连续被拒绝,资源节点未创建。请重试 frames.extract。`,
+        };
+      }
       // 返回文案必须把「节点 id」与「资产 id」分开写清:两者长的很像(都以 asset- 开头),
       // 模型曾把节点 id 当 assetId 传给 vision.caption → 「资产不存在」,再绕道 assets.list
       // 翻全库找 id。这里显式标注用途,并顺带给下一步可用的工具。
@@ -1643,6 +2079,33 @@ export class ToolHandlers {
   }
 
   /**
+   * 把「新建的节点」挂到画布并落盘,带 stale 重试(与 h3.write_prompt 的写回防护同口径)。
+   *
+   * 用于带长 await(网络下载 / ffmpeg 抽帧)的工具:进入工具时加载的快照在 await 期间
+   * 常被渲染层/队列的新保存顶掉版本,持旧快照整体保存会被 saveCanvasSnapshot 的
+   * 版本防护拒绝。改为:落盘前重新加载 → 挂载新节点 → 立即保存;被拒则重载重试。
+   */
+  private appendNodeWithRetry(
+    projectId: string,
+    canvasId: string,
+    node: CanvasNode,
+    now: string,
+  ): { ok: boolean } {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const fresh = this.store.loadProjectCanvases(projectId).canvases.find((c) => c.id === canvasId);
+      if (!fresh) return { ok: false };
+      fresh.nodes.push(node);
+      fresh.updatedAt = now;
+      fresh.version = (fresh.version ?? 0) + 1;
+      const saved = this.store.saveCanvasSnapshot(fresh);
+      if (!(saved && saved.ok === false)) return { ok: true };
+      // 回滚挂载,避免在被拒绝的快照对象上残留重复节点
+      fresh.nodes = fresh.nodes.filter((n) => n.id !== node.id);
+    }
+    return { ok: false };
+  }
+
+  /**
    * ffmpeg 本地图片节点(image-crop / image-stitch / image-split)的 engine.submit 执行路径:
    * 同步执行(秒级,不进渲染队列)→ 记一条 succeeded Take → 产物路径/分片回写节点 data →
    * saveCanvasSnapshot 落盘并广播(渲染层据 canvas-snapshot-updated 同步)。
@@ -1780,7 +2243,8 @@ export class ToolHandlers {
     const req = {
       inputPath: srcPath,
       scale: Number(d.scale ?? 2),
-      superRes: (d.superRes as 'realesrgan' | 'none' | undefined) ?? 'realesrgan',
+      superRes: (d.superRes as 'realesrgan' | 'seedvr2' | 'none' | undefined) ?? 'realesrgan',
+      seedvrModel: typeof d.seedvrModel === 'string' ? d.seedvrModel : undefined,
       srModel: d.srModel as never,
       faceModel: d.faceModel as never,
       faceWeight: d.faceWeight === undefined ? undefined : Number(d.faceWeight),

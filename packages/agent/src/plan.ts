@@ -13,6 +13,9 @@ import {
   assembleZImagePrompt,
   rowNeedsImage,
   rowSeconds,
+  rowCell,
+  resolveMaterializeSeconds,
+  normalizeShotDuration,
   storyboardMarkdown,
   tableToGfm,
   STORYBOARD_HEAD,
@@ -113,6 +116,17 @@ export function buildStoryboardMaterialized(
   const size = SB_SIZE['16:9']!;
   rows.forEach((row, r) => {
     const rowNo = r + 1;
+    const promptText = assembleH3Prompt(row, head, basePrompt).text;
+    const sec = resolveMaterializeSeconds(
+      rowSeconds(row, head),
+      rowCell(row, head, '画面描述'),
+      rowCell(row, head, '提示词(可选)'),
+      promptText,
+    );
+    const dur = normalizeShotDuration(
+      { prompt: promptText, seconds: sec || undefined },
+      { label: `镜头 ${String(rowNo).padStart(2, '0')}`, prompt: promptText },
+    );
     const shot: CanvasNode = {
       id: nid('shot'),
       kind: 'shot',
@@ -121,10 +135,11 @@ export function buildStoryboardMaterialized(
       data: {
         engine: 'mock',
         mode: 'text2video',
-        prompt: assembleH3Prompt(row, head, basePrompt).text,
+        prompt: promptText,
         width: size.width,
         height: size.height,
-        seconds: rowSeconds(row, head) || undefined,
+        seconds: Number(dur.data.seconds),
+        frames: Number(dur.data.frames),
         steps: 30,
         layers: 50,
         reuse: 1,
@@ -146,11 +161,12 @@ export function buildStoryboardMaterialized(
         label: `图片生成 · 分镜静帧 ${String(rowNo).padStart(2, '0')}`,
         data: {
           engine: 'mlxgen',
-          model: 'AbstractFramework/z-image-turbo-8bit',
+          // 🆕 不写 model(2026-09-29 v1 工具模型)/ steps(2026-10-14 按模型缺省,Turbo=8):
+          // 留给提交期按「节点显式值 > 设置页工具模型 > 内置默认」解析;
+          // 这里写死 z-image+24 会让设置页配置与 Turbo 锁步全部失效
           prompt: assembleZImagePrompt(row, head, basePrompt).text,
           width: size.width,
           height: size.height,
-          steps: 24,
           guidance: 1.0,
           seeds: [42],
           promptFrom: { nodeId: storyboardId, mode: 'row', row: rowNo },

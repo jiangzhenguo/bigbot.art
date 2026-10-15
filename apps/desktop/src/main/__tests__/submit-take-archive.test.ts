@@ -61,7 +61,7 @@ function makeStore() {
         kind: 'shot',
         label: '镜头 A',
         position: { x: 0, y: 0 },
-        data: { prompt: '一个美女跳舞', engine: 'h3c', mode: 'text2video' },
+        data: { prompt: '一个美女跳舞', engine: 'h3c', mode: 'text2video', width: 544, height: 544, frames: 22 },
       },
     ],
     edges: [],
