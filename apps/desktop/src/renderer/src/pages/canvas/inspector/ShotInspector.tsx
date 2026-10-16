@@ -372,7 +372,7 @@ export function ShotInspector({
             src={outputUrlOf(curTake.resultPath)}
             controls
             preload="metadata"
-            style={{ width: '100%', height: 'auto', borderRadius: 'var(--radius-md)', display: 'block', background: '#000' }}
+            style={{ width: '100%', height: 'auto', borderRadius: 'var(--radius-md)', display: 'block', background: 'var(--media-bg)' }}
           />
         </div>
       ) : curTake?.status === 'succeeded' ? (
@@ -790,7 +790,7 @@ export function ShotInspector({
               <div
                 className="f-hint"
                 data-od-id="shot-ref-video-duration-warn"
-                style={{ marginTop: 4, color: 'var(--warn, #d08700)' }}
+                style={{ marginTop: 4, color: 'var(--warn)' }}
               >
                 ⚠️ 参考视频带音轨时 h3 要求输出 ≥2 秒,当前 {outputSeconds.toFixed(2)} 秒:
                 请提高帧数/时长(≥ {MIN_SOUNDTRACK_FRAMES} 帧),或勾选上面的「忽略参考视频音轨」。

@@ -32,30 +32,13 @@ export default {
   'Ornith-1.5-35B-A3B · 本地': 'Ornith-1.5-35B-A3B · Local',
   '无技能': 'No Skill',
   '无技能 · 自由编排': 'No Skill · Freeform',
-  '纸拼贴剧情片': 'Paper Collage Drama',
-  '剧情短片': 'Short Drama',
-  '电商产品': 'E-commerce Product',
-  '科普讲解': 'Science Explainer',
-  '水墨': 'Ink Wash',
-  '纸拼贴': 'Paper Collage',
-  /* 快捷技能模板 */
+  /* 快捷技能模板(真实 listSkills) */
   '从 Skill 模板开始': 'Start from a Skill Template',
-  '用三幕结构写一部 45 秒剧情短片：主角在旧车站错过一班列车，却在站台重逢多年未见的朋友。':
-    'Write a 45-second short drama in three acts: the protagonist misses a train at an old station, but reunites with a long-lost friend on the platform.',
-  '为保温杯生成 3 个视角的产品视频：侧视旋转、开盖特写、户外使用场景，统一浅灰背景。':
-    'Generate product videos of a thermos from 3 angles: side rotation, lid-opening close-up, and outdoor use, all on a light gray background.',
-  '做一支 60 秒科普短片解释日全食：从月球轨道切入，到贝利珠瞬间，图文穿插。':
-    "Make a 60-second science short explaining a total solar eclipse: from the lunar orbit to the Baily's beads moment, intercut with graphics.",
-  '水墨风格山水短片：远山、孤舟、留白，镜头缓慢横移，30 秒。':
-    'An ink-wash style landscape short: distant mountains, a lone boat, negative space, slow lateral camera move, 30 seconds.',
-  '帮我在导演台搭一场戏：男女主在草原上走，遇到一条很宽的河，女主跃过河，男主在岸边踱步。纸拼贴风格，60 秒以内。':
-    "Set up a scene on the director's canvas: the leads walk across the grassland and reach a wide river; she leaps across while he paces the shore. Paper collage style, under 60 seconds.",
+  '用「{name}」开始:{desc}': 'Start with "{name}": {desc}',
+  '用「{name}」技能开始创作': 'Start creating with the "{name}" skill',
+  官方精选技能: 'Featured skill',
   /* 备选入口 */
   '也可以这样开始': 'You Can Also Start Like This',
-  '图片 → 视频管线': 'Image → Video Pipeline',
-  'Z-Image 静帧作首帧': 'Z-Image stills as first frame',
-  '批量产品视频': 'Batch Product Videos',
-  '多角度图逐镜生成': 'Multi-angle images, generated shot by shot',
   '导入项目包(.bba)': 'Import Project Package (.bba)',
   '换机 / 协作 · 结构+历史+附件': 'New machine / hand-off · structure + history + attachments',
   /* 右侧项目流 */

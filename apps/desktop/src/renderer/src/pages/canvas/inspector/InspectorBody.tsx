@@ -313,7 +313,7 @@ export function InspectorBody({
                 controls
                 muted
                 preload="metadata"
-                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: 'var(--media-bg)' }}
               />
               <div className="mono mut" style={{ fontSize: 11, marginTop: 4 }}>
                 {d.width && d.height ? `${d.width}×${d.height}` : ''}
@@ -328,7 +328,7 @@ export function InspectorBody({
                 controls
                 muted
                 preload="metadata"
-                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: '#000' }}
+                style={{ width: '100%', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-soft)', background: 'var(--media-bg)' }}
               />
             </div>
           ) : null}

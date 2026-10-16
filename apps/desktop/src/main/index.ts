@@ -2,7 +2,7 @@
  * Electron 主进程 — 窗口 + IPC + 服务编排
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
-import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, shell, nativeImage, dialog, nativeTheme } from 'electron';
 import { join, resolve, basename } from 'node:path';
 import { existsSync, statSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -31,6 +31,12 @@ import { runDataMigration } from './migrate';
 import { DATA_DIR } from './workspace-paths';
 import { DebugLogger } from './logger';
 import { installCrashGuard } from './crash-guard';
+import {
+  applyThemeSource,
+  normalizeTheme,
+  syncWindowBackground,
+  windowBackgroundColor,
+} from './theme';
 import { mlxgenModelInfo, mlxgenDownload, mlxgenDownloadStatus, mlxgenDownloadActive, mlxgenDownloadCancel } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
 import { runSelfCheck } from './selfcheck';
@@ -561,7 +567,8 @@ async function createWindow() {
     width: 1440,
     height: 900,
     title: 'BigBotArt',
-    backgroundColor: '#14161a',
+    // 与 --bg 深浅值对齐,避免启动闪反色底(见 theme.ts)
+    backgroundColor: windowBackgroundColor(nativeTheme.shouldUseDarkColors),
     ...(existsSync(iconPath) ? { icon: iconPath } : {}),
     // 隐藏 macOS 原生标题栏:红绿灯悬浮内嵌,窗口拖拽由渲染层 .topbar/侧栏的 -webkit-app-region 承担
     titleBarStyle: 'hiddenInset',
@@ -887,23 +894,29 @@ ipcMain.handle('save-skill', (_e, input: { name: string; projectId: string; canv
     inject: instructions ? (input.inject === 'summary' ? 'summary' : 'full') : undefined,
   });
 });
-ipcMain.handle('apply-skill', (_e, skillId: string, projectName: string, activate = false) => {
-  const project = skills.apply(skillId, projectName, store);
-  if (activate) {
-    const canvasId = project.activeCanvasId || 'main';
-    memory.setActiveSkillId(project.id, canvasId, skillId);
-  }
-  return { project };
-});
+ipcMain.handle(
+  'apply-skill',
+  (_e, skillId: string, projectName: string, activate = false, paramValues?: Record<string, string>) => {
+    const project = skills.apply(skillId, projectName, store, paramValues);
+    if (activate) {
+      const canvasId = project.activeCanvasId || 'main';
+      memory.setActiveSkillId(project.id, canvasId, skillId, paramValues);
+    }
+    return { project };
+  },
+);
 ipcMain.handle('delete-skill', (_e, id: string) => skills.delete(id));
 ipcMain.handle('skill-read', (_e, skillId: string) => skills.get(skillId) ?? null);
 ipcMain.handle('skill-update', (_e, skillId: string, patch: { name?: string; description?: string; instructions?: string | null; inject?: 'full' | 'summary' }) => skills.update(skillId, patch));
-ipcMain.handle('skill-activate', (_e, projectId: string, canvasId: string, skillId: string) => {
-  const skill = skills.get(skillId);
-  if (!skill) return { ok: false as const, error: 'Skill 不存在' };
-  memory.setActiveSkillId(projectId, canvasId, skillId);
-  return { ok: true as const, preview: (skill.instructions ?? '').slice(0, 60), hasInstructions: !!skill.instructions };
-});
+ipcMain.handle(
+  'skill-activate',
+  (_e, projectId: string, canvasId: string, skillId: string, paramValues?: Record<string, string>) => {
+    const skill = skills.get(skillId);
+    if (!skill) return { ok: false as const, error: 'Skill 不存在' };
+    memory.setActiveSkillId(projectId, canvasId, skillId, paramValues);
+    return { ok: true as const, preview: (skill.instructions ?? '').slice(0, 60), hasInstructions: !!skill.instructions };
+  },
+);
 ipcMain.handle('skill-deactivate', (_e, projectId: string, canvasId: string) => {
   memory.setActiveSkillId(projectId, canvasId, null);
   return { ok: true as const };
@@ -1113,7 +1126,18 @@ ipcMain.handle('get-settings', async () => {
   }
   return s;
 });
-ipcMain.handle('set-settings', (_e, patch) => settings.patch(patch));
+ipcMain.handle('set-settings', (_e, patch: Partial<import('@bigbotart/shared').AppSettings>) => {
+  const nextPatch = { ...patch };
+  if ('theme' in nextPatch) {
+    nextPatch.theme = normalizeTheme(nextPatch.theme, (m) => logger.log('warn', m));
+  }
+  const next = settings.patch(nextPatch);
+  if ('theme' in (patch ?? {})) {
+    applyThemeSource(normalizeTheme(next.theme));
+    syncWindowBackground(win);
+  }
+  return next;
+});
 
 // ---------- IPC:h3 模型包(加速 / 风格)管理 ----------
 ipcMain.handle('accel-list', () => accel.list());
@@ -1709,6 +1733,8 @@ app.whenReady().then(async () => {
   });
 
   await store.init();
+  // 创建窗口前设好 themeSource,渲染层 prefers-color-scheme 首帧即正确(无闪屏)
+  applyThemeSource(normalizeTheme(settings.get().theme, (m) => logger.log('warn', m)));
   await createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

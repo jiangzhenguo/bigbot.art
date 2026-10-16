@@ -24,6 +24,7 @@ export default {
   '{n} 小时前更新': 'Updated {n} hr ago',
   '{n} 天前更新': 'Updated {n} d ago',
   /* 参数化字段 */
+  '需 {n} 个参数': '{n} params',
   秒: 's',
   '从资产中心选择…': 'Pick from Asset Center…',
   '沿用模板文案结构…': 'Reuse the template copy structure…',

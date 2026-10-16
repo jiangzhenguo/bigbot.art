@@ -74,14 +74,22 @@ const api: BigBotArtApi = {
   listSkills: () => ipcRenderer.invoke('list-skills'),
   saveSkill: (input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) =>
     ipcRenderer.invoke('save-skill', input),
-  applySkill: (skillId: string, projectName: string, activate?: boolean) =>
-    ipcRenderer.invoke('apply-skill', skillId, projectName, activate),
+  applySkill: (
+    skillId: string,
+    projectName: string,
+    activate?: boolean,
+    paramValues?: Record<string, string>,
+  ) => ipcRenderer.invoke('apply-skill', skillId, projectName, activate, paramValues),
   deleteSkill: (id: string) => ipcRenderer.invoke('delete-skill', id),
   skillRead: (skillId: string) => ipcRenderer.invoke('skill-read', skillId),
   skillUpdate: (skillId: string, patch: { name?: string; description?: string; instructions?: string | null; inject?: 'full' | 'summary' }) =>
     ipcRenderer.invoke('skill-update', skillId, patch),
-  skillActivate: (projectId: string, canvasId: string, skillId: string) =>
-    ipcRenderer.invoke('skill-activate', projectId, canvasId, skillId),
+  skillActivate: (
+    projectId: string,
+    canvasId: string,
+    skillId: string,
+    paramValues?: Record<string, string>,
+  ) => ipcRenderer.invoke('skill-activate', projectId, canvasId, skillId, paramValues),
   skillDeactivate: (projectId: string, canvasId: string) => ipcRenderer.invoke('skill-deactivate', projectId, canvasId),
   skillActive: (projectId: string, canvasId: string) => ipcRenderer.invoke('skill-active', projectId, canvasId),
   exportTimeline: (req) => ipcRenderer.invoke('export-timeline', req),

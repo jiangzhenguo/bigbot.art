@@ -516,7 +516,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
                       <VideoPoster
                         src={src}
                         alt={`镜${i + 1} 片段封面`}
-                        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: '#000' }}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: 'var(--media-bg)' }}
                       />
                     ) : (
                       <img draggable={false} src={src} alt={`镜${i + 1} 片段封面`} />

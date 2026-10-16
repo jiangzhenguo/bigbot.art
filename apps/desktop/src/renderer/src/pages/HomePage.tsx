@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { AppSettings, Asset, LlmSource, RenderJob, Skill } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import { useRenderQueue } from './useRenderQueue';
@@ -42,13 +42,32 @@ interface HomePageProps {
   };
 }
 
-const QUICK_SKILLS = [
-  { label: '剧情短片', fill: '用三幕结构写一部 45 秒剧情短片：主角在旧车站错过一班列车，却在站台重逢多年未见的朋友。', skill: '剧情短片' },
-  { label: '电商产品', fill: '为保温杯生成 3 个视角的产品视频：侧视旋转、开盖特写、户外使用场景，统一浅灰背景。', skill: '电商产品' },
-  { label: '科普讲解', fill: '做一支 60 秒科普短片解释日全食：从月球轨道切入，到贝利珠瞬间，图文穿插。', skill: '科普讲解' },
-  { label: '水墨', fill: '水墨风格山水短片：远山、孤舟、留白，镜头缓慢横移，30 秒。', skill: '水墨' },
-  { label: '纸拼贴', fill: '帮我在导演台搭一场戏：男女主在草原上走，遇到一条很宽的河，女主跃过河，男主在岸边踱步。纸拼贴风格，60 秒以内。', skill: '纸拼贴剧情片' },
-];
+/**
+ * 首页「从 Skill 模板开始」优先展示的内置技能(按顺序;库里没有的跳过)。
+ * 不含「H3 提示词写作规范」——那是写作手册,不是创作入口。
+ */
+const HOME_QUICK_SKILL_IDS = [
+  'minimalist-product-ad',
+  '3d-animation-short',
+  'brand-promo-video',
+  'co-op-game-intro',
+  'music-video-subtitle',
+  'handdrawn-live-video',
+  'paper-collage-explainer',
+  'papercraft-stop-motion',
+] as const;
+
+/** 芯片用短名:去掉尾部「生成器」 */
+function shortSkillLabel(name: string): string {
+  return name.replace(/生成器$/, '');
+}
+
+/** 点选技能时预填到输入框的开场句 */
+function skillStarterBrief(s: Skill, t: TFn): string {
+  const desc = (s.description ?? '').trim();
+  if (desc) return t('用「{name}」开始:{desc}', { name: s.name, desc });
+  return t('用「{name}」技能开始创作', { name: s.name });
+}
 
 /** 附件媒体类型中文名(t() key,与 assets 字典共用) */
 const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', audio: '音频', document: '文档' };
@@ -299,12 +318,36 @@ export default function HomePage({
     setShowSkillPop(false);
   };
 
-  const handleQuickSkill = (fill: string, skillName: string) => {
-    setBrief(fill);
-    // 按名称匹配真实技能(内置技能如「纸拼贴剧情片」在技能库中;匹配不到则为无技能)
-    setSkillId(skills.find((s) => s.name === skillName)?.id ?? null);
+  /** 首页快捷 chip / 底栏技能卡:选中真实技能 + 预填开场句 */
+  const handleQuickSkill = (skill: Skill) => {
+    setSkillId(skill.id);
+    setBrief(skillStarterBrief(skill, t));
+    setShowSkillPop(false);
     areaRef.current?.focus();
   };
+
+  /** 快捷区:按 HOME_QUICK_SKILL_IDS 从真实列表取;不足时用其余内置补齐 */
+  const quickSkills = useMemo(() => {
+    const byId = new Map(skills.map((s) => [s.id, s]));
+    const picked: Skill[] = [];
+    for (const id of HOME_QUICK_SKILL_IDS) {
+      const s = byId.get(id);
+      if (s) picked.push(s);
+      if (picked.length >= 5) break;
+    }
+    if (picked.length < 5) {
+      for (const s of skills) {
+        if (s.id === 'h3-prompt-writing') continue;
+        if (picked.some((p) => p.id === s.id)) continue;
+        picked.push(s);
+        if (picked.length >= 5) break;
+      }
+    }
+    return picked;
+  }, [skills]);
+
+  /** 「也可以这样开始」里两张技能卡(真实技能 + 导入包) */
+  const altSkills = useMemo(() => quickSkills.slice(0, 2), [quickSkills]);
 
   /* 真实附件导入:系统对话框选文件 → 复制进资产库(全局);取消则静默 */
   const handleAddAttachment = async () => {
@@ -655,12 +698,14 @@ export default function HomePage({
                     {t('无技能 · 自由编排')}
                     {skillId === null && <span className="ck">✓</span>}
                   </div>
-                  {skills.map((s) => (
-                    <div key={s.id} className="pop-it" data-skill={s.id} onClick={() => handlePickSkill(s.id)}>
-                      {s.name}
-                      {skillId === s.id && <span className="ck">✓</span>}
-                    </div>
-                  ))}
+                  {[...skills]
+                    .sort((a, b) => Number(!!b.builtin) - Number(!!a.builtin) || a.name.localeCompare(b.name, 'zh'))
+                    .map((s) => (
+                      <div key={s.id} className="pop-it" data-skill={s.id} onClick={() => handlePickSkill(s.id)}>
+                        {s.name}
+                        {skillId === s.id && <span className="ck">✓</span>}
+                      </div>
+                    ))}
                   {skills.length === 0 && <div className="pop-it dim">{t('技能库为空 · 可在 Skills 库页创建')}</div>}
                 </div>
               )}
@@ -673,24 +718,47 @@ export default function HomePage({
 
           <div className="skill-quick" data-od-id="skill-quick">
             <span className="lbl" style={{ width: '100%', textAlign: 'center', marginBottom: '2px' }}>{t('从 Skill 模板开始')}</span>
-            {QUICK_SKILLS.map((opt) => (
-              <button key={opt.label} className="chip" data-fill={opt.fill} data-skillpick={opt.skill} onClick={() => handleQuickSkill(t(opt.fill), opt.skill)}>
-                {t(opt.label)}
+            {quickSkills.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="chip"
+                data-skillpick={s.id}
+                title={s.description ?? s.name}
+                onClick={() => handleQuickSkill(s)}
+              >
+                {shortSkillLabel(s.name)}
               </button>
             ))}
+            {quickSkills.length === 0 && (
+              <span className="mut" style={{ fontSize: 'var(--text-xs)' }}>{t('技能库为空 · 可在 Skills 库页创建')}</span>
+            )}
           </div>
 
           <div style={{ width: '100%', maxWidth: '660px', marginTop: '34px' }}>
             <span className="lbl">{t('也可以这样开始')}</span>
             <div className="alt-grid">
-              <div className="card" data-od-id="alt-i2v">
-                <b>{t('图片 → 视频管线')}</b>
-                <span className="mut">{t('Z-Image 静帧作首帧')}</span>
-              </div>
-              <div className="card" data-od-id="alt-batch">
-                <b>{t('批量产品视频')}</b>
-                <span className="mut">{t('多角度图逐镜生成')}</span>
-              </div>
+              {altSkills.map((s) => (
+                <div
+                  key={s.id}
+                  className="card"
+                  data-od-id={`alt-skill-${s.id}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleQuickSkill(s)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleQuickSkill(s);
+                    }
+                  }}
+                  style={{ cursor: 'pointer' }}
+                  title={s.description ?? s.name}
+                >
+                  <b>{shortSkillLabel(s.name)}</b>
+                  <span className="mut">{s.description ?? t('官方精选技能')}</span>
+                </div>
+              ))}
               <div className="card" data-od-id="alt-import" onClick={() => onImportProject?.()} style={{ cursor: 'pointer' }}>
                 <b>{t('导入项目包(.bba)')}</b>
                 <span className="mut">{t('换机 / 协作 · 结构+历史+附件')}</span>
@@ -772,8 +840,8 @@ export default function HomePage({
                             padding: '1px 5px',
                             borderRadius: 4,
                             fontSize: '9px',
-                            background: 'rgba(0,0,0,.55)',
-                            color: '#fff',
+                            background: 'var(--on-media-bg)',
+                            color: 'var(--on-media)',
                           }}
                         >
                           {t('手动')}
@@ -895,7 +963,7 @@ export default function HomePage({
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(29,29,31,.38)',
+            background: 'var(--scrim)',
             WebkitBackdropFilter: 'blur(3px)',
             backdropFilter: 'blur(3px)',
             zIndex: 100,

@@ -123,8 +123,8 @@ export function AgentPane({
               </svg>
             </button>
           </div>
-          <span className="row g6 mono mut" style={{ fontSize: '10.5px', flex: 'none' }}>
-            <span className="dot ok"></span>pi · 运行中
+          <span className="row g6" style={{ flex: 'none' }} title="pi · 运行中" aria-label="pi · 运行中">
+            <span className="dot ok"></span>
           </span>
         </div>
 

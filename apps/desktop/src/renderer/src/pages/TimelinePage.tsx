@@ -900,7 +900,7 @@ export default function TimelinePage({
                         height: 'auto',
                         objectFit: 'contain',
                         display: 'block',
-                        background: '#000',
+                        background: 'var(--media-bg)',
                       }}
                     />
                   ) : (
@@ -1178,7 +1178,7 @@ export default function TimelinePage({
                           loop
                           playsInline
                           preload="metadata"
-                          style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', display: 'block', background: '#000' }}
+                          style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', display: 'block', background: 'var(--media-bg)' }}
                         />
                       ) : (
                         <img src={t2.file} alt={`${t2.label} Take`} />

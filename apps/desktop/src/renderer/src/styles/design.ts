@@ -3,23 +3,24 @@
  * 从 colors_and_type.css 提取为 React 可用的样式对象
  */
 
+/** 走 CSS 变量,随 prefers-color-scheme / nativeTheme 翻转(禁止再写死十六进制) */
 export const colors = {
-  bg: '#ffffff',
-  surface: '#f5f5f7',
-  surfaceWarm: '#fbfbfd',
-  fg: '#1d1d1f',
-  fg2: '#424245',
-  muted: '#6e6e73',
-  meta: '#86868b',
-  border: '#d2d2d7',
-  borderSoft: '#e8e8ed',
-  accent: '#0071e3',
-  accentOn: '#ffffff',
-  accentHover: '#0077ed',
-  accentActive: '#0066cc',
-  success: '#16a34a',
-  warn: '#eab308',
-  danger: '#dc2626',
+  bg: 'var(--bg)',
+  surface: 'var(--surface)',
+  surfaceWarm: 'var(--surface-warm)',
+  fg: 'var(--fg)',
+  fg2: 'var(--fg-2)',
+  muted: 'var(--muted)',
+  meta: 'var(--meta)',
+  border: 'var(--border)',
+  borderSoft: 'var(--border-soft)',
+  accent: 'var(--accent)',
+  accentOn: 'var(--accent-on)',
+  accentHover: 'var(--accent-hover)',
+  accentActive: 'var(--accent-active)',
+  success: 'var(--success)',
+  warn: 'var(--warn)',
+  danger: 'var(--danger)',
 } as const;
 
 export const fonts = {
@@ -162,7 +163,7 @@ export const cardStyles = {
   },
   hover: {
     borderColor: colors.border,
-    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.08)',
+    boxShadow: 'var(--elev-raised)',
     transform: 'translateY(-2px)',
   },
 } as const;
@@ -175,7 +176,7 @@ export const popStyles = {
     background: colors.bg,
     border: `1px solid ${colors.borderSoft}`,
     borderRadius: radius.md,
-    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.08)',
+    boxShadow: 'var(--elev-raised)',
     padding: spacing[1],
     display: 'none',
   },
@@ -246,22 +247,22 @@ export function combineStyles(...styles: (React.CSSProperties | undefined)[]): R
 export function glassStyles(level: 'sm' | 'md' | 'lg' = 'md') {
   const map = {
     sm: {
-      background: 'rgba(255, 255, 255, 0.56)',
-      backdropFilter: 'blur(14px) saturate(160%)',
-      WebkitBackdropFilter: 'blur(14px) saturate(160%)',
-      boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.66), 0 14px 44px rgba(0, 0, 0, 0.13)',
+      background: 'var(--glass-bg)',
+      backdropFilter: 'var(--glass-blur-sm)',
+      WebkitBackdropFilter: 'var(--glass-blur-sm)',
+      boxShadow: 'var(--glass-spec), var(--glass-shadow)',
     },
     md: {
-      background: 'rgba(255, 255, 255, 0.56)',
-      backdropFilter: 'blur(24px) saturate(180%)',
-      WebkitBackdropFilter: 'blur(24px) saturate(180%)',
-      boxShadow: '0 14px 44px rgba(0, 0, 0, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.66)',
+      background: 'var(--glass-bg)',
+      backdropFilter: 'var(--glass-blur)',
+      WebkitBackdropFilter: 'var(--glass-blur)',
+      boxShadow: 'var(--glass-shadow), var(--glass-spec)',
     },
     lg: {
-      background: 'rgba(255, 255, 255, 0.74)',
-      backdropFilter: 'blur(24px) saturate(180%)',
-      WebkitBackdropFilter: 'blur(24px) saturate(180%)',
-      boxShadow: '0 24px 70px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.66)',
+      background: 'var(--glass-bg-strong)',
+      backdropFilter: 'var(--glass-blur)',
+      WebkitBackdropFilter: 'var(--glass-blur)',
+      boxShadow: 'var(--glass-shadow-lg), var(--glass-spec)',
     },
   };
   return map[level];

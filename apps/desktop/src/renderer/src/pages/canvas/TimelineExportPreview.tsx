@@ -147,7 +147,7 @@ export function TimelineExportPreview({
             e.stopPropagation();
             togglePlay();
           }}
-          style={{ width: '100%', display: 'block', background: '#000', aspectRatio: '16/9', objectFit: 'contain' }}
+          style={{ width: '100%', display: 'block', background: 'var(--media-bg)', aspectRatio: '16/9', objectFit: 'contain' }}
         />
         {!playing && (
           <button

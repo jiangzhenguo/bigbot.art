@@ -9,6 +9,7 @@ import OnboardingPage from './pages/OnboardingPage';
 import ProjectsPage from './pages/ProjectsPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import { I18nProvider, translate, type Lang } from './i18n';
+import { useColorScheme } from './hooks/useColorScheme';
 import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
@@ -41,6 +42,8 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('home');
   /* 界面语言(启动时从 settings.json 回填,设置页切换即持久化) */
   const [lang, setLangState] = useState<Lang>('zh-CN');
+  /* 同步 html[data-theme]=light|dark(调试/E2E;样式只认 prefers-color-scheme) */
+  useColorScheme();
   /* 简易导航栈:handleNavigate 压栈,详情页「返回」经 handleBack 出栈回到来源页
      (此前资源管理页写死回画布/凭 projects.length 猜来源,返回目标不对) */
   const navStackRef = useRef<Page[]>([]);
@@ -158,6 +161,27 @@ export default function App() {
         await window.bigbotart.updateAsset(a.id, { projectId: pid }).catch((e) => console.error('资产归入项目失败', e));
       }
 
+      // 技能带入必须在进画布之前完成:
+      // Canvas 挂载时 useAgentChat 会 skillActive 回填 chip;若先进画布再激活,
+      // 挂载读到空且不会再刷新 → 首页选的技能「带不进」画布(UI 无 chip、首轮对话也可能没注入)。
+      if (opts?.skillId) {
+        try {
+          const pc = await window.bigbotart.loadProjectCanvases(pid);
+          const canvasId = pc.activeCanvasId ?? pc.canvases[0]?.id;
+          if (canvasId) {
+            const r = await window.bigbotart.skillActivate(pid, canvasId, opts.skillId);
+            if (!r.ok) console.error('激活技能失败', r.error);
+            else {
+              // 双通道:sessionStorage 供挂载瞬间立即回填(与 bba.newChat 同口径)
+              const meta = await window.bigbotart.skillActive(pid, canvasId);
+              if (meta) sessionStorage.setItem('bba.homeSkill', JSON.stringify(meta));
+            }
+          }
+        } catch (e) {
+          console.error('激活技能失败', e);
+        }
+      }
+
       // 先跳转:项目与画布就绪后立刻进画布(规划是秒级 LLM 调用,期间用户已能看到画布);
       // 规划/对话随后经 bba-plan-ready / bba-newchat-ready 事件投递给已挂载的 CanvasPage
       setCurrentPage('canvas');
@@ -172,16 +196,6 @@ export default function App() {
       const plan = await window.bigbotart.agentPlanStoryboard(brief + attNote, { projectId: pid });
       sessionStorage.setItem('bba.plan', JSON.stringify(plan));
       window.dispatchEvent(new Event('bba-plan-ready'));
-      // 技能带入:选中的技能注入到新项目当前画布(对话自动加载指令段)
-      if (opts?.skillId) {
-        try {
-          const pc = await window.bigbotart.loadProjectCanvases(pid);
-          const canvasId = pc.activeCanvasId ?? pc.canvases[0]?.id;
-          if (canvasId) await window.bigbotart.skillActivate(pid, canvasId, opts.skillId);
-        } catch (e) {
-          console.error('激活技能失败', e);
-        }
-      }
       // 对话带入:首页 brief(含附件)作为画布 Agent 的首条消息,由 CanvasPage 自动发送
       sessionStorage.setItem('bba.newChat', JSON.stringify({ text: brief, attachments: opts?.attachments ?? [] }));
       window.dispatchEvent(new Event('bba-newchat-ready'));

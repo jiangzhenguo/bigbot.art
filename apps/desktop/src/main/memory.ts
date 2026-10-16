@@ -22,7 +22,7 @@ import type {
   ChatThread,
   ChatThreadListItem,
 } from '@bigbotart/shared';
-import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
+import { nodeKindGuide, connectorSummary, applyParamValues } from '@bigbotart/shared';
 import { DATA_DIR, memoryFile } from './workspace-paths.js';
 import {
   listThreadItems,
@@ -243,18 +243,38 @@ export class MemoryStore {
     return this.get(projectId).canvasMemory[canvasId]?.activeSkillId;
   }
 
-  /** 🆕 激活/停用画布技能(skillId=null 停用);持久化,跨会话恢复 */
-  setActiveSkillId(projectId: string, canvasId: string, skillId: string | null): void {
+  /**
+   * 激活/停用画布技能(skillId=null 停用);持久化,跨会话恢复。
+   * @param paramValues 激活时可选:用户填的 `{占位}` 值,注入指令前替换;停用时清除
+   */
+  setActiveSkillId(
+    projectId: string,
+    canvasId: string,
+    skillId: string | null,
+    paramValues?: Record<string, string>,
+  ): void {
     const m = this.get(projectId);
     const cur = m.canvasMemory[canvasId];
+    const params =
+      skillId && paramValues && Object.keys(paramValues).length > 0
+        ? { ...paramValues }
+        : undefined;
     if (!cur) {
       if (!skillId) return;
       m.canvasMemory[canvasId] = {
-        summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [],
+        summary: '',
+        nodeCount: 0,
+        lastActive: new Date().toISOString(),
+        keyDecisions: [],
         activeSkillId: skillId,
+        activeSkillParams: params,
       };
     } else {
-      m.canvasMemory[canvasId] = { ...cur, activeSkillId: skillId ?? undefined };
+      m.canvasMemory[canvasId] = {
+        ...cur,
+        activeSkillId: skillId ?? undefined,
+        activeSkillParams: skillId ? params : undefined,
+      };
     }
     this.persist(projectId);
   }
@@ -455,13 +475,18 @@ export class MemoryStore {
     // ①c 当前画布激活技能(Agent 指令段注入;full=全量 / summary=摘要+skills.read 提示。
     //  解析器缺失或技能不存在时静默跳过,保持零开销)
     const activeSkillId = m.canvasMemory[canvasId]?.activeSkillId;
+    const activeSkillParams = m.canvasMemory[canvasId]?.activeSkillParams;
     if (activeSkillId && resolveSkill) {
       const skill = resolveSkill(activeSkillId);
       if (skill?.instructions) {
+        // 激活时填过的占位先替换;未填的保留 `{名}` 让 Agent 用 ask.user 补
+        const instructions = activeSkillParams
+          ? applyParamValues(skill.instructions, activeSkillParams, { keepUnfilled: true })
+          : skill.instructions;
         parts.push(
           skill.inject === 'summary'
-            ? `【当前技能】${skill.name}(summary 模式 · 已激活):${skill.instructions.slice(0, 160)}…\n需要完整指令时调用 skills.read(skillId="${activeSkillId}")`
-            : `【当前技能】${skill.name} 的操作指令:\n${skill.instructions}`,
+            ? `【当前技能】${skill.name}(summary 模式 · 已激活):${instructions.slice(0, 160)}…\n需要完整指令时调用 skills.read(skillId="${activeSkillId}")`
+            : `【当前技能】${skill.name} 的操作指令:\n${instructions}`,
         );
       } else if (skill) {
         parts.push(`【当前技能】${skill.name} · 画布模板已激活(该技能无操作指令段)`);

@@ -151,7 +151,7 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
                       }
                     />
                     {cover?.mode === 'manual' && (
-                      <span style={{ position: 'absolute', left: spacing[2], bottom: spacing[2], padding: '1px 6px', borderRadius: '4px', fontSize: '10px', background: 'rgba(0,0,0,.55)', color: '#fff' }}>
+                      <span style={{ position: 'absolute', left: spacing[2], bottom: spacing[2], padding: '1px 6px', borderRadius: '4px', fontSize: '10px', background: 'var(--on-media-bg)', color: 'var(--on-media)' }}>
                         {t('手动')}
                       </span>
                     )}
@@ -164,27 +164,62 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
                       {cover?.path && <span style={{ marginLeft: 'auto' }}>{cover.mode === 'manual' ? t('手动封面') : t('自动封面')}</span>}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: spacing[2], marginTop: 'auto', paddingTop: spacing[2], borderTop: `1px solid ${colors.borderSoft}` }}>
-                    <button onClick={(e) => { e.stopPropagation(); onSelectProject(p.id); }} style={{ ...btnStyles.base, ...btnStyles.secondary, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('打开')}</button>
+                  <div
+                    className="proj-card-actions"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2, marginTop: 'auto', paddingTop: spacing[2], borderTop: `1px solid ${colors.borderSoft}` }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     <button
+                      type="button"
+                      className="ibtn"
                       data-od-id="project-cover-edit"
+                      aria-label={t('编辑封面')}
+                      title={coverBusyId === p.id ? t('处理中…') : t('编辑封面')}
                       disabled={coverBusyId === p.id}
-                      onClick={(e) => { e.stopPropagation(); void handleEditCover(p.id, p.name); }}
-                      style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}
+                      onClick={() => void handleEditCover(p.id, p.name)}
                     >
-                      {coverBusyId === p.id ? t('处理中…') : t('编辑封面')}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <rect x="3" y="4" width="18" height="16" rx="2" />
+                        <circle cx="8.5" cy="9.5" r="1.5" />
+                        <path d="m4 17 4.5-4.5 3.5 3.5 3-3L20 17" />
+                      </svg>
                     </button>
                     {cover?.mode === 'manual' ? (
                       <button
+                        type="button"
+                        className="ibtn"
+                        aria-label={t('恢复自动封面')}
+                        title={t('恢复自动封面(跟随第一个出图节点)')}
                         disabled={coverBusyId === p.id}
-                        onClick={(e) => { e.stopPropagation(); void handleResetCover(p.id, p.name); }}
-                        style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}
+                        onClick={() => void handleResetCover(p.id, p.name)}
                       >
-                        {t('恢复自动')}
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                          <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
+                        </svg>
                       </button>
                     ) : null}
-                    <button onClick={(e) => { e.stopPropagation(); handleRename(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.ghost, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('重命名')}</button>
-                    <button onClick={(e) => { e.stopPropagation(); handleDelete(p.id, p.name); }} style={{ ...btnStyles.base, ...btnStyles.danger, flex: 1, fontSize: '11px', padding: `${spacing[1]} ${spacing[2]}` }}>{t('删除')}</button>
+                    <button
+                      type="button"
+                      className="ibtn"
+                      aria-label={t('重命名项目')}
+                      title={t('重命名')}
+                      onClick={() => handleRename(p.id, p.name)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className="ibtn danger"
+                      aria-label={t('删除项目')}
+                      title={t('删除')}
+                      onClick={() => handleDelete(p.id, p.name)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
                 );
@@ -196,8 +231,8 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
 
       {/* 新建项目对话框 */}
       {showNewModal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.4)', display: 'grid', placeItems: 'center', zIndex: 100 }}>
-          <div style={{ background: colors.bg, border: `1px solid ${colors.border}`, borderRadius: '16px', boxShadow: '0 24px 70px rgba(0,0,0,.16)', width: '480px', maxWidth: '90vw', padding: spacing[6] }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'var(--scrim)', display: 'grid', placeItems: 'center', zIndex: 100 }}>
+          <div style={{ background: colors.bg, border: `1px solid ${colors.border}`, borderRadius: '16px', boxShadow: 'var(--glass-shadow-lg)', width: '480px', maxWidth: '90vw', padding: spacing[6] }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: spacing[3], marginBottom: spacing[4] }}>
               <h2 style={{ fontSize: textSizes.base, fontWeight: 600, margin: 0 }}>{t('新建项目')}</h2>
               <button onClick={() => setShowNewModal(false)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px', color: colors.muted }}>×</button>

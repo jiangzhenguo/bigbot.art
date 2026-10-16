@@ -185,6 +185,23 @@ describe('MemoryStore.buildContext 注入激活技能指令(@当前技能」段)
     expect(ctx.systemPrompt).toContain('提交前 ask.user 确认档位');
   });
 
+  it('激活时带 paramValues → 指令占位被替换,未填保留', () => {
+    const pid = `p-skill-params-${Date.now()}`;
+    const resolve = (id: string) =>
+      id === 'skill-game'
+        ? {
+            name: '双人游戏',
+            instructions: '标题 {game_title} · 风格 {visual_style}',
+            inject: 'full' as const,
+          }
+        : undefined;
+    store.setActiveSkillId(pid, 'cA', 'skill-game', { game_title: '骑士小猫' });
+    const ctx = store.buildContext(pid, 'cA', '继续', resolve);
+    expect(ctx.systemPrompt).toContain('标题 骑士小猫');
+    expect(ctx.systemPrompt).toContain('{visual_style}');
+    expect(ctx.systemPrompt).not.toContain('{game_title}');
+  });
+
   it('未激活技能 → 不注入任何【当前技能】段(零开销)', () => {
     const pid = `p-skill-ctx2-${Date.now()}`;
     store.updateCanvasSummary(pid, 'cA', 's', 1);

@@ -106,7 +106,7 @@ export function AssetInspector({
                 width: '100%',
                 borderRadius: 'var(--radius-md)',
                 border: '1px solid var(--border-soft)',
-                background: '#000',
+                background: 'var(--media-bg)',
                 display: 'block',
               }}
             />

@@ -14,6 +14,8 @@
    ========================================================================== */
 
 :root {
+  color-scheme: light dark;
+
   /* ── 色彩:实色层 ─────────────────────────────────────────────────── */
   --bg:           #ffffff;  /* 页面底色 / 内容卡实色底 */
   --surface:      #f5f5f7;  /* 侧栏、编组底、次级表面 */
@@ -36,16 +38,54 @@
   --warn:    #eab308;  /* 进行中脉冲点、需注意 */
   --danger:  #dc2626;  /* 危险操作(右键菜单删除等) */
 
+  /* ── 语义扩展(深色化补齐;浅色值=原硬编码,零视觉变化) ─────────── */
+  --scrim:          rgba(0, 0, 0, 0.38); /* 弹窗遮罩 */
+  --scrim-lightbox: color-mix(in oklab, #000 58%, transparent); /* 看图灯箱暗场 */
+  --media-bg:       #000000;             /* 视频/图片画幅黑边(内容语义,两模式同) */
+  --on-media:       #ffffff;             /* 叠在缩略图上的角标字色 */
+  --on-media-soft:  rgba(255, 255, 255, 0.92);
+  --on-media-muted: rgba(255, 255, 255, 0.85);
+  --on-media-bg:    rgba(0, 0, 0, 0.55); /* 叠在缩略图上的角标底 */
+  --on-media-hover: rgba(255, 255, 255, 0.16);
+  --media-scrim:    rgba(0, 0, 0, 0.18); /* 缩略图播放遮罩 */
+  --play-btn-bg:    rgba(255, 255, 255, 0.92);
+  --prog-track:     rgba(255, 255, 255, 0.4);
+  --thumb-backing:
+    linear-gradient(45deg, color-mix(in oklab, var(--border-soft) 88%, var(--bg)) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in oklab, var(--border-soft) 88%, var(--bg)) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--border-soft) 88%, var(--bg)) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--border-soft) 88%, var(--bg)) 75%);
+  --thumb-backing-size: 10px 10px;
+  --thumb-backing-pos: 0 0, 0 5px, 5px -5px, -5px 0;
+  --canvas-bg:       var(--bg);          /* 无限画布底;深色单独可调 */
+  --canvas-grid-dot: color-mix(in oklab, var(--fg) 12%, transparent);
+  /* 调试面板日志/指标(终端风格,深浅两模式同色可读) */
+  --log-error:  #ff8a80;
+  --log-warn:   #ffd54f;
+  --log-info:   #80d8ff;
+  --stat-warn:  #e0a33a;
+  --stat-bad:   #e0644f;
+  /* 叠在视频上的走带/播放控件(内容语义,两模式同) */
+  --transport-bg:     rgba(16, 16, 20, 0.78);
+  --transport-bg-hi:  rgba(16, 16, 20, 0.88);
+  --transport-border: rgba(255, 255, 255, 0.14);
+  --transport-border-hi: rgba(255, 255, 255, 0.3);
+  --transport-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  /* 时间线监视器角标/时长(此前未定义,补齐为 on-media 语义) */
+  --monitor-fg:   var(--on-media);
+  --monitor-mask: var(--on-media-bg);
+
   /* ── 色彩:Liquid Glass 材质层(WWDC25) ────────────────────────────
      玻璃仅用于:导航栏、侧栏、浮动面板、弹层、按钮、芯片、走带/队列条。
-     内容层(卡片、画布节点、消息、缩略图、设置分组)保持实色 --bg。 */
+     内容层(卡片、画布节点、消息、缩略图、设置分组)保持实色 --bg。
+     阴影取值以 design-pages.css 当前生效版为准收敛(略轻于旧 colors 稿)。 */
   --glass-bg:        rgba(255, 255, 255, .56);  /* 侧栏 / 面板 */
   --glass-bg-strong: rgba(255, 255, 255, .74);  /* 顶栏 / 弹层 / 向导卡 */
   --glass-border:    rgba(255, 255, 255, .62);
   --glass-spec-hi:   rgba(255, 255, 255, .66);  /* 顶部高光(内阴影) */
   --glass-spec-lo:   rgba(29, 29, 31, .05);     /* 底部暗边(内阴影) */
-  --glass-shadow:    0 14px 44px rgba(0, 0, 0, .13), 0 2px 8px rgba(0, 0, 0, .05);
-  --glass-shadow-lg: 0 24px 70px rgba(0, 0, 0, .16);
+  --glass-shadow:    0 8px 28px rgba(0, 0, 0, .07), 0 1px 4px rgba(0, 0, 0, .03);
+  --glass-shadow-lg: 0 16px 48px rgba(0, 0, 0, .10);
   --glass-spec:      inset 0 1px 0 var(--glass-spec-hi), inset 0 -1px 0 var(--glass-spec-lo);
   --glass-blur:      blur(24px) saturate(180%);
   --glass-blur-sm:   blur(14px) saturate(160%);
@@ -97,6 +137,18 @@
   --elev-ring:   0 0 0 1px var(--border);
   --elev-raised: 0 12px 32px rgba(0, 0, 0, .08);
   --focus-ring:  0 0 0 4px color-mix(in oklab, var(--accent), transparent 65%);
+  --shadow-node:        0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-node-hover:  0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-node-accent: 0 0 0 2.5px var(--accent), 0 6px 18px rgba(0, 0, 0, 0.1);
+  --shadow-ctl:         0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-badge:       0 2px 8px rgba(0, 0, 0, 0.18);
+  --shadow-card:        0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-ask:         0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-node-add:    0 2px 8px rgba(0, 0, 0, 0.12), inset 0 1px 0 var(--glass-spec-hi);
+  --shadow-play:        0 4px 18px rgba(0, 0, 0, 0.28);
+  --shadow-thumb:       0 1px 3px rgba(0, 0, 0, 0.18);
+  --shadow-combo:       0 14px 38px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.05);
+  --shadow-wiz:         0 24px 70px rgba(0, 0, 0, 0.12);
 
   /* ── 动效 ────────────────────────────────────────────────────────── */
   --motion-fast:   150ms;
@@ -117,6 +169,65 @@
     --glass-bg:        rgba(255, 255, 255, .94);
     --glass-bg-strong: rgba(255, 255, 255, .97);
     --glass-well:      var(--surface-warm);
+  }
+}
+
+/* ── 深色:由 Electron nativeTheme.themeSource 驱动 prefers-color-scheme ──
+   取值对齐《深色浅色主题-产品设计与技术方案》§3.1 建议起点 + Open Design 原型定稿。
+   样式只认本媒体查询;html[data-theme] 仅供调试/E2E,不作为选择器。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg:           #1c1c1e;
+    --surface:      #161618;
+    --surface-warm: #242426;
+    --fg:           #f5f5f7;
+    --fg-2:         #d1d1d6;
+    --muted:        #98989d;
+    --meta:         #8e8e93;
+    --border:       #3a3a3c;
+    --border-soft:  #2c2c2e;
+    --accent:        #0a84ff;
+    --accent-on:     #ffffff;
+    --accent-hover:  #409cff;
+    --accent-active: #0071e3;
+    --success: #30d158;
+    --warn:    #ffd60a;
+    --danger:  #ff453a;
+    --scrim:   rgba(0, 0, 0, 0.52);
+    --canvas-bg:       #2c2c2e;
+    --canvas-grid-dot: color-mix(in oklab, var(--fg) 14%, transparent);
+    --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.42);
+    --shadow-node:        0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
+    --shadow-node-hover:  0 2px 0 rgba(255, 255, 255, 0.07), 0 12px 32px rgba(0, 0, 0, 0.45);
+    --shadow-node-accent: 0 0 0 2.5px var(--accent), 0 12px 28px rgba(0, 0, 0, 0.42);
+    --shadow-ctl:         0 1px 0 rgba(255, 255, 255, 0.06), 0 6px 18px rgba(0, 0, 0, 0.32);
+    --shadow-badge:       0 4px 14px rgba(0, 0, 0, 0.45);
+    --shadow-card:        0 1px 0 rgba(255, 255, 255, 0.05);
+    --shadow-ask:         0 1px 0 rgba(255, 255, 255, 0.05);
+    --shadow-node-add:    0 2px 10px rgba(0, 0, 0, 0.38), inset 0 1px 0 var(--glass-spec-hi);
+    --shadow-play:        0 4px 18px rgba(0, 0, 0, 0.45);
+    --shadow-thumb:       0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-combo:       0 18px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-wiz:         0 28px 80px rgba(0, 0, 0, 0.55);
+    --glass-bg:        rgba(30, 30, 32, .56);
+    --glass-bg-strong: rgba(30, 30, 32, .78);
+    --glass-border:    rgba(255, 255, 255, .10);
+    --glass-spec-hi:   rgba(255, 255, 255, .08);
+    --glass-spec-lo:   rgba(0, 0, 0, .30);
+    --glass-shadow:    0 18px 52px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .35);
+    --glass-shadow-lg: 0 28px 80px rgba(0, 0, 0, .62);
+    --glass-well:      color-mix(in oklab, var(--bg) 72%, transparent);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --glass-bg:        rgba(28, 28, 30, .96);
+      --glass-bg-strong: rgba(28, 28, 30, .98);
+      --glass-well:      var(--surface-warm);
+    }
   }
 }
 

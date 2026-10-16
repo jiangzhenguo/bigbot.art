@@ -42,13 +42,14 @@ describe('SkillStore 内置技能种子', () => {
   it('空库首次构造 → seed 全部内置技能(builtin:true)', () => {
     const store = new M.SkillStore();
     const builtins = store.list().filter((s) => s.builtin);
-    expect(builtins.length).toBeGreaterThanOrEqual(3); // 至少原有 3 个出厂技能
-    expect(builtins.some((s) => s.id === 'paper-collage')).toBe(true);
+    expect(builtins.length).toBeGreaterThanOrEqual(9); // MiniMax 官方适配技能
+    expect(builtins.some((s) => s.id === 'h3-prompt-writing')).toBe(true);
+    expect(builtins.some((s) => s.id === 'paper-collage')).toBe(false); // 已退役
     expect(existsSync(SKILLS_FILE)).toBe(true);
   });
 
   it('已有库再次构造 → 合并不存在的内置 id,用户技能原样保留', () => {
-    // 模拟老版本库:只剩一个用户技能 + 一个内置技能(其余内置被"官方扩容"新增)
+    // 模拟老版本库:只剩一个用户技能 + 一个仍在服役的内置技能(其余内置被"官方扩容"新增)
     writeFileSync(
       SKILLS_FILE,
       JSON.stringify([
@@ -62,8 +63,8 @@ describe('SkillStore 内置技能种子', () => {
           updatedAt: new Date().toISOString(),
         },
         {
-          id: 'paper-collage',
-          name: '纸拼贴剧情片',
+          id: 'h3-prompt-writing',
+          name: 'H3 提示词写作规范',
           nodes: [],
           edges: [],
           params: [],
@@ -79,22 +80,22 @@ describe('SkillStore 内置技能种子', () => {
     // 用户技能保留
     expect(list.some((s) => s.id === 'skill-user-1')).toBe(true);
     // 缺失的内置技能被合并进来
-    expect(list.some((s) => s.id === 'ecom-product' && s.builtin)).toBe(true);
+    expect(list.some((s) => s.id === 'minimalist-product-ad' && s.builtin)).toBe(true);
     // 已存在的内置技能内容不被种子覆盖
-    expect(store.get('paper-collage')?.instructions).toBe('旧内容不被覆盖');
+    expect(store.get('h3-prompt-writing')?.instructions).toBe('旧内容不被覆盖');
   });
 
   it('删除内置技能 → 记 tombstone,重新构造不复活;删用户技能不记', () => {
     const store = new M.SkillStore();
-    expect(store.delete('ecom-product').ok).toBe(true);
+    expect(store.delete('minimalist-product-ad').ok).toBe(true);
     expect(store.delete('skill-user-1').ok).toBe(true);
     const tombstones = JSON.parse(readFileSync(TOMBSTONE_FILE, 'utf-8')) as string[];
-    expect(tombstones).toContain('ecom-product');
+    expect(tombstones).toContain('minimalist-product-ad');
     expect(tombstones).not.toContain('skill-user-1');
 
     const store2 = new M.SkillStore();
-    expect(store2.get('ecom-product')).toBeUndefined(); // tombstone 挡住复活
-    expect(store2.get('paper-collage')).toBeDefined(); // 未删的内置仍在
+    expect(store2.get('minimalist-product-ad')).toBeUndefined(); // tombstone 挡住复活
+    expect(store2.get('h3-prompt-writing')).toBeDefined(); // 未删的内置仍在
   });
 
   it('全部删空后重新构造 → 内置技能全部 tombstone,不复活任何一个', () => {
@@ -103,7 +104,64 @@ describe('SkillStore 内置技能种子', () => {
     const store2 = new M.SkillStore();
     const ids = store2.list().map((s) => s.id);
     expect(ids).toHaveLength(0); // 所有内置均被用户删过(tombstone),空库也不再复活
-    expect(ids).not.toContain('ecom-product');
+    expect(ids).not.toContain('minimalist-product-ad');
+  });
+
+  it('退役内置(纸拼贴/电商/科普)启动时从库清除并记 tombstone', () => {
+    writeFileSync(
+      SKILLS_FILE,
+      JSON.stringify([
+        {
+          id: 'paper-collage',
+          name: '纸拼贴剧情片',
+          nodes: [],
+          edges: [],
+          params: [],
+          instructions: '应被清掉',
+          builtin: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'ecom-product',
+          name: '电商产品',
+          nodes: [],
+          edges: [],
+          params: [],
+          instructions: '应被清掉',
+          builtin: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'science-pop',
+          name: '科普讲解',
+          nodes: [],
+          edges: [],
+          params: [],
+          instructions: '应被清掉',
+          builtin: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'skill-user-keep',
+          name: '我的技能',
+          nodes: [],
+          edges: [],
+          params: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    const store = new M.SkillStore();
+    expect(store.get('paper-collage')).toBeUndefined();
+    expect(store.get('ecom-product')).toBeUndefined();
+    expect(store.get('science-pop')).toBeUndefined();
+    expect(store.get('skill-user-keep')).toBeDefined();
+    const tombstones = JSON.parse(readFileSync(TOMBSTONE_FILE, 'utf-8')) as string[];
+    expect(tombstones).toEqual(expect.arrayContaining(['paper-collage', 'ecom-product', 'science-pop']));
   });
 });
 

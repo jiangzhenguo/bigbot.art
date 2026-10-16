@@ -47,6 +47,10 @@ export class SettingsStore {
 
   patch(patch: Partial<AppSettings>): AppSettings {
     this.data = { ...this.data, ...patch };
+    // theme 由调用方(IPC)先 normalize;此处兜底非法写入
+    if (this.data.theme !== undefined && this.data.theme !== 'system' && this.data.theme !== 'light' && this.data.theme !== 'dark') {
+      this.data.theme = 'system';
+    }
     this.save();
     return this.get();
   }

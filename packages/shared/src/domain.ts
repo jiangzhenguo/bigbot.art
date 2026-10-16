@@ -978,6 +978,9 @@ export interface ExportTask {
   createdAt: string;
 }
 
+/** 外观主题偏好(设置页「通用 › 外观」;缺省 system=跟随系统) */
+export type ThemePref = 'system' | 'light' | 'dark';
+
 /** 应用设置(全局,持久化 ~/.bigbotart/settings.json) */
 export interface AppSettings {
   /** 全局默认 LLM 来源(设置页),项目级覆盖优先 */
@@ -986,6 +989,12 @@ export interface AppSettings {
   renderMode: 'demo' | 'real';
   /** 界面语言(默认 zh-CN;en 为增量覆盖,缺译回退中文) */
   language?: 'zh-CN' | 'en';
+  /**
+   * 外观主题:system=跟随 OS / light / dark。
+   * 主进程经 `nativeTheme.themeSource` 生效;渲染层 CSS 只认 `prefers-color-scheme`。
+   * 缺省或非法值按 system(老 settings.json 无此字段无需迁移)。
+   */
+  theme?: ThemePref;
   /** h3 视频生成:SSD 流式读权重(--ssd-streaming)。省 RAM(峰值≈6GB)但慢约 30%;64GB+ 默认关更快 */
   ssdStreaming?: boolean;
   lmStudioModel?: string;
@@ -1112,6 +1121,11 @@ export interface CanvasMemory {
   conversationSummary?: string;
   /** 🆕 当前画布激活的 Agent 技能 id(对话自动注入该技能指令段;同一画布至多一个) */
   activeSkillId?: string;
+  /**
+   * 激活技能时用户在 Skills 页填入的参数值(键为 `{name}` 或裸名)。
+   * buildContext 注入指令前替换占位;停用技能时一并清除。
+   */
+  activeSkillParams?: Record<string, string>;
   /** 🆕 当前活跃会话 id;缺省则用该画布唯一/默认 thread */
   activeThreadId?: string;
 }

@@ -106,7 +106,7 @@ export function AssetDetail({
             loop
             playsInline
             preload="metadata"
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: '#000' }}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: 'var(--media-bg)' }}
           />
         ) : a.kind === 'audio' ? (
           <div className="wavebox" style={{ display: 'flex', alignItems: 'center', gap: 3, height: '100%', padding: '0 18px' }}>

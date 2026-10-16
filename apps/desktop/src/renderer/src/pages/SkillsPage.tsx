@@ -1,8 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Skill } from '@bigbotart/shared';
+import { paramDisplayLabel, paramTokenKey } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import PageTopBar from '../components/PageTopBar';
 import { useT } from '../i18n';
+
+/** 卡片上最多露出几个可读参数名(其余收进「需 N 个参数」) */
+const CARD_PARAM_PREVIEW = 2;
 
 interface SkillsPageProps {
   onNavigate: (
@@ -22,33 +26,13 @@ interface SkillDef {
   params: string[];
 }
 
+/** 演示用详情表(真实内置技能走 listSkills;此处仅兜底「水墨」等非出厂模板) */
 const SKILLS: Record<string, SkillDef> = {
-  paper: {
-    name: '纸拼贴剧情片',
-    sub: '剧情 · 5 节点 · 复用 7 次',
-    img: './assets/sb-river.jpg',
-    keep: '纸拼贴风格措辞 · 镜头节奏 · 档位模板 · 提示词结构',
-    params: ['主题', '旁白', '时长', '角色'],
-  },
   drama: {
     name: '剧情短片',
     sub: '剧情 · 三幕结构 · 复用 12 次',
     img: './assets/shot-02.jpg',
     keep: '三幕结构 · 冲突-转折-收束节奏 · 写实影调措辞',
-    params: ['主题', '旁白', '时长'],
-  },
-  ecom: {
-    name: '电商产品',
-    sub: '多角度 · 批量管线 · 复用 9 次',
-    img: './assets/prop-bottle.jpg',
-    keep: '浅灰背景 · 产品居中构图 · 三视角镜头序列',
-    params: ['产品', '视角', '时长'],
-  },
-  sci: {
-    name: '科普讲解',
-    sub: '图文穿插 · 节奏模板 · 复用 5 次',
-    img: './assets/eclipse.jpg',
-    keep: '图文穿插节奏 · 数据图示占位 · 旁白驱动结构',
     params: ['主题', '旁白', '时长'],
   },
   ink: {
@@ -57,20 +41,6 @@ const SKILLS: Record<string, SkillDef> = {
     img: './assets/ink.jpg',
     keep: '水墨笔触措辞 · 留白构图 · 缓慢横移运镜',
     params: ['主题', '时长'],
-  },
-  river: {
-    name: '草原之河 · v2',
-    sub: '保存于昨天 · 含 8 节点',
-    img: './assets/shot-01.jpg',
-    keep: '纸拼贴风格 · 双角色锁定 · 5 镜头结构',
-    params: ['主题', '角色', '时长'],
-  },
-  bottle: {
-    name: '保温杯三视角',
-    sub: '派生自「电商产品」 · 含 6 节点',
-    img: './assets/prop-bottle.jpg',
-    keep: '浅灰背景 · 侧视/开盖/场景三视角',
-    params: ['产品', '视角'],
   },
 };
 
@@ -83,53 +53,11 @@ interface SkillCardDef {
   sub?: string;
   img?: string;
   imgStyle?: React.CSSProperties;
-  pchs?: string[];
+  /** 原始占位列表(搜索用;卡片不直接铺 `{snake_case}`) */
+  params?: string[];
   /** 🆕 卡片徽章(如「指令」「已激活」) */
   badges?: Array<{ label: string; kind: 'inst' | 'active' }>;
 }
-
-const BUILTIN_CARDS: SkillCardDef[] = [
-  {
-    skill: 'paper',
-    kind: 'builtin',
-    title: '纸拼贴剧情片',
-    sub: '剧情 · 5 节点 · 复用 7 次',
-    img: './assets/sb-river.jpg',
-    pchs: ['主题', '旁白', '时长', '角色'],
-  },
-  {
-    skill: 'drama',
-    kind: 'builtin',
-    title: '剧情短片',
-    sub: '剧情 · 三幕结构 · 复用 12 次',
-    img: './assets/shot-02.jpg',
-    pchs: ['主题', '旁白', '时长'],
-  },
-  {
-    skill: 'ecom',
-    kind: 'builtin',
-    title: '电商产品',
-    sub: '多角度 · 批量管线 · 复用 9 次',
-    img: './assets/prop-bottle.jpg',
-    pchs: ['产品', '视角', '时长'],
-  },
-  {
-    skill: 'sci',
-    kind: 'builtin',
-    title: '科普讲解',
-    sub: '图文穿插 · 节奏模板 · 复用 5 次',
-    img: './assets/eclipse.jpg',
-    pchs: ['主题', '旁白', '时长'],
-  },
-  {
-    skill: 'ink',
-    kind: 'builtin',
-    title: '水墨',
-    sub: '风格 · 镜头语言 · 复用 3 次',
-    img: './assets/ink.jpg',
-    pchs: ['主题', '时长'],
-  },
-];
 
 interface DerivRow {
   name: string;
@@ -153,16 +81,39 @@ function buildParams(
   const params = SKILLS[skillId]?.params ?? skills.find((s) => s.id === skillId)?.params;
   if (!params) return [];
   return params.map((p): ParamDef => {
-    if (p === '时长') return { label: '时长', value: '45', numeric: true, unit: t('秒') };
-    if (p === '角色') return { label: '角色', placeholder: t('从资产中心选择…') };
-    if (p === '旁白') return { label: '旁白', placeholder: t('沿用模板文案结构…') };
-    if (p === '主题' && skillId === 'paper') return { label: p, value: '日全食科普' };
-    return { label: p, placeholder: t('填写{p}…', { p }) };
+    const bare = paramTokenKey(p);
+    const label = paramDisplayLabel(p);
+    if (bare === '时长' || p === '时长') return { label, value: '45', numeric: true, unit: t('秒') };
+    if (bare === '角色' || p === '角色') return { label, placeholder: t('从资产中心选择…') };
+    if (bare === '旁白' || p === '旁白') return { label, placeholder: t('沿用模板文案结构…') };
+    return { label, placeholder: t('填写{p}…', { p: label }) };
   });
 }
 
 function paramKey(skillId: string | null, index: number): string {
   return `${skillId ?? 'none'}:${index}`;
+}
+
+/** 把表单值收成 apply/activate 用的 `{name}` → 值 映射 */
+function collectFilledParamMap(
+  skillId: string | null,
+  rawParams: string[],
+  paramValues: Record<string, string>,
+  dur: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  rawParams.forEach((p, i) => {
+    const bare = paramTokenKey(p);
+    const token = p.startsWith('{') ? p : `{${bare}}`;
+    const key = paramKey(skillId, i);
+    let val = paramValues[key] ?? '';
+    if (bare === '时长' || p === '时长') val = dur;
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    out[token] = trimmed;
+    out[bare] = trimmed;
+  });
+  return out;
 }
 
 /** 更新时间 → 友好文案(卡片副标题用) */
@@ -194,7 +145,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
   const t = useT();
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string | null>('paper-collage');
+  const [selected, setSelected] = useState<string | null>(null);
   const [dur, setDur] = useState('45');
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -242,7 +193,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
             m: s.params.length,
             updated: fmtUpdated(s.updatedAt, t),
           }),
-          pchs: s.params,
+          params: s.params,
           badges: [
             ...(s.instructions ? [{ label: t('指令'), kind: 'inst' as const }] : []),
             ...(activeSkillId === s.id ? [{ label: t('已激活'), kind: 'active' as const }] : []),
@@ -251,7 +202,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
     [skills, activeSkillId, t],
   );
 
-  /** 官方精选(出厂内置,builtin):封面占位,指令徽章 + 激活徽章;渲染替换 BUILTIN_CARDS 演示数据 */
+  /** 官方精选(出厂内置,builtin):封面占位,指令徽章 + 激活徽章 */
   const builtinCards: SkillCardDef[] = useMemo(
     () =>
       skills
@@ -261,7 +212,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
           kind: 'builtin' as const,
           title: s.name,
           sub: s.description ?? t('双形态齐备 · 画布模板 + Agent 操作指令'),
-          pchs: s.params,
+          params: s.params,
           img: '',
           badges: [
             ...(s.instructions ? [{ label: t('指令'), kind: 'inst' as const }] : []),
@@ -308,7 +259,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
     if (q) {
       // 搜索范围:标题 / 副标题 / 参数 / 指令内容(设计稿「搜索 Skill 名称、指令内容…」)
       const real = c.skill ? skillOf(c.skill) : undefined;
-      const text = [c.title, c.sub ?? '', ...(c.pchs ?? []), real?.instructions ?? '', real?.description ?? '']
+      const text = [c.title, c.sub ?? '', ...(c.params ?? []), real?.instructions ?? '', real?.description ?? '']
         .join(' ')
         .toLowerCase();
       if (text.indexOf(q) < 0) return false;
@@ -411,7 +362,13 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
       return;
     }
     try {
-      const r = await window.bigbotart.skillActivate(projectId, canvasId, skill.id);
+      const filled = collectFilledParamMap(skill.id, skill.params, paramValues, dur);
+      const r = await window.bigbotart.skillActivate(
+        projectId,
+        canvasId,
+        skill.id,
+        Object.keys(filled).length ? filled : undefined,
+      );
       if (!r.ok) {
         showError(r.error ?? t('注入指令失败'));
         return;
@@ -443,7 +400,13 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
     const projectName = await askPrompt({ title: t('新项目名称'), initial: skill.name });
     if (!projectName) return; // 取消或空名
     try {
-      await window.bigbotart.applySkill(skill.id, projectName);
+      const filled = collectFilledParamMap(skill.id, skill.params, paramValues, dur);
+      await window.bigbotart.applySkill(
+        skill.id,
+        projectName,
+        false,
+        Object.keys(filled).length ? filled : undefined,
+      );
       onNavigate('canvas');
     } catch (err) {
       showError(t('应用 Skill 失败'), err);
@@ -523,7 +486,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
       </div>
       <div className="si">
         <b>{c.title}</b>
-        <div className="row g6" style={{ marginTop: -1 }}>
+        <div className="row g6" style={{ marginTop: 6 }}>
           {(c.badges ?? []).map((b) => (
             <span key={b.label} className={`badge ${b.kind === 'active' ? 'ok' : ''}`} style={{ fontSize: 10 }}>
               {b.label}
@@ -531,13 +494,18 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
           ))}
         </div>
         <div className="sub">{c.sub}</div>
-        <div className="pchs">
-          {(c.pchs ?? []).map((p) => (
-            <span className="chip" key={p}>
-              {p}
+        {(c.params?.length ?? 0) > 0 ? (
+          <div className="pchs">
+            <span className="chip" title={(c.params ?? []).map(paramDisplayLabel).join(' · ')}>
+              {t('需 {n} 个参数', { n: c.params!.length })}
             </span>
-          ))}
-        </div>
+            {(c.params ?? []).slice(0, CARD_PARAM_PREVIEW).map((p) => (
+              <span className="chip" key={p}>
+                {paramDisplayLabel(p)}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );

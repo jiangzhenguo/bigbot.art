@@ -9,10 +9,12 @@ import type {
   LocalModelInfo,
   LocalRuntimeModels,
   RuntimeProbe,
+  ThemePref,
 } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
 import { ToolModelsSection } from './ToolModelsSection';
 import { setAccelDefaultCache } from './canvas/tool-models-store';
+import { useColorScheme } from '../hooks/useColorScheme';
 import { useI18n, useT } from '../i18n';
 
 interface SettingsPageProps {
@@ -348,10 +350,25 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const toggleSw = (id: string): void => setSw((s) => ({ ...s, [id]: !s[id] }));
 
   /* ---- 通用:外观 / 语言 chip ---- */
-  const [appearance, setAppearance] = useState<'系统' | '浅色' | '深色'>('系统');
+  const [appearance, setAppearance] = useState<ThemePref>('system');
+  const colorScheme = useColorScheme();
   /* 界面语言:全局 i18n 上下文(切换即生效并持久化到 settings.json,见 App.setLang) */
   const { lang, setLang } = useI18n();
   const t = useT();
+
+  const appearanceSub =
+    appearance === 'system'
+      ? t('跟随系统（当前：{mode}）', { mode: t(colorScheme === 'dark' ? '深色' : '浅色') })
+      : appearance === 'dark'
+        ? t('已固定为深色')
+        : t('已固定为浅色');
+
+  const setThemePref = (pref: ThemePref): void => {
+    setAppearance(pref);
+    void window.bigbotart.setSettings({ theme: pref }).catch((e) => {
+      console.error('保存外观设置失败', e);
+    });
+  };
 
   /* ==== LLM:本地来源辅助 ==== */
 
@@ -860,6 +877,9 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         if (!alive) return;
         setRenderReal(s.renderMode === 'real');
         setSsdStreaming(s.ssdStreaming === true);
+        setAppearance(
+          s.theme === 'light' || s.theme === 'dark' || s.theme === 'system' ? s.theme : 'system',
+        );
         setLlmSource(s.llm ?? null);
         if (s.llm?.kind) setLlm(KIND_TO_KEY[s.llm.kind] ?? 'lmstudio');
         if (s.llm?.kind === 'openai-compatible') {
@@ -1317,26 +1337,29 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
               <div className="gh">
                 <b>{t('通用')}</b>
               </div>
-              <div className="srow">
+              <div className="srow" data-settings-theme>
                 <div className="grow">
                   <b>{t('外观')}</b>
-                  <div className="sub">{t('跟随系统（当前：浅色）')}</div>
+                  <div className="sub">{appearanceSub}</div>
                 </div>
                 <span
-                  className={`chip${appearance === '系统' ? ' on' : ''}`}
-                  onClick={() => setAppearance('系统')}
+                  className={`chip${appearance === 'system' ? ' on' : ''}`}
+                  data-theme-opt="system"
+                  onClick={() => setThemePref('system')}
                 >
                   {t('系统')}
                 </span>
                 <span
-                  className={`chip${appearance === '浅色' ? ' on' : ''}`}
-                  onClick={() => setAppearance('浅色')}
+                  className={`chip${appearance === 'light' ? ' on' : ''}`}
+                  data-theme-opt="light"
+                  onClick={() => setThemePref('light')}
                 >
                   {t('浅色')}
                 </span>
                 <span
-                  className={`chip${appearance === '深色' ? ' on' : ''}`}
-                  onClick={() => setAppearance('深色')}
+                  className={`chip${appearance === 'dark' ? ' on' : ''}`}
+                  data-theme-opt="dark"
+                  onClick={() => setThemePref('dark')}
                 >
                   {t('深色')}
                 </span>
@@ -2199,7 +2222,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     )}
                   </div>
                   {accelDefaultEnabled && accelPacks.filter((p) => p.exists && p.kind !== 'style').length === 0 && (
-                    <div className="sub" style={{ color: 'var(--warn, #b8860b)' }}>
+                    <div className="sub" style={{ color: 'var(--warn)' }}>
                       {t('⚠️ 当前没有可用加速包(目录缺失),新建镜头不会真正启用加速')}
                     </div>
                   )}
@@ -2238,7 +2261,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                         </div>
                         {/* 风格类包构建状态:LoRA/基础模型/脚本缺什么直接列出(不假装能构建) */}
                         {isStyleLike && st && !st.mergedReady && st.buildable && st.missing.length > 0 && (
-                          <div className="sub" style={{ fontSize: 11, color: 'var(--warn, #b8860b)' }}>
+                          <div className="sub" style={{ fontSize: 11, color: 'var(--warn)' }}>
                             {t('构建待备:{list}', { list: st.missing.join(' · ') })}
                           </div>
                         )}

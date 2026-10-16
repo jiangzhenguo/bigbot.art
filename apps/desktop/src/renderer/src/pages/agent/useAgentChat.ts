@@ -731,18 +731,40 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       .catch(() => toastMsg('停用技能失败'));
   }, [projectId, canvasId, activeSkill, toastMsg]);
 
-  /* 🆕 挂载时恢复画布激活技能(进入页面 chip 与注入状态一致) */
+  /* 🆕 恢复画布激活技能(进入页面 chip 与注入状态一致)。
+   *  首页「生成」会先 skillActivate 再进画布,并可能经 sessionStorage `bba.homeSkill` 播种;
+   *  同时监听 bba-newchat-ready:覆盖「挂载瞬间 IPC 尚未可见 / 晚于挂载才写盘」的竞态。 */
   useEffect(() => {
     if (!projectId) return;
     let alive = true;
-    void window.bigbotart
-      .skillActive(projectId, canvasId)
-      .then((s) => {
-        if (alive && s) setActiveSkill({ skillId: s.skillId, name: s.name, inject: s.inject });
-      })
-      .catch(() => {});
+    const apply = (s: { skillId: string; name: string; inject?: 'full' | 'summary' } | null) => {
+      if (!alive || !s) return;
+      setActiveSkill({ skillId: s.skillId, name: s.name, inject: s.inject });
+    };
+    const refresh = () => {
+      try {
+        const raw = sessionStorage.getItem('bba.homeSkill');
+        if (raw) {
+          sessionStorage.removeItem('bba.homeSkill');
+          const seeded = JSON.parse(raw) as { skillId?: string; name?: string; inject?: 'full' | 'summary' };
+          if (seeded?.skillId && seeded.name) {
+            apply({ skillId: seeded.skillId, name: seeded.name, inject: seeded.inject });
+            return;
+          }
+        }
+      } catch {
+        /* 播种损坏则回退 IPC */
+      }
+      void window.bigbotart
+        .skillActive(projectId, canvasId)
+        .then((s) => apply(s))
+        .catch(() => {});
+    };
+    refresh();
+    window.addEventListener('bba-newchat-ready', refresh);
     return () => {
       alive = false;
+      window.removeEventListener('bba-newchat-ready', refresh);
     };
   }, [projectId, canvasId]);
 

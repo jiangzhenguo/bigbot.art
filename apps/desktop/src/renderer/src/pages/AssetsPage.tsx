@@ -560,7 +560,7 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
         <div
           className="archive-pop"
           data-od-id="archive-from-canvas-pop"
-          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.35)' }}
+          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'var(--scrim)' }}
           onClick={() => setArchOpen(false)}
         >
           <div className="pop open" style={{ width: 420, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>
@@ -623,7 +623,7 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
       {trashOpen && (
         <div
           className="trash-pop"
-          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.35)' }}
+          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'var(--scrim)' }}
           onClick={() => setTrashOpen(false)}
         >
           <div className="pop open" style={{ width: 460, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>

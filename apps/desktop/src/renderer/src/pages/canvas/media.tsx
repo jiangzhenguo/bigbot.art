@@ -287,7 +287,7 @@ export function VideoPoster({
 
   if (!poster) {
     // 抽帧中:给一块与视频容器同色的占位,避免布局跳动
-    return <span style={{ display: 'block', width: '100%', height: '100%', background: '#000', ...style }} />;
+    return <span style={{ display: 'block', width: '100%', height: '100%', background: 'var(--media-bg)', ...style }} />;
   }
   return <img draggable={false} src={poster} alt={alt ?? ''} style={style} />;
 }
@@ -372,7 +372,7 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
   return (
     <div
       className="nthumb"
-      style={{ position: 'relative', background: '#000', aspectRatio: ar ?? '16/9', overflow: 'hidden' }}
+      style={{ position: 'relative', background: 'var(--media-bg)', aspectRatio: ar ?? '16/9', overflow: 'hidden' }}
       onMouseEnter={playOnHover}
       onMouseLeave={pauseOnLeave}
     >
@@ -398,7 +398,7 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
       {badge ? (
         <span
           className="nmeta mono"
-          style={{ position: 'absolute', left: 6, bottom: 6, margin: 0, background: 'rgba(0,0,0,.55)', color: '#fff', padding: '2px 7px', borderRadius: 6, fontSize: 10 }}
+          style={{ position: 'absolute', left: 6, bottom: 6, margin: 0, background: 'var(--on-media-bg)', color: 'var(--on-media)', padding: '2px 7px', borderRadius: 6, fontSize: 10 }}
         >
           {badge}
         </span>

@@ -553,16 +553,16 @@ export function OutpaintPads({
         }}
       >
         {sides.top ? (
-          <div style={{ position: 'absolute', left: '14%', right: '14%', top: 0, height: `${Math.min(24, Math.max(6, sides.top / 20))}px`, background: 'repeating-linear-gradient(45deg,rgba(0,113,227,.18) 0 6px,transparent 6px 12px)' }} />
+          <div style={{ position: 'absolute', left: '14%', right: '14%', top: 0, height: `${Math.min(24, Math.max(6, sides.top / 20))}px`, background: 'repeating-linear-gradient(45deg,color-mix(in oklab, var(--accent) 18%, transparent) 0 6px,transparent 6px 12px)' }} />
         ) : null}
         {sides.bottom ? (
-          <div style={{ position: 'absolute', left: '14%', right: '14%', bottom: 0, height: `${Math.min(24, Math.max(6, sides.bottom / 20))}px`, background: 'repeating-linear-gradient(45deg,rgba(0,113,227,.18) 0 6px,transparent 6px 12px)' }} />
+          <div style={{ position: 'absolute', left: '14%', right: '14%', bottom: 0, height: `${Math.min(24, Math.max(6, sides.bottom / 20))}px`, background: 'repeating-linear-gradient(45deg,color-mix(in oklab, var(--accent) 18%, transparent) 0 6px,transparent 6px 12px)' }} />
         ) : null}
         {sides.left ? (
-          <div style={{ position: 'absolute', top: '10%', bottom: '10%', left: 0, width: `${Math.max(6, Math.min(30, sides.left / 14))}px`, background: 'repeating-linear-gradient(45deg,rgba(0,113,227,.18) 0 6px,transparent 6px 12px)' }} />
+          <div style={{ position: 'absolute', top: '10%', bottom: '10%', left: 0, width: `${Math.max(6, Math.min(30, sides.left / 14))}px`, background: 'repeating-linear-gradient(45deg,color-mix(in oklab, var(--accent) 18%, transparent) 0 6px,transparent 6px 12px)' }} />
         ) : null}
         {sides.right ? (
-          <div style={{ position: 'absolute', top: '10%', bottom: '10%', right: 0, width: `${Math.max(6, Math.min(30, sides.right / 14))}px`, background: 'repeating-linear-gradient(45deg,rgba(0,113,227,.18) 0 6px,transparent 6px 12px)' }} />
+          <div style={{ position: 'absolute', top: '10%', bottom: '10%', right: 0, width: `${Math.max(6, Math.min(30, sides.right / 14))}px`, background: 'repeating-linear-gradient(45deg,color-mix(in oklab, var(--accent) 18%, transparent) 0 6px,transparent 6px 12px)' }} />
         ) : null}
         <div
           style={{

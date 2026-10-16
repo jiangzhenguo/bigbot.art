@@ -19,6 +19,9 @@ export default {
   /* ---- 通用 ---- */
   外观: 'Appearance',
   '跟随系统（当前：浅色）': 'Follow system (currently: Light)',
+  '跟随系统（当前：{mode}）': 'Follow system (currently: {mode})',
+  已固定为深色: 'Locked to Dark',
+  已固定为浅色: 'Locked to Light',
   系统: 'System',
   浅色: 'Light',
   深色: 'Dark',
