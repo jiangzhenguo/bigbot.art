@@ -74,6 +74,8 @@ export { toolDefinitions } from '@bigbotart/shared';
 export interface ToolContext {
   projectId: string;
   canvasId: string;
+  /** Agent 会话 id(engine.submit 透传到 RenderJob,供自动续跑回到正确会话) */
+  threadId?: string;
 }
 
 export interface ToolResult {
@@ -1598,6 +1600,7 @@ export class ToolHandlers {
         /* 标记 Agent 来源(2026-10-10 自动续跑):任务成功后 onJobFinish 据此唤醒
            Agent 自动推进任务链;用户在画布手点的提交不带此标记,不触发。 */
         source: 'agent',
+        threadId: ctx.threadId,
         params: submitParams,
         references,
       });

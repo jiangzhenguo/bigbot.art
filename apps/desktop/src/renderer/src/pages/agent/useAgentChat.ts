@@ -10,10 +10,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import type { AgentChatResponse, Asset, LlmSource } from '@bigbotart/shared';
+import type { AgentChatResponse, Asset, ChatThreadListItem, LlmSource } from '@bigbotart/shared';
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
-import { selectRestoreWindow } from './restore-window';
+import { restoreMsgsFromRecall } from './restore-msgs';
 import { llmDisplayName } from './llm-display';
 
 /** 错误卡标题:模板类错误(本地模型 Prompt Template 损坏,pi-chat 已附修复指引)/ 不可达 / 其他对话失败 */
@@ -38,6 +38,12 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
+  /** 本画布会话列表 + 活跃会话(历史聊天) */
+  const [threads, setThreads] = useState<ChatThreadListItem[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const activeThreadIdRef = useRef<string | null>(null);
+  activeThreadIdRef.current = activeThreadId;
 
   const chatRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -150,10 +156,41 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     [projectId, toastMsg],
   );
 
-  /* 切换项目/画布:清空对话区,真实历史由恢复 effect 填充 */
+  /* 切换项目/画布:清空对话区与会话态,真实历史由恢复 effect 填充 */
   useEffect(() => {
     setMsgs([]);
+    setThreads([]);
+    setActiveThreadId(null);
+    setHistoryOpen(false);
   }, [projectId, canvasId]);
+
+  const refreshThreads = useCallback(async (): Promise<ChatThreadListItem[]> => {
+    if (!projectId || !canvasId) return [];
+    try {
+      const list = await window.bigbotart.chatThreadsList(projectId, canvasId);
+      setThreads(list);
+      return list;
+    } catch (e) {
+      console.error('拉取会话列表失败', e);
+      return [];
+    }
+  }, [projectId, canvasId]);
+
+  const loadThreadMessages = useCallback(
+    async (threadId: string) => {
+      if (!projectId) return;
+      try {
+        const recall = await window.bigbotart.chatThreadMessages(projectId, threadId);
+        const restored = restoreMsgsFromRecall(recall, () => ++msgId.current);
+        setMsgs(restored);
+        pinToBottom.current = true;
+      } catch (e) {
+        console.error('恢复会话消息失败', e);
+        setMsgs([]);
+      }
+    },
+    [projectId],
+  );
 
   /* 消息流自动贴底:用户在底部附近时,新消息(回复/工具行/loading)到达即滚到底;往上翻查历史则不打扰 */
   useEffect(() => {
@@ -179,7 +216,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     setMsgs((m) => [...m, { ...msg, id: ++msgId.current }]);
   }, []);
 
-  /** /clear 命令:清空当前画布对话(UI + 持久化 recall/压缩摘要;画布/产物不受影响) */
+  /** /clear 命令:清空**当前活跃会话**(UI + 持久化 recall/压缩摘要;画布/产物与其他会话不受影响) */
   const clearChat = useCallback(() => {
     if (!projectId || !canvasId) {
       toastMsg('请先进入一个项目画布');
@@ -189,9 +226,12 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     pinToBottom.current = true;
     void window.bigbotart
       .memoryClear(projectId, canvasId)
-      .then((res) => toastMsg(res.ok ? `已清空对话 · 移除 ${res.cleared} 条记录` : `清空失败:${res.error ?? '未知错误'}`))
+      .then((res) => {
+        toastMsg(res.ok ? `已清空当前对话 · 移除 ${res.cleared} 条记录` : `清空失败:${res.error ?? '未知错误'}`);
+        void refreshThreads();
+      })
       .catch((e) => toastMsg(`清空失败:${e instanceof Error ? e.message : String(e)}`));
-  }, [projectId, canvasId, toastMsg]);
+  }, [projectId, canvasId, toastMsg, refreshThreads]);
 
   /** /compact 命令:把旧对话压成摘要(LLM 总结 + 裁剪 recall),保留最近若干条承接上下文 */
   const compactChat = useCallback(() => {
@@ -295,6 +335,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         .agentChat({
           projectId: pid,
           canvasId: cid,
+          threadId: activeThreadIdRef.current ?? undefined,
           text: v,
           attachments: atts.length ? atts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, localPath: a.localPath })) : undefined,
           selectedNodeIds: ctxNodes.length ? ctxNodes.map((n) => n.id) : undefined,
@@ -394,9 +435,10 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       void window.bigbotart.loadProjectCanvases(projectId ?? '').then(() => {
         onCanvasMutated();
       });
+      void refreshThreads();
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     },
-    [projectId, onCanvasMutated],
+    [projectId, onCanvasMutated, refreshThreads],
   );
 
   /** 终局收尾的稳定引用(事件订阅的 effect 依赖它,避免因函数重建而反复退订) */
@@ -429,102 +471,44 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     setMsgs((m) => m.map((x) => (x.id === msgId && x.ask ? { ...x, ask: { ...x.ask, picked: undefined } } : x)));
   }, []);
 
-  /** 挂载时恢复当前画布的对话历史(recall;连续的 tool 记录聚合为一组 toolRuns) */
+  /** 挂载/切画布:拉会话列表 → 活跃会话 → 恢复该会话消息。
+   *  若会话 IPC 不可用(主进程未重启 / 旧构建),回退到 memoryGet 按 canvasId 恢复,
+   *  避免「数据还在、面板空白」的假丢历史。 */
   useEffect(() => {
     if (!projectId || !canvasId) return;
     let alive = true;
-    void window.bigbotart.memoryGet(projectId).then((mem) => {
-      if (!alive) return;
-      /* ⚠️ 窗口口径(2026-10-09 「对话消失了」事故):
-         旧实现是 `mem.recall.filter(...).slice(-20)` —— **所有角色一起数**。
-         一次「铺节点并生成」发了 8 个 engine.submit(每个 tool + system 两条记录),
-         单轮吃掉 16+ 条额度,把整段人类对话冲到窗口外;用户重启后看到对话"消失"了
-         (数据其实完好,只是没回显)。现在改走 selectRestoreWindow:额度只数
-         user/assistant/ask 卡片,机器记录不占额度。
-         与主进程 memory.ts 的 recall 注入窗口(RECALL_INJECT_LIMIT)同口径。 */
-      const recent = selectRestoreWindow(mem.recall.filter((r) => r.canvasId === canvasId));
-      if (recent.length === 0) return;
-      const restored: ChatMsg[] = [];
-      let toolGroup: ToolRun[] | null = null;
-      const flushTools = () => {
-        if (toolGroup?.length) {
-          restored.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-tools', toolRuns: toolGroup });
-        }
-        toolGroup = null;
-      };
-      for (let i = 0; i < recent.length; i++) {
-        const r = recent[i];
-        if (!r) continue; // noUncheckedIndexedAccess:recent[i] 可能为 undefined
-        if (r.role === 'tool' && r.toolName === 'ask.user') {
-          // ask.user 暂停卡(被 worker 拦截,不经工具桥):恢复成可点选的确认卡,而不是丢成纯文本
-          flushTools();
-          const args = (r.toolArgs ?? {}) as { question?: string; options?: unknown };
-          // 容错:LLM 可能把 options 序列化成 JSON 字符串(真实事故:字符串有 .length 属性,
-          // 旧判定误放行 → AskCard options.map 崩溃白屏);非数组一律降级为纯文本
-          let opts: unknown = args.options;
-          if (typeof opts === 'string') {
-            try {
-              opts = JSON.parse(opts);
-            } catch {
-              opts = null;
-            }
-          }
-          if (args.question && Array.isArray(opts) && opts.length >= 2) {
-            // 去重:recall 里 assistant 正文与 ask 问题是同一段文本(与实时渲染「不重复推 reply」对齐)。
-            // 注意 recall 顺序是 [assistant 文本, …工具记录, ask.user],要往前找最近一条同文本文本消息
-            const dupIdx = restored.findLastIndex((x) => x.kind === 'agent' && x.text === args.question);
-            if (dupIdx >= 0) restored.splice(dupIdx, 1);
-            // 恢复「已点选」:ask.user 之后紧邻的用户消息恰为某个选项文案 → 视为用户当时的点选,
-            // 卡片直接回显「已选择 · X」,而不是退回等待确认(修复:点选未记录,重进页面状态丢失)
-            const askOpts = opts as Array<{ label: string }>;
-            const nxt = recent[i + 1];
-            const picked =
-              nxt?.role === 'user' && nxt.content && askOpts.some((o) => o.label.trim() === nxt.content.trim())
-                ? nxt.content.trim()
-                : undefined;
-            restored.push({
-              id: ++msgId.current,
-              kind: 'agent',
-              odId: 'agent-ask',
-              ask: { question: args.question, options: opts as import('@bigbotart/shared').AskOption[], picked },
-            });
-          } else if (args.question) {
-            // options 不可解析(被截断/非数组):仍能拿到 question → 降级为纯文本提问,不暴露工具调用原文
-            restored.push({ id: ++msgId.current, kind: 'agent', text: args.question });
-          } else {
-            /* 脏记录(旧版本 ask.user 未被 worker 拦截,落到工具桥报「未知工具:ask.user」,
-               options 被 JSON.stringify 截断成非法 JSON):没有 question 可展示,
-               原样 push 会在对话里留一条 `ask.user({...` 的裸文本气泡,看着像调用失败。
-               这类记录是历史噪音,直接丢弃(本轮真正的提问卡由 index.ts 那条 ask 记录负责)。 */
-            continue;
-          }
-        } else if (r.role === 'tool' && r.toolName) {
-          (toolGroup ??= []).push({ name: r.toolName, args: r.toolArgs ?? {}, status: 'success', result: r.toolResult });
-        } else {
-          flushTools();
-          restored.push({
-            id: ++msgId.current,
-            kind: r.role === 'user' ? 'user' : 'agent',
-            text: r.content,
-            // 关注/引用节点徽标还原(recall 留痕;多引用读数组字段,旧记录回退单值字段)
-            contextNodes:
-              r.role === 'user'
-                ? r.selectedNodeIds?.length
-                  ? r.selectedNodeIds.map((id, i) => ({ id, title: r.selectedNodeTitles?.[i] ?? id }))
-                  : r.selectedNodeId
-                    ? [{ id: r.selectedNodeId, title: r.selectedNodeTitle ?? r.selectedNodeId }]
-                    : undefined
-                : undefined,
-          });
+    void (async () => {
+      try {
+        const active = await window.bigbotart.chatThreadActive(projectId, canvasId);
+        if (!alive) return;
+        setActiveThreadId(active.threadId);
+        const list = await window.bigbotart.chatThreadsList(projectId, canvasId);
+        if (!alive) return;
+        setThreads(list);
+        const recall = await window.bigbotart.chatThreadMessages(projectId, active.threadId);
+        if (!alive) return;
+        const restored = restoreMsgsFromRecall(recall, () => ++msgId.current);
+        if (restored.length) setMsgs((m) => [...restored, ...m]);
+      } catch (e) {
+        console.error('恢复会话失败,回退 memoryGet', e);
+        try {
+          const mem = await window.bigbotart.memoryGet(projectId);
+          if (!alive) return;
+          const restored = restoreMsgsFromRecall(
+            mem.recall.filter((r) => r.canvasId === canvasId),
+            () => ++msgId.current,
+          );
+          if (restored.length) setMsgs((m) => [...restored, ...m]);
+          toastMsg('历史会话功能需重启应用后生效 · 已按旧方式恢复本画布对话');
+        } catch (e2) {
+          console.error('回退恢复也失败', e2);
         }
       }
-      flushTools();
-      setMsgs((m) => [...restored, ...m]);
-    });
+    })();
     return () => {
       alive = false;
     };
-  }, [projectId, canvasId]);
+  }, [projectId, canvasId, toastMsg]);
 
   /** 订阅 Agent 实时事件(工具开始/结束 → 聚合卡实时行;连续性校验 → 校验卡) */
   useEffect(() => {
@@ -538,6 +522,16 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       if (seenEvents.current.size > 200) seenEvents.current.clear(); // 防无限增长
       if (ev.projectId && projectId && ev.projectId !== projectId) return;
       if (ev.canvasId && canvasId && ev.canvasId !== canvasId) return;
+      // 多会话:事件带 threadId 时只收当前展示会话的(避免切走后旧 done 污染新会话 UI)。
+      // auto-start 例外:主进程已切回提交时的会话,这里跟随切 UI 再收事件。
+      if (
+        ev.kind !== 'auto-start' &&
+        ev.threadId &&
+        activeThreadIdRef.current &&
+        ev.threadId !== activeThreadIdRef.current
+      ) {
+        return;
+      }
       if (ev.kind === 'tool-start' && ev.toolName) {
         const row: ToolRun = { name: ev.toolName, args: ev.toolArgs ?? {}, status: 'running' };
         // StrictMode 下 updater 双跑:id 与 ref 在 updater 外一次分配,避免重复建卡
@@ -613,19 +607,33 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         /* 自动续跑(2026-10-10):Agent 提交的生成完成后,主进程自动发起一轮 chat 推进任务链。
            这里等价于 send() 的「开局」动作:开新一轮收尾闸、重置聚合卡指针、
            放系统说明 + loading 气泡、锁定输入;随后 tool-start/end 与 done/failed 照旧流转。
-           ⚠️ updater 纯:id 自增在 updater 外一次完成(StrictMode 双跑安全)。 */
-        settleGuard.current = false;
-        liveToolCardId.current = null;
-        pinToBottom.current = true;
-        const sysId = ++msgId.current;
-        const loadId = ++msgId.current;
-        setMsgs((m) => [
-          ...m.filter((x) => !x.loading),
-          { id: sysId, kind: 'sys', text: ev.note || '⚙️ 生成完成 · Agent 自动推进任务链…' },
-          { id: loadId, kind: 'sys', loading: true, text: '思考中…' },
-        ]);
-        setSending(true);
-        if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+           ⚠️ updater 纯:id 自增在 updater 外一次完成(StrictMode 双跑安全)。
+           若用户已切到别的历史会话,先跟主进程切回提交时的会话再开局。 */
+        const beginAuto = () => {
+          settleGuard.current = false;
+          liveToolCardId.current = null;
+          pinToBottom.current = true;
+          const sysId = ++msgId.current;
+          const loadId = ++msgId.current;
+          setMsgs((m) => [
+            ...m.filter((x) => !x.loading),
+            { id: sysId, kind: 'sys', text: ev.note || '⚙️ 生成完成 · Agent 自动推进任务链…' },
+            { id: loadId, kind: 'sys', loading: true, text: '思考中…' },
+          ]);
+          setSending(true);
+          if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+        };
+        if (ev.threadId && ev.threadId !== activeThreadIdRef.current) {
+          setActiveThreadId(ev.threadId);
+          activeThreadIdRef.current = ev.threadId;
+          void loadThreadMessages(ev.threadId).then(() => {
+            void refreshThreads();
+            toastMsg('已切回生成完成的对话继续');
+            beginAuto();
+          });
+        } else {
+          beginAuto();
+        }
       } else if (ev.kind === 'continuity') {
         setMsgs((m) => [
           ...m,
@@ -667,7 +675,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     });
     return off;
-  }, [projectId, canvasId, onCanvasMutated]);
+  }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, toastMsg]);
 
   /** 🆕 手动激活技能(输入区快选 / 技能页共用):调 IPC + 落「技能注入卡」+ 同步 chip */
   const activateSkill = useCallback(
@@ -738,6 +746,97 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     };
   }, [projectId, canvasId]);
 
+  const guardBusy = useCallback((): boolean => {
+    if (sending) {
+      toastMsg('请先等待本轮结束或打断');
+      return true;
+    }
+    return false;
+  }, [sending, toastMsg]);
+
+  const switchThread = useCallback(
+    async (threadId: string) => {
+      if (!projectId || !canvasId) return;
+      if (threadId === activeThreadIdRef.current) {
+        setHistoryOpen(false);
+        return;
+      }
+      if (guardBusy()) return;
+      const res = await window.bigbotart.chatThreadSwitch(projectId, canvasId, threadId);
+      if (!res.ok || !res.thread) {
+        toastMsg(res.error ?? '切换会话失败');
+        return;
+      }
+      setActiveThreadId(threadId);
+      activeThreadIdRef.current = threadId;
+      await loadThreadMessages(threadId);
+      await refreshThreads();
+      setHistoryOpen(false);
+      toastMsg(`已切换对话 · ${res.thread.title || '新对话'}`);
+    },
+    [projectId, canvasId, guardBusy, loadThreadMessages, refreshThreads, toastMsg],
+  );
+
+  const newThread = useCallback(
+    async (opts?: { parentThreadId?: string }) => {
+      if (!projectId || !canvasId) return;
+      if (guardBusy()) return;
+      const res = await window.bigbotart.chatThreadCreate(projectId, canvasId, opts);
+      if (!res.ok || !res.thread) {
+        toastMsg(res.error ?? '新建会话失败');
+        return;
+      }
+      const reused = res.thread.id === activeThreadIdRef.current;
+      setActiveThreadId(res.thread.id);
+      activeThreadIdRef.current = res.thread.id;
+      if (reused && !opts?.parentThreadId) {
+        setHistoryOpen(false);
+        toastMsg('当前已是空会话 · 直接输入即可');
+        return;
+      }
+      setMsgs([]);
+      pinToBottom.current = true;
+      await refreshThreads();
+      setHistoryOpen(false);
+      toastMsg(opts?.parentThreadId ? '已从所选会话派生新对话' : '已新建对话 · 上一会话保留在历史列表');
+    },
+    [projectId, canvasId, guardBusy, refreshThreads, toastMsg],
+  );
+
+  const renameThread = useCallback(
+    async (threadId: string, title: string) => {
+      if (!projectId) return;
+      const res = await window.bigbotart.chatThreadRename(projectId, threadId, title);
+      if (!res.ok) {
+        toastMsg(res.error ?? '重命名失败');
+        return;
+      }
+      await refreshThreads();
+      toastMsg(title.trim() ? `已重命名为「${title.trim()}」` : '标题已清空 · 将用首条消息生成');
+    },
+    [projectId, refreshThreads, toastMsg],
+  );
+
+  const deleteThread = useCallback(
+    async (threadId: string) => {
+      if (!projectId || !canvasId) return;
+      if (guardBusy()) return;
+      const res = await window.bigbotart.chatThreadDelete(projectId, threadId);
+      if (!res.ok || !res.activeThreadId) {
+        toastMsg(res.error ?? '删除失败');
+        return;
+      }
+      setActiveThreadId(res.activeThreadId);
+      activeThreadIdRef.current = res.activeThreadId;
+      await loadThreadMessages(res.activeThreadId);
+      await refreshThreads();
+      toastMsg('已删除会话');
+    },
+    [projectId, canvasId, guardBusy, loadThreadMessages, refreshThreads, toastMsg],
+  );
+
+  const activeThreadTitle = threads.find((t) => t.id === activeThreadId)?.title || '新对话';
+
   return {
     msgs,
     sending,
@@ -762,6 +861,17 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     activeSkill,
     activateSkill,
     deactivateSkill,
+    /* 历史会话 */
+    threads,
+    activeThreadId,
+    activeThreadTitle,
+    historyOpen,
+    setHistoryOpen,
+    switchThread,
+    newThread,
+    renameThread,
+    deleteThread,
+    refreshThreads,
   };
 }
 

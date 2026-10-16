@@ -12,7 +12,8 @@
  * 修复(三处,本文件锁住其中两处的可观测行为):
  *   1. pi-chat.ts — options 不足 2 个时把 ask.user 从本轮 calls 摘掉,绝不交给工具桥
  *   2. index.ts  — 写 recall 的工具循环跳过 name==='ask.user' 的条目(提问卡由 result.ask 分支记)
- *   3. useAgentChat.ts — 恢复历史时,question 可用的降级为纯文本提问,否则整条丢弃
+ *   3. restore-msgs.ts — 恢复历史时,question 可用的降级为纯文本提问,否则整条丢弃
+ *      (原在 useAgentChat.ts;多会话后抽到共享恢复函数)
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -51,13 +52,16 @@ describe('ask.user 脏记录防护', () => {
     expect(code).toMatch(/return \{ reply: t \|\| question/);
   });
 
-  it('useAgentChat.ts 恢复历史时不再把脏记录渲染成裸文本气泡', () => {
-    const code = src('apps/desktop/src/renderer/src/pages/agent/useAgentChat.ts');
+  it('restore-msgs.ts 恢复历史时不再把脏记录渲染成裸文本气泡', () => {
+    const code = src('apps/desktop/src/renderer/src/pages/agent/restore-msgs.ts');
     // 降级分支必须用 args.question 而不是 r.content(后者就是那串 ask.user({...)
     expect(code).toMatch(/text: args\.question/);
     expect(code).not.toMatch(/kind: 'agent', text: r\.content \}/);
     // 没有 question 的脏记录直接丢弃
     expect(code).toMatch(/continue;/);
+    // useAgentChat 必须走共享恢复函数,避免两套逻辑分叉
+    const hook = src('apps/desktop/src/renderer/src/pages/agent/useAgentChat.ts');
+    expect(hook).toMatch(/restoreMsgsFromRecall/);
   });
 
   it('真实事故记录的形状:options 被截断成非法 JSON 时应被判定为不可点选', () => {

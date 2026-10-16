@@ -32,6 +32,8 @@ export interface AutoNotice {
   nodeId: string;
   label?: string;
   resultPath?: string;
+  /** 提交时的会话(唤醒时切回,避免用户已切到别的历史会话) */
+  threadId?: string;
 }
 
 export interface AutoGateState {
@@ -158,6 +160,7 @@ export class AutoContinueController {
         this.pushDeferred(key, job.projectId, job.canvasId, {
           nodeId: job.nodeId,
           resultPath: job.resultPath,
+          threadId: job.threadId,
         });
         this.deps.logger?.log(
           'info',
@@ -177,6 +180,7 @@ export class AutoContinueController {
     this.scheduleNotice(key, job.projectId!, job.canvasId!, {
       nodeId: job.nodeId,
       resultPath: job.resultPath,
+      threadId: job.threadId,
     });
   }
 

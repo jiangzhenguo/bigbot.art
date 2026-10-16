@@ -334,6 +334,7 @@ agent.toolExecutor = async (req) => {
   const ctx = {
     projectId: req.params.projectId || currentToolCtx?.projectId || '',
     canvasId: req.params.canvasId || currentToolCtx?.canvasId || '',
+    threadId: currentToolCtx?.threadId,
   };
   const argsBrief = JSON.stringify(req.params.args ?? {}).slice(0, 120);
   logger.log('info', `agent.tool → ${req.params.tool}(${argsBrief})`);
@@ -359,6 +360,7 @@ agent.onEvent = (ev: AgentEvent) => {
     ...ev,
     projectId: ev.projectId || currentToolCtx?.projectId || '',
     canvasId: ev.canvasId || currentToolCtx?.canvasId || '',
+    threadId: ev.threadId || currentToolCtx?.threadId,
   });
 };
 
@@ -427,9 +429,9 @@ queue.onChange = (jobs) => {
 };
 
 /** 当前活跃 chat 的工具上下文(按 chatKey 隔离,避免并发串写) */
-const activeToolCtx = new Map<string, { projectId: string; canvasId: string }>();
+const activeToolCtx = new Map<string, { projectId: string; canvasId: string; threadId?: string }>();
 /** 最近一次 chat 上下文(事件兜底;工具 RPC 已自带 projectId/canvasId) */
-let currentToolCtx: { projectId: string; canvasId: string } | null = null;
+let currentToolCtx: { projectId: string; canvasId: string; threadId?: string } | null = null;
 /**
  * 本会话已成功完成的工具动作(按 project:canvas 归集)。
  * 用途:长任务失败/超时时说明「哪些改动其实已经生效」——旧实现在收尾超时时只回一句
@@ -1220,6 +1222,8 @@ async function executeAgentChat(opts: {
   selectedNodeId?: string;
   /** 本轮引用的多个节点(右键「添加到聊天窗口」+ @ 提及);与 selectedNodeId 合并去重 */
   selectedNodeIds?: string[];
+  /** 目标会话;缺省用画布活跃会话 */
+  threadId?: string;
   auto?: boolean;
 }): Promise<AgentChatResponse> {
   const flightKey = `${opts.projectId}:${opts.canvasId}`;
@@ -1237,7 +1241,7 @@ async function executeAgentChat(opts: {
   // 自动续跑都会通过上面的检查,两轮交错写 recall / currentToolCtx。
   inFlightChats.add(flightKey);
   let chatKey: string | undefined;
-  let toolCtx: { projectId: string; canvasId: string } | undefined;
+  let toolCtx: { projectId: string; canvasId: string; threadId?: string } | undefined;
   try {
   let llm: LlmSource | undefined;
   const project = store.getProject(opts.projectId);
@@ -1254,6 +1258,17 @@ async function executeAgentChat(opts: {
     return { ok: false, error: `LLM 来源不可用:${(e as Error).message}` };
   }
 
+  // 会话:显式 threadId 优先;否则确保画布有活跃会话并切过去
+  const threadId =
+    opts.threadId || memory.ensureActiveThread(opts.projectId, opts.canvasId);
+  if (opts.threadId) {
+    try {
+      memory.switchThread(opts.projectId, opts.canvasId, opts.threadId);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
   // 记忆上下文组装(skillResolver:激活技能经 SkillStore 解析,注入「【当前技能】」指令段;
   // canvas 快照:注入「【当前画布】」实时状态段,让 Agent 首轮就感知画布轮廓)
   const ctxSnap = store.loadProjectCanvases(opts.projectId).canvases.find((c) => c.id === opts.canvasId);
@@ -1267,7 +1282,7 @@ async function executeAgentChat(opts: {
   chatKey = `${opts.projectId}:${opts.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */
   const activityKey = `${opts.projectId}:${opts.canvasId}`;
-  toolCtx = { projectId: opts.projectId, canvasId: opts.canvasId };
+  toolCtx = { projectId: opts.projectId, canvasId: opts.canvasId, threadId };
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
 
@@ -1282,6 +1297,7 @@ async function executeAgentChat(opts: {
     const selNodes = ctxSnap ? selIds.map((id) => ctxSnap.nodes.find((x) => x.id === id)).filter((n): n is CanvasNode => !!n) : [];
     memory.addRecall(opts.projectId, {
       canvasId: opts.canvasId,
+      threadId,
       role: 'user',
       content: visibleText,
       // 单值字段保留(旧渲染层/旧读取方兼容);数组字段是 2026-10 多引用的真源
@@ -1332,6 +1348,7 @@ async function executeAgentChat(opts: {
       kind: 'auto-start',
       projectId: opts.projectId,
       canvasId: opts.canvasId,
+      threadId,
       note: '⚙️ 生成完成 · Agent 自动推进任务链…',
     } satisfies AgentEvent);
   }
@@ -1350,7 +1367,12 @@ async function executeAgentChat(opts: {
     );
     // assistant 回复记入 recall
     if (result.reply) {
-      memory.addRecall(opts.projectId, { canvasId: opts.canvasId, role: 'assistant', content: result.reply });
+      memory.addRecall(opts.projectId, {
+        canvasId: opts.canvasId,
+        threadId,
+        role: 'assistant',
+        content: result.reply,
+      });
     }
     // 工具调用记入 recall(role=tool,留痕回看)+ 成功动作记入 recall(role=system,注入下一轮上下文)
     for (const tc of result.toolCalls) {
@@ -1361,13 +1383,13 @@ async function executeAgentChat(opts: {
          分支负责记录,这里直接跳过。 */
       if (tc.name === 'ask.user') continue;
       memory.addRecall(opts.projectId, {
-        canvasId: opts.canvasId, role: 'tool',
+        canvasId: opts.canvasId, threadId, role: 'tool',
         content: `${tc.name}(${JSON.stringify(tc.args).slice(0, 120)})`,
         toolName: tc.name, toolArgs: tc.args, toolResult: tc.result,
       });
       if (tc.ok) {
         memory.addRecall(opts.projectId, {
-          canvasId: opts.canvasId, role: 'system',
+          canvasId: opts.canvasId, threadId, role: 'system',
           content: describeToolAction(tc.name, tc.args, tc.nodeId),
         });
       }
@@ -1375,7 +1397,7 @@ async function executeAgentChat(opts: {
     // ask.user 暂停卡也记入 recall(被 worker 拦截、不经工具桥):刷新/切换后恢复成可点选的确认卡,而不是丢成纯文本
     if (result.ask) {
       memory.addRecall(opts.projectId, {
-        canvasId: opts.canvasId, role: 'tool',
+        canvasId: opts.canvasId, threadId, role: 'tool',
         content: `ask.user(${result.ask.question.slice(0, 120)})`,
         toolName: 'ask.user',
         toolArgs: { question: result.ask.question, options: result.ask.options },
@@ -1387,7 +1409,7 @@ async function executeAgentChat(opts: {
       toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted,
     };
     win?.webContents.send('agent-event', {
-      kind: 'done', projectId: opts.projectId, canvasId: opts.canvasId, final,
+      kind: 'done', projectId: opts.projectId, canvasId: opts.canvasId, threadId, final,
     } satisfies AgentEvent);
     return final;
   } catch (e) {
@@ -1400,7 +1422,7 @@ async function executeAgentChat(opts: {
     const msg = `${(e as Error).message}${summary}`;
     logger.log('error', `agent.chat 失败${opts.auto ? '(自动推进)' : ''}:${msg}`);
     win?.webContents.send('agent-event', {
-      kind: 'failed', projectId: opts.projectId, canvasId: opts.canvasId, error: msg,
+      kind: 'failed', projectId: opts.projectId, canvasId: opts.canvasId, threadId, error: msg,
     } satisfies AgentEvent);
     return { ok: false, error: msg };
   }
@@ -1423,21 +1445,40 @@ async function executeAgentChat(opts: {
 async function runAutoContinueRound(
   projectId: string,
   canvasId: string,
-  notices: Array<{ nodeId: string; resultPath?: string }>,
+  notices: Array<{ nodeId: string; resultPath?: string; threadId?: string }>,
 ): Promise<void> {
   const snap = store.loadProjectCanvases(projectId).canvases.find((c) => c.id === canvasId);
   const enriched = notices.map((n) => ({
     ...n,
     label: snap?.nodes.find((x) => x.id === n.nodeId)?.label,
   }));
+  // 回到提交时的会话(多会话:用户可能已切到别的历史聊天)
+  const threadId =
+    notices.map((n) => n.threadId).find(Boolean) || memory.ensureActiveThread(projectId, canvasId);
+  try {
+    memory.switchThread(projectId, canvasId, threadId);
+  } catch {
+    /* 会话已被删 → ensureActive 兜底 */
+  }
   logger.log(
     'info',
-    `[auto-continue] 触发自动推进 ${projectId}:${canvasId} · ${enriched.map((n) => `「${n.label || n.nodeId}」`).join('、')}`,
+    `[auto-continue] 触发自动推进 ${projectId}:${canvasId}:${threadId} · ${enriched.map((n) => `「${n.label || n.nodeId}」`).join('、')}`,
   );
   /* recall 留痕用 system 角色而非 user:合成通知绝不能被 pinnedInstruction 当成
      「任务链首条用户指令」钉进 systemPrompt(那会永久顶掉用户真正的原始指令)。 */
-  memory.addRecall(projectId, { canvasId, role: 'system', content: buildAutoRecallNote(enriched) });
-  await executeAgentChat({ projectId, canvasId, text: buildAutoContinueText(enriched), auto: true });
+  memory.addRecall(projectId, {
+    canvasId,
+    threadId,
+    role: 'system',
+    content: buildAutoRecallNote(enriched),
+  });
+  await executeAgentChat({
+    projectId,
+    canvasId,
+    threadId,
+    text: buildAutoContinueText(enriched),
+    auto: true,
+  });
 }
 
 ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentChatResponse> => {
@@ -1446,6 +1487,7 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
   return executeAgentChat({
     projectId: req.projectId,
     canvasId: req.canvasId,
+    threadId: req.threadId,
     text: req.text,
     attachments: req.attachments,
     selectedNodeId: req.selectedNodeId,
@@ -1466,6 +1508,52 @@ ipcMain.handle('memory-clear', (_e, projectId: string, canvasId: string) => {
   logger.log('info', `memory.clear ${projectId}:${canvasId} · 清除 ${res.cleared} 条对话记录`);
   return { ok: true, ...res };
 });
+
+/* ---------- IPC:Agent 历史会话(ChatThread) ---------- */
+ipcMain.handle('chat-threads-list', (_e, projectId: string, canvasId: string) =>
+  memory.listThreads(projectId, canvasId),
+);
+ipcMain.handle(
+  'chat-thread-create',
+  (_e, projectId: string, canvasId: string, opts?: { title?: string; parentThreadId?: string }) => {
+    try {
+      const thread = memory.createThread(projectId, canvasId, opts);
+      return { ok: true, thread };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  },
+);
+ipcMain.handle('chat-thread-switch', (_e, projectId: string, canvasId: string, threadId: string) => {
+  try {
+    const thread = memory.switchThread(projectId, canvasId, threadId);
+    return { ok: true, thread };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+});
+ipcMain.handle('chat-thread-rename', (_e, projectId: string, threadId: string, title: string) => {
+  try {
+    const thread = memory.renameThread(projectId, threadId, title);
+    return { ok: true, thread };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+});
+ipcMain.handle('chat-thread-delete', (_e, projectId: string, threadId: string) => {
+  try {
+    const res = memory.deleteThread(projectId, threadId);
+    return { ok: true, ...res };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+});
+ipcMain.handle('chat-thread-messages', (_e, projectId: string, threadId: string) =>
+  memory.threadMessages(projectId, threadId),
+);
+ipcMain.handle('chat-thread-active', (_e, projectId: string, canvasId: string) => ({
+  threadId: memory.ensureActiveThread(projectId, canvasId),
+}));
 
 /** 把 recall 消息组装成压缩用的 LLM 上下文(tool 记录转成带标记的 user 文本,便于模型理解"发生了什么") */
 function compactContext(msgs: RecallMessage[]): { systemPrompt: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> } {

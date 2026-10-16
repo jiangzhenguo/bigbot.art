@@ -340,9 +340,9 @@ export interface BigBotArtApi {
   onAgentEvent(cb: (ev: import('./domain').AgentEvent) => void): () => void;
   /** 读取项目记忆(调试/设置页展示) */
   memoryGet(projectId: string): Promise<import('./domain').ProjectMemory>;
-  /** /clear 命令:清空当前画布对话(移除该画布全部 recall + 对话压缩摘要;节点总结保留) */
+  /** /clear 命令:清空**当前活跃会话**对话(移除该会话 recall + 压缩摘要;节点总结与其他会话保留) */
   memoryClear(projectId: string, canvasId: string): Promise<{ ok: boolean; cleared: number; error?: string }>;
-  /** /compact 命令:把当前画布旧对话压成摘要(LLM 总结,不可达时兜底),写入 canvasMemory.conversationSummary 并裁剪 recall(保留最近 N 条) */
+  /** /compact 命令:把当前活跃会话旧对话压成摘要(LLM 总结,不可达时兜底),写入会话 conversationSummary 并裁剪 recall(保留最近 N 条) */
   memoryCompact(projectId: string, canvasId: string): Promise<{
     ok: boolean;
     summary?: string;
@@ -354,6 +354,36 @@ export interface BigBotArtApi {
     fallback?: boolean;
     error?: string;
   }>;
+  /* ── Agent 历史会话(ChatThread) ── */
+  /** 列出某画布的会话(含预览;按 updatedAt 降序) */
+  chatThreadsList(projectId: string, canvasId: string): Promise<import('./domain').ChatThreadListItem[]>;
+  /** 新建会话并设为活跃;当前已是空会话则复用 */
+  chatThreadCreate(
+    projectId: string,
+    canvasId: string,
+    opts?: { title?: string; parentThreadId?: string },
+  ): Promise<{ ok: boolean; thread?: import('./domain').ChatThread; error?: string }>;
+  /** 切换活跃会话 */
+  chatThreadSwitch(
+    projectId: string,
+    canvasId: string,
+    threadId: string,
+  ): Promise<{ ok: boolean; thread?: import('./domain').ChatThread; error?: string }>;
+  /** 重命名会话 */
+  chatThreadRename(
+    projectId: string,
+    threadId: string,
+    title: string,
+  ): Promise<{ ok: boolean; thread?: import('./domain').ChatThread; error?: string }>;
+  /** 删除会话;若删活跃则自动切到最近一条/清空壳 */
+  chatThreadDelete(
+    projectId: string,
+    threadId: string,
+  ): Promise<{ ok: boolean; activeThreadId?: string; error?: string }>;
+  /** 读某会话全部 recall(供 UI 恢复) */
+  chatThreadMessages(projectId: string, threadId: string): Promise<import('./domain').RecallMessage[]>;
+  /** 当前画布活跃会话 id(没有则确保新建) */
+  chatThreadActive(projectId: string, canvasId: string): Promise<{ threadId: string }>;
   // Take 历史(shot 节点生成归档)
   /** 列出项目下全部 Take(最新在前) */
   takesList(projectId: string): Promise<import('./domain').Take[]>;

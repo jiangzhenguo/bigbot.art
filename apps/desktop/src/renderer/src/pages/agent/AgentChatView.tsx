@@ -42,16 +42,23 @@ export function AgentChatView({
           pinToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <ChatMessageList
-          msgs={msgs}
-          onSend={send}
-          onLocate={onLocate}
-          onOpenSettings={onOpenSettings}
-          onAskPick={askPick}
-          onAskReset={askReset}
-          onEditSkill={onEditSkill}
-          resolveMedia={resolveMedia}
-        />
+        {msgs.length === 0 ? (
+          <div className="thread-empty" data-od-id="thread-empty-hint">
+            <b>描述你想做的事…</b>
+            <span>例如：「帮我在导演台搭一场戏」或「只改镜 2 的运镜」。对话历史 · 画布内容共用。</span>
+          </div>
+        ) : (
+          <ChatMessageList
+            msgs={msgs}
+            onSend={send}
+            onLocate={onLocate}
+            onOpenSettings={onOpenSettings}
+            onAskPick={askPick}
+            onAskReset={askReset}
+            onEditSkill={onEditSkill}
+            resolveMedia={resolveMedia}
+          />
+        )}
       </div>
     </>
   );

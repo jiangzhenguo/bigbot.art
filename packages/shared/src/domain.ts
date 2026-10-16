@@ -895,6 +895,8 @@ export interface RenderJob {
   resultPath?: string;
   /** 提交来源(RenderRequest.source 透传):'agent' 提交的任务完成后可触发 Agent 自动续跑 */
   source?: 'agent' | 'user';
+  /** 🆕 Agent 会话 id(RenderRequest.threadId 透传;自动续跑用) */
+  threadId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1068,16 +1070,50 @@ export interface AssetImportResult {
 
 /* ═══ Agent 会话 / 记忆体系(画布页 Agent 对话) ═══ */
 
+/**
+ * Agent 会话(同一画布可有多条;活跃指针在 CanvasMemory.activeThreadId)。
+ * 会话只隔离对话记忆,画布节点/技能仍共用 —— 详见 docs/Agent历史聊天-产品设计与技术方案.md。
+ */
+export interface ChatThread {
+  id: string;
+  canvasId: string;
+  /** 展示名;空则 UI 用首条用户消息生成 */
+  title: string;
+  /** 可选:从哪次会话派生而来 */
+  parentThreadId?: string;
+  /** /compact 结果(会话级;取代画布级 conversationSummary) */
+  conversationSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** 软删时间;有值则列表默认隐藏 */
+  archivedAt?: string;
+}
+
+/** 会话列表项(list IPC 返回;含预览等派生字段,不落盘) */
+export interface ChatThreadListItem extends ChatThread {
+  /** 最近一条 user/assistant 正文截断 */
+  preview?: string;
+  /** 是否有压缩摘要 */
+  hasCompact?: boolean;
+  /** 是否当前活跃 */
+  active?: boolean;
+}
+
 /** 单画布记忆:节点总结(切换画布时写入)+ 对话压缩摘要(/compact 生成,注入当前会话上下文) */
 export interface CanvasMemory {
   summary: string;
   nodeCount: number;
   lastActive: string;
   keyDecisions: string[];
-  /** /compact 生成的对话压缩摘要(注入当前画布上下文,压缩后仍保留全局脉络) */
+  /**
+   * @deprecated 迁移后读 ChatThread.conversationSummary;存量兼容只读兜底
+   * /compact 生成的对话压缩摘要(注入当前画布上下文,压缩后仍保留全局脉络)
+   */
   conversationSummary?: string;
   /** 🆕 当前画布激活的 Agent 技能 id(对话自动注入该技能指令段;同一画布至多一个) */
   activeSkillId?: string;
+  /** 🆕 当前活跃会话 id;缺省则用该画布唯一/默认 thread */
+  activeThreadId?: string;
 }
 
 /** 分层记忆(MemGPT 式):core 核心记忆 + 画布总结 + recall 对话流 + archival 归档 */
@@ -1092,15 +1128,21 @@ export interface ProjectMemory {
   };
   /** 每个画布的总结记忆(切换画布时写入;其他画布以 summary 注入当前会话) */
   canvasMemory: Record<string, CanvasMemory>;
+  /** 🆕 会话清单(按 id);消息仍在 recall 扁平数组里用 threadId 归属 */
+  threads?: Record<string, ChatThread>;
   /** 全部对话消息(可检索) */
   recall: RecallMessage[];
   /** 归档记忆(长期事实:生成产物/关键决定/资产备注) */
   archival: ArchivalEntry[];
+  /** 会话迁移标记(chatThreadsV1);有则不再重跑迁移 */
+  migration?: { chatThreadsV1?: boolean };
 }
 
 export interface RecallMessage {
   id: string;
   canvasId: string;
+  /** 🆕 所属会话;缺省 = 迁移前的「画布默认会话」 */
+  threadId?: string;
   /** system = 工具成功后的动作记录(人类可读,随最近消息注入下一轮上下文) */
   role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
@@ -1148,6 +1190,8 @@ export interface AgentChatRequest {
   /** 本轮引用的多个节点 id(2026-10:右键「添加到聊天窗口」+ 输入框 @ 提及,可多个并存;
    *  与 selectedNodeId 并存兼容旧调用方;两者都给时合并去重) */
   selectedNodeIds?: string[];
+  /** 🆕 目标会话;缺省用画布 activeThreadId(渲染层应显式传入,避免竞态) */
+  threadId?: string;
 }
 /** ask.user 结构化提问选项(🆕 支持副说明与推荐徽标;worker 已把字符串归一化为对象) */
 export interface AskOption {
@@ -1191,6 +1235,8 @@ export interface AgentEvent {
   kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed' | 'auto-start';
   projectId: string;
   canvasId: string;
+  /** 🆕 所属会话;渲染层过滤「事件属于当前展示的会话」,避免切走后旧 done 污染新会话 UI */
+  threadId?: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
   ok?: boolean;

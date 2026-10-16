@@ -2,13 +2,14 @@
  * AgentPane — 右侧 Agent 对话面板(常驻 · 无检查器页签)
  *
  * 对齐 Open Design canvas.html:Agent 对话独立占右侧,检查器拆到左侧 insp-panel。
- * 对话内容由 useAgentChat 提供(AgentChatView/AgentComposer)。
+ * 对话内容由 useAgentChat 提供(AgentChatView/AgentComposer);历史会话抽屉叠在消息区上。
  */
 import React, { useRef } from 'react';
 import type { AgentChatApi } from '../agent/useAgentChat';
 import type { ChatMedia } from '../agent/types';
 import { AgentChatView } from '../agent/AgentChatView';
 import { AgentComposer } from '../agent/AgentComposer';
+import { AgentChatHistory } from '../agent/AgentChatHistory';
 
 interface AgentPaneProps {
   chat: AgentChatApi;
@@ -52,10 +53,22 @@ export function AgentPane({
   resolveMedia,
 }: AgentPaneProps) {
   const agentRef = useRef<HTMLElement | null>(null);
+  const {
+    historyOpen,
+    setHistoryOpen,
+    threads,
+    activeThreadId,
+    activeThreadTitle,
+    switchThread,
+    newThread,
+    renameThread,
+    deleteThread,
+  } = chat;
+
   return (
     <>
       <aside
-        className="agent"
+        className={`agent${historyOpen ? ' thread-hist-open' : ''}`}
         data-od-id="agent-panel"
         ref={(el) => {
           agentRef.current = el;
@@ -64,21 +77,78 @@ export function AgentPane({
         onClick={onBackgroundClick}
       >
         <div className="agent-head">
-          <span className="lbl" data-od-id="agent-panel-title">
-            Agent 对话
-          </span>
-          <span className="spacer"></span>
-          <span className="row g6 mono mut" style={{ fontSize: '10.5px' }}>
+          <button
+            type="button"
+            className="thread-title-btn"
+            title="点击重命名当前对话"
+            data-od-id="agent-thread-title"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!activeThreadId) return;
+              const next = window.prompt('会话标题', activeThreadTitle === '新对话' ? '' : activeThreadTitle);
+              if (next == null) return;
+              void renameThread(activeThreadId, next);
+            }}
+          >
+            {activeThreadTitle}
+          </button>
+          <div className="agent-head-actions">
+            <button
+              type="button"
+              className="agent-text-btn"
+              title="新对话 · 归档当前会话"
+              data-od-id="agent-new-thread"
+              onClick={(e) => {
+                e.stopPropagation();
+                void newThread();
+              }}
+            >
+              新对话
+            </button>
+            <button
+              type="button"
+              className="agent-icon-btn"
+              title="本画布的历史聊天"
+              aria-expanded={historyOpen}
+              aria-controls="threadDrawer"
+              data-od-id="agent-history-toggle"
+              onClick={(e) => {
+                e.stopPropagation();
+                setHistoryOpen(!historyOpen);
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9">
+                <path d="M4 6h16M4 12h10M4 18h14" />
+                <circle cx="18" cy="17" r="3" />
+              </svg>
+            </button>
+          </div>
+          <span className="row g6 mono mut" style={{ fontSize: '10.5px', flex: 'none' }}>
             <span className="dot ok"></span>pi · 运行中
           </span>
         </div>
-        <AgentChatView
-          chat={chat}
-          onLocate={onLocate}
-          onOpenSettings={onOpenSettings}
-          onEditSkill={onEditSkill}
-          resolveMedia={resolveMedia}
-        />
+
+        <div className="agent-body">
+          <AgentChatHistory
+            open={historyOpen}
+            threads={threads}
+            activeThreadId={activeThreadId}
+            onClose={() => setHistoryOpen(false)}
+            onSwitch={(id) => void switchThread(id)}
+            onRename={(id, title) => void renameThread(id, title)}
+            onDelete={(id) => void deleteThread(id)}
+            onDerive={(parentId) => void newThread({ parentThreadId: parentId })}
+          />
+          <div className="agent-chat-stack">
+            <AgentChatView
+              chat={chat}
+              onLocate={onLocate}
+              onOpenSettings={onOpenSettings}
+              onEditSkill={onEditSkill}
+              resolveMedia={resolveMedia}
+            />
+          </div>
+        </div>
         <AgentComposer
           chat={chat}
           toastMsg={toastMsg}
@@ -100,7 +170,9 @@ export function AgentPane({
         onPointerDown={onGripPointerDown}
         onDoubleClick={onGripDoubleClick}
         onKeyDown={onGripKeyDown}
-      ></button>
+      />
     </>
   );
 }
+
+export default AgentPane;

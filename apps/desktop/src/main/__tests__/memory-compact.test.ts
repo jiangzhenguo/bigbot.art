@@ -2,7 +2,7 @@
  * MemoryStore clearConversation / compactConversation 单测(主进程 memory.ts)
  * - /clear:清空画布对话 recall + 对话压缩摘要(节点总结 summary 保留)
  * - /compact:裁剪旧消息为摘要(保留最近 keepLast 条),摘要合并进 conversationSummary
- * - buildContext:压缩摘要以「本画布对话摘要(已压缩)」注入
+ * - buildContext:压缩摘要以「本对话摘要(已压缩)」注入
  *
  * 关键:memory.ts 的 DATA_DIR 在 import 时按 BIGBOTART_HOME 求值 →
  * 模块顶层先设临时目录,再在 beforeAll 里动态 import(绝不触碰真实 ~/.bigbotart)。
@@ -117,7 +117,7 @@ describe('MemoryStore.compactConversation(/compact)', () => {
 });
 
 describe('MemoryStore.buildContext 注入压缩摘要', () => {
-  it('有 conversationSummary 时以「本画布对话摘要(已压缩)」注入 system prompt', () => {
+  it('有 conversationSummary 时以「本对话摘要(已压缩)」注入 system prompt', () => {
     const pid = `p-ctx-${Date.now()}`;
     store.addRecall(pid, recallMessage('cA', 1));
     store.addRecall(pid, recallMessage('cA', 2));
@@ -125,7 +125,7 @@ describe('MemoryStore.buildContext 注入压缩摘要', () => {
     store.compactConversation(pid, 'cA', '对话压缩摘要', 1);
 
     const ctx = store.buildContext(pid, 'cA', '继续');
-    expect(ctx.systemPrompt).toContain('【本画布对话摘要(已压缩)】对话压缩摘要');
+    expect(ctx.systemPrompt).toContain('【本对话摘要(已压缩)】对话压缩摘要');
     // 当前画布节点总结不注入(只注入 conversationSummary),其他画布的 summary 走既有逻辑
   });
 });

@@ -69,6 +69,8 @@ export interface RenderRequest {
    * 用户手点的生成不触发(用户在画布上看得见结果,不需要 Agent 插话)。
    */
   source?: 'agent' | 'user';
+  /** 🆕 Agent 会话 id(自动续跑回到提交时的会话,避免用户已切走) */
+  threadId?: string;
   /** 语义参数由 Provider 按其能力解释 */
   params: Record<string, unknown>;
   references?: { asset: Asset; role: string; localPath: string }[];

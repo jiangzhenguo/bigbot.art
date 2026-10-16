@@ -6,14 +6,31 @@
  * 四层:
  * - core: 核心记忆(项目目标/风格/约束/偏好),始终全量注入 system prompt
  * - canvasMemory: 每个画布的总结(切换画布时写入;其他画布以 summary 注入当前会话)
- * - recall: 全部对话消息(按 canvasId 检索最近 N 条注入)
+ * - recall: 全部对话消息(按 canvasId + threadId 检索最近 N 条注入)
  * - archival: 长期事实(生成产物/关键决定),关键字检索注入
+ *
+ * 2026-10:同一画布支持多 ChatThread(会话);活跃指针 canvasMemory.activeThreadId。
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ProjectMemory, RecallMessage, ArchivalEntry, CanvasNode, CanvasEdge } from '@bigbotart/shared';
+import type {
+  ProjectMemory,
+  RecallMessage,
+  ArchivalEntry,
+  CanvasNode,
+  CanvasEdge,
+  ChatThread,
+  ChatThreadListItem,
+} from '@bigbotart/shared';
 import { nodeKindGuide, connectorSummary } from '@bigbotart/shared';
 import { DATA_DIR, memoryFile } from './workspace-paths.js';
+import {
+  listThreadItems,
+  migrateChatThreadsV1,
+  newThreadId,
+  threadHasUserMessage,
+  truncateTitle,
+} from './memory-threads.js';
 
 const RECALL_INJECT_LIMIT = 12; // 当前画布最近 N 条可注入消息(user/assistant/system;tool 留痕记录不占窗口)
 const ARCHIVAL_INJECT_LIMIT = 3; // archival 检索 top N
@@ -40,8 +57,10 @@ function emptyMemory(projectId: string): ProjectMemory {
     projectId,
     core: { projectGoal: '', styleGuide: '', constraints: '', userPreferences: '' },
     canvasMemory: {},
+    threads: {},
     recall: [],
     archival: [],
+    migration: { chatThreadsV1: true },
   };
 }
 
@@ -54,11 +73,21 @@ export class MemoryStore {
 
   get(projectId: string): ProjectMemory {
     const cached = this.cache.get(projectId);
-    if (cached) return cached;
+    if (cached) {
+      // 缓存命中也跑一次幂等迁移(测试/热路径可能先 add 再读)
+      if (migrateChatThreadsV1(cached)) this.persist(projectId);
+      return cached;
+    }
     const f = memFile(projectId);
     if (existsSync(f)) {
       try {
         const m = JSON.parse(readFileSync(f, 'utf-8')) as ProjectMemory;
+        m.threads ??= {};
+        if (migrateChatThreadsV1(m)) {
+          this.cache.set(projectId, m);
+          this.persist(projectId);
+          return m;
+        }
         this.cache.set(projectId, m);
         return m;
       } catch {
@@ -91,15 +120,27 @@ export class MemoryStore {
     }
   }
 
-  /** 追加对话消息到 recall */
+  /** 追加对话消息到 recall(自动补 threadId=活跃会话;顺带刷新会话 updatedAt / 空标题) */
   addRecall(projectId: string, msg: Omit<RecallMessage, 'id' | 'createdAt'>): RecallMessage {
     const m = this.get(projectId);
+    const threadId = msg.threadId || this.ensureActiveThread(projectId, msg.canvasId);
+    const now = new Date().toISOString();
     const entry: RecallMessage = {
       ...msg,
+      threadId,
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     };
     m.recall.push(entry);
+    const thr = m.threads?.[threadId];
+    if (thr) {
+      thr.updatedAt = now;
+      // 首条用户消息且标题仍空/默认 → 用正文截断作标题
+      if (entry.role === 'user' && (!thr.title || thr.title === '新对话' || thr.title === '默认对话')) {
+        const t = truncateTitle(entry.content);
+        if (t) thr.title = t;
+      }
+    }
     this.persist(projectId);
     return entry;
   }
@@ -140,12 +181,22 @@ export class MemoryStore {
     this.persist(projectId);
   }
 
-  /** /clear:清空当前画布对话——移除该画布全部 recall + 对话压缩摘要(节点总结 summary 保留) */
+  /**
+   * /clear:清空**当前活跃会话**的 recall + 该会话压缩摘要
+   * (节点总结 summary / 其他会话保留;画布级 legacy conversationSummary 一并清)
+   */
   clearConversation(projectId: string, canvasId: string): { cleared: number } {
     const m = this.get(projectId);
+    const threadId = this.ensureActiveThread(projectId, canvasId);
     const before = m.recall.length;
-    m.recall = m.recall.filter((r) => r.canvasId !== canvasId);
+    m.recall = m.recall.filter((r) => r.threadId !== threadId);
     let changed = m.recall.length !== before;
+    const thr = m.threads?.[threadId];
+    if (thr?.conversationSummary) {
+      thr.conversationSummary = undefined;
+      thr.updatedAt = new Date().toISOString();
+      changed = true;
+    }
     const cur = m.canvasMemory[canvasId];
     if (cur?.conversationSummary) {
       m.canvasMemory[canvasId] = { ...cur, conversationSummary: undefined };
@@ -155,23 +206,34 @@ export class MemoryStore {
     return { cleared: before - m.recall.length };
   }
 
-  /** /compact:把画布旧对话压成摘要——合并写入 canvasMemory.conversationSummary,裁剪 recall 只留最近 keepLast 条 */
+  /**
+   * /compact:把**当前活跃会话**旧对话压成摘要——写入 thread.conversationSummary,
+   * 裁剪该会话 recall 只留最近 keepLast 条(兼容:同步写 canvasMemory.conversationSummary 供旧读路径)
+   */
   compactConversation(projectId: string, canvasId: string, summary: string, keepLast = COMPACT_KEEP_LAST): { replaced: number } {
     const m = this.get(projectId);
-    const entries = m.recall.filter((r) => r.canvasId === canvasId);
+    const threadId = this.ensureActiveThread(projectId, canvasId);
+    const entries = m.recall.filter((r) => r.threadId === threadId);
     const replaced = Math.max(0, entries.length - keepLast);
     if (replaced === 0) return { replaced: 0 };
+    const thr = m.threads?.[threadId];
+    const merged = thr?.conversationSummary ? `${thr.conversationSummary}\n\n${summary}` : summary;
+    if (thr) {
+      thr.conversationSummary = merged;
+      thr.updatedAt = new Date().toISOString();
+    }
     const cur = m.canvasMemory[canvasId];
-    const merged = cur?.conversationSummary ? `${cur.conversationSummary}\n\n${summary}` : summary;
     m.canvasMemory[canvasId] = {
       summary: cur?.summary ?? '',
       nodeCount: cur?.nodeCount ?? 0,
       lastActive: cur?.lastActive ?? new Date().toISOString(),
       keyDecisions: cur?.keyDecisions ?? [],
-      conversationSummary: merged,
-      activeSkillId: cur?.activeSkillId, // 压缩不改变画布激活技能
+      conversationSummary: merged, // 兼容旧读路径
+      activeSkillId: cur?.activeSkillId,
+      activeThreadId: threadId,
     };
-    m.recall = m.recall.filter((r) => r.canvasId !== canvasId || entries.indexOf(r) >= entries.length - keepLast);
+    const keep = new Set(entries.slice(-keepLast).map((r) => r.id));
+    m.recall = m.recall.filter((r) => r.threadId !== threadId || keep.has(r.id));
     this.persist(projectId);
     return { replaced };
   }
@@ -197,21 +259,27 @@ export class MemoryStore {
     this.persist(projectId);
   }
 
-  /** 检索 recall(当前画布最近 N 条注入消息)。
+  /** 检索 recall(当前活跃会话最近 N 条注入消息)。
    *  窗口只数可注入角色(user/assistant/system):role=tool 是留痕回看用的机器记录,不参与计数。
    *  否则一轮「操作前必查」的工具调用(list_nodes + get_node×N,每条占 tool+system 两条)
    *  就能把用户的原始指令挤出窗口 —— 真实事故:「编辑图片让女孩站立」经一轮 ask.user 往返后即掉出上下文。 */
-  recentRecall(projectId: string, canvasId: string, limit = RECALL_INJECT_LIMIT): RecallMessage[] {
+  recentRecall(projectId: string, canvasId: string, limit = RECALL_INJECT_LIMIT, threadId?: string): RecallMessage[] {
     const m = this.get(projectId);
+    const tid = threadId || this.ensureActiveThread(projectId, canvasId);
     return m.recall
-      .filter((r) => r.canvasId === canvasId && (r.role === 'user' || r.role === 'assistant' || r.role === 'system'))
+      .filter(
+        (r) =>
+          r.threadId === tid &&
+          (r.role === 'user' || r.role === 'assistant' || r.role === 'system'),
+      )
       .slice(-limit);
   }
 
   /** 当前任务链的首条用户指令:最近一条「非 ask.user 应答」的 user 消息。
    *  ask 应答(点选项/自由回复)的前一条必是 ask.user 的 tool 记录,据此区分「新指令」与「链内应答」。 */
-  pinnedInstruction(projectId: string, canvasId: string): string | undefined {
-    const entries = this.get(projectId).recall.filter((r) => r.canvasId === canvasId);
+  pinnedInstruction(projectId: string, canvasId: string, threadId?: string): string | undefined {
+    const tid = threadId || this.ensureActiveThread(projectId, canvasId);
+    const entries = this.get(projectId).recall.filter((r) => r.threadId === tid);
     for (let i = entries.length - 1; i >= 0; i--) {
       const r = entries[i];
       if (!r || r.role !== 'user') continue;
@@ -444,10 +512,12 @@ export class MemoryStore {
       parts.push(MemoryStore.canvasStateSummary(canvas));
     }
 
-    // ② 当前画布的对话压缩摘要(/compact 生成)注入 —— 压缩后仍保留全局脉络
-    const curMem = m.canvasMemory[canvasId];
-    if (curMem?.conversationSummary) {
-      parts.push(`【本画布对话摘要(已压缩)】${curMem.conversationSummary}`);
+    // ② 当前会话的对话压缩摘要(/compact 生成)注入 —— 压缩后仍保留全局脉络
+    const activeTid = this.ensureActiveThread(projectId, canvasId);
+    const thrSummary =
+      m.threads?.[activeTid]?.conversationSummary ?? m.canvasMemory[canvasId]?.conversationSummary;
+    if (thrSummary) {
+      parts.push(`【本对话摘要(已压缩)】${thrSummary}`);
     }
 
     // ② 其他画布的 summary 注入(当前画布除外)
@@ -460,10 +530,10 @@ export class MemoryStore {
       }
     }
 
-    // ③ 当前画布 recall(最近 N 条) —— 转 messages
+    // ③ 当前会话 recall(最近 N 条) —— 转 messages
     //    role=system(工具成功后的动作记录)也注入:让下一轮感知"刚才发生了什么",避免凭对话文本猜画布状态
     //    连续重复的系统记录(如必查规则下的「已执行 canvas.get_node」×5)合并为「… ×N」,不占满注入窗口
-    const recent = this.recentRecall(projectId, canvasId);
+    const recent = this.recentRecall(projectId, canvasId, RECALL_INJECT_LIMIT, activeTid);
     const collapsed: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
     const counts: number[] = [];
     for (const r of recent) {
@@ -483,7 +553,7 @@ export class MemoryStore {
 
     // ③b 钉住当前任务链的首条用户指令:工具调用密集时原始指令可能掉出 recall 窗口
     //    (真实事故:「编辑图片让女孩站立」第二轮起即丢失),这里兜底注入,直到用户发出新指令自然替换
-    const pinned = this.pinnedInstruction(projectId, canvasId);
+    const pinned = this.pinnedInstruction(projectId, canvasId, activeTid);
     if (pinned && !messages.some((msg) => msg.role === 'user' && msg.content === pinned)) {
       parts.push(
         `【进行中的任务】用户最初指令:「${pinned.slice(0, 200)}」——后续的问答与确认都围绕它推进,执行时不得丢失该目标;若用户最新消息开启了新任务,以最新消息为准。`,
@@ -506,5 +576,156 @@ export class MemoryStore {
     for (const n of nodes) counts[n.kind] = (counts[n.kind] ?? 0) + 1;
     const parts = Object.entries(counts).map(([k, v]) => `${v}个${k}`);
     return `「${canvasName}」: ${parts.join('、') || '空白画布'}`.slice(0, SUMMARY_FALLBACK_LEN);
+  }
+
+  /* ═══ ChatThread 多会话 ═══ */
+
+  /** 保证画布有活跃会话;没有则新建「新对话」并返回其 id */
+  ensureActiveThread(projectId: string, canvasId: string): string {
+    const m = this.get(projectId);
+    m.threads ??= {};
+    const cm = m.canvasMemory[canvasId];
+    const cur = cm?.activeThreadId;
+    if (cur && m.threads[cur] && !m.threads[cur]!.archivedAt) return cur;
+    const existing = Object.values(m.threads).find((t) => t.canvasId === canvasId && !t.archivedAt);
+    if (existing) {
+      m.canvasMemory[canvasId] = {
+        ...(cm ?? { summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [] }),
+        activeThreadId: existing.id,
+      };
+      this.persist(projectId);
+      return existing.id;
+    }
+    const created = this.createThread(projectId, canvasId, { title: '新对话' });
+    return created.id;
+  }
+
+  getActiveThreadId(projectId: string, canvasId: string): string {
+    return this.ensureActiveThread(projectId, canvasId);
+  }
+
+  listThreads(projectId: string, canvasId: string): ChatThreadListItem[] {
+    return listThreadItems(this.get(projectId), canvasId);
+  }
+
+  threadMessages(projectId: string, threadId: string): RecallMessage[] {
+    return this.get(projectId).recall.filter((r) => r.threadId === threadId);
+  }
+
+  createThread(
+    projectId: string,
+    canvasId: string,
+    opts?: { title?: string; parentThreadId?: string },
+  ): ChatThread {
+    const m = this.get(projectId);
+    m.threads ??= {};
+    const activeId = m.canvasMemory[canvasId]?.activeThreadId;
+    // 当前活跃会话从未发过用户消息 → 复用,防空壳刷屏
+    if (activeId && m.threads[activeId] && !threadHasUserMessage(m, activeId) && !opts?.parentThreadId) {
+      const thr = m.threads[activeId]!;
+      if (opts?.title) thr.title = opts.title;
+      thr.updatedAt = new Date().toISOString();
+      this.persist(projectId);
+      return thr;
+    }
+    const now = new Date().toISOString();
+    const id = newThreadId();
+    const parent = opts?.parentThreadId ? m.threads[opts.parentThreadId] : undefined;
+    const thread: ChatThread = {
+      id,
+      canvasId,
+      title: opts?.title?.trim() || '新对话',
+      parentThreadId: parent?.id,
+      // 派生:把父会话压缩摘要带过去作开场脉络(不复制全文 recall)
+      conversationSummary: parent?.conversationSummary,
+      createdAt: now,
+      updatedAt: now,
+    };
+    m.threads[id] = thread;
+    const cm = m.canvasMemory[canvasId];
+    m.canvasMemory[canvasId] = {
+      ...(cm ?? { summary: '', nodeCount: 0, lastActive: now, keyDecisions: [] }),
+      activeThreadId: id,
+    };
+    // 派生时写一条 system 注记,说明来源(不占用户消息)
+    if (parent) {
+      m.recall.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        canvasId,
+        threadId: id,
+        role: 'system',
+        content: `从会话「${parent.title || parent.id}」派生的新对话`,
+        createdAt: now,
+      });
+    }
+    this.persist(projectId);
+    return thread;
+  }
+
+  switchThread(projectId: string, canvasId: string, threadId: string): ChatThread {
+    const m = this.get(projectId);
+    const thr = m.threads?.[threadId];
+    if (!thr || thr.canvasId !== canvasId || thr.archivedAt) {
+      throw new Error(`会话不存在或不属于当前画布:${threadId}`);
+    }
+    const cm = m.canvasMemory[canvasId];
+    m.canvasMemory[canvasId] = {
+      ...(cm ?? { summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [] }),
+      activeThreadId: threadId,
+    };
+    this.persist(projectId);
+    return thr;
+  }
+
+  renameThread(projectId: string, threadId: string, title: string): ChatThread {
+    const m = this.get(projectId);
+    const thr = m.threads?.[threadId];
+    if (!thr || thr.archivedAt) throw new Error(`会话不存在:${threadId}`);
+    const t = truncateTitle(title.trim(), 64) || '新对话';
+    thr.title = t;
+    thr.updatedAt = new Date().toISOString();
+    this.persist(projectId);
+    return thr;
+  }
+
+  /**
+   * 删除会话及其 recall。若删的是活跃会话 → 切到同画布最近一条,没有则新建空会话。
+   * 至少保留一条(画布不能没有活跃会话)。
+   */
+  deleteThread(projectId: string, threadId: string): { activeThreadId: string } {
+    const m = this.get(projectId);
+    const thr = m.threads?.[threadId];
+    if (!thr) throw new Error(`会话不存在:${threadId}`);
+    const canvasId = thr.canvasId;
+    const siblings = Object.values(m.threads ?? {}).filter(
+      (t) => t.canvasId === canvasId && !t.archivedAt && t.id !== threadId,
+    );
+    if (siblings.length === 0) {
+      // 最后一条:清空消息但保留会话壳,避免「零会话」状态
+      m.recall = m.recall.filter((r) => r.threadId !== threadId);
+      thr.title = '新对话';
+      thr.conversationSummary = undefined;
+      thr.updatedAt = new Date().toISOString();
+      thr.parentThreadId = undefined;
+      const cm = m.canvasMemory[canvasId];
+      m.canvasMemory[canvasId] = {
+        ...(cm ?? { summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [] }),
+        activeThreadId: threadId,
+        conversationSummary: undefined,
+      };
+      this.persist(projectId);
+      return { activeThreadId: threadId };
+    }
+    m.recall = m.recall.filter((r) => r.threadId !== threadId);
+    delete m.threads![threadId];
+    siblings.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    const nextId = siblings[0]!.id;
+    const cm = m.canvasMemory[canvasId];
+    m.canvasMemory[canvasId] = {
+      ...(cm ?? { summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [] }),
+      activeThreadId: nextId,
+    };
+    this.persist(projectId);
+    return { activeThreadId: nextId };
   }
 }

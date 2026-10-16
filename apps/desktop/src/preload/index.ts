@@ -154,6 +154,20 @@ const api: BigBotArtApi = {
   memoryGet: (projectId: string) => ipcRenderer.invoke('memory-get', projectId),
   memoryClear: (projectId: string, canvasId: string) => ipcRenderer.invoke('memory-clear', projectId, canvasId),
   memoryCompact: (projectId: string, canvasId: string) => ipcRenderer.invoke('memory-compact', projectId, canvasId),
+  chatThreadsList: (projectId: string, canvasId: string) =>
+    ipcRenderer.invoke('chat-threads-list', projectId, canvasId),
+  chatThreadCreate: (projectId: string, canvasId: string, opts?) =>
+    ipcRenderer.invoke('chat-thread-create', projectId, canvasId, opts),
+  chatThreadSwitch: (projectId: string, canvasId: string, threadId: string) =>
+    ipcRenderer.invoke('chat-thread-switch', projectId, canvasId, threadId),
+  chatThreadRename: (projectId: string, threadId: string, title: string) =>
+    ipcRenderer.invoke('chat-thread-rename', projectId, threadId, title),
+  chatThreadDelete: (projectId: string, threadId: string) =>
+    ipcRenderer.invoke('chat-thread-delete', projectId, threadId),
+  chatThreadMessages: (projectId: string, threadId: string) =>
+    ipcRenderer.invoke('chat-thread-messages', projectId, threadId),
+  chatThreadActive: (projectId: string, canvasId: string) =>
+    ipcRenderer.invoke('chat-thread-active', projectId, canvasId),
   takesList: (projectId: string) => ipcRenderer.invoke('takes-list', projectId),
   takesHistory: (projectId: string, shotNodeId: string, currentTakeId?: string) =>
     ipcRenderer.invoke('takes-history', projectId, shotNodeId, currentTakeId),

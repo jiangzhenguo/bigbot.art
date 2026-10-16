@@ -87,6 +87,7 @@ export class RenderQueue {
       canvasId: req.canvasId,
       takeId: req.takeId,
       source: req.source,
+      threadId: req.threadId,
       req,
       createdAt: now,
       updatedAt: now,
