@@ -824,7 +824,7 @@ export class PiChatSession {
       provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
       input: ['text'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: LLM_CONTEXT_WINDOW, maxTokens: LLM_MAX_TOKENS,
+      contextWindow: params.contextWindow && params.contextWindow > 0 ? params.contextWindow : LLM_CONTEXT_WINDOW, maxTokens: LLM_MAX_TOKENS,
     };
     const provider = createProvider({
       id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,

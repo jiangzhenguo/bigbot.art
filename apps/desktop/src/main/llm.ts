@@ -18,6 +18,7 @@ import type {
   LocalModelInfo,
   LocalRuntimeModels,
 } from '@bigbotart/shared';
+import { readLmStudioContext, readOllamaContext } from './context-budget.js';
 
 const execFileP = promisify(execFile);
 
@@ -436,5 +437,43 @@ export async function resolveLlmEndpoint(
     }
     case 'none':
       throw new Error('未配置 LLM 来源');
+  }
+}
+
+const contextLenCache = new Map<string, { tokens?: number; at: number }>();
+
+/**
+ * 读本地运行时已经加载的上下文长度。探不到返回 undefined,调用方用保守窗口。
+ * 60 秒内同一端点+模型不重复打。失败不抛。
+ */
+export async function probeLoadedContextTokens(baseUrl: string, model: string): Promise<number | undefined> {
+  const key = `${baseUrl}|${model}`;
+  const hit = contextLenCache.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.tokens;
+  const tokens = await probeLoadedContextUncached(baseUrl, model);
+  contextLenCache.set(key, { tokens, at: Date.now() });
+  return tokens;
+}
+
+async function probeLoadedContextUncached(baseUrl: string, model: string): Promise<number | undefined> {
+  const root = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+  try {
+    const data = await getJson(`${root}/api/v0/models`, undefined, 1_500);
+    const n = readLmStudioContext(data, model);
+    if (n) return n;
+  } catch {
+    /* 不是 LM Studio,或服务没开这条路由 */
+  }
+  try {
+    const res = await fetch(`${root}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: model }),
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!res.ok) return undefined;
+    return readOllamaContext(await res.json());
+  } catch {
+    return undefined;
   }
 }

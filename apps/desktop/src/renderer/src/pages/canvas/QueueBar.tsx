@@ -14,16 +14,12 @@ interface QueueBarProps {
 }
 
 export function QueueBar({ jobs, nodes }: QueueBarProps) {
-  const queued = jobs.filter((j) => j.status === 'queued').length;
   return (
     <footer className="queue" data-od-id="canvas-queue">
       <span className="lbl">队列</span>
       {queueItem('video', jobs, nodes)}
       {queueItem('image', jobs, nodes)}
       <span className="spacer"></span>
-      <span className="mono mut" style={{ fontSize: '11px' }}>
-        {queued > 0 ? `${queued} 个排队 · FIFO 串行执行` : 'FIFO · 预览档可插队（需确认）'}
-      </span>
     </footer>
   );
 }

@@ -642,7 +642,18 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .mention-pop{bottom:calc(100% + 6px);left:0;right:0;min-width:0;max-height:240px;overflow:auto}
 .pg-canvas .toolrow{display:flex;gap:6px;margin-top:9px;align-items:center;flex-wrap:wrap;position:relative}
 .pg-canvas .toolrow .pop{bottom:calc(100% + 6px);left:0}
-.pg-canvas .composer-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:9px}
+.pg-canvas .composer-bar{display:flex;align-items:flex-end;gap:8px;margin-top:9px}
+.pg-canvas .composer-bar .toolrow{flex:1;min-width:0;margin-top:0}
+/* 发送 / 停止:圆形图标,停在工具行右侧,不再用长文案按钮 */
+.pg-canvas .send-orb,.pg-home .send-orb{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;flex:none;padding:0;border:none;cursor:pointer;color:var(--accent-on);background:var(--glass-accent);box-shadow:inset 0 1px 0 var(--glass-spec-hi),0 4px 12px color-mix(in oklab,var(--accent) 28%,transparent);transition:background var(--motion-fast) var(--ease-standard),transform 80ms var(--ease-standard)}
+.pg-canvas .send-orb svg,.pg-home .send-orb svg{width:16px;height:16px;display:block}
+.pg-canvas .send-orb:hover:not(:disabled),.pg-home .send-orb:hover:not(:disabled){background:var(--glass-accent-hover)}
+.pg-canvas .send-orb:active:not(:disabled),.pg-home .send-orb:active:not(:disabled){transform:scale(.94)}
+.pg-canvas .send-orb:disabled,.pg-home .send-orb:disabled{background:color-mix(in oklab,var(--fg) 7%,var(--surface));color:var(--meta);box-shadow:none;cursor:default}
+.pg-canvas .send-orb.stop{background:var(--fg);color:var(--bg);box-shadow:inset 0 1px 0 color-mix(in oklab,var(--bg) 22%,transparent)}
+.pg-canvas .send-orb.stop:hover:not(:disabled){background:color-mix(in oklab,var(--fg) 88%,var(--bg))}
+.pg-canvas .send-orb .spin{width:14px;height:14px;border-radius:50%;border:2px solid color-mix(in oklab,var(--bg) 28%,transparent);border-top-color:var(--bg);animation:send-orb-spin .7s linear infinite}
+@keyframes send-orb-spin{to{transform:rotate(360deg)}}
 /* 检查器 — 左侧独立面板,选中节点时在节点面板左边弹出 */
 .pg-canvas{--insp-w:300px}
 .pg-canvas .insp-panel{position:absolute;z-index:41;left:12px;top:66px;bottom:12px;width:var(--insp-w);border:1px solid var(--border);border-radius:18px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec);display:flex;flex-direction:column;min-height:0;overflow:hidden;opacity:0;pointer-events:none;transform:translateX(-10px);transition:opacity var(--motion-base) var(--ease-standard),transform var(--motion-base) var(--ease-standard),width .15s var(--ease-standard)}
@@ -1137,16 +1148,20 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
  * z-index 高于 .ovl:.ovl-lb 可能由 .ovl 内部的图片再打开,必须盖住底层弹层。── */
 .ovl-lb{position:fixed;inset:0;z-index:260;background:var(--scrim-lightbox);overflow:hidden;cursor:zoom-out}
 .ovl-lb button{font:inherit;cursor:pointer;border:0;background:none;color:inherit;padding:0;text-align:left}
-.ovl-lb-viewport{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden;touch-action:none;cursor:zoom-out}
+/* 上下让开关闭钮和底栏,图片在这块区域里居中,而不是按整屏居中后被底栏压住下沿 */
+.ovl-lb-viewport{position:absolute;left:24px;right:24px;top:20px;bottom:78px;display:grid;place-items:center;overflow:hidden;touch-action:none;cursor:zoom-out}
 .ovl-lb-viewport.pan{cursor:grab}
 .ovl-lb-viewport.grabbing{cursor:grabbing}
-.ovl-lb-viewport img{display:block;user-select:none;-webkit-user-drag:none}
+.ovl-lb-viewport img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;min-width:0;min-height:0;object-fit:contain;object-position:center;user-select:none;-webkit-user-drag:none;margin:0}
 .ovl-lb-bar{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:2;display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:var(--radius-pill);background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow-lg),var(--glass-spec);border:1px solid var(--glass-border);color:var(--fg);cursor:default}
 .ovl-lb-bar button{min-width:30px;justify-content:center;text-align:center}
 .ovl-lb-bar button:disabled{opacity:.4;pointer-events:none}
 .ovl-lb-pct{min-width:46px;text-align:center;font-size:11.5px;color:var(--fg-2)}
 .ovl-lb-tip{font-size:10.5px;color:var(--muted);padding:0 4px;white-space:nowrap}
-.ovl-lb-close{position:absolute;top:14px;right:14px;z-index:2}
+.ovl-lb button.ovl-lb-close{position:absolute;top:16px;right:16px;z-index:2;width:36px;height:36px;padding:0;border-radius:50%;display:grid;place-items:center;color:var(--fg);background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);border:1px solid var(--glass-border);box-shadow:var(--glass-shadow),var(--glass-spec);cursor:pointer;transition:background var(--motion-fast) var(--ease-standard),transform 80ms var(--ease-standard)}
+.ovl-lb button.ovl-lb-close:hover{background:var(--bg)}
+.ovl-lb button.ovl-lb-close:active{transform:scale(.94)}
+.ovl-lb button.ovl-lb-close svg{width:16px;height:16px;display:block}
 .mcard{width:520px;max-width:calc(100vw - 48px);max-height:min(600px,calc(100vh - 64px));display:flex;flex-direction:column;border-radius:20px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow-lg),var(--glass-spec);border:1px solid var(--glass-border);overflow:hidden}
 .mhead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border-soft)}
 .mhead b{font-size:var(--text-sm)}

@@ -14,7 +14,7 @@ interface ImagePreviewProps {
 
 /**
  * 检查器图片预览:完整显示源图(object-fit: contain)+「⛶ 全屏」按钮。
- * 全屏 = 应用内覆盖层(ImageLightbox):Esc / 点击背景 / ✕ 关闭,不影响画布状态;
+ * 全屏 = 应用内覆盖层(ImageLightbox):Esc / 点击背景 / 关闭按钮,不影响画布状态;
  * 覆盖层内支持放大缩小(按钮 / 滚轮 / Mac 触控板双指捏合 / 双击)与拖动平移,
  * 详见 `ImageLightbox` 顶部注释。点击缩略图本身也进入全屏(与主流看图交互一致)。
  * 纯展示组件,不触碰 window.bigbotart。

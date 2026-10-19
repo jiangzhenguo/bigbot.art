@@ -15,6 +15,7 @@ import { H3StyleModelBuilder } from './h3-style-model';
 import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots, isValidOutputRelName } from './assets';
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
+import { loadSkillPackage } from './skill-import';
 import { ExportService, resolveExportFile } from './export';
 import { exportProject, importProjectFromFile } from './project-package';
 import { coverOf, listProjectCovers, setCoverAsset, clearCover, isUsableCoverFile } from './project-cover';
@@ -23,6 +24,7 @@ import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideoPostTooling, cancelVideoPost, listRunningVideoPost, lastVideoPostProgress } from './video-post';
 import { RenderQueue } from './render-queue';
 import { AutoContinueController, buildAutoContinueText, buildAutoRecallNote } from './auto-continue';
+import { waitUntilFlightFree } from './flight-turn';
 import { MemoryStore, COMPACT_KEEP_LAST, compactFallbackSummary } from './memory';
 import { ToolHandlers } from './tool-handlers';
 import { requestH3PromptCompletion } from './h3-prompt';
@@ -53,8 +55,10 @@ import {
   loadOllama,
   loadPiMlx,
   resolveLlmEndpoint,
+  probeLoadedContextTokens,
   testConnection,
 } from './llm';
+import { placementOf, planContext } from './context-budget';
 import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind, ProjectExportRequest, ProjectExportResult, ProjectImportResult, ProjectCover } from '@bigbotart/shared';
 import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
 
@@ -452,6 +456,8 @@ const toolActivity = new Map<string, string[]>();
    是函数声明,此处引用靠提升,定义在下方 agent-chat IPC 附近。 */
 /** 正在进行中的对话轮次(`${projectId}:${canvasId}`;手动与自动同口径,防并发串写) */
 const inFlightChats = new Set<string>();
+/** 占坑那一轮的收尾承诺:用户新消息要抢占时 await 它,等放锁后再开下一轮 */
+const inFlightTails = new Map<string, Promise<void>>();
 const autoContinue = new AutoContinueController({
   enabled: process.env.BIGBOTART_AGENT_AUTO_CONTINUE !== '0',
   maxRounds: Number(process.env.BIGBOTART_AGENT_AUTO_CONTINUE_MAX ?? '') || undefined,
@@ -894,6 +900,24 @@ ipcMain.handle('save-skill', (_e, input: { name: string; projectId: string; canv
     inject: instructions ? (input.inject === 'summary' ? 'summary' : 'full') : undefined,
   });
 });
+ipcMain.handle('import-skill', async () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const opts = {
+    title: '选择技能文件夹或 zip 包',
+    properties: ['openFile' as const, 'openDirectory' as const],
+    filters: [{ name: '技能包', extensions: ['zip'] }],
+  };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  if (r.canceled || r.filePaths.length === 0) return { ok: false as const, canceled: true as const };
+  const target = r.filePaths[0]!;
+  const loaded = await loadSkillPackage(target);
+  if (!loaded.ok) return { ok: false as const, error: loaded.error };
+  const imported = loaded.drafts.map((draft) => skills.importDraft(draft));
+  const first = imported[0];
+  if (!first) return { ok: false as const, error: '没有导入任何技能' };
+  logger.log('info', `[skills] 从本地导入 ${imported.map((s) => `「${s.name}」`).join('、')} ← ${basename(target)}`);
+  return { ok: true as const, skill: first, skills: imported };
+});
 ipcMain.handle(
   'apply-skill',
   (_e, skillId: string, projectName: string, activate = false, paramValues?: Record<string, string>) => {
@@ -1255,15 +1279,27 @@ async function executeAgentChat(opts: {
     // 同画布并发对话会串写工具上下文与 recall 顺序。
     // 自动轮被拒时必须留日志:fire() 已经把连续轮计数加上,这里再静默 return,
     // 这一轮就从用户视角凭空消失。
+    // 用户消息则抢占:打断当前轮,等它放锁后再开(输入区「打断并发送」)。
     if (opts.auto) {
       logger.log('warn', `[auto-continue] 自动推进放弃:该画布有对话正在进行 ${flightKey}`);
+      return { ok: false, error: '该画布有对话正在进行,请等它收尾后再发' };
     }
-    return { ok: false, error: '该画布有对话正在进行,请等它收尾后再发' };
+    await waitUntilFlightFree({
+      isInFlight: () => inFlightChats.has(flightKey),
+      cancel: () => {
+        void agent.cancel();
+      },
+      currentTail: () => inFlightTails.get(flightKey),
+    });
   }
-  // 占坑必须在任何 await 之前。resolveLlmEndpoint 会让出事件循环,而渲染层的
-  // sending 锁要等下面的 auto-start(端点解析成功之后)才生效 —— 空窗里用户消息和
-  // 自动续跑都会通过上面的检查,两轮交错写 recall / currentToolCtx。
+  // 占坑必须紧挨在 resolveLlmEndpoint 的 await 之前(空闲路径不能先无条件 await,
+  // 否则两条消息都会通过检查)。上面的等待只在「已经有人占坑」时发生。
   inFlightChats.add(flightKey);
+  let releaseTail = () => {};
+  const tailPromise = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  inFlightTails.set(flightKey, tailPromise);
   let chatKey: string | undefined;
   let toolCtx: { projectId: string; canvasId: string; threadId?: string } | undefined;
   try {
@@ -1271,9 +1307,21 @@ async function executeAgentChat(opts: {
   const project = store.getProject(opts.projectId);
   if (project?.llmOverride) llm = project.llmOverride;
   else if (settings.get().llm) llm = settings.get().llm;
+  const source = llm;
+  let contextWindow = 100_000;
+  let historyTokenBudget: number | undefined;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
     llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    const placement = placementOf(source, ep.baseUrl);
+    const loaded = placement === 'local' ? await probeLoadedContextTokens(ep.baseUrl, ep.model) : undefined;
+    const plan = planContext({ placement, model: ep.model, loadedContextTokens: loaded });
+    contextWindow = plan.windowTokens;
+    historyTokenBudget = plan.compactAt;
+    logger.log(
+      'info',
+      `[agent.context] ${placement} · 模型 ${ep.model} · 窗口 ${plan.windowTokens} · 本轮工作集 ${plan.compactAt}${loaded ? ` · 已加载 ${loaded}` : ''}`,
+    );
   } catch (e) {
     if (opts.auto) {
       // 自动轮 LLM 不可达:不推 failed 事件(面板没进「执行中」,推了会留一张突兀的错误卡),日志留痕即可
@@ -1293,6 +1341,16 @@ async function executeAgentChat(opts: {
     }
   }
 
+  if (historyTokenBudget != null) {
+    const folded = memory.autoCompact(opts.projectId, opts.canvasId, historyTokenBudget);
+    if (folded.compacted) {
+      logger.log(
+        'info',
+        `[agent.context] 自动压缩 ${folded.replaced} 条旧对话 · 窗口 ${contextWindow} · 压缩线 ${historyTokenBudget}`,
+      );
+    }
+  }
+
   // 记忆上下文组装(skillResolver:激活技能经 SkillStore 解析,注入「【当前技能】」指令段;
   // canvas 快照:注入「【当前画布】」实时状态段,让 Agent 首轮就感知画布轮廓)
   const ctxSnap = store.loadProjectCanvases(opts.projectId).canvases.find((c) => c.id === opts.canvasId);
@@ -1302,6 +1360,7 @@ async function executeAgentChat(opts: {
     opts.text,
     (id) => skills.get(id),
     ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
+    historyTokenBudget != null ? { historyTokenBudget } : undefined,
   );
   chatKey = `${opts.projectId}:${opts.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */
@@ -1383,6 +1442,7 @@ async function executeAgentChat(opts: {
       canvasId: opts.canvasId,
       text: opts.text + attNote + selNote,
       context: ctx,
+      contextWindow,
       llm,
     });
     logger.log(
@@ -1452,6 +1512,8 @@ async function executeAgentChat(opts: {
   }
   } finally { // 占坑覆盖解析端点到对话结束;LLM 不可用的提前 return 也走这里放锁
     inFlightChats.delete(flightKey);
+    releaseTail();
+    if (inFlightTails.get(flightKey) === tailPromise) inFlightTails.delete(flightKey);
     if (chatKey) activeToolCtx.delete(chatKey);
     // 仅当仍指向本会话时清空,避免并发 chat 的 finally 互相踩掉。
     // LLM 解析失败时 toolCtx 还没建立,不能拿 undefined 去比。

@@ -1236,20 +1236,42 @@ export class ToolHandlers {
     },
     'canvas.delete_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
-      const pc = this.store.loadProjectCanvases(ctx.projectId);
-      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      if (!cur) return { ok: false, result: '画布不存在' };
-      const hit = resolveNodeRefOrError(cur.nodes, rawId);
-      if (!hit.ok) return { ok: false, result: hit.error };
-      const nodeId = hit.node.id;
-      const before = cur.nodes.length;
-      cur.nodes = cur.nodes.filter((n) => n.id !== nodeId);
-      cur.edges = cur.edges.filter((e) => e.source !== nodeId && e.target !== nodeId);
-      if (cur.nodes.length === before) return { ok: false, result: `节点 ${nodeId} 不存在` };
-      cur.updatedAt = new Date().toISOString();
-      cur.version += 1;
-      this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已删除节点 ${nodeId} 及其连线`, nodeId };
+      // 删到 0 节点时 saveCanvasSnapshot 默认拒绝空快照(防渲染层 flush 把画布覆盖空)。
+      // 2026-10-16「开始制作」:删光其它节点后,最后的「镜头 05」每次都回「已删除」,
+      // list_nodes 却还在 —— 保存被拒,返回值没看。这里显式 allowEmpty,并在拒绝时重试、仍失败就报失败。
+      const DELETE_RETRY = 3;
+      for (let attempt = 0; attempt < DELETE_RETRY; attempt += 1) {
+        const pc = this.store.loadProjectCanvases(ctx.projectId);
+        const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+        if (!cur) return { ok: false, result: '画布不存在' };
+        const hit = resolveNodeRefOrError(cur.nodes, rawId);
+        if (!hit.ok) {
+          if (attempt > 0) return { ok: true, result: `节点已不在画布上(${rawId})` };
+          return { ok: false, result: hit.error };
+        }
+        const nodeId = hit.node.id;
+        const label = hit.node.label || nodeId;
+        const before = cur.nodes.length;
+        cur.nodes = cur.nodes.filter((n) => n.id !== nodeId);
+        cur.edges = cur.edges.filter((e) => e.source !== nodeId && e.target !== nodeId);
+        if (Array.isArray(cur.groups)) {
+          cur.groups = cur.groups
+            .map((g) => ({ ...g, members: g.members.filter((id) => id !== nodeId) }))
+            .filter((g) => g.members.length > 0);
+        }
+        if (cur.nodes.length === before) return { ok: false, result: `节点 ${nodeId} 不存在` };
+        cur.updatedAt = new Date().toISOString();
+        cur.version += 1;
+        const saved = this.store.saveCanvasSnapshot(cur, { allowEmpty: cur.nodes.length === 0 });
+        if (saved.ok) return { ok: true, result: `已删除节点 ${nodeId} 及其连线`, nodeId };
+        if (!saved.stale) {
+          return { ok: false, result: `删除「${label}」未落盘,节点仍在画布上。` };
+        }
+      }
+      return {
+        ok: false,
+        result: `删除未落盘(快照被拒绝,已重试 ${DELETE_RETRY} 次)。节点仍在画布上,请再 canvas.list_nodes 确认后重试。`,
+      };
     },
     'canvas.connect': async (a, ctx) => {
       const rawFrom = String(a.from ?? '');

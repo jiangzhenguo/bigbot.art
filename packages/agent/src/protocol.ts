@@ -70,6 +70,8 @@ export interface ChatParams {
     /** 历史消息(user/assistant 文本 + system 动作记录);system 在 worker 里转成 user 角色注入(pi-ai 无原生 system 消息) */
     messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   };
+  /** 本轮声明给框架的上下文窗口。缺省时 worker 用 10 万兜底。 */
+  contextWindow?: number;
   llm?: import('@bigbotart/shared').LlmSource;
 }
 

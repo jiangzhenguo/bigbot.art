@@ -150,3 +150,35 @@ describe('pinnedInstruction 任务链首条指令(修复 3)', () => {
     expect(ctx.systemPrompt).toContain('编辑图片让女孩站立');
   });
 });
+
+describe('按 token 预算装历史', () => {
+  it('预算够时旧指令留在消息里;预算紧时丢掉并钉进系统提示', () => {
+    const p = pid();
+    store.addRecall(p, { canvasId: 'cA', role: 'user', content: '甲'.repeat(6_000) });
+    store.addRecall(p, { canvasId: 'cA', role: 'assistant', content: '最新回复' });
+
+    const wide = store.buildContext(p, 'cA', '继续', undefined, undefined, { historyTokenBudget: 80_000 });
+    expect(wide.messages.some((m) => m.content.startsWith('甲'))).toBe(true);
+    expect(wide.systemPrompt).not.toContain('【进行中的任务】');
+
+    const tight = store.buildContext(p, 'cA', '继续', undefined, undefined, { historyTokenBudget: 2_000 });
+    expect(tight.messages.some((m) => m.content === '最新回复')).toBe(true);
+    expect(tight.messages.some((m) => m.content.startsWith('甲甲'))).toBe(false);
+    expect(tight.systemPrompt).toContain('【进行中的任务】');
+    expect(tight.systemPrompt).toContain('甲'.repeat(20));
+  });
+
+  it('超过压缩线时折掉旧记录,摘要进下一轮系统提示', () => {
+    const p = pid();
+    store.addRecall(p, { canvasId: 'cA', role: 'user', content: '最初要画一只猫' });
+    for (let i = 0; i < 8; i++) {
+      store.addRecall(p, { canvasId: 'cA', role: 'assistant', content: `第${i}轮很长的回复`.repeat(80) });
+    }
+    const res = store.autoCompact(p, 'cA', 200);
+    expect(res.compacted).toBe(true);
+    expect(res.replaced).toBeGreaterThan(0);
+    const ctx = store.buildContext(p, 'cA', '继续', undefined, undefined, { historyTokenBudget: 80_000 });
+    expect(ctx.systemPrompt).toContain('【对话自动摘要】');
+    expect(ctx.systemPrompt).toContain('最初要画一只猫');
+  });
+});

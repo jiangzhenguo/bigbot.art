@@ -13,6 +13,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { estimateTokens, foldRecallSummary, historyRoom, packByTokens, tailKeepCount } from './context-budget.js';
 import type {
   ProjectMemory,
   RecallMessage,
@@ -238,6 +239,25 @@ export class MemoryStore {
     return { replaced };
   }
 
+  /**
+   * 可注入历史的 token 超过 compactAt 时,把装不下的旧记录折成确定性摘要并裁掉。
+   * 不另开一次 LLM:自动压缩发生在每轮对话之前,本地模型再等一轮总结会把发送拖成双倍。
+   * 规则、技能、当前任务不在这段摘要里,它们由 buildContext 每轮从磁盘重新注入。
+   */
+  autoCompact(projectId: string, canvasId: string, compactAt: number): { compacted: boolean; replaced: number } {
+    const m = this.get(projectId);
+    const threadId = this.ensureActiveThread(projectId, canvasId);
+    const entries = m.recall.filter((r) => r.threadId === threadId);
+    const injectable = entries.filter((r) => r.role === 'user' || r.role === 'assistant' || r.role === 'system');
+    const tokens = injectable.reduce((sum, r) => sum + estimateTokens(r.content), 0);
+    if (tokens <= compactAt) return { compacted: false, replaced: 0 };
+    const keep = tailKeepCount(entries, Math.floor(compactAt * 0.5));
+    if (entries.length <= keep) return { compacted: false, replaced: 0 };
+    const dropped = entries.slice(0, entries.length - keep);
+    const { replaced } = this.compactConversation(projectId, canvasId, foldRecallSummary(dropped), keep);
+    return { compacted: replaced > 0, replaced };
+  }
+
   /** 🆕 读画布激活技能 id(无则 undefined) */
   getActiveSkillId(projectId: string, canvasId: string): string | undefined {
     return this.get(projectId).canvasMemory[canvasId]?.activeSkillId;
@@ -383,6 +403,8 @@ export class MemoryStore {
     userInput: string,
     resolveSkill?: (skillId: string) => { name: string; instructions?: string; inject?: 'full' | 'summary' } | undefined,
     canvas?: { name: string; nodes: CanvasNode[]; edges: CanvasEdge[] } | undefined,
+    /** historyTokenBudget:本轮输入工作集(含系统提示)。给出时按 token 装历史,不再用固定 12 条。 */
+    opts?: { historyTokenBudget?: number },
   ): {
     systemPrompt: string;
     messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
@@ -492,19 +514,16 @@ export class MemoryStore {
         parts.push(`【当前技能】${skill.name} · 画布模板已激活(该技能无操作指令段)`);
       }
     }
-    /* ①c′ 技能流程不得跳步(2026-10-09 「测试1」事故)。
+    /* ①c′ 技能流程以技能正文为准;角色卡/场景卡按故事判断(2026-10-16 「开始制作」)。
      *
-     * 事故:激活了 3d-animation-short,但它是 summary 模式 → 只看到流程名;
-     * Agent 也没调 skills.read(recall 里 0 次),于是不知道「角色卡是权威身份源」,
-     * 从分镜表直接跳去 storyboard.materialize,8 个镜头的人物各画各的、毫无一致性。
-     * 用户的原话是「拆分镜头后并没有生成人物参考图」。
+     * 2026-10-09 「测试1」:3d-animation-short 当时是 summary,模型没读全文就跳过角色卡。
+     * 兜底写成了「正确做法 = 先建角色卡再出图」,并且注给每一个已激活技能。
+     * 2026-10-16 纸拼贴讲解:模型读过全文(技能没有角色卡,一致性靠每镜静帧),
+     * 仍建了一张没有 prompt 的「沉默者 · 角色卡」并提交,出图是一张菜单。
+     * summary 警告里的反例「跳过角色卡」也在把模型往建卡上推。
      *
-     * 两道防线(技能已改 full 是治本,这里是治标兜底):
-     *   ① summary 模式下**必须先 skills.read** —— 只看到 160 字摘要就动手,
-     *      等于没读手册;这正是本次事故的直接原因。
-     *   ② 涉及角色/场景一致性的技能,**先出角色卡与场景卡再铺节点** ——
-     *      一致性靠的是参考图连线(image-gen → image-gen 的 ref-image),不是提示词措辞;
-     *      跳过资产设定直接铺镜头,后面画多少张都对不上。 */
+     * 现在:先 skills.read(summary);要不要卡看分镜里有没有跨镜复用的脸或空间;
+     * 技能正文写死「必须出卡」或「用静帧、不要卡」时,以正文为准,不用全局规矩推翻。 */
     if (activeSkillId && resolveSkill) {
       const sk = resolveSkill(activeSkillId);
       if (sk?.instructions) {
@@ -512,16 +531,22 @@ export class MemoryStore {
           [
             '【技能执行硬规矩】',
             ...(sk.inject === 'summary'
-              ? [`⚠️ 本技能是 summary 注入(上下文只有前 160 字摘要)。**动手前必须先调用 skills.read(skillId="${activeSkillId}") 读全文** —— 只凭摘要执行等于没读手册(真实事故:模型没读全文就跳过角色卡,镜头画出来人物全不一致)。`]
+              ? [`⚠️ 本技能是 summary 注入(上下文只有前 160 字摘要)。**动手前必须先调用 skills.read(skillId="${activeSkillId}") 读全文** —— 只凭摘要执行等于没读手册。流程以全文为准,不要把别的技能的步骤套过来。`]
               : []),
-            '⚠️ **技能流程的步骤顺序不可跳步**。若技能要求先做「角色卡 / 场景卡」这类一致性资产,必须**先把它们做成画布节点并生成产物**、再铺镜头与分镜:',
-            '- 一致性靠的是**参考图连线**,不是提示词措辞。仅靠文字描述「红衣女」,每个镜头都会重画一张不同的脸。',
-            '- 正确做法:先建 image-gen 角色卡/场景卡节点 → `engine.submit` 出图 → 再 `canvas.connect`(label=ref-image)把它们连到各分镜的 image-gen 与 shot 上,让每个镜头都引用同一张参考图。',
-            '- 连 `ref-image` 后镜头 mode 必须是 **ref-image(关联)**,禁止停在 text2video(文生)。双角色同框要连两张角色卡,提示词用 `<Subject n>`/`<Picture n>` 锁身份。',
-            '- **h3 互斥**:同一个 shot 不能同时有 `first-frame`/`last-frame` 和 `ref-image`/`ref-video`(引擎报 full references cannot be combined with frame anchors,`canvas.connect` 会直接拒绝)。关联生成把环境图、角色卡、手部参考全部连 `ref-image`;首帧生成只连 `first-frame`,不要再连参考图。',
-            '- 主菜单/开场类技能:**优先 1 张确认静帧 + 1 个 ~15s shot**,不要拆成大量短镜头并行提交(队列耗尽、锁不住人、接不齐成片)。多镜时必须串行 + 镜间接续。',
-            '- **音乐 MV 类技能**:用户音乐必须 `assets.import` → 建「主音轨」asset/`audio-ref` 节点 → 每个 shot `canvas.connect(label="ref-audio")` 再 `engine.submit`。只在 prompt 里写配乐/BPM/歌词**不算**用了音乐(真实事故:技能跑完成片没有用户歌)。',
-            '- 用户跳步催促(如直接说「铺节点并生成」)时,也要先补齐前置资产并说明原因,不要把跳过的步骤静默省掉。',
+            '⚠️ **技能正文规定的步骤不可跳**。用户催「直接铺、直接生成」时,也先做完正文里的前置步(确认门、必读文档),再说明为什么没跳。正文没写的步骤不要自行加。',
+            '',
+            '【要不要角色卡 / 场景卡】读完故事或分镜再决定。禁止默认建卡,也禁止默认不建。',
+            '- 先有分镜(storyboard.plan,或 document.read 已有的表)。逐镜看画面,只问两件事:同一张脸、同一套衣服的角色是否出现在 2 个及以上镜头,且身份不能漂?同一处空间(房间、地标、布景)是否在 2 个及以上镜头复用?',
+            '- 要锁的角色:每个建一张 image-gen,标题「角色卡·名字」。只出场一次、剪影/色块/隐喻物件、各镜画面互相独立 → 不建角色卡。',
+            '- 要锁的空间:同样建「场景卡·名字」。每镜换一个视觉隐喻、没有复用的空间 → 不建场景卡。',
+            '- 技能正文写了「必须先出角色卡/场景卡」→ 照技能做,不用上面的判断推翻。',
+            '- 技能正文的一致性手段是每镜静帧、且没有要求角色卡(纸拼贴讲解)→ 不要额外建卡。静帧就是锁构图的方式;建了卡之后 storyboard.materialize 会改走参考图、不再给每镜建静帧。',
+            '- 决定要建时:先把不可改的特征写进该节点的 prompt,再 engine.submit。prompt 为空不许提交。出图后再铺镜头。',
+            '- materialize 只会把已有的卡连到序列第一镜,后面的镜默认改成上一镜尾帧接续,卡就断了。铺完后,把对应的角色卡/场景卡用 canvas.connect(label=ref-image)连到每一个该角色或该场景出镜的 shot,这些 shot 的 mode 设为 ref-image。不出镜的镜头不要连。',
+            '- 连了 ref-image 的镜头禁止停在 text2video。双角色同框连两张角色卡,提示词用 <Subject n> / <Picture n> 按连线顺序锁身份。',
+            '- **h3 互斥**:同一个 shot 不能同时有 first-frame/last-frame 和 ref-image/ref-video(引擎报 full references cannot be combined with frame anchors,canvas.connect 会直接拒绝)。要锁身份就只走 ref-image;要接上一镜尾帧就只走 first-frame,不要再连参考卡。',
+            '- 主菜单/开场类技能:优先 1 张确认静帧 + 1 个约 15 秒 shot,不要拆成大量短镜头并行提交。',
+            '- **音乐 MV 类技能**:用户音乐必须 assets.import → 建「主音轨」asset 或 audio-ref 节点 → 每个 shot canvas.connect(label=ref-audio) 再 engine.submit。只在 prompt 里写配乐不算用了音乐。',
           ].join('\n'),
         );
       }
@@ -558,7 +583,11 @@ export class MemoryStore {
     // ③ 当前会话 recall(最近 N 条) —— 转 messages
     //    role=system(工具成功后的动作记录)也注入:让下一轮感知"刚才发生了什么",避免凭对话文本猜画布状态
     //    连续重复的系统记录(如必查规则下的「已执行 canvas.get_node」×5)合并为「… ×N」,不占满注入窗口
-    const recent = this.recentRecall(projectId, canvasId, RECALL_INJECT_LIMIT, activeTid);
+    const budget = opts?.historyTokenBudget;
+    const recent =
+      budget == null
+        ? this.recentRecall(projectId, canvasId, RECALL_INJECT_LIMIT, activeTid)
+        : this.recentRecall(projectId, canvasId, Number.MAX_SAFE_INTEGER, activeTid);
     const collapsed: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
     const counts: number[] = [];
     for (const r of recent) {
@@ -571,10 +600,13 @@ export class MemoryStore {
         counts.push(1);
       }
     }
-    const messages = collapsed.map((msg, i) => {
+    let messages = collapsed.map((msg, i) => {
       const n = counts[i] ?? 1;
       return n > 1 ? { ...msg, content: `${msg.content} ×${n}` } : msg;
     });
+    if (budget != null) {
+      messages = packByTokens(messages, historyRoom(budget, estimateTokens(parts.join('\n\n'))));
+    }
 
     // ③b 钉住当前任务链的首条用户指令:工具调用密集时原始指令可能掉出 recall 窗口
     //    (真实事故:「编辑图片让女孩站立」第二轮起即丢失),这里兜底注入,直到用户发出新指令自然替换

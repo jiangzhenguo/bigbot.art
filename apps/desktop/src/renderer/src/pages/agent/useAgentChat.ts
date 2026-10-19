@@ -38,6 +38,38 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  /** 同步写 ref,避免「打断后立刻再发」读到旧的 sending 闭包 */
+  const markSending = useCallback((on: boolean) => {
+    sendingRef.current = on;
+    setSending(on);
+  }, []);
+  /**
+   * 有一轮 Agent 对话尚未收尾。点了「打断」只是发出取消,worker 停下前仍算忙,
+   * 这段时间再发消息要排队,不能另开一轮把收尾事件写错对话。
+   * 压缩对话只占 sending,不算这里。
+   */
+  const [agentBusy, setAgentBusy] = useState(false);
+  const agentBusyRef = useRef(false);
+  const markAgentBusy = useCallback((on: boolean) => {
+    agentBusyRef.current = on;
+    setAgentBusy(on);
+  }, []);
+  /** 执行中发出的下一条还在等上一轮停下 */
+  const [replacing, setReplacing] = useState(false);
+  const replacingRef = useRef(false);
+  const pendingReplace = useRef<{
+    text: string;
+    attachments?: Asset[];
+    mentions?: Array<{ id: string; title: string }>;
+  } | null>(null);
+  /** 这次收尾是为了接上一条新指令 */
+  const preemptingRef = useRef(false);
+  /** 纯打断已经写过系统行,收尾时不要再写一行 */
+  const interruptNoted = useRef(false);
+  /** 当前轮次代号。旧请求的回执晚到时不得改新一轮的忙状态 */
+  const roundGen = useRef(0);
+  const flushReplaceRef = useRef<() => void>(() => {});
   /** 本画布会话列表 + 活跃会话(历史聊天) */
   const [threads, setThreads] = useState<ChatThreadListItem[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -240,7 +272,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       return;
     }
     const loadingId = ++msgId.current;
-    setSending(true);
+    markSending(true);
     setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '正在压缩对话…' }]);
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     window.bigbotart
@@ -268,22 +300,40 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         const detail = e instanceof Error ? e.message : String(e);
         setMsgs((m) => [...m.filter((x) => x.id !== loadingId), { id: errId, kind: 'agent', error: { title: '压缩失败', detail } }]);
       })
-      .finally(() => setSending(false));
-  }, [projectId, canvasId]);
+      .finally(() => markSending(false));
+  }, [projectId, canvasId, markSending]);
 
   /* ══ 对话发送 / 打断 ══ */
   const send = useCallback(
-    (overrideText?: string, attachments?: Asset[], mentions?: Array<{ id: string; title: string }>) => {
+    (overrideText?: string, attachments?: Asset[], mentions?: Array<{ id: string; title: string }>): boolean => {
       const v = (overrideText ?? chatInput).trim();
       const atts = attachments ?? [];
       // 有附件时允许空文本发送
-      if ((!v && atts.length === 0) || sending) return;
+      if (!v && atts.length === 0) return false;
       const pid = projectId;
       const cid = canvasId;
       if (!pid || !cid) {
         toastMsg('请先进入一个项目画布');
-        return;
+        return false;
       }
+      // 上一轮还没停:先打断,等收尾后再真正发出(输入区「打断并发送」)
+      if (agentBusyRef.current) {
+        pendingReplace.current = { text: v, attachments: atts, mentions };
+        preemptingRef.current = true;
+        if (!replacingRef.current) {
+          replacingRef.current = true;
+          setReplacing(true);
+          void window.bigbotart.agentCancel(pid);
+        }
+        setChatInput('');
+        if (inputRef.current) {
+          inputRef.current.value = '';
+          autoGrow(inputRef.current);
+        }
+        return true;
+      }
+      // 压缩进行中:不插队
+      if (sendingRef.current) return false;
       // ✂️ 斜杠命令(仅纯文本时识别;带附件视为普通消息):/clear 清空对话 · /compact 压缩上下文
       if (atts.length === 0) {
         const cmd = v.match(/^\/(clear|compact)(?:\s|$)/)?.[1];
@@ -291,13 +341,13 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           clearChat();
           setChatInput('');
           if (inputRef.current) inputRef.current.value = '';
-          return;
+          return true;
         }
         if (cmd === 'compact') {
           compactChat();
           setChatInput('');
           if (inputRef.current) inputRef.current.value = '';
-          return;
+          return true;
         }
       }
       // 本轮引用节点 = 常驻关注(右键添加) + 本条消息 @ 提及,按 id 去重;
@@ -325,9 +375,11 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       // 新一轮开始:重置聚合卡指针(SSE tool-start 会建一张新卡)
       liveToolCardId.current = null;
       settleGuard.current = false; // 新一轮:打开收尾闸(见 settleGuard 声明)
+      const myGen = ++roundGen.current;
       // loading 气泡
       const loadingId = ++msgId.current;
-      setSending(true);
+      markAgentBusy(true);
+      markSending(true);
       setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '思考中…' }]);
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
 
@@ -341,6 +393,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           selectedNodeIds: ctxNodes.length ? ctxNodes.map((n) => n.id) : undefined,
         })
         .then((res) => {
+          // 本轮已被新一轮取代(打断后发出的下一条):旧回执作废
+          if (roundGen.current !== myGen) return;
           // 批次1 任务化:主进程立即回执 {ok:true,accepted:true},真正结果走 agent-event
           // 的 done/failed。收到回执时**只切状态、不收尾**(否则会在工具还在跑时就把卡片封死);
           // 若主进程走了同步失败路径(带 error 且非 accepted),则在这里直接收尾。
@@ -351,11 +405,10 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           settleRef.current(res);
         })
         .catch((e) => {
-          // 若终局事件已经收过尾,这里只解锁,不再补错误卡(防双开)
-          if (settleGuard.current) {
-            setSending(false);
-            return;
-          }
+          if (roundGen.current !== myGen) return;
+          // 若终局事件已经收过尾,不再补错误卡(防双开)。解锁留给那次收尾,
+          // 避免把「打断后已经发出的下一轮」的忙状态清掉。
+          if (settleGuard.current) return;
           settleGuard.current = true;
           liveToolCardId.current = null;
           const detail = e instanceof Error ? e.message : String(e);
@@ -364,11 +417,34 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
             { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail, retryText: v } },
           ]);
           // 请求本身失败(IPC 断开等)是终局,必须解锁;正常路径的解锁在 settleChat 的 done 分支
-          setSending(false);
+          if (pendingReplace.current) {
+            sendingRef.current = false;
+            agentBusyRef.current = false;
+          } else {
+            markSending(false);
+            markAgentBusy(false);
+          }
+          flushReplaceRef.current();
         });
+      return true;
     },
-    [chatInput, projectId, canvasId, sending, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, focusNodesRef],
+    [chatInput, projectId, canvasId, autoGrow, onCanvasMutated, toastMsg, clearChat, compactChat, focusNodesRef, markSending, markAgentBusy],
   );
+
+  /** 上一轮收尾后,把排队的下一条真正发出。微任务发出,让同一次 done 的重复投递仍看见收尾闸。 */
+  flushReplaceRef.current = () => {
+    const pending = pendingReplace.current;
+    pendingReplace.current = null;
+    preemptingRef.current = false;
+    replacingRef.current = false;
+    setReplacing(false);
+    if (!pending) return;
+    agentBusyRef.current = false;
+    sendingRef.current = false;
+    queueMicrotask(() => {
+      send(pending.text, pending.attachments, pending.mentions);
+    });
+  };
 
   /**
    * 终局收尾(批次1 任务化):把 AgentChatResponse 落成消息卡片。
@@ -387,6 +463,18 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       settleGuard.current = true;
       const liveId = liveToolCardId.current;
       liveToolCardId.current = null;
+      const preempting = preemptingRef.current;
+      const noted = interruptNoted.current;
+      interruptNoted.current = false;
+      // id 在 updater 外分配:StrictMode 会把 updater 跑两遍
+      const interruptLine =
+        res.aborted && !noted
+          ? {
+              id: ++msgId.current,
+              kind: 'sys' as const,
+              text: preempting ? '已打断 · 按新指令继续' : '已打断 · 可直接在画布修改',
+            }
+          : null;
       setMsgs((m) => {
         const rest = m.filter((x) => !x.loading);
         const out: ChatMsg[] = [...rest];
@@ -414,7 +502,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
               toolRuns: msg.toolRuns.map((r) => (r.status === 'running' ? { ...r, status: 'error' as const, result: '已打断' } : r)),
             };
           }
-          out.push({ id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改' });
+          if (interruptLine) out.push(interruptLine);
         } else if (res.ask && res.ask.options.length >= 2) {
           // 结构化提问:渲染确认卡片(不重复推 reply 文本,卡片已含问题);思考内容折叠展示
           if (res.thinking) out.push({ id: ++msgId.current, kind: 'agent', thinking: res.thinking });
@@ -431,29 +519,40 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         }
         return out;
       });
-      setSending(false);
+      // 有排队的下一条时,可见忙状态先留着,避免按钮闪回「发送」;ref 放行交给 flush
+      if (pendingReplace.current) {
+        sendingRef.current = false;
+        agentBusyRef.current = false;
+      } else {
+        markSending(false);
+        markAgentBusy(false);
+      }
       void window.bigbotart.loadProjectCanvases(projectId ?? '').then(() => {
         onCanvasMutated();
       });
       void refreshThreads();
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+      // 执行中发来的下一条:等这次收尾落完再开,避免旧 done 把新一轮收掉
+      flushReplaceRef.current();
     },
-    [projectId, onCanvasMutated, refreshThreads],
+    [projectId, onCanvasMutated, refreshThreads, markSending, markAgentBusy],
   );
 
   /** 终局收尾的稳定引用(事件订阅的 effect 依赖它,避免因函数重建而反复退订) */
   const settleRef = useRef(settleChat);
   settleRef.current = settleChat;
 
-  /** 真实打断:中止 worker 内 LLM 请求 */
+  /** 真实打断:中止 worker 内 LLM 请求。忙状态留到收尾事件,避免立刻再发和旧 done 撞车。 */
   const interrupt = useCallback(() => {
-    if (!projectId) return;
+    if (!projectId || !agentBusyRef.current) return;
     void window.bigbotart.agentCancel(projectId);
+    if (interruptNoted.current) return;
+    interruptNoted.current = true;
+    const noteId = ++msgId.current;
     setMsgs((m) => [
       ...m.filter((x) => !x.loading),
-      { id: ++msgId.current, kind: 'sys', text: '已打断 · 可直接在画布修改,Agent 将基于当前画布增量重规划' },
+      { id: noteId, kind: 'sys', text: '已打断 · 可直接在画布修改,Agent 将基于当前画布增量重规划' },
     ]);
-    setSending(false);
   }, [projectId]);
 
   /** ask 确认卡点选:①把选择写回消息数据(ask.picked,记录——重进页面/恢复历史后仍回显);②以选项文案继续对话 */
@@ -610,6 +709,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
            ⚠️ updater 纯:id 自增在 updater 外一次完成(StrictMode 双跑安全)。
            若用户已切到别的历史会话,先跟主进程切回提交时的会话再开局。 */
         const beginAuto = () => {
+          roundGen.current += 1;
           settleGuard.current = false;
           liveToolCardId.current = null;
           pinToBottom.current = true;
@@ -620,7 +720,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
             { id: sysId, kind: 'sys', text: ev.note || '⚙️ 生成完成 · Agent 自动推进任务链…' },
             { id: loadId, kind: 'sys', loading: true, text: '思考中…' },
           ]);
-          setSending(true);
+          markAgentBusy(true);
+          markSending(true);
           if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
         };
         if (ev.threadId && ev.threadId !== activeThreadIdRef.current) {
@@ -667,15 +768,22 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
             ),
           { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail } },
         ]);
-        setSending(false);
+        if (pendingReplace.current) {
+          sendingRef.current = false;
+          agentBusyRef.current = false;
+        } else {
+          markSending(false);
+          markAgentBusy(false);
+        }
         void window.bigbotart.loadProjectCanvases(projectId ?? '').then(() => {
           onCanvasMutated();
         });
+        flushReplaceRef.current();
       }
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     });
     return off;
-  }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, toastMsg]);
+  }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, toastMsg, markSending, markAgentBusy]);
 
   /** 🆕 手动激活技能(输入区快选 / 技能页共用):调 IPC + 落「技能注入卡」+ 同步 chip */
   const activateSkill = useCallback(
@@ -862,6 +970,10 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   return {
     msgs,
     sending,
+    /** 有一轮对话还没收尾(打断之后、worker 停下之前也算) */
+    agentBusy,
+    /** 已打断,正在等上一轮停下再发送输入框里的新指令 */
+    replacing,
     send,
     askPick,
     askReset,

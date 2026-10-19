@@ -200,8 +200,13 @@ export class ProjectStore {
   /** 单画布快照写回(自动定位到对应项目容器)。
    *  版本防护:snap.version 落后于 store 当前版本(如 Agent 工具已增量写盘、渲染层还持旧状态)时
    *  拒绝整体覆盖(stale=true + 最新 current),让渲染层刷新后再保存 —— 修复「Agent 操作的画布被
-   *  渲染层旧快照覆盖」(两个写入者无版本协调时,整体替换会把增量写入吞掉)。 */
-  saveCanvasSnapshot(snap: CanvasSnapshot): { ok: boolean; stale?: boolean; current?: CanvasSnapshot } {
+   *  渲染层旧快照覆盖」(两个写入者无版本协调时,整体替换会把增量写入吞掉)。
+   *  allowEmpty:只有「调用方明确要清空」(canvas.delete_node 删掉最后一节点)才传 true。
+   *  渲染层 flush / 未装填的空快照不传,继续被下面的空快照闸拒绝。 */
+  saveCanvasSnapshot(
+    snap: CanvasSnapshot,
+    opts?: { allowEmpty?: boolean },
+  ): { ok: boolean; stale?: boolean; current?: CanvasSnapshot } {
     const pc = this.loadProjectCanvases(snap.projectId);
     const now = new Date().toISOString();
     const idx = pc.canvases.findIndex((c) => c.id === snap.id);
@@ -209,14 +214,14 @@ export class ProjectStore {
     // 🛡️ 防护:空快照覆盖有内容的画布一律拒绝(最后防线)。
     // 事故背景(2026-09-22):渲染层在「画布尚未装填」的瞬间 flush 了一次空快照,把 version 374 的
     // 有内容画布写成了空画布;version 防护挡不住(渲染层版本并不落后),只能靠内容判空兜底。
-    // 用户真要清空画布时,渲染层会先删节点(每次删除都算内容变化)→ 那时传的是「非首次」的空快照,
-    // 这里按「当前 store 有、传入为空」拒绝;确需清空请走 delete-canvas 或先删到只剩一个节点再删。
+    // 用户真要清空画布时,必须由调用方显式传 allowEmpty(canvas.delete_node 删到 0 节点)。
+    // 不传则按「当前 store 有、传入为空」拒绝 —— 渲染层未装填时的 flush 不能靠「删到最后一个」绕过。
     //
     // ⚠️ 2026-10-11「美女项目画布全空」事故:旧判定要求 **nodes 与 edges 同时为空**才拦,
     // 而事故快照是「0 节点 + 1 条悬空边」(pal4→new6,重挂载窗口期 nodesRef 已空、edgesRef 还有边)
     // —— 边引用的节点不存在,本身就是损坏快照,却被放行覆盖了整个画布。
     // 故判定收紧为**只看 nodes**:0 节点 + N 边永远是坏快照;0+0 的合法清空依然被拦(同原设计)。
-    if (cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0) {
+    if (!opts?.allowEmpty && cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0) {
       // R6 留痕:拒绝必须可查——这类写入一旦出现就是事故前兆(2026-10-11 实测:
       // 旧判定被「0 节点 + 1 悬空边」绕过,整个画布被覆盖)
       console.error(

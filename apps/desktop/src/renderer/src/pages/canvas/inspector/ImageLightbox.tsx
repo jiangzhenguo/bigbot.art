@@ -16,7 +16,7 @@ import {
 interface ImageLightboxProps {
   src: string;
   alt: string;
-  /** 点击背景 / ✕ / Esc 关闭 */
+  /** 点击背景 / 关闭按钮 / Esc 关闭 */
   onClose: () => void;
 }
 
@@ -405,11 +405,9 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
           draggable={false}
           onLoad={measure}
           style={{
-            // 自适应尺寸(object-fit: contain),再叠加 zoom/pan 变换 ——
-            // 不能用图片自然尺寸,否则变换的百分比平移基准会随图片大小乱变
-            maxWidth: '100%',
-            maxHeight: '100%',
-            objectFit: 'contain',
+            // 布局盒锁成「适应窗口」后的尺寸。若用自然尺寸再 scale,
+            // 百分比平移的基准和视口中心对不齐,图会整体偏下。
+            ...(box.dw > 0 && box.dh > 0 ? { width: box.dw, height: box.dh } : null),
             transform: `translate(${view.tx * 100}%, ${view.ty * 100}%) scale(${view.zoom})`,
             transformOrigin: 'center center',
             transition: panning ? 'none' : 'transform 90ms ease-out',
@@ -420,11 +418,18 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
       </div>
       <button
         type="button"
-        className="btn btn-s btn-sm ovl-lb-close"
+        className="ovl-lb-close"
         data-od-id="image-lightbox-close"
-        onClick={onClose}
+        aria-label="关闭"
+        title="关闭 (Esc)"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
       >
-        ✕ 关闭
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+          <path d="M6 6l12 12M18 6 6 18" />
+        </svg>
       </button>
     </div>
   );

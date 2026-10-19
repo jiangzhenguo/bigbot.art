@@ -1,5 +1,8 @@
 /**
- * AgentComposer — Agent 对话输入区(附件行 + 技能 chip + 输入框 + 模型/技能弹层 + 发送/打断)
+ * AgentComposer — Agent 对话输入区(附件行 + 技能 chip + 输入框 + 模型/技能弹层 + 发送)
+ *
+ * 右下角只有一个主按钮:空闲是「发送」;这轮还在跑且没写新内容是「打断并改画布」;
+ * 这轮还在跑且已经写了新指令是「打断并发送」(先停下当前轮,再把新指令发出去)。
  *
  * 纯展示:对话状态来自 useAgentChat;附件/弹层是本组件的本地 UI 状态。
  * 技能:弹层选项来自真实技能库(listSkills),选中即真实激活(skillActivate)——
@@ -8,6 +11,8 @@
 import React, { useEffect, useState } from 'react';
 import type { Asset, Skill } from '@bigbotart/shared';
 import type { AgentChatApi } from './useAgentChat';
+import { composerPrimaryAction } from './composer-action';
+import { ComposerToolRow } from './ComposerToolRow';
 
 export function AgentComposer({
   chat,
@@ -37,16 +42,28 @@ export function AgentComposer({
   const [mentionPop, setMentionPop] = useState<{ start: number; query: string } | null>(null);
   /** 弹层键盘高亮下标 */
   const [mentionIdx, setMentionIdx] = useState(0);
+  /** / 命令弹层:start = 「/」在文本中的下标,query = / 后已输入的过滤词 */
+  const [slashPop, setSlashPop] = useState<{ start: number; query: string } | null>(null);
+  const [slashIdx, setSlashIdx] = useState(0);
   /** 技能弹层选项(真实技能库;unmounted 清理) */
   const [skillOptions, setSkillOptions] = useState<Skill[]>([]);
 
   const {
-    sending, send, interrupt,
+    sending, agentBusy, replacing, send, interrupt, chatInput,
     clearChat, compactChat,
     setChatInput, inputRef, autoGrow,
     model, modelOptions, loadModelOptions, pickModel,
     activeSkill, activateSkill, deactivateSkill,
   } = chat;
+
+  const slashCommands = [
+    { name: 'clear', hint: '清空当前对话', run: clearChat },
+    { name: 'compact', hint: '把旧对话压成摘要', run: compactChat },
+  ] as const;
+  /** / 弹层的过滤候选(命令名前缀匹配) */
+  const slashCandidates = slashCommands.filter(
+    (c) => !slashPop || c.name.startsWith(slashPop.query.toLowerCase()),
+  );
 
   /** @ 弹层的过滤候选(标题模糊匹配,最多 8 条) */
   const mentionCandidates = (mentionNodes ?? [])
@@ -72,6 +89,25 @@ export function AgentComposer({
     }, 0);
   };
 
+  /** 选中一条 / 命令:删掉输入中的「/query」,立刻执行(与整句回车 /clear、/compact 同口径) */
+  const pickSlash = (cmd: (typeof slashCommands)[number]) => {
+    const el = inputRef.current;
+    if (!el || !slashPop) return;
+    const caret = el.selectionStart ?? el.value.length;
+    const next = `${el.value.slice(0, slashPop.start)}${el.value.slice(caret)}`;
+    const cleaned = next.trim() ? next : '';
+    setChatInput(cleaned);
+    el.value = cleaned;
+    autoGrow(el);
+    setSlashPop(null);
+    const pos = Math.min(slashPop.start, cleaned.length);
+    window.setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    }, 0);
+    cmd.run();
+  };
+
   /** 输入变化:同步 chatInput + 检测/关闭 @ 弹层 + 剪掉文本里已被删掉的提及 */
   const onInputChange = (el: HTMLTextAreaElement) => {
     const v = el.value;
@@ -88,10 +124,22 @@ export function AgentComposer({
       if (!/\s/.test(query)) {
         setMentionPop({ start: at, query });
         setMentionIdx(0);
+        setSlashPop(null);
         return;
       }
     }
     setMentionPop(null);
+    // / 命令:与 @ 同规则,词首的「/」且到光标之间无空白
+    const slash = before.lastIndexOf('/');
+    if (slash >= 0 && (slash === 0 || /\s/.test(before[slash - 1] ?? ' '))) {
+      const query = before.slice(slash + 1);
+      if (!/\s/.test(query)) {
+        setSlashPop({ start: slash, query });
+        setSlashIdx(0);
+        return;
+      }
+    }
+    setSlashPop(null);
   };
 
   useEffect(() => {
@@ -109,10 +157,24 @@ export function AgentComposer({
 
   /** 发送(带附件 + @ 提及;发出后清空附件区与提及) */
   const sendWithAttachments = () => {
-    send(undefined, attachments, mentions);
+    const ok = send(undefined, attachments, mentions);
+    if (!ok) return;
     if (attachments.length) setAttachments([]);
     if (mentions.length) setMentions([]);
     setMentionPop(null);
+  };
+
+  const busy = agentBusy || replacing;
+  const hasDraft = chatInput.trim().length > 0 || attachments.length > 0;
+  const action = composerPrimaryAction(busy, hasDraft);
+  /** 空闲发送;执行中没草稿则打断;执行中有草稿则打断并发送 */
+  const submit = () => {
+    if (replacing) return;
+    if (action.kind === 'interrupt') {
+      interrupt();
+      return;
+    }
+    sendWithAttachments();
   };
 
   return (
@@ -221,9 +283,33 @@ export function AgentComposer({
         <textarea
           rows={2}
           ref={inputRef}
-          placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…（@ 引用节点 · /clear 清空 · /compact 压缩）"
+          placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…（@ 引用节点 · / 命令）"
           onChange={(e) => onInputChange(e.target)}
           onKeyDown={(e) => {
+            // / 命令弹层打开时:方向键/回车/Tab/Esc 先给弹层,不发送
+            if (slashPop) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setSlashIdx((i) => (slashCandidates.length ? (i + 1) % slashCandidates.length : 0));
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setSlashIdx((i) => (slashCandidates.length ? (i - 1 + slashCandidates.length) % slashCandidates.length : 0));
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setSlashPop(null);
+                return;
+              }
+              if ((e.key === 'Enter' || e.key === 'Tab') && slashCandidates.length > 0) {
+                e.preventDefault();
+                const pick = slashCandidates[slashIdx] ?? slashCandidates[0];
+                if (pick) pickSlash(pick);
+                return;
+              }
+            }
             // @ 弹层打开时:方向键/回车/Tab/Esc 先给弹层,不发送
             if (mentionPop) {
               if (e.key === 'ArrowDown') {
@@ -250,12 +336,16 @@ export function AgentComposer({
             }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
-              sendWithAttachments();
+              if (action.kind === 'interrupt') return;
+              submit();
             }
           }}
           onBlur={() => {
             // 失焦关弹层(延迟一拍,让弹层里的 click 先触发)
-            window.setTimeout(() => setMentionPop(null), 150);
+            window.setTimeout(() => {
+              setMentionPop(null);
+              setSlashPop(null);
+            }, 150);
           }}
         />
         {/* @ 提及节点弹层(候选 = 当前画布节点,按标题过滤) */}
@@ -279,120 +369,71 @@ export function AgentComposer({
             )}
           </div>
         ) : null}
-      </div>
-      <div className="toolrow">
-        <button className="chip mono" onClick={clearChat} title="清空当前画布对话(移除全部对话记录,不可恢复;画布与产物不受影响)">
-          /clear
-        </button>
-        <button className="chip mono" onClick={compactChat} title="把旧对话压缩成摘要并裁剪上下文,保留最近几轮">
-          /compact
-        </button>
-        <button
-          className="chip"
-          onClick={(e) => {
-            e.stopPropagation();
-            // dev/E2E 钩子:一次性消费——读出即删,避免残留导致之后每次点击都绕过 Finder 重复导入同一张图
-            const win = window as unknown as { __bbaDevImportPaths?: string[] };
-            const paths = win.__bbaDevImportPaths;
-            delete win.__bbaDevImportPaths;
-            void window.bigbotart
-              .importAssets(paths?.length ? { paths } : undefined)
-              .then((res) => {
-                if (res.canceled || !res.assets?.length) return;
-                // 按资产 id 去重,同一资产重复导入只保留一个 chip
-                setAttachments((list) => [...list, ...res.assets.filter((a) => !list.some((x) => x.id === a.id))]);
-                if (res.failed.length) {
-                  toastMsg(`已导入 ${res.assets.length} 个;失败 ${res.failed.length}:${res.failed.map((f) => f.name).join(', ')}`);
-                }
-              });
-          }}
-        >
-          ＋ 参考图 / 文件
-        </button>
-        <button
-          className="chip"
-          onClick={(e) => {
-            e.stopPropagation();
-            const opening = openPop !== 'modelPop';
-            setOpenPop((p) => (p === 'modelPop' ? null : 'modelPop'));
-            if (opening) void loadModelOptions();
-          }}
-        >
-          模型:{model}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-        </button>
-        <div className={`pop${openPop === 'modelPop' ? ' open' : ''}`} onClick={(e) => e.stopPropagation()}>
-          {modelOptions.map((m) => (
-            <div
-              className="pop-it"
-              key={m.name}
-              onClick={() => {
-                pickModel(m);
-                setOpenPop(null);
-              }}
-            >
-              {m.sub}
-              {model === m.name ? <span className="ck">✓</span> : null}
-            </div>
-          ))}
-          <div
-            className="pop-it dim"
-            style={{
-              borderTop: '1px solid var(--border-soft)',
-              marginTop: 4,
-              paddingTop: 9,
-            }}
-          >
-            项目级覆盖 · 规划时优先使用该 LLM
+        {/* / 命令弹层:输入「/」唤出 /clear、/compact */}
+        {slashPop ? (
+          <div className="pop open mention-pop" data-od-id="slash-pop" onMouseDown={(e) => e.preventDefault()}>
+            {slashCandidates.length === 0 ? (
+              <div className="pop-it dim">没有匹配「/{slashPop.query}」的命令</div>
+            ) : (
+              slashCandidates.map((c, i) => (
+                <div
+                  key={c.name}
+                  className="pop-it"
+                  style={i === slashIdx ? { background: 'color-mix(in oklab,var(--accent) 12%,transparent)' } : undefined}
+                  onMouseEnter={() => setSlashIdx(i)}
+                  onClick={() => pickSlash(c)}
+                >
+                  <span className="mono">/{c.name}</span>
+                  <span className="mut" style={{ marginLeft: 'auto', fontSize: 11 }}>{c.hint}</span>
+                </div>
+              ))
+            )}
           </div>
-        </div>
-        <button
-          className="chip"
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpenPop((p) => (p === 'skillPop' ? null : 'skillPop'));
-          }}
-        >
-          ＋ 技能
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-        </button>
-        <div className={`pop${openPop === 'skillPop' ? ' open' : ''}`} onClick={(e) => e.stopPropagation()}>
-          <div
-            className="pop-it"
-            onClick={() => {
-              deactivateSkill();
-              setOpenPop(null);
-            }}
-          >
-            无技能 · 自由编排
-            {!activeSkill ? <span className="ck">✓</span> : null}
-          </div>
-          {skillOptions.map((s) => (
-            <div
-              className="pop-it"
-              key={s.id}
-              onClick={() => {
-                activateSkill({ skillId: s.id, name: s.name, inject: s.inject });
-                setOpenPop(null);
-              }}
-            >
-              {s.name}
-              {s.instructions ? <span className="mut mono" style={{ fontSize: 10 }}> · 指令</span> : null}
-              {activeSkill?.skillId === s.id ? <span className="ck">✓</span> : null}
-            </div>
-          ))}
-        </div>
+        ) : null}
       </div>
-      <div className="composer-actions">
-        <button className="btn btn-g btn-sm" onClick={interrupt}>
-          打断并改画布
-        </button>
-        <button className="btn btn-p btn-sm" onClick={sendWithAttachments} disabled={sending}>
-          发送
+      <div className="composer-bar">
+        <ComposerToolRow
+          toastMsg={toastMsg}
+          setAttachments={setAttachments}
+          openPop={openPop}
+          setOpenPop={setOpenPop}
+          model={model}
+          modelOptions={modelOptions}
+          loadModelOptions={loadModelOptions}
+          pickModel={pickModel}
+          skillOptions={skillOptions}
+          activeSkill={activeSkill}
+          activateSkill={activateSkill}
+          deactivateSkill={deactivateSkill}
+        />
+        <button
+          type="button"
+          className={`send-orb${action.glyph === 'stop' || replacing ? ' stop' : ''}`}
+          data-od-id="composer-submit"
+          onClick={submit}
+          disabled={replacing || (action.kind === 'send' && (!hasDraft || sending))}
+          aria-label={replacing ? '正在停下当前这轮' : action.label}
+          title={
+            replacing
+              ? '正在停下当前这轮,随后发送'
+              : action.kind === 'interrupt-send'
+                ? '停下当前这轮,并发送输入框里的新指令'
+                : action.kind === 'interrupt'
+                  ? '停下当前这轮,之后可以直接改画布或输入新指令'
+                  : '发送'
+          }
+        >
+          {replacing ? (
+            <span className="spin" />
+          ) : action.glyph === 'stop' ? (
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="2.2" fill="currentColor" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 19V5M6 11l6-6 6 6" />
+            </svg>
+          )}
         </button>
       </div>
     </div>

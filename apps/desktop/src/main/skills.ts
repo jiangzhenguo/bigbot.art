@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Skill, CanvasNode, CanvasEdge, Project } from '@bigbotart/shared';
 import { applyParamValuesDeep } from '@bigbotart/shared';
+import type { SkillImportDraft } from './skill-import';
 import type { ProjectStore } from './store';
 // MiniMax 官方技能(MiniMax-AI/MiniMax-H3,适配为 BigBotArt 工具流程后的指令文档,?raw 打进 main 包)
 import h3PromptWriting from './builtin-skills/h3-prompt-writing.md?raw';
@@ -406,6 +407,41 @@ export class SkillStore {
       description: snapshot.nodes.filter((n) => n.kind === 'document').map((n) => (n.data as { markdown?: string }).markdown ?? '').join('\n').slice(0, 200) || undefined,
       instructions: opts?.instructions?.trim() ? opts.instructions.trim() : undefined,
       inject: opts?.inject ?? (opts?.instructions?.trim() ? 'full' : undefined),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.skills.push(skill);
+    this.persist();
+    return skill;
+  }
+
+  /**
+   * 从本地技能文档入库。纯指令技能 nodes/edges 为空;
+   * 不标 builtin,所以出现在「我的 Skill」而不是官方精选。
+   */
+  importDraft(draft: SkillImportDraft): Skill {
+    const now = new Date().toISOString();
+    const instructions = draft.instructions.trim();
+    const nodes = draft.nodes.filter((n): n is CanvasNode => !!n && typeof n === 'object');
+    const edges = draft.edges.filter((e): e is CanvasEdge => !!e && typeof e === 'object');
+    const params = new Set<string>();
+    for (const raw of draft.params) {
+      const key = raw.trim().replace(/^\{|\}$/g, '');
+      if (key) params.add(`{${key}}`);
+    }
+    if (instructions) {
+      for (const p of collectParams([{ data: { markdown: instructions } } as CanvasNode])) params.add(p);
+    }
+    for (const p of collectParams(nodes)) params.add(p);
+    const skill: Skill = {
+      id: `skill-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: draft.name.trim(),
+      nodes: JSON.parse(JSON.stringify(nodes)) as CanvasNode[],
+      edges: JSON.parse(JSON.stringify(edges)) as CanvasEdge[],
+      params: [...params],
+      description: draft.description?.trim() || undefined,
+      instructions: instructions || undefined,
+      inject: instructions ? draft.inject : undefined,
       createdAt: now,
       updatedAt: now,
     };

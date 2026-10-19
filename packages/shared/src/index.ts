@@ -155,6 +155,11 @@ export interface BigBotArtApi {
   // Skills 库(画布模板 + Agent 指令段双形态;激活状态持久化在 canvasMemory,见 docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md)
   listSkills(): Promise<import('./domain').Skill[]>;
   saveSkill(input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }): Promise<import('./domain').Skill>;
+  /** 从本地技能文件夹或 .zip 包导入到「我的 Skill」 */
+  importSkill(): Promise<
+    | { ok: true; skill: import('./domain').Skill; skills: import('./domain').Skill[] }
+    | { ok: false; canceled?: boolean; error?: string }
+  >;
   applySkill(
     skillId: string,
     projectName: string,

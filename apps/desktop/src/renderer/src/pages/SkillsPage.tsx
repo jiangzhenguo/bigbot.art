@@ -318,6 +318,25 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
     }
   };
 
+  /** 从本地选一个技能文件夹或 .zip 包入库 */
+  const handleImportSkill = async () => {
+    try {
+      const res = await window.bigbotart.importSkill();
+      if (!res.ok) {
+        if (!res.canceled) showError(res.error ?? t('导入 Skill 失败'));
+        return;
+      }
+      await refreshSkills();
+      const picked = res.skills[0] ?? res.skill;
+      setSelected(picked.id);
+      setInsDraft(picked.instructions ? { id: picked.id, text: picked.instructions, inject: picked.inject ?? 'full' } : null);
+      setDur('45');
+      setParamValues({});
+    } catch (err) {
+      showError(t('导入 Skill 失败'), err);
+    }
+  };
+
   const handleFork = () => {
     setDerivs((prev) => [...prev, { name: '新分支 · 未命名', tag: '刚刚' }]);
   };
@@ -594,11 +613,24 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
 
             <div className="sect-h" data-sect="mine" style={{ display: mineShown ? '' : 'none' }}>
               <b>{t('我的 Skill')}</b>
-              <span className="mut">{t('保存自画布 · 节点结构 + 参数 + 操作指令 · 可编辑')}</span>
+              <span className="mut">{t('从本地导入或从画布保存 · 可编辑')}</span>
             </div>
             <div className="sgrid" data-sect-grid="mine" style={{ display: mineShown ? '' : 'none' }}>
               {mineCards.map(renderCard)}
-              <div className="scard new" data-kind="mine">
+              <div
+                className="scard new"
+                data-kind="mine"
+                data-od-id="skill-import-card"
+                role="button"
+                tabIndex={0}
+                onClick={() => void handleImportSkill()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void handleImportSkill();
+                  }
+                }}
+              >
                 <svg
                   width="18"
                   height="18"
@@ -606,13 +638,17 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 >
-                  <path d="M12 5v14M5 12h14" />
+                  <path d="M12 3v10" />
+                  <path d="m8 9 4 4 4-4" />
+                  <path d="M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4" />
                 </svg>
                 <span style={{ fontSize: 'var(--text-xs)' }}>
-                  {t('从当前画布保存')}
+                  {t('从本地导入')}
                   <br />
-                  {t('节点结构 + 参数 + 操作指令整体入库')}
+                  {t('选择文件夹或 .zip 包')}
                 </span>
               </div>
             </div>

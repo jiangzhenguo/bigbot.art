@@ -74,6 +74,8 @@ const api: BigBotArtApi = {
   listSkills: () => ipcRenderer.invoke('list-skills'),
   saveSkill: (input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) =>
     ipcRenderer.invoke('save-skill', input),
+  // 本地技能文档导入;preload 只在主进程重载后暴露给渲染层
+  importSkill: () => ipcRenderer.invoke('import-skill'),
   applySkill: (
     skillId: string,
     projectName: string,

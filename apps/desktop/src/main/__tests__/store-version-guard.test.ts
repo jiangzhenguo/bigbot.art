@@ -112,6 +112,29 @@ describe('saveCanvasSnapshot 版本防护(渲染层整体保存 vs Agent 增量)
     expect(pushed?.version).toBeGreaterThan(cur.version);
   });
 
+  it('未声明 allowEmpty 时,删到 0 节点的快照被拒绝,原节点还在', () => {
+    const { store, canvas } = freshCanvas();
+    agentWrite(store, canvas, 'shot-last');
+    const cur = store.loadProjectCanvases(canvas.projectId).canvases.find((x) => x.id === canvas.id)!;
+    const emptied: CanvasSnapshot = { ...cur, nodes: [], edges: [], version: cur.version + 1 };
+    const r = store.saveCanvasSnapshot(emptied);
+    expect(r.ok).toBe(false);
+    expect(r.stale).toBe(true);
+    const after = store.loadProjectCanvases(canvas.projectId).canvases.find((x) => x.id === canvas.id)!;
+    expect(after.nodes.map((n) => n.id)).toEqual(['shot-last']);
+  });
+
+  it('allowEmpty 时,明确清空可以落成 0 节点', () => {
+    const { store, canvas } = freshCanvas();
+    agentWrite(store, canvas, 'shot-last');
+    const cur = store.loadProjectCanvases(canvas.projectId).canvases.find((x) => x.id === canvas.id)!;
+    const emptied: CanvasSnapshot = { ...cur, nodes: [], edges: [], version: cur.version + 1 };
+    const r = store.saveCanvasSnapshot(emptied, { allowEmpty: true });
+    expect(r.ok).toBe(true);
+    const after = store.loadProjectCanvases(canvas.projectId).canvases.find((x) => x.id === canvas.id)!;
+    expect(after.nodes).toEqual([]);
+  });
+
   it('Agent 工具连续增量写盘不误伤(自身版本同步,不触发 stale)', () => {
     const { store, canvas } = freshCanvas();
     agentWrite(store, canvas, 'shot-a');

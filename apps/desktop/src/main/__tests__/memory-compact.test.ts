@@ -234,6 +234,28 @@ describe('MemoryStore.buildContext 注入激活技能指令(@当前技能」段)
     const ctx = store.buildContext(pid, 'cA', '继续', skillResolver);
     expect(ctx.systemPrompt).toContain('【当前技能】仅模板 · 画布模板已激活');
   });
+
+  /* 2026-10-16「开始制作」:全局硬规矩把「先建角色卡」写成所有技能的正确做法,
+   * 纸拼贴全文没有角色卡,模型仍建了一张空 prompt 的卡。 */
+  it('激活技能时按分镜判断要不要角色卡,不把建卡写成所有技能的默认步骤', () => {
+    const pid = `p-skill-cards-${Date.now()}`;
+    store.setActiveSkillId(pid, 'cA', 'skill-paper');
+    const ctx = store.buildContext(pid, 'cA', '继续', skillResolver);
+    expect(ctx.systemPrompt).toContain('【要不要角色卡 / 场景卡】');
+    expect(ctx.systemPrompt).toContain('禁止默认建卡,也禁止默认不建');
+    expect(ctx.systemPrompt).toContain('2 个及以上镜头');
+    expect(ctx.systemPrompt).toContain('技能正文写了「必须先出角色卡/场景卡」');
+    expect(ctx.systemPrompt).toContain('不要额外建卡');
+    expect(ctx.systemPrompt).not.toContain('正确做法:先建 image-gen 角色卡');
+  });
+
+  it('summary 技能的必读警告不再把「跳过角色卡」当成唯一反例', () => {
+    const pid = `p-skill-cards-sum-${Date.now()}`;
+    store.setActiveSkillId(pid, 'cA', 'skill-paper-summary');
+    const ctx = store.buildContext(pid, 'cA', '继续', skillResolver);
+    expect(ctx.systemPrompt).toContain('不要把别的技能的步骤套过来');
+    expect(ctx.systemPrompt).not.toContain('跳过角色卡');
+  });
 });
 
 describe('MemoryStore.buildContext · 【提问规则】的「直接执行」清单(2026-10-09 「测试1」事故)', () => {

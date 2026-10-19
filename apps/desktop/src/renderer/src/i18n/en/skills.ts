@@ -10,8 +10,13 @@ export default {
   官方精选: 'Featured',
   '双形态齐备 · 画布模板 + Agent 操作指令': 'Dual form ready · canvas template + Agent instructions',
   '保存自画布 · 节点结构 + 参数 + 操作指令 · 可编辑': 'Saved from canvas · node structure + params + instructions · editable',
+  '从本地导入或从画布保存 · 可编辑': 'Import a local file or save from the canvas · editable',
   从当前画布保存: 'Save from Current Canvas',
   '节点结构 + 参数 + 操作指令整体入库': 'Node structure + params + instructions, saved together',
+  从本地导入: 'Import from local',
+  '选择文件夹或 .zip 包': 'Choose a folder or .zip package',
+  '选择 .md / .json 技能文档': 'Choose a .md / .json skill file',
+  '导入 Skill 失败': 'Failed to import skill',
   /* 卡片徽章 / 副标题 */
   指令: 'Instructions',
   已激活: 'Active',
