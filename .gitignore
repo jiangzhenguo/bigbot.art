@@ -43,3 +43,15 @@ Thumbs.db
 # 权威副本在 ~/ai/weights/(BIGBOTART_WEIGHTS_DIR),这里只是运行期兜底与下载残片
 gfpgan/
 CodeFormer/
+
+# 本机运行笔记与一次性抢救脚本(含绝对路径、项目 id),不进公开仓库
+CLAUDE.md
+PRD-BigBotArt-无限画布视频图片生成Agent.md
+docs/H3_USAGE.md
+docs/MiniMax-H3-加速-LoRA-使用手册.md
+docs/调研报告-MiniMaxDesign与本地模型接入方案.md
+docs/CosyVoice3语音合成与视频配音-产品设计与技术方案.md
+docs/节点手册.md
+scripts/rescue-canvas-tp83c.py
+scripts/restore-canvas-shot.py
+.tmp-inspect-skill.py

@@ -1,94 +1,136 @@
-# BigBotArt — 无限画布的视频/图片生成 Agent
+# BigBotArt
 
-跨端桌面 App(Electron 31 + 原生 JS/HTML/CSS,Apple HIG + Liquid Glass 设计系统),专门为**本地部署的 h3.c 视频引擎 + MLX 图片生成/编辑引擎**打造创作工作流。产品 PRD 见 [`PRD-BigBotArt-无限画布视频图片生成Agent.md`](PRD-BigBotArt-无限画布视频图片生成Agent.md),调研报告见 [`docs/调研报告-MiniMaxDesign与本地模型接入方案.md`](docs/调研报告-MiniMaxDesign与本地模型接入方案.md)。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 当前状态:M1 完整应用(原生 JS/HTML/CSS 实现,基于设计系统)
+本地优先的无限画布，把一句话编排成可改、可复跑、可交付的视频和图片。
 
-已实现的完整应用闭环:
+Electron desktop app for Apple Silicon. An agent lays out shots and images on an infinite canvas, then runs them on local engines: [h3.c](https://github.com/antirez/h3) for MiniMax-H3 video, and MLX (`mlxgen`) for images.
 
-- ✅ **跨端桌面 App 外壳**(Electron 31 + 原生 JS/HTML/CSS,多页应用)
-- ✅ **Apple HIG + Liquid Glass 设计系统**:7 个完整页面(首页/画布/资产/Skills/时间线/设置/引擎引导),视觉与交互完全按设计稿
-- ✅ **画布工作台**:9 类节点拖拽/连线/检查器/Agent 面板/队列条(原生 CSS transform 实现,非 React Flow)
-- ✅ **一句话起活**:首页输入需求 → Agent 规划(远端 DeepSeek / 本地 LM Studio)→ 生成 Brief + 镜头节点
-- ✅ **引擎引导向导雏形**:真实探测 LM Studio(1234)/ Ollama(11434)/ ComfyUI(8188)/ h3.c(--info 读 GPU/Metal/内存)/ mlxgen(command -v)
-- ✅ **h3c Provider**(`packages/providers/src/h3c.ts`):命令构造器(32 倍数宽高校验、档位防呆、五段式提示词)+ 后台子进程托管骨架(registry 默认 dry-run;真实跑见「M1 骨架的已知边界」)
-- ✅ **mlxgen Provider**(文生图/指令编辑/I2I/Inpaint/Outpaint/超分能力声明)
-- ✅ **Mock Provider**:离线演示,ffmpeg 生成带音轨测试视频(模拟带声直出)
-- ✅ **Agent 内核**(`packages/agent`):JSON-RPC over stdio 子进程协议 + pi-ai 真 LLM 规划(远端 DeepSeek / 本地 LM Studio)
-- ✅ **项目/画布持久化**(`apps/desktop/src/main/store.ts`):JSON 存储(接口可切换 SQLite)
-- ✅ **节点生成按钮**:每个镜头节点有"▶ 生成"按钮,按当前模式路由(真实跑 `pnpm dev` 时调 h3.c / mlxgen 真实推理;`pnpm dev:dry` 时只落占位结果)
+数据、素材和成片都留在本机（`~/.bigbotart`）。没有云端账号，也没有订阅。
 
-## 目录结构
+![首页：一句话起活，右侧是最近项目](docs/screenshots/home.png)
+
+## 能做什么
+
+在画布上把节点连起来，自己跑，或让右侧的 Agent 代劳。
+
+| | |
+|---|---|
+| **一句话起活** | 首页写下需求。Agent 拆成文档、分镜、镜头和图片节点，再逐个提交。 |
+| **画布可干预** | 改提示词、换参考图、调档位，只重跑受影响的节点。每次生成留下一条 Take，可以回看。 |
+| **图片** | 文生图、指令编辑、图生图、局部重绘、扩图、超分，以及裁切、拼接、拆分。 |
+| **视频** | 文生视频、首帧、首尾帧、参考图、参考视频、音频参考。成片自带音轨。出片后可去块、超分、修脸。 |
+| **视频回到图片** | 从成片截一帧，接回图片编辑或下一镜的首帧。 |
+| **技能** | 把一套做法存成技能。换主题时沿用同一套流程，只改内容。 |
+| **项目可以搬走** | 导出 `.bba` 项目包（画布、对话记忆、用户素材）。生成产物不打包，换机后按参数重跑。 |
+
+节点面板里现在能用的类型：提示词 / 文档、分镜表、资产、图片生成、图片编辑、图片增强、视频增强、裁切、拼接、拆分、镜头、视频取帧、音频参考、时间线。
+
+## 界面
+
+八个页面：首页、画布、项目、资产、技能、时间线、设置、引擎引导。画布支持平移缩放、拖拽连线、框选、分组、撤销重做。主题跟随系统的浅色 / 深色。
+
+画布是自研的：DOM 节点、SVG 连线、CSS 变换。没有使用 React Flow。
+
+![画布：节点、连线和右侧 Agent（骑士小猫）](docs/screenshots/canvas.png)
+
+![技能库：官方精选模板](docs/screenshots/skills.png)
+
+## 它怎么串起来
 
 ```text
-apps/desktop/          # Electron 外壳(main/preload/renderer)
-  src/renderer/        # 原生 JS/HTML/CSS 页面(Apple HIG + Liquid Glass 设计系统)
-    index.html         # 入口(重定向到 home.html)
-    home.html          # 首页(一句话起活 + 模型/技能选择 + 附件 + 项目流)
-    home.js            # 首页交互逻辑(接入 Agent/项目/引擎探测)
-    canvas.html        # 画布工作台(9 类节点 + 拖拽 + 连线 + Agent 面板 + 队列条)
-    assets.html        # 资产中心(筛选/搜索/详情/Take 归档)
-    skills.html        # Skills 库(模板参数化/派生分支)
-    timeline.html      # 时间线/导出(双轨剪辑 + FFmpeg)
-    settings.html      # 设置(LLM 来源 / Provider 注册表 / 队列)
-    onboarding.html    # 引擎引导向导(探测/安装/下载/自检)
-    public/design/     # 设计系统令牌(colors_and_type.css)
-    public/assets/     # 演示摄影素材(CC 授权)
-    public/build/      # 品牌标记 SVG
-packages/shared/       # 领域类型(画布/节点/Shot/Take/Provider/引擎状态)
-packages/providers/    # h3c / mlxgen / mock Provider + 注册表 + h3 命令构造器
-packages/agent/        # Agent 子进程管理 + 确定性规划(pi 插槽)
+首页 / 画布 / Agent 面板          React（渲染进程）
+        │  IPC
+主进程                        项目、队列、技能、看图、ffmpeg
+        │
+        ├── Agent 子进程       对话、工具调用（stdio JSON-RPC）
+        ├── h3.c              视频（Metal，本机二进制）
+        ├── mlxgen            图片（MLX）
+        └── ~/.bigbotart      项目、画布、Take、资产
 ```
 
-## 运行
+渲染进程不直接碰 Node 或引擎。一切能力走类型化的 IPC 契约 `BigBotArtApi`。
+
+## 环境
+
+面向 Apple Silicon Mac。视频引擎 h3.c 走 Metal，图片引擎走 MLX，换到 Intel 或非 macOS 后这两个引擎不可用。
+
+| 依赖 | 用途 |
+|---|---|
+| Node.js ≥ 22、pnpm | 安装与启动 |
+| ffmpeg | 占位视频、裁切、拼接、拆分、抽帧、时间线导出 |
+| [h3.c](https://github.com/antirez/h3) + MiniMax-H3 权重 | 真实出视频。模型约 144GB，预览档也要一两分钟 |
+| `mlxgen`（安装 `mlx-gen-jzg`，不要装上游 `mlx-gen`） | 真实出图、编辑、超分。安装见 [图片引擎文档](docs/mlxgen-图片引擎-安装与模型管理.md) |
+| LM Studio，或任意 OpenAI 兼容端点 | Agent 对话。配了远端就用远端，否则回退本地 `127.0.0.1:1234`，都不可达时用模板拆镜 |
+
+没有模型也能打开应用：dry-run 只构造命令并落占位结果，用来看界面和走流程。
+
+## 快速开始
 
 ```bash
 pnpm install
-pnpm dev          # 真实跑(根脚本显式 BIGBOTART_DRYRUN=0,见 AGENTS.md §0.5)
-pnpm dev:dry      # 开发/排障 dry-run(安全默认,不碰真模型)
-pnpm build        # 构建产物
-pnpm start        # electron-vite preview(真实跑)
+pnpm dev:dry    # 开发默认：不加载模型
+pnpm dev        # 真实推理：调用本机 h3.c / mlxgen
 ```
 
-首次启动会自动创建示例项目;引擎引导向导在画布右上角"🛠 引擎引导"。
+真实跑要两层同时打开：启动命令带 `BIGBOTART_DRYRUN=0`（`pnpm dev` 已经带上），并且设置里的推理模式是「真实」。只开一层时，任务会显示成功，但产物是占位文件。
 
-### 环境变量
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `BIGBOTART_HOME` | `~/.bigbotart` | 项目/画布数据目录 |
-| `BIGBOTART_DRYRUN=0` | `1` | 关闭 dry-run,真实调用 h3.c / mlxgen(慢,需模型就绪;根脚本 `pnpm dev`/`pnpm start` 已显式设为 `0`) |
-| `BIGBOTART_H3_OUTPUTS` | `.bigbotart/outputs` | h3 输出目录 |
-
-### 远端/本地 LLM(Agent 规划内核)
-
-Agent 已集成 **pi-ai + 远端 OpenAI 兼容 LLM**(默认 DeepSeek,已实测打通)。按优先级:
-
-1. **远端**(推荐):设置以下环境变量后启动,优先使用
-   - `BIGBOTART_LLM_BASE_URL`(如 `https://api.deepseek.com/v1`,任何 OpenAI 兼容端点均可:GLM/Kimi/MiniMax…)
-   - `BIGBOTART_LLM_API_KEY`
-   - `BIGBOTART_LLM_MODEL`(默认 `deepseek-chat`)
-2. **本地 LM Studio**:未配置远端时自动回退 `http://127.0.0.1:1234/v1`(Ornith-1.5)
-3. **确定性规划兜底**:LLM 不可达时自动回退模板拆镜,闭环不断
-
-### Agent 对话(画布右侧面板)
-
-画布页右侧 Agent 面板即多轮创作对话(带工具调用 + 分层记忆)。输入框支持两个斜杠命令,Composer 工具行也有等价按钮:
-
-- **`/clear`** — 清空当前画布对话:UI 消息与持久化对话记录(recall + 压缩摘要)一并移除,不可恢复;画布节点、生成产物、节点总结不受影响,其他画布对话不受影响。
-- **`/compact`** — 压缩上下文:把旧对话交给 LLM 压成中文摘要并裁剪对话记录(保留最近 8 条承接上下文),摘要会作为「本画布对话摘要(已压缩)」随后续每次对话注入系统提示,多次压缩自动合并;LLM 不可达时自动降级为确定性兜底摘要,流程不中断。
-
-## M1 骨架的已知边界
-
-- **h3.c / mlxgen registry 代码默认 dry-run**(只构造命令 + 占位结果)。⚠️ 但根脚本 `pnpm dev` / `pnpm start` 已显式 `BIGBOTART_DRYRUN=0` = **真实跑**(144GB 模型、preview 档也要 1-2 分钟);`pnpm dev:dry` 才是 dry-run(开发/排障默认)。真实跑还需设置页「真实推理」开关 = real,两层开关、前置条件与常见坑见 AGENTS.md §0.5。
-- **Agent 为 pi-ai 真 LLM 规划**(远端/本地),失败回退确定性模板;接入点 `packages/agent/src/pi-planner.ts`。
-- **画布持久化为 JSON 文件**;SQLite 方案(接口已抽象)待 Electron 内置 Node 升级或引入 better-sqlite3。
-- **macOS Gatekeeper**:从非官方渠道下载的 Electron 二进制可能被系统清除;本仓库已用 `codesign --force --deep --sign -` 做 ad-hoc 签名规避,重装依赖后如遇清除需重新签名(见下)。
-
-### 如果 Electron 二进制被 macOS 移除
+常用脚本：
 
 ```bash
-cd node_modules/.pnpm/electron@*/node_modules/electron
-ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node install.js
-codesign --force --deep --sign - dist/Electron.app
+pnpm test          # vitest
+pnpm typecheck     # 全仓库 tsc --noEmit
+pnpm build         # electron-vite build
+pnpm start         # 运行构建产物（真实推理）
 ```
+
+Agent 的密钥放在本机 `.env`（参考 [`.env.example`](.env.example)），不要写进会被提交的文件。
+
+## 仓库
+
+```text
+apps/desktop          Electron 主进程、preload、React 渲染层
+packages/shared       领域类型与 IPC 契约（唯一类型来源）
+packages/providers    h3.c / mlxgen / mock，经 registry 选择
+packages/agent        Agent 子进程：规划、对话、工具协议
+```
+
+mock Provider 用 ffmpeg 生成带音轨的占位 MP4，不需要模型，适合把界面走通。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [图片引擎](docs/mlxgen-图片引擎-安装与模型管理.md) | mlxgen 安装、模型下载与本地目录 |
+| [技能怎么写](docs/Agent技能文档-撰写指南与模板.md) | 给 Agent 的操作手册 |
+| [AGENTS.md](AGENTS.md) | 给人和编码代理的仓库约定 |
+
+## 状态
+
+`0.1.0`，持续在本机使用和改。导演台、工作流入口 / 出口三类节点的类型还在，面板里已经下架：点了不会真正执行。
+
+## 致谢
+
+界面、对话和队列是这里写的。生成本身站在下面这些项目上，感谢作者把它们公开出来。
+
+| 项目 | 在这里的角色 | 协议 |
+|---|---|---|
+| [h3.c](https://github.com/antirez/h3) | Apple Silicon 上的 MiniMax-H3 视频推理，Salvatore Sanfilippo | MIT |
+| [mflux](https://github.com/mflux-community/mflux) | MLX 图片生成的底子，Filip Strand 与社区 | MIT |
+| [mlx-gen](https://github.com/lpalbou/mlx-gen) | 本应用实际调用的 `mlxgen`，mflux 的分支，Laurent-Philippe Albou | MIT |
+| [MLX](https://github.com/ml-explore/mlx) | Apple 的数组框架，图片引擎跑在上面 | MIT |
+| [Pi](https://github.com/earendil-works/pi) | Agent 用的多供应商 LLM API（`@earendil-works/pi-ai`），Mario Zechner | MIT |
+| [Electron](https://www.electronjs.org/) | 桌面外壳 | MIT |
+| [React](https://react.dev/) | 界面 | MIT |
+| [Vite](https://vite.dev/) | 构建（经 electron-vite） | MIT |
+| [TypeScript](https://www.typescriptlang.org/) | 语言 | Apache-2.0 |
+| [FFmpeg](https://ffmpeg.org/) | 裁切、拼接、拆分、抽帧、时间线导出。本仓库不附带二进制 | LGPL / GPL，随本机的构建 |
+| [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)、[GFPGAN](https://github.com/TencentARC/GFPGAN)、[CodeFormer](https://github.com/sczhou/CodeFormer) | 视频增强（超分与修脸）的可选后处理，脚本与权重在本机另装 | 各自仓库的协议 |
+
+[MiniMax](https://github.com/MiniMax-AI/MiniMax-H3) 提供了 H3 模型，以及内置技能所改编的官方技能文档。模型权重遵循 [MiniMax H3 社区许可](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE)，不在本仓库的 MIT 之内。Qwen、FLUX、Z-Image、SeedVR2 等图片权重同理，各归各的模型许可。
+
+## 开源协议
+
+本仓库的代码以 [MIT License](LICENSE) 授权。Copyright (c) 2026 姜振国。
+
+MIT 只覆盖这个仓库里的代码。模型权重、`h3` / `mlxgen` / `ffmpeg` 这些外部程序，以及内置技能文档的上游原文，都沿用它们自己的协议。调用它们不会把那些协议改写成 MIT。

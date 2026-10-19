@@ -178,11 +178,6 @@ describe('provider 侧注释已更正(本次修正的核心事实)', () => {
     expect(src).toMatch(/images\[-1\]/); // 正确事实已在注释里留证
     expect(src).toMatch(/最后一张/);
   });
-
-  it('CLAUDE.md 不得再写「首张锚定几何」', () => {
-    const md = fs.readFileSync(path.join(repoRoot, 'CLAUDE.md'), 'utf8');
-    expect(md).not.toMatch(/首张锚定几何/);
-  });
 });
 
 /**
