@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+官网：https://www.bigbot.art/
+
 本地优先的无限画布，把一句话编排成可改、可复跑、可交付的视频和图片。
 
 Electron desktop app for Apple Silicon. An agent lays out shots and images on an infinite canvas, then runs them on local engines: [h3.c](https://github.com/antirez/h3) for MiniMax-H3 video, and MLX (`mlxgen`) for images.
