@@ -14,13 +14,19 @@ import { deterministicPlanner, planStoryboardDeterministic } from './plan.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * worker 必须是磁盘上的真实文件:spawn 读不了 app.asar。
- * 开发时它就在 dist/worker.js 旁边;安装包里 electron-builder 把它解到 app.asar.unpacked。
+ * worker 必须是磁盘上的真实文件:spawn 读不了 app.asar,且
+ * ELECTRON_RUN_AS_NODE 也读不了 asar 里的 node_modules。
+ * 安装包把整份 node_modules 解到 app.asar.unpacked,这里改走那份 worker.js,
+ * 让 Node 自己解析 pi-ai。不要再 esbuild 打成单文件:循环依赖会把
+ * ModelsImpl 留在未初始化状态,对话一进来就抛
+ * "ModelsImpl is not a constructor"(界面上截成 ModelSimpl)。
  */
-function resolveWorkerEntry(): string {
-  const beside = join(__dirname, 'worker.js');
-  const unpacked = beside.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
-  return unpacked !== beside && existsSync(unpacked) ? unpacked : beside;
+export function resolveWorkerEntry(fromDir = __dirname): string {
+  const beside = join(fromDir, 'worker.js');
+  const asarSeg = `${sep}app.asar${sep}`;
+  if (!fromDir.includes(asarSeg)) return beside;
+  const unpacked = beside.replace(asarSeg, `${sep}app.asar.unpacked${sep}`);
+  return existsSync(unpacked) ? unpacked : beside;
 }
 
 /** worker 入口(编译产物) */

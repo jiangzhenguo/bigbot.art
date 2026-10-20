@@ -3,9 +3,12 @@ productName: BigBotArt
 copyright: Copyright © 2026 姜振国
 electronVersion: 38.8.6
 asar: true
-# spawn 读不了 asar。Agent worker 必须解到 app.asar.unpacked。
+# spawn 用 ELECTRON_RUN_AS_NODE,读不了 app.asar。
+# 整份 node_modules 解包,worker 才能用 Node 原生 ESM 加载 pi-ai。
+# 不要改回 esbuild 单文件:循环依赖会让 ModelsImpl 未初始化,
+# 对话报 "ModelsImpl is not a constructor"。
 asarUnpack:
-  - "**/node_modules/@bigbotart/agent/dist/**"
+  - "**/node_modules/**"
 npmRebuild: false
 files:
   - out/**/*
