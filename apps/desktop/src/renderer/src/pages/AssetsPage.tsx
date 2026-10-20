@@ -12,6 +12,7 @@
  * 详情面板由 pages/assets/AssetDetail 承担,卡片由 pages/assets/AssetCard 承担。
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Asset, AssetCategory, AssetRef, Project } from '@bigbotart/shared';
 import { AssetCard } from './assets/AssetCard';
 import { AssetDetail } from './assets/AssetDetail';
@@ -556,14 +557,13 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
       </div>
 
       {/* ── 从画布产物导入弹层(仅项目视图) ── */}
-      {archOpen && (
+      {archOpen && createPortal(
         <div
-          className="archive-pop"
+          className="pg-assets asset-ovl"
           data-od-id="archive-from-canvas-pop"
-          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'var(--scrim)' }}
           onClick={() => setArchOpen(false)}
         >
-          <div className="pop open" style={{ width: 420, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>
+          <div className="asset-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="ap-h" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center' }}>
               <div style={{ flex: 1 }}>
                 <b>{t('从画布产物导入')}</b>
@@ -616,26 +616,30 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {/* ── 回收站弹层 ── */}
-      {trashOpen && (
+      {/* ── 回收站弹层:挂到 body,避免被资源页毛玻璃层挡住,卡片本身要有底 ── */}
+      {trashOpen && createPortal(
         <div
-          className="trash-pop"
-          style={{ position: 'fixed', inset: 0, zIndex: 130, display: 'grid', placeItems: 'center', background: 'var(--scrim)' }}
+          className="pg-assets asset-ovl"
+          data-od-id="trash-pop"
           onClick={() => setTrashOpen(false)}
         >
-          <div className="pop open" style={{ width: 460, maxHeight: '70vh', display: 'block' }} onClick={(e) => e.stopPropagation()}>
-            <div className="ap-h" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center' }}>
+          <div className="asset-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="ap-h" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', flex: 'none' }}>
               <b>{t('回收站')}</b>
               <span className="mut" style={{ fontSize: 11, marginLeft: 8 }}>{t('7 天后自动清理 · 期间可恢复')}</span>
               <span className="spacer" />
               <button className="btn btn-g btn-sm btn-danger" disabled={trash.length === 0} onClick={() => void emptyTrash()}>
                 {t('清空回收站')}
               </button>
+              <button className="ibtn" aria-label={t('关闭')} onClick={() => setTrashOpen(false)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 6l12 12M6 18 18 6" /></svg>
+              </button>
             </div>
-            <div style={{ padding: '4px 16px', overflowY: 'auto', maxHeight: 320 }}>
+            <div style={{ padding: '4px 16px 12px', overflowY: 'auto', maxHeight: 320, flex: 'none' }}>
               {trash.length === 0 ? (
                 <div className="mut" style={{ padding: '20px 0', textAlign: 'center' }}>{t('回收站是空的')}</div>
               ) : (
@@ -653,7 +657,8 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

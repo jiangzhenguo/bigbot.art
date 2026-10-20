@@ -414,8 +414,8 @@ export function spawnCaption(
 /** 给用户/Agent 的安装指引(命令缺失时用) */
 export function captionCommandHint(): string {
   return (
-    '本机没有可用的 mlxgen-caption:请在 mlx-gen 仓库执行 `uv tool install --editable .` 重装工具' +
-    '(console script 是新增的,旧 venv 里没有),或用 BIGBOTART_CAPTION_BIN 指定可执行文件'
+    '本机没有可用的 mlxgen-caption:请执行 `uv tool install --upgrade mlx-gen-jzg`' +
+    '(上游包 mlx-gen 没有这条命令),或用 BIGBOTART_CAPTION_BIN 指定可执行文件'
   );
 }
 

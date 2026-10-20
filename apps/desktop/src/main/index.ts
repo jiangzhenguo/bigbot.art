@@ -33,6 +33,7 @@ import { runDataMigration } from './migrate';
 import { DATA_DIR } from './workspace-paths';
 import { DebugLogger } from './logger';
 import { installCrashGuard } from './crash-guard';
+import { packagedToolPath } from './tool-path';
 import {
   applyThemeSource,
   normalizeTheme,
@@ -60,20 +61,15 @@ import {
 } from './llm';
 import { placementOf, planContext } from './context-budget';
 import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind, ProjectExportRequest, ProjectExportResult, ProjectImportResult, ProjectCover } from '@bigbotart/shared';
-import { referenceMediaIssues, referenceAnchorConflictIssues } from '@bigbotart/shared';
+import { referenceMediaIssues, referenceAnchorConflictIssues, PLAN_APPROVE_LABEL, openShots } from '@bigbotart/shared';
 
 const isDev = !app.isPackaged;
 
-// 打包版从 Finder/Dock 启动时 PATH 只有系统目录(/usr/bin:/bin…),而 ffmpeg/ffprobe、
-// h3、mlxgen 等外部工具多在 /opt/homebrew/bin;h3 内部用 posix_spawnp 按名找 ffprobe,
-// PATH 缺 homebrew 会在视频合成最后一步报「cannot start FFprobe」(2026-10 真实事故)。
-// 打包版补齐常见工具目录;dev 从终端启动自带用户 PATH,不动。
+// 打包版从 Finder/Dock 启动时 PATH 只有系统目录(/usr/bin:/bin…)。
+// ffmpeg 多在 Homebrew;uv 把 mlxgen 放在 ~/.local/bin。缺后者时 spawn('mlxgen') 直接 ENOENT。
+// dev 从终端启动自带用户 PATH,不动。
 if (!isDev) {
-  const parts = (process.env.PATH ?? '').split(':').filter(Boolean);
-  for (const p of ['/usr/local/bin', '/opt/homebrew/bin']) {
-    if (!parts.includes(p)) parts.unshift(p);
-  }
-  process.env.PATH = parts.join(':');
+  process.env.PATH = packagedToolPath(process.env.PATH, homedir());
 }
 
 /** 渲染产物根目录(h3c/mlxgen/mock 输出;bba-output:// 协议只读这里及子目录) */
@@ -116,6 +112,12 @@ function describeToolAction(name: string, args: Record<string, unknown>, nodeId?
       return `已激活技能「${j(args.skillId)}」`;
     case 'skills.deactivate':
       return '已停用当前技能';
+    case 'todo.write': {
+      const n = Array.isArray(args.todos) ? args.todos.length : 0;
+      return n ? `已更新任务清单(${n} 项)` : '已清空任务清单';
+    }
+    case 'plan.present':
+      return '已提交多镜计划,等待用户确认';
     default:
       return `已执行 ${name}`;
   }
@@ -177,6 +179,12 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+// 安装包从访达启动,没有 pnpm dev 注入的 BIGBOTART_DRYRUN=0。
+// 判定式不改(仍是 !== '0')。这里只在「已打包且环境没写这个变量」时补上 0,
+// 与 pnpm start 相同。设置里的 renderMode 默认仍是 demo,真实推理还要用户打开。
+if (app.isPackaged && process.env.BIGBOTART_DRYRUN == null) {
+  process.env.BIGBOTART_DRYRUN = '0';
+}
 // 引擎:BIGBOTART_DRYRUN=0 时真实 spawn h3;未设或非 0 则 dry-run 占位
 // h3 开启 onLog:调试面板实时显示 h3 进度行
 const logger = new DebugLogger();
@@ -566,8 +574,7 @@ function wireDebugLog(win: BrowserWindow) {
 }
 
 async function createWindow() {
-  // 自定义应用图标(dev/unpacked 下 Electron 用默认图标;macOS 走 Dock,Windows/Linux 走窗口 icon。
-  //  打包时需另配 electron-builder 的 icon/extraResources,目前仓库尚无打包配置)
+  // 自定义应用图标。macOS 安装包的 Dock 图标由 electron-builder 的 mac.icon 写入。
   const iconPath = join(__dirname, '../../resources/icon.png');
   win = new BrowserWindow({
     width: 1440,
@@ -1354,10 +1361,21 @@ async function executeAgentChat(opts: {
   // 记忆上下文组装(skillResolver:激活技能经 SkillStore 解析,注入「【当前技能】」指令段;
   // canvas 快照:注入「【当前画布】」实时状态段,让 Agent 首轮就感知画布轮廓)
   const ctxSnap = store.loadProjectCanvases(opts.projectId).canvases.find((c) => c.id === opts.canvasId);
+  let textForModel = opts.text;
+  if (!opts.auto && opts.text.trim() === PLAN_APPROVE_LABEL && ctxSnap) {
+    const openIds = openShots(ctxSnap.nodes).map((s) => s.id);
+    const decision = memory.tryApproveShotPlan(opts.projectId, opts.canvasId, openIds);
+    if (decision.ok) {
+      logger.log('info', `[shot-plan] 已批准 ${openIds.length} 个未出片镜头`);
+    } else if (!decision.silent) {
+      textForModel = `${opts.text}\n\n(系统:${decision.reason})`;
+      logger.log('warn', `[shot-plan] 点头未生效:${decision.reason}`);
+    }
+  }
   const ctx = memory.buildContext(
     opts.projectId,
     opts.canvasId,
-    opts.text,
+    textForModel,
     (id) => skills.get(id),
     ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
     historyTokenBudget != null ? { historyTokenBudget } : undefined,
@@ -1440,7 +1458,7 @@ async function executeAgentChat(opts: {
     const result = await agent.chat({
       projectId: opts.projectId,
       canvasId: opts.canvasId,
-      text: opts.text + attNote + selNote,
+      text: textForModel + attNote + selNote,
       context: ctx,
       contextWindow,
       llm,

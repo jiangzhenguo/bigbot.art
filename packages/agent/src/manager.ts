@@ -4,15 +4,27 @@
  * worker 内嵌 pi-ai(真 LLM 规划);inline=true 仅供调试(确定性规划)。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import type { AgentProcessState, LlmSource, AgentEvent } from '@bigbotart/shared';
 import type { AgentRequest, AgentResponse, PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult, ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { deterministicPlanner, planStoryboardDeterministic } from './plan.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * worker 必须是磁盘上的真实文件:spawn 读不了 app.asar。
+ * 开发时它就在 dist/worker.js 旁边;安装包里 electron-builder 把它解到 app.asar.unpacked。
+ */
+function resolveWorkerEntry(): string {
+  const beside = join(__dirname, 'worker.js');
+  const unpacked = beside.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
+  return unpacked !== beside && existsSync(unpacked) ? unpacked : beside;
+}
+
 /** worker 入口(编译产物) */
-export const WORKER_ENTRY = join(__dirname, 'worker.js');
+export const WORKER_ENTRY = resolveWorkerEntry();
 
 /**
  * chat 的**静默**超时(不是总超时):连续这么久没有任何心跳才判失败。

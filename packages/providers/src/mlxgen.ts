@@ -48,6 +48,8 @@ export class MlXGenProvider implements Provider {
   private outPaths = new Map<string, string>();
   /** 失败诊断:taskId → 累计 stderr 尾部 */
   private stderrs = new Map<string, string>();
+  /** spawn 本身失败(命令不存在等)。没有 error 监听时 Node 会把它变成未捕获异常。 */
+  private spawnErrors = new Map<string, string>();
   /** 实时进度:taskId → 最近一次 --json-events 运行时事件(stdout JSONL,2026-09 实测各路由均支持) */
   private events = new Map<string, MlxgenEvent>();
 
@@ -64,7 +66,7 @@ export class MlXGenProvider implements Provider {
       const { stdout } = await execFileP('sh', ['-lc', `command -v ${this.bin}`], { timeout: 5000 });
       const path = stdout.trim();
       if (!path) {
-        st.installHint = '运行 uv tool install --upgrade mlx-gen 安装';
+        st.installHint = '运行 uv tool install --upgrade mlx-gen-jzg 安装';
         return st;
       }
       st.installed = true;
@@ -77,7 +79,7 @@ export class MlXGenProvider implements Provider {
     } catch (e) {
       const msg = (e as Error).message;
       if (!/not found|command not found|ENOENT/.test(msg)) st.error = msg;
-      st.installHint = '运行 uv tool install --upgrade mlx-gen;模型:mlxgen download --model <id>';
+      st.installHint = '运行 uv tool install --upgrade mlx-gen-jzg;模型:mlxgen download --model <id>';
     }
     return st;
   }
@@ -601,6 +603,14 @@ export class MlXGenProvider implements Provider {
    */
   private spawnRun(taskId: string, cmd: string[]): void {
     const child = spawn(this.bin, cmd, { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      const msg =
+        err.code === 'ENOENT'
+          ? `找不到命令 ${this.bin}。请先安装:uv tool install --upgrade mlx-gen-jzg(可执行文件在 ~/.local/bin)`
+          : `无法启动 ${this.bin}:${err.message}`;
+      this.spawnErrors.set(taskId, msg);
+      this.stderrs.set(taskId, msg);
+    });
     const errAcc: string[] = [];
     child.stderr.on('data', (d: Buffer) => {
       errAcc.push(d.toString());
@@ -627,6 +637,8 @@ export class MlXGenProvider implements Provider {
   }
 
   async status(handle: RenderJobHandle): Promise<RenderStatus> {
+    const spawnErr = this.spawnErrors.get(handle.providerTaskId);
+    if (spawnErr) return { status: 'FAILED', error: spawnErr };
     const child = this.running.get(handle.providerTaskId);
     if (!child) {
       return { status: 'SUCCEEDED', progress: 1, stage: 'dry-run (未真实推理);命令见日志', resultPath: this.outPaths.get(handle.providerTaskId) };

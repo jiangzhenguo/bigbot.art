@@ -169,7 +169,7 @@ async function checkMlxgen(logger?: DebugLogger): Promise<SelfCheckItem> {
       label: 'mlxgen 图片引擎',
       ok: false,
       detail: '未检测到 mlxgen CLI',
-      hint: 'uv tool install --upgrade mlx-gen(或在第 2 步点「安装」)',
+      hint: 'uv tool install --upgrade mlx-gen-jzg(或在第 2 步点「安装」)',
       ms: Date.now() - started,
     };
   }

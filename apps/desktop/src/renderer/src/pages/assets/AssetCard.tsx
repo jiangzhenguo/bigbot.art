@@ -6,6 +6,7 @@
  */
 import React from 'react';
 import type { Asset } from '@bigbotart/shared';
+import { SafeImage } from '../../components/SafeImage';
 
 interface AssetCardProps {
   asset: Asset;
@@ -37,7 +38,7 @@ export function AssetCard({ asset: a, categoryName, selected, refCount, onSelect
     >
       <div className="athumb">
         {img ? (
-          <img src={img} alt={a.name} loading="lazy" />
+          <SafeImage src={img} alt={a.name} fill loading="lazy" />
         ) : a.kind === 'audio' ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 2.5, height: '100%', padding: '0 16px' }}>
             {[14, 26, 36, 20, 30, 16, 34, 22, 12, 28].map((h, i) => (

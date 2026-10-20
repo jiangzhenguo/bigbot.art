@@ -22,8 +22,10 @@ import type {
   CanvasEdge,
   ChatThread,
   ChatThreadListItem,
+  AgentTodoItem,
+  CanvasMemory,
 } from '@bigbotart/shared';
-import { nodeKindGuide, connectorSummary, applyParamValues } from '@bigbotart/shared';
+import { nodeKindGuide, connectorSummary, applyParamValues, decideShotPlanApproval, formatTodoPrompt } from '@bigbotart/shared';
 import { DATA_DIR, memoryFile } from './workspace-paths.js';
 import {
   listThreadItems,
@@ -299,6 +301,66 @@ export class MemoryStore {
     this.persist(projectId);
   }
 
+  private blankCanvas(): CanvasMemory {
+    return { summary: '', nodeCount: 0, lastActive: new Date().toISOString(), keyDecisions: [] };
+  }
+
+  /** 整表替换当前画布任务清单。空数组清空。 */
+  setTodos(projectId: string, canvasId: string, todos: AgentTodoItem[]): void {
+    const m = this.get(projectId);
+    const cur = m.canvasMemory[canvasId] ?? this.blankCanvas();
+    m.canvasMemory[canvasId] = { ...cur, todos: todos.length > 0 ? todos : undefined };
+    this.persist(projectId);
+  }
+
+  getApprovedShotIds(projectId: string, canvasId: string): string[] | undefined {
+    return this.get(projectId).canvasMemory[canvasId]?.approvedShotIds;
+  }
+
+  /**
+   * 记下待确认的多镜计划,并清掉上一份批准。
+   * 新计划没点头之前,旧的「按此执行」不能继续放行。
+   */
+  setPendingShotPlan(projectId: string, canvasId: string, plan: { shotIds: string[]; markdown: string }): void {
+    const m = this.get(projectId);
+    const cur = m.canvasMemory[canvasId] ?? this.blankCanvas();
+    m.canvasMemory[canvasId] = {
+      ...cur,
+      pendingShotPlan: { shotIds: [...plan.shotIds].sort(), markdown: plan.markdown },
+      approvedShotIds: undefined,
+    };
+    this.persist(projectId);
+  }
+
+  /**
+   * 用户点「按此执行」。镜头集合仍与提交计划时一致才写入批准并清掉待确认计划。
+   * 没有待确认计划时静默跳过。集合变了则清掉待确认计划,避免过期计划被同一句话再次点头。
+   */
+  tryApproveShotPlan(
+    projectId: string,
+    canvasId: string,
+    openIds: string[],
+  ): { ok: true } | { ok: false; silent: true } | { ok: false; silent: false; reason: string } {
+    const m = this.get(projectId);
+    const cur = m.canvasMemory[canvasId];
+    const decision = decideShotPlanApproval(cur?.pendingShotPlan?.shotIds, openIds);
+    if (!cur) return decision.ok ? { ok: false, silent: true } : decision;
+    if (decision.ok) {
+      m.canvasMemory[canvasId] = {
+        ...cur,
+        approvedShotIds: decision.approvedShotIds,
+        pendingShotPlan: undefined,
+      };
+      this.persist(projectId);
+      return { ok: true };
+    }
+    if (!decision.silent) {
+      m.canvasMemory[canvasId] = { ...cur, pendingShotPlan: undefined };
+      this.persist(projectId);
+    }
+    return decision;
+  }
+
   /** 检索 recall(当前活跃会话最近 N 条注入消息)。
    *  窗口只数可注入角色(user/assistant/system):role=tool 是留痕回看用的机器记录,不参与计数。
    *  否则一轮「操作前必查」的工具调用(list_nodes + get_node×N,每条占 tool+system 两条)
@@ -422,7 +484,7 @@ export class MemoryStore {
 ⚠️ 提问要有节制,确认卡太多会卡死对话。只有这两种情况才准提问:
 ① 用户的指令有多种合理解读,且各路径代价差异大(如「改风格」= 全量重跑 vs 只改提示词):把方案对比列成选项;
 ② 关键信息缺失且无法合理默认(如必须让用户给提示词、选风格方向)。
-以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit)、写镜头提示词(h3.write_prompt)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
+以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit;未出片镜头达到 2 个时例外,必须先 plan.present 等用户点「按此执行」)、写镜头提示词(h3.write_prompt)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
 ⚠️ 尤其是 storyboard.plan:**不要先问「要不要我出分镜表」,也不要回一句「我开始出分镜表」就结束本轮** —— 这句话之后必须真的跟着 storyboard.plan 工具调用,否则用户看到的就是「说了要做却没动静」(真实事故:模型回「我开始出分镜表」但本轮零工具调用,画布上什么都没产出)。
 用户说了「确认/执行/提交/继续」类授权后,立即执行对应工具,禁止二次确认(二次确认会陷入死循环)。
 选项写法:能给一句补充说明时,options 用对象形式 {label, sub, recommended},把最稳妥的方案标 recommended=true(至多一个);简单选项直接给字符串即可。
@@ -492,7 +554,10 @@ export class MemoryStore {
         '默认分步只出表(让用户确认/改表),用户要求直接铺节点时传 autoMaterialize=true;',
         '已有分镜表要铺节点用 storyboard.materialize(智能连线:有角色卡/场景卡 → 首镜 Ref2VA 绑定参考;后续镜 FL2VA 接续上一镜尾帧;无卡时仅序列起点按「需配图」建静帧——不要事后再机械给每行补 image-gen);',
         '改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
-        '铺节点只创建节点、不触发运行 —— 生成用 engine.submit 逐节点或批跑,指令明确时直接执行,不必再确认。'].join('\n'),
+        '铺节点只创建节点、不触发运行。',
+        '单镜、图片节点:用户指令明确就直接 engine.submit,不必再确认。',
+        '未出片的镜头达到 2 个时:先把节点和连线做完,再 plan.present。markdown 以 # 标题开头,写清要建什么、怎么连、要提交哪些镜头(用标题)。调用后本轮暂停,用户点「按此执行」之后才能 engine.submit 这些镜头;点「修改计划」就改完再交一次。没点头就提交会被拒绝。同一轮里不要一边 plan.present 一边 engine.submit。',
+        '多步任务用 todo.write 维护清单:每次交完整列表(整表替换),每项一句短任务,status 为 pending / in_progress / completed,同时只能有一项 in_progress。做完就更新状态。单步任务不要写清单。清单会在之后每一轮重新注入,自动续跑时按未完成项继续。'].join('\n'),
     );
     // ①c 当前画布激活技能(Agent 指令段注入;full=全量 / summary=摘要+skills.read 提示。
     //  解析器缺失或技能不存在时静默跳过,保持零开销)
@@ -615,6 +680,15 @@ export class MemoryStore {
       parts.push(
         `【进行中的任务】用户最初指令:「${pinned.slice(0, 200)}」——后续的问答与确认都围绕它推进,执行时不得丢失该目标;若用户最新消息开启了新任务,以最新消息为准。`,
       );
+    }
+
+    const canvasMem = m.canvasMemory[canvasId];
+    const todoPrompt = formatTodoPrompt(canvasMem?.todos);
+    if (todoPrompt) parts.push(todoPrompt);
+    if (canvasMem?.pendingShotPlan) {
+      parts.push('【多镜生成】有一份计划正在等用户点头。在用户点「按此执行」之前,不要 engine.submit 这些镜头。');
+    } else if (canvasMem?.approvedShotIds && canvasMem.approvedShotIds.length > 0) {
+      parts.push('【多镜生成】用户已点头。对当时批准的未出片镜头可以直接 engine.submit。之后新出现的未出片镜头要重新 plan.present。');
     }
 
     // ④ archival 检索注入(进 system prompt)

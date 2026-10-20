@@ -54,7 +54,7 @@ $ mflux-generate-flux2-edit --help
 | 图片 Provider | `packages/providers/src/mlxgen.ts`(301 行) | 单例 `MlXGenProvider`,内部按 `kind` 分派命令 |
 | 注册表 | `packages/providers/src/registry.ts` | **唯一后端选择点**(红线 R3);`createRegistry({ extra })` |
 | 模型管理 | `apps/desktop/src/main/mlxgen-models.ts` | 清单 / 缓存探测 / 真实下载(spawn `mlxgen download`) |
-| 安装 | `apps/desktop/src/main/runtime-install.ts` | spawn `uv tool install --upgrade mlx-gen` |
+| 安装 | `apps/desktop/src/main/runtime-install.ts` | spawn `uv tool install --upgrade mlx-gen-jzg` |
 | IPC 契约 | `packages/shared/src/index.ts` | `mlxgenModels/Download/DownloadStatus/…`(5 个方法) |
 | 领域类型 | `packages/shared/src/domain.ts:252,269` | `ImageGenParams.engine` / `ImageEditParams.engine` **字面量写死 `'mlxgen'`** |
 

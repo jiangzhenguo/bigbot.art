@@ -27,6 +27,7 @@ import {
 import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
 import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb, VideoPoster, AudioPlayer } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
+import { SafeImage } from '../../../components/SafeImage';
 
 interface NodeBodyProps {
   node: CanvasNode;
@@ -162,7 +163,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
           <div className="nb">
             {am.kind === 'image' && am.src ? (
               <div className="nthumb fit">
-                <img draggable={false} src={am.src} alt={am.name} loading="lazy" />
+                <SafeImage draggable={false} src={am.src} alt={am.name} />
               </div>
             ) : am.kind === 'video' ? (
               <VideoThumb src={am.src ?? ''} badge={am.name} />
@@ -230,7 +231,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb fit"><img draggable={false} src={outputUrlOf(outImg)} alt="图片产物" /></div>
+            <div className="nthumb fit"><SafeImage draggable={false} src={outputUrlOf(outImg)} alt="图片产物" /></div>
           ) : (
           <div className="nthumb" style={{ aspectRatio: '1/1', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
             待生成 · {w}×{h}
@@ -259,7 +260,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb fit"><img draggable={false} src={outputUrlOf(outImg)} alt="编辑产物" /></div>
+            <div className="nthumb fit"><SafeImage draggable={false} src={outputUrlOf(outImg)} alt="编辑产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               {modeLabel} · {inputState}
@@ -280,7 +281,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb fit"><img draggable={false} src={outputUrlOf(outImg)} alt="超分产物" /></div>
+            <div className="nthumb fit"><SafeImage draggable={false} src={outputUrlOf(outImg)} alt="超分产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               ×{scale} 超分 · {inputState}
@@ -306,7 +307,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
         <div className="nb">
           {outImg ? (
             <div className="nthumb">
-              <img draggable={false}
+              <SafeImage draggable={false}
                 src={outputUrlOf(outImg)}
                 alt="裁切产物"
                 style={{ aspectRatio: ratio, objectFit: 'contain', background: 'var(--surface-warm)' }}
@@ -336,7 +337,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb fit"><img draggable={false} src={outputUrlOf(outImg)} alt="取帧产物" /></div>
+            <div className="nthumb fit"><SafeImage draggable={false} src={outputUrlOf(outImg)} alt="取帧产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               裁切{atLabel} → 图片资源 · {inputState}
@@ -355,7 +356,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
       return (
         <div className="nb">
           {outImg ? (
-            <div className="nthumb fit"><img draggable={false} src={outputUrlOf(outImg)} alt="拼接产物" /></div>
+            <div className="nthumb fit"><SafeImage draggable={false} src={outputUrlOf(outImg)} alt="拼接产物" /></div>
           ) : (
             <div className="nthumb" style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11 }}>
               {modeLabel}拼接 · {pieces.length > 0 ? `${pieces.length} 件` : '待连拼接件'}
@@ -383,7 +384,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
           {pieces.length > 0 ? (
             <div className="nthumb" style={{ display: 'grid', gridTemplateColumns: `repeat(${viewCols}, 1fr)`, gap: 2, background: 'var(--surface-warm)', alignItems: 'start' }}>
               {pieces.map((p, i) => (
-                <img draggable={false} key={p} src={outputUrlOf(p)} alt={`第 ${i + 1} 片`} style={{ width: '100%', height: 'auto', display: 'block', objectFit: 'contain' }} />
+                <SafeImage draggable={false} key={p} src={outputUrlOf(p)} alt={`第 ${i + 1} 片`} style={{ width: '100%', height: 'auto', display: 'block', objectFit: 'contain' }} />
               ))}
             </div>
           ) : (
@@ -519,7 +520,7 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
                         style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', background: 'var(--media-bg)' }}
                       />
                     ) : (
-                      <img draggable={false} src={src} alt={`镜${i + 1} 片段封面`} />
+                      <SafeImage draggable={false} fill compact src={src} alt={`镜${i + 1} 片段封面`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                     )}
                   </span>
                 );

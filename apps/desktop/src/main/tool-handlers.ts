@@ -28,6 +28,11 @@ import {
   PIECE_LABEL_RE,
   deriveShotRefsFromEdges,
   validateRefsForSubmit,
+  validateTodoList,
+  formatTodoResult,
+  validatePlanMarkdown,
+  openShots,
+  shotSubmitAllowed,
   referenceMediaIssues,
   referenceAnchorConflictIssues,
   capabilityOf,
@@ -1361,6 +1366,14 @@ export class ToolHandlers {
       if (!submitHit.ok) return { ok: false, result: submitHit.error };
       const node = submitHit.node;
       const nodeId = node.id;
+      if (node.kind === 'shot') {
+        const planGate = shotSubmitAllowed({
+          nodeId,
+          nodes: cur.nodes,
+          approvedShotIds: this.memory.getApprovedShotIds(ctx.projectId, ctx.canvasId),
+        });
+        if (!planGate.ok) return { ok: false, result: planGate.reason };
+      }
       const gate = checkSkillSubmitGates(
         this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId),
         node,
@@ -2052,6 +2065,35 @@ export class ToolHandlers {
       if (clips.length === 0) return { ok: false, result: '画布上还没有已生成的镜头产物' };
       const res = this.exportSvc.submit({ projectId: ctx.projectId, clips, outputName: String(a.outputName ?? 'timeline') });
       return { ok: true, result: `已发起导出(${res.taskId}),${clips.length} 个片段合成中` };
+    },
+
+    /* ── 任务清单 / 多镜确认 ── */
+    'todo.write': async (a, ctx) => {
+      const parsed = validateTodoList(a.todos);
+      if (!parsed.ok) return { ok: false, result: parsed.error };
+      this.memory.setTodos(ctx.projectId, ctx.canvasId, parsed.todos);
+      return { ok: true, result: formatTodoResult(parsed.todos) };
+    },
+    'plan.present': async (a, ctx) => {
+      const markdown = String(a.markdown ?? '');
+      const text = validatePlanMarkdown(markdown);
+      if (!text.ok) return { ok: false, result: text.error };
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      const open = openShots(cur.nodes);
+      if (open.length < 2) {
+        return { ok: false, result: `未出片镜头只有 ${open.length} 个,不必计划确认。单镜直接 engine.submit。` };
+      }
+      this.memory.setPendingShotPlan(ctx.projectId, ctx.canvasId, {
+        shotIds: open.map((s) => s.id),
+        markdown: markdown.trim(),
+      });
+      const titles = open.map((s) => `「${s.label}」`).join('、');
+      return {
+        ok: true,
+        result: `计划已交给用户确认。未出片镜头:${titles}。等用户点「按此执行」后再 engine.submit;本轮不要提交。`,
+      };
     },
 
     /* ── memory 域 ── */

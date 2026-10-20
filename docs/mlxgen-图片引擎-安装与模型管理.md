@@ -8,7 +8,7 @@
 
 ```bash
 brew install uv                       # 前置:Python 包管理器(未装时)
-uv tool install --upgrade mlx-gen     # 1) 安装 mlxgen CLI
+uv tool install --upgrade mlx-gen-jzg  # 1) 安装 mlxgen CLI(fork;不要装上游 mlx-gen)
 mlxgen download --model <model-id>    # 2) 按需下载模型(见 §3 清单)
 mlxgen --help                         # 3) 验证
 # 4) 应用内:设置 → 引擎 → mlxgen「检测 / 管理模型」+ 打开「真实推理」
@@ -33,9 +33,11 @@ mlxgen --help                         # 3) 验证
 **方式 A:命令行(推荐)**
 ```bash
 brew install uv
-uv tool install --upgrade mlx-gen
-mlxgen --help          # 应打印帮助与版本号
+uv tool install --upgrade mlx-gen-jzg
+mlxgen --help          # 应打印帮助;版本行形如 MLX-Gen 0.1.0
 ```
+
+包名是 fork **`mlx-gen-jzg`**。`uv tool install mlx-gen` 装的是上游,没有 Qwen-Image-2.1 参考编辑和 `mlxgen-caption`。两个包都会写 `~/.local/bin/mlxgen`;以前装过旧工具名 `mlx-gen` 时先 `uv tool uninstall mlx-gen`。应用内安装遇到入口冲突会自动卸旧工具再重试。
 
 **方式 B:应用内引导**
 - 首次启动引导向导「安装组件」→ mlxgen 行显示 `未安装 · pip 包(uv tool install)`;点击安装按钮会给出并尝试执行上面的命令(`install-runtime` IPC)。
@@ -92,10 +94,11 @@ mlxgen capabilities --model ~/ai/models/Qwen-Image-2.1-bf16 --base-model qwen-im
 
 实测性能(M5 Max,1024²,40 步):约 **3.5 s/步、全图 2 分 20 秒**;权重约 22GB 常驻(8bit 导出)。
 
-> ⚠️ **Qwen-Image-2.1 需要 mlx-gen ≥ 0.38.0**。0.37.0 及更早版本没有 `qwen21` 模型族:
+> ⚠️ **Qwen-Image-2.1 在 fork `mlx-gen-jzg` 里**。上游 PyPI `mlx-gen` 0.38.0 没有这条路由:
 > `mlxgen capabilities --model Qwen/Qwen-Image-2.1` 不会报错,但会返回**旧 Qwen Image**
-> 的能力集(`qwen.generate` handler),真跑才会在加载权重时失败。本机源码在 `~/ai/mlx-gen`
-> (分支 `feat/qwen-image-2.1`),用 `uv tool install --force --no-cache ~/ai/mlx-gen` 安装/升级。
+> 的能力集(`qwen.generate` handler),真跑才会在加载权重时失败。安装用
+> `uv tool install --upgrade mlx-gen-jzg`。本机源码仍在 `~/ai/mlx-gen`,调试期用
+> `uv tool install --editable ~/ai/mlx-gen --force`。
 > 该分支 `pyproject.toml` 的 `[project.scripts]` 里两个含裸点号的 key
 > (`mflux-generate-qwen-2.1` / `mlxgen-generate-qwen-2.1`)**必须加引号**,否则 TOML 会把它
 > 解析成嵌套 map,`uv tool install` 直接报 `invalid type: map, expected a string`。
@@ -134,14 +137,15 @@ mlxgen capabilities --model ~/ai/models/Qwen-Image-2.1-bf16 --base-model qwen-im
 > 老项目文件里存的 8bit 仓库名仍能正常打开(别名与 `--base-model` 提示保留作向后兼容,
 > 会落到同一份 bf16);手工填 8bit 跑编辑则走既有防呆明确报错,不发必炸的命令。
 
-**引擎版本要求**:正式包 0.38.0 **没有** `qwen21.edit` 路由 —— `mlxgen capabilities` 只报
+**引擎版本要求**:上游 `mlx-gen` 0.38.0 **没有** `qwen21.edit` 路由 —— `mlxgen capabilities` 只报
 `qwen21.text`/`qwen21.latent`,传参考图会被判成 latent i2i 并索要 `--image-strength`。
-该实现目前只在源码工作区(未提交):`src/mflux/models/qwen21/reference/` +
-`variants/edit/qwen_image_21_edit.py` + `cli/qwen21_edit_generate.py`。安装方式:
+这条路由在 fork `mlx-gen-jzg` 里(`src/mflux/models/qwen21/reference/` +
+`variants/edit/qwen_image_21_edit.py` + `cli/qwen21_edit_generate.py`)。安装方式:
 
 ```bash
-cd ~/ai/mlx-gen && uv tool install --editable . --force   # 改代码即时生效,调试期推荐
-# 或一次性覆盖安装:uv tool install --force --no-cache ~/ai/mlx-gen
+uv tool install --upgrade mlx-gen-jzg
+# 改本机源码时(仓库仍是 ~/ai/mlx-gen):
+cd ~/ai/mlx-gen && uv tool install --editable . --force
 # 复核(必须能列出 qwen21.edit 行):
 mlxgen capabilities --model ~/ai/models/Qwen-Image-2.1-bf16 --base-model qwen-image-2.1
 ```
@@ -276,8 +280,8 @@ opt-in 真跑用例:`BIGBOTART_CAPTION_E2E=1 pnpm vitest run apps/desktop/src/ma
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 设置页探测 `installed=false` | mlxgen 不在 PATH | `uv tool install --upgrade mlx-gen`;重开应用 |
-| 探测 `ready=false` 但 CLI 在 | `--help` 执行失败(版本不兼容) | `mlxgen --help` 手动看报错;`uv tool install --upgrade mlx-gen` |
+| 设置页探测 `installed=false` | mlxgen 不在 PATH | `uv tool install --upgrade mlx-gen-jzg`;重开应用 |
+| 探测 `ready=false` 但 CLI 在 | `--help` 执行失败(版本不兼容) | `mlxgen --help` 手动看报错;`uv tool install --upgrade mlx-gen-jzg` |
 | 提交成功但产物不存在(dry-run) | 未关 dry-run 或 demo 模式 | 设置「真实推理」+ `BIGBOTART_DRYRUN=0` |
 | 真实推理 `exit != 0` | 模型未下载 / 显存不足 | `mlxgen download --model <id>`;关视频槽位任务后重试 |
 | `exit 1: mlxgen download --model Qwen/Qwen-Image-Edit`(DownloadRequired) | 模型字段用了短别名 `qwen-image-edit`,被解析成全量 57.7GB 仓库(未下载) | Provider 已把短别名归一化为 `mlx-community/Qwen-Image-Edit-8bit`;新节点默认即为 8bit 仓库。⚠️ 不要在 64GB 机器下载全量版 |
@@ -287,7 +291,7 @@ opt-in 真跑用例:`BIGBOTART_CAPTION_E2E=1 pnpm vitest run apps/desktop/src/ma
 | 图片槽位一直排队 | 与视频任务互斥 | 等视频任务完成(FIFO) |
 | 模型下载行「Qwen3-VL 8B caption」点下载报 HF 错误 | 该仓库无 ModelScope 镜像,只能走 HF;本机 HF 直连不可达 | 在 LM Studio 里下载(下完 App 自动认「已就绪」),或设 `HF_ENDPOINT=<镜像>` 后用 `mlxgen download` 手动拉 |
 | `vision.caption` 报 `fetch failed` 且提示「未单独配置看图模型」 | 走的是**端点通道**而端点不可达(最常见:LM Studio 没在跑);⚠️ 若你刚在设置页配好「本地 mlxgen-caption」仍报这个,**说明应用主进程还是改动前启动的** | 重启应用(主进程代码只在启动时加载);或直接在设置页选「本地 · mlxgen-caption」(免 LM Studio) |
-| `vision.caption` 报「本地看图通道不可用」 | `mlxgen-caption` 命令缺失(**旧 venv 里没有这个 console script**,引擎 2026-10 才加)或本机没有 MLX 格式 Qwen3-VL | 在 mlx-gen 仓库 `uv tool install --editable .` 重装;或 `BIGBOTART_CAPTION_BIN=<可执行路径>`。App 已内置 shebang 回退(用 `mlxgen` 的解释器跑模块),若仍报此错说明 `mlxgen` 也不在 PATH |
+| `vision.caption` 报「本地看图通道不可用」 | `mlxgen-caption` 命令缺失(上游 `mlx-gen` 没有这条命令)或本机没有 MLX 格式 Qwen3-VL | `uv tool install --upgrade mlx-gen-jzg`;或 `BIGBOTART_CAPTION_BIN=<可执行路径>`。App 已内置 shebang 回退(用 `mlxgen` 的解释器跑模块),若仍报此错说明 `mlxgen` 也不在 PATH |
 | `vision.caption` 报「未产出文本」 | checkpoint 不是 MLX 格式 dense Qwen3-VL(torch 布局 / MoE),或输出被截断 | 换 `mlx-community` / `mlx-vlm` 转换过的仓库;报错里的 `do not map` 段会点名第一个不匹配的 key;截断则调大 `BIGBOTART_CAPTION_MAX_TOKENS` |
 | `vision.caption` 变慢 / 内存高 | 图片 token 预算过大(prefill 随其平方增长) | 调小 `BIGBOTART_CAPTION_MAX_PIXELS`(默认 640000 已接近 800×800) |
 
@@ -299,5 +303,5 @@ opt-in 真跑用例:`BIGBOTART_CAPTION_E2E=1 pnpm vitest run apps/desktop/src/ma
 - 注册: `packages/providers/src/registry.ts`(dry-run 默认;`BIGBOTART_DRYRUN=0` 反转)
 - 输出目录默认:`MLXGEN_DEFAULTS.outputDir`(`BIGBOTART_MLXGEN_OUTPUTS ?? ~/.bigbotart/outputs/images`)
 - 节点渲染:image-gen / image-edit / image-upscale 检查器在 `apps/desktop/src/renderer/src/pages/canvas/inspector/InspectorBody.tsx`;提交链路在 `CanvasPage.tsx` `runNode`
-- 安装提示:`apps/desktop/src/main/index.ts` `install-runtime`(mlxgen → `uv tool install --upgrade mlx-gen`)
+- 安装提示:`apps/desktop/src/main/runtime-install.ts`(mlxgen → `uv tool install --upgrade mlx-gen-jzg`;旧工具 `mlx-gen` 占入口时先卸载再重试)
 - 看图反推两条通道(§6.1):`apps/desktop/src/main/vision.ts`(通道编排 / 白名单 / 指令 / 回退)+ `apps/desktop/src/main/mlxgen-caption.ts`(命令解析含 shebang 回退 / checkpoint 发现 / spawn / 错误面);设置入口 `apps/desktop/src/renderer/src/pages/ToolModelsSection.tsx`,绑定字段 `ToolModelBinding.captionLocal`(`packages/shared/src/domain.ts`)

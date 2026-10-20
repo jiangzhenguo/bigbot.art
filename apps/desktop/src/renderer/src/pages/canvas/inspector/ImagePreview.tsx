@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { ImageFail } from '../../../components/SafeImage';
 import { ImageLightbox } from './ImageLightbox';
 
 interface ImagePreviewProps {
@@ -21,6 +22,7 @@ interface ImagePreviewProps {
  */
 export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: ImagePreviewProps) {
   const [full, setFull] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!full) return;
@@ -34,6 +36,7 @@ export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: Im
   /* 源图被换掉(切 Take / 换节点)时关掉全屏层:否则悬着一层显示旧图的覆盖层 */
   useEffect(() => {
     setFull(false);
+    setFailed(false);
   }, [src]);
 
   if (!src) {
@@ -58,13 +61,19 @@ export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: Im
           background: 'var(--surface-warm)',
         }}
       >
-        <img
-          src={src}
-          alt={alt}
-          title="点击全屏查看(可放大 / 双指缩放)"
-          style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'contain', cursor: 'zoom-in' }}
-          onClick={() => setFull(true)}
-        />
+        {failed ? (
+          <ImageFail style={{ maxHeight: 240 }} />
+        ) : (
+          <img
+            src={src}
+            alt={alt}
+            title="点击全屏查看(可放大 / 双指缩放)"
+            style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'contain', cursor: 'zoom-in' }}
+            onClick={() => setFull(true)}
+            onError={() => setFailed(true)}
+          />
+        )}
+        {failed ? null : (
         <button
           type="button"
           className="btn btn-s btn-sm"
@@ -75,6 +84,7 @@ export function ImagePreview({ src, alt = '图片预览', label, emptyHint }: Im
         >
           ⛶ 全屏
         </button>
+        )}
       </div>
       {full ? createPortal(<ImageLightbox src={src} alt={alt} onClose={() => setFull(false)} />, document.body) : null}
     </div>

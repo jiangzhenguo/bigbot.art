@@ -1092,3 +1092,14 @@ describe('submit · Qwen-Image-2.1-Turbo(8 步蒸馏)', () => {
     ).rejects.toThrow('不支持「指令编辑」');
   });
 });
+
+describe('spawn 失败', () => {
+  it('找不到 mlxgen 时记为失败,不变成未捕获异常', async () => {
+    const p = new MlXGenProvider({ dryRun: false, bin: '/no/such/mlxgen-bin', outputDir: '/tmp/bba-mlxgen-missing' });
+    const handle = await p.submit(req('generate', { prompt: 'x', model: 'm/z-8bit' }));
+    await new Promise((r) => setTimeout(r, 50));
+    const st = await p.status(handle);
+    expect(st.status).toBe('FAILED');
+    expect(st.error).toMatch(/找不到命令/);
+  });
+});

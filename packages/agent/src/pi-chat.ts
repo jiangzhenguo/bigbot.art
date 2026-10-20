@@ -12,6 +12,7 @@
 import { createModels, createProvider, type Context, type Message, type AssistantMessage, type ToolCall } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import type { LlmSource, AskOption } from '@bigbotart/shared';
+import { PLAN_APPROVE_LABEL, PLAN_REVISE_LABEL } from '@bigbotart/shared';
 import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
@@ -631,6 +632,17 @@ export function composePlainTextAskReply(reply: string): string {
  * @param nodeId 工具返回的结构化节点 id(有则拼进正文)
  * @param ok     工具是否成功(id 只在成功时才可信)
  */
+/** 多镜计划确认卡。选项固定,不让模型自己编「批准」文案。 */
+export function planReviewAsk(markdown: string): { question: string; options: AskOption[] } {
+  return {
+    question: markdown,
+    options: [
+      { label: PLAN_APPROVE_LABEL, sub: '允许提交计划覆盖的未出片镜头', recommended: true },
+      { label: PLAN_REVISE_LABEL, sub: '先不跑,改完计划再确认' },
+    ],
+  };
+}
+
 export function buildToolResultText(result: string, nodeId?: string, ok = true): string {
   if (!nodeId || !ok) return result;
   return (
@@ -1224,6 +1236,60 @@ export class PiChatSession {
         }
       }
 
+      // 多镜计划:plan.present 成功就暂停,同一批里的其它工具(尤其 engine.submit)先不执行。
+      // 失败则把错误喂回模型,其余工具照常跑(未满两镜时可以直接提交)。
+      // 失败清单只保留这一轮(plan.present 与其后的工具都算本轮)。
+      lastRoundFailures = [];
+      let planConsumedAssistant = false;
+      const planCall = calls.find((c) => c.name === 'plan.present');
+      if (planCall && !signal.aborted) {
+        const planArgs = (planCall.arguments ?? {}) as Record<string, unknown>;
+        const markdown = String(planArgs.markdown ?? '').trim();
+        const norm = (s: string) => s.replace(/\s+/g, '');
+        const repeated = !!this.lastAskQuestion && norm(this.lastAskQuestion) === norm(markdown);
+        calls.splice(calls.indexOf(planCall), 1);
+        messages.push(assistant);
+        planConsumedAssistant = true;
+        const pushPlanResult = (ok: boolean, text: string) => {
+          toolCalls.push({ name: 'plan.present', args: planArgs, ok, result: text });
+          if (!ok) lastRoundFailures.push({ name: 'plan.present', result: text });
+          messages.push({
+            role: 'toolResult' as const,
+            toolCallId: planCall.id,
+            toolName: planCall.rawName ?? 'plan.present',
+            content: [{ type: 'text' as const, text }],
+            isError: !ok,
+            timestamp: Date.now(),
+          } as never);
+        };
+        if (repeated) {
+          const nudge = params.text.trim().startsWith(PLAN_APPROVE_LABEL)
+            ? '该计划用户已点「按此执行」。不要再次 plan.present,直接 engine.submit 已批准的镜头。'
+            : '这张计划与刚才相同。用户若要求修改,请改写正文后再 plan.present,不要原样重交。';
+          pushPlanResult(false, nudge);
+          if (calls.length === 0) {
+            messages.push({ role: 'user', content: nudge, timestamp: Date.now() } as Message);
+            continue;
+          }
+        } else {
+          const req: ToolCallRequest = {
+            id: ++this.toolCallSeq,
+            method: 'tool',
+            params: { tool: 'plan.present', args: planArgs, projectId: params.projectId, canvasId: params.canvasId },
+          };
+          const res = this.onToolCall
+            ? await this.onToolCall(req)
+            : { id: req.id, error: { code: 'NO_BRIDGE', message: '工具桥未注入' } };
+          const tr = res.result ?? { ok: false, result: res.error?.message ?? '工具调用失败' };
+          pushPlanResult(tr.ok, tr.result);
+          if (tr.ok) {
+            this.lastAskQuestion = markdown;
+            return { reply: markdown, thinking: collectThinking(), toolCalls, ask: planReviewAsk(markdown) };
+          }
+          if (calls.length === 0) continue;
+        }
+      }
+
       // 敏感操作确认闸(结构兜底):未授权时一个都不执行,改发 ask.user 确认卡
       // —— 防模型绕过 prompt 直接 delete;图片下载另加一条:地址没在用户原文里出现过就先确认
       // 已授权过的签名(用户点过确认的同 name+args 操作)直接放行,不再二次拦截
@@ -1263,10 +1329,8 @@ export class PiChatSession {
       }
 
       // 执行每个工具调用(反向 RPC 到主进程)
-      messages.push(assistant);
-      /* 本轮失败清单先清空:只保留**最近一轮**的失败供下一轮判定
-         (拿累计值会误伤「上一轮失败、这一轮如实汇报」的正常收尾) */
-      lastRoundFailures = [];
+      // plan.present 若已把 assistant 写入消息,这里不能再推一次。
+      if (!planConsumedAssistant) messages.push(assistant);
       for (const call of calls) {
         const args = (call.arguments ?? {}) as Record<string, unknown>;
         const req: ToolCallRequest = {

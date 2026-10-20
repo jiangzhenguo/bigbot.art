@@ -1,0 +1,31 @@
+appId: art.bigbot.desktop
+productName: BigBotArt
+copyright: Copyright © 2026 姜振国
+electronVersion: 38.8.6
+asar: true
+# spawn 读不了 asar。Agent worker 必须解到 app.asar.unpacked。
+asarUnpack:
+  - "**/node_modules/@bigbotart/agent/dist/**"
+npmRebuild: false
+files:
+  - out/**/*
+  - package.json
+  - node_modules/**/*
+  - "!**/*.map"
+  - "!**/*.{ts,tsx}"
+  - "!**/{test,__tests__,tests}/**"
+mac:
+  category: public.app-category.graphics-design
+  icon: resources/icon.png
+  # 本机没有 Developer ID。ad-hoc 签名让这台 Mac 能打开;发给别人仍需右键打开。
+  # 不开 Hardened Runtime:没有证书时它会拦掉未签名的动态库,应用打得开却起不来。
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+dmg:
+  title: BigBotArt
+artifactName: ${productName}-${version}-${arch}.${ext}

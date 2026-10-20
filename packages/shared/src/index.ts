@@ -434,3 +434,4 @@ export * from './style-model.js';
 export * from './shot-duration.js';
 export * from './storyboard-materialize.js';
 export * from './skill-params.js';
+export * from './agent-task.js';

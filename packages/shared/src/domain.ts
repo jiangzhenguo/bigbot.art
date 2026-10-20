@@ -1108,6 +1108,21 @@ export interface ChatThreadListItem extends ChatThread {
   active?: boolean;
 }
 
+/** 对话 Agent 的一项任务(整表替换;同时至多一项 in_progress) */
+export type AgentTodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface AgentTodoItem {
+  content: string;
+  status: AgentTodoStatus;
+}
+
+/** 已交给用户、尚未点头的多镜计划 */
+export interface PendingShotPlan {
+  /** 提交计划时的未出片镜头 id(已排序) */
+  shotIds: string[];
+  markdown: string;
+}
+
 /** 单画布记忆:节点总结(切换画布时写入)+ 对话压缩摘要(/compact 生成,注入当前会话上下文) */
 export interface CanvasMemory {
   summary: string;
@@ -1128,6 +1143,12 @@ export interface CanvasMemory {
   activeSkillParams?: Record<string, string>;
   /** 🆕 当前活跃会话 id;缺省则用该画布唯一/默认 thread */
   activeThreadId?: string;
+  /** 当前画布的任务清单(todo.write 整表替换;每轮注入系统提示) */
+  todos?: AgentTodoItem[];
+  /** 多镜真跑前交给用户确认的计划;点头后清空 */
+  pendingShotPlan?: PendingShotPlan;
+  /** 用户已点「按此执行」的未出片镜头 id */
+  approvedShotIds?: string[];
 }
 
 /** 分层记忆(MemGPT 式):core 核心记忆 + 画布总结 + recall 对话流 + archival 归档 */

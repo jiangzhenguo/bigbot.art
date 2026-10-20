@@ -260,7 +260,7 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
   /* ── 步骤 2:mlxgen 安装(install-runtime 真实执行 uv tool install)── */
   const handleMgenInstall = async () => {
     if (mgen.state === 'busy') return;
-    setMgen({ state: 'busy', message: '安装中…(uv tool install mlx-gen,可能数分钟)' });
+    setMgen({ state: 'busy', message: '安装中…(uv tool install mlx-gen-jzg,可能数分钟)' });
     let res: { ok: boolean; message: string } | null = null;
     try {
       res = await window.bigbotart.installRuntime('mlxgen');
@@ -275,7 +275,7 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
         /* 忽略探测失败 */
       }
     } else {
-      setMgen({ state: 'idle', message: res?.message ?? '安装失败 · 请手动执行 uv tool install --upgrade mlx-gen' });
+      setMgen({ state: 'idle', message: res?.message ?? '安装失败 · 请手动执行 uv tool install --upgrade mlx-gen-jzg' });
     }
   };
 

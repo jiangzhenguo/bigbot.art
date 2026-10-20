@@ -545,7 +545,7 @@ export function checkToolingFor(n: NormalizedVideoPost, t: VideoPostTooling): st
     if (n.faceModel === 'codeformer' && !t.codeformerWeight) return 'CodeFormer 权重未就绪:~/ai/weights/codeformer.pth 不存在';
   }
   if (n.doSeedVr) {
-    if (!t.mlxgen) return 'mlxgen 未就绪:SeedVR2 视频超分需要 mlxgen(在 mlx-gen 仓库执行 uv tool install --editable .)';
+    if (!t.mlxgen) return 'mlxgen 未就绪:SeedVR2 视频超分需要 mlxgen(uv tool install --upgrade mlx-gen-jzg)';
     if (n.seedvrModel === SEEDVR2_VIDEO_MODEL && !t.seedvr2) {
       return `SeedVR2 权重未就绪:请在设置页下载 ${SEEDVR2_VIDEO_MODEL},或执行 mlxgen download --model ${SEEDVR2_VIDEO_MODEL}`;
     }

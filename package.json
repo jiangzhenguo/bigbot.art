@@ -13,6 +13,7 @@
     "dev": "env -u ELECTRON_RUN_AS_NODE BIGBOTART_DRYRUN=0 pnpm --filter @bigbotart/desktop dev",
     "dev:dry": "env -u ELECTRON_RUN_AS_NODE BIGBOTART_DRYRUN=1 pnpm --filter @bigbotart/desktop dev",
     "build": "pnpm --filter @bigbotart/desktop build",
+    "dist:mac": "node scripts/dist-mac.mjs",
     "build:packages": "pnpm -r --filter './packages/*' build",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",

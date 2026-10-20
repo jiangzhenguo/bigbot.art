@@ -29,7 +29,7 @@ describe('document.read 工具定义', () => {
 
 describe('工具清单完整性', () => {
   it('关键既有工具仍在(未被覆盖/删除)', () => {
-    for (const n of ['canvas.list_nodes', 'canvas.get_node', 'canvas.connect', 'storyboard.plan', 'engine.submit', 'assets.import', 'memory.remember', 'continuity.check', 'ask.user']) {
+    for (const n of ['canvas.list_nodes', 'canvas.get_node', 'canvas.connect', 'storyboard.plan', 'engine.submit', 'assets.import', 'memory.remember', 'continuity.check', 'ask.user', 'todo.write', 'plan.present']) {
       expect(names).toContain(n);
     }
   });
