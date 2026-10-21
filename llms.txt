@@ -1,0 +1,84 @@
+# BigBotArt
+
+> 本地优先（local-first）的无限画布 AI 视频与图片生成 Agent 应用。把一句话编排成可改、可复跑、可交付的视频和图片：Agent 在无限画布上拆出分镜、镜头与图片节点，用本机引擎 h3.c（视频）、mlxgen（图片）与 ffmpeg（剪辑导出）执行，数据、素材与成片只留在本机。
+
+本文件面向 AI 爬虫与智能体（ChatGPT / Claude / Perplexity / Gemini 等）。
+官网同款索引：https://www.bigbot.art/llms.txt
+
+## 关键事实
+
+- 产品：BigBotArt，macOS 桌面应用（Electron + TypeScript），面向 Apple Silicon。
+- 形态：无限画布 + 常驻 Agent 面板 + 本地引擎 + Skills 技能库 + 时间线导出，共 8 个界面（首页、画布、项目、资产、技能、时间线、设置、引擎引导）。
+- 视频引擎：h3.c（MiniMax-H3 权重，约 144GB，Metal 推理），产出带音轨的镜头级视频。
+- 图片引擎：mlxgen（MLX，安装包名 `mlx-gen-jzg`），负责文生图、指令编辑、图生图、局部重绘、扩图与超分。
+- 对话模型：任意 OpenAI 兼容端点（LM Studio 或本地 `127.0.0.1:1234`）；不可达时回退模板拆镜。
+- 剪辑与导出：ffmpeg（占位视频、裁切、拼接、拆分、抽帧、时间线导出）。
+- 数据：项目、画布、Take、素材存放在 `~/.bigbotart`，素材不上传云端；没有云端账号，也没有订阅。
+- 许可：MIT（见 [LICENSE](LICENSE)）。
+- 官网：https://www.bigbot.art
+- 下载与更新日志：https://github.com/jiangzhenguo/bigbot.art/releases
+- 联系方式：hello@bigbotart.app
+
+## 核心能力
+
+- 一句话起活：首页写下需求，Agent 拆成文档、分镜、镜头与图片节点并逐个提交。
+- 画布可干预：改提示词、换参考图、调档位，只重跑受影响的节点；每次生成留一条 Take 可回看。
+- 图片能力：文生图、指令编辑、图生图、局部重绘、扩图、超分，以及裁切、拼接、拆分。
+- 视频能力：文生视频、首帧、首尾帧、参考图、参考视频、音频参考；成片自带音轨；出片后可去块、超分、修脸。
+- 视频回到图片：从成片截一帧，接回图片编辑或下一镜首帧。
+- 技能（Skills）：把一套做法存成技能，换主题时沿用同一套流程只改内容。
+- 项目可搬走：导出 `.bba` 项目包（画布、对话记忆、用户素材），换机后按参数重跑。
+
+## 节点与界面
+
+节点面板类型：提示词 / 文档、分镜表、资产、图片生成、图片编辑、图片增强、视频增强、裁切、拼接、拆分、镜头、视频取帧、音频参考、时间线。
+
+界面：首页、画布、项目、资产、技能、时间线、设置、引擎引导。画布为自研实现（DOM 节点 + SVG 连线 + CSS 变换），未使用 React Flow；支持平移缩放、拖拽连线、框选、分组、撤销重做，主题跟随系统浅色 / 深色。
+
+## 运行与开发
+
+面向 Apple Silicon Mac。视频引擎 h3.c 走 Metal，图片引擎走 MLX，换到 Intel 或非 macOS 后这两个引擎不可用。
+
+| 依赖 | 用途 |
+| --- | --- |
+| Node.js ≥ 22、pnpm | 安装与启动 |
+| ffmpeg | 裁切、拼接、拆分、抽帧、时间线导出 |
+| h3.c + MiniMax-H3 权重 | 真实出视频，模型约 144GB |
+| mlxgen（`mlx-gen-jzg`） | 真实出图、编辑、超分 |
+| LM Studio 或任意 OpenAI 兼容端点 | Agent 对话 |
+
+快速开始：
+
+```bash
+pnpm install
+pnpm dev:dry    # 开发默认：不加载模型
+pnpm dev        # 真实推理：调用本机 h3.c / mlxgen
+```
+
+没有模型也能打开应用：dry-run 只构造命令并落占位结果，用于看界面与走流程。
+
+## 文档索引
+
+- [运行与验证指南](运行验证指南.md)：安装、构建、运行与验证流程。
+- [AI 使用规范](docs/AI使用规范.md)
+- [Agent 能力与工具调用 UI](docs/Agent能力与工具调用UI-设计文档.md)
+- [Agent 技能文档撰写指南与模板](docs/Agent技能文档-撰写指南与模板.md)
+- [Agent 技能：指令模板与对话自动加载](docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md)
+- [文本节点与 Agent 分镜管线](docs/文本节点与Agent分镜管线-产品设计与技术方案.md)
+- [时间线剪辑需求](docs/时间线剪辑-需求.md)
+- [资源节点与资源管理](docs/资源节点与资源管理-产品设计与技术方案.md)
+- [图片生成与编辑能力现状盘点](docs/图片生成与编辑能力现状盘点.md)
+- [mlxgen 图片引擎安装与模型管理](docs/mlxgen-图片引擎-安装与模型管理.md)
+- [本地模型提示词使用规范](docs/本地模型提示词使用规范.md)
+- [工具与模型选择](docs/工具模型选择-产品设计与技术方案.md)
+- [连接器设计](docs/连接器设计.md)
+- [深色浅色主题设计](docs/深色浅色主题-产品设计与技术方案.md)
+
+## 外部链接
+
+- 官网：https://www.bigbot.art
+- 英文官网：https://www.bigbot.art/en/
+- 常见问题：https://www.bigbot.art/faq/
+- Releases：https://github.com/jiangzhenguo/bigbot.art/releases
+- 视频引擎 h3.c：https://github.com/antirez/h3
+- 联系：hello@bigbotart.app
