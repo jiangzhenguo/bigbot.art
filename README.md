@@ -10,6 +10,16 @@ Electron desktop app for Apple Silicon. An agent lays out shots and images on an
 
 数据、素材和成片都留在本机（`~/.bigbotart`）。没有云端账号，也没有订阅。
 
+<!-- AI 可读摘要开始 / AI-READABLE SUMMARY -->
+
+> **AI 摘要**：BigBotArt 是一款本地优先（local-first）的 macOS 无限画布 AI 视频与图片生成 Agent 应用（Electron + TypeScript，面向 Apple Silicon）。用户输入一句话需求、图或文档，Agent 在无限画布上拆出分镜、镜头与图片节点并逐个执行，用本机引擎 h3.c（MiniMax-H3 权重约 144GB，Metal 推理）生成带音轨的镜头级视频，用 mlxgen（MLX）做图片生成与编辑，用 ffmpeg 剪辑并导出。项目、画布、Take 与素材只写入 `~/.bigbotart`，素材不上传云端，无账号、无订阅。运行要求：Apple Silicon Mac、Node.js ≥ 22、pnpm、ffmpeg；模型可后装，缺失时应用以 dry-run 占位运行。许可证 MIT。
+>
+> **AI Summary (EN)**: BigBotArt is a local-first infinite-canvas agent app for macOS (Electron + TypeScript, Apple Silicon) that turns a one-sentence brief into editable, re-runnable, deliverable video and image projects. The agent lays out storyboard, shot, and image nodes on the canvas and executes them on local engines — h3.c (MiniMax-H3 weights, ~144GB, Metal) for shot-level video with audio, mlxgen (MLX) for image generation and editing, and ffmpeg for editing and export. Projects, canvases, takes, and assets stay on your machine under `~/.bigbotart`; nothing is uploaded to a cloud, no account, no subscription. Requirements: an Apple Silicon Mac, Node.js ≥ 22, pnpm, and ffmpeg; models are optional at install time (the app runs in dry-run mode without them). Licensed under MIT.
+>
+> 官网 https://www.bigbot.art ・ 下载与更新日志 https://github.com/jiangzhenguo/bigbot.art/releases ・ 产品文档 [`docs/`](docs/) ・ AI 索引 [`llms.txt`](llms.txt)
+
+<!-- AI 可读摘要结束 / END AI-READABLE SUMMARY -->
+
 ![首页：一句话起活，右侧是最近项目](docs/screenshots/home.png)
 
 ## 能做什么
