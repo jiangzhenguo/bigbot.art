@@ -8,6 +8,7 @@ import {
   directDownstreamGenIds,
   allDownstreamGenIds,
   pickCascadeTargets,
+  shouldKickCascade,
 } from '../cascade.js';
 import type { CanvasNode, Edge } from '../types.js';
 
@@ -89,5 +90,34 @@ describe('pickCascadeTargets · 接力目标选择', () => {
     const edges = [edge('u', 'd1'), edge('u', 'd2')];
     const busy = (id: string) => id === 'd1';
     expect(pickCascadeTargets('u', nodes, edges, { isBusy: busy })).toEqual(['d2']);
+  });
+});
+
+describe('shouldKickCascade · 进画布不得误接力(猫侠传事故)', () => {
+  it('queued → succeeded:真正完成,应接力', () => {
+    expect(shouldKickCascade('queued', 'succeeded')).toBe(true);
+  });
+
+  it('running → succeeded:真正完成,应接力', () => {
+    expect(shouldKickCascade('running', 'succeeded')).toBe(true);
+  });
+
+  it('undefined → succeeded:重挂载首次看见历史成功任务,不接力', () => {
+    expect(shouldKickCascade(undefined, 'succeeded')).toBe(false);
+  });
+
+  it('succeeded → succeeded:无迁移,不接力', () => {
+    expect(shouldKickCascade('succeeded', 'succeeded')).toBe(false);
+  });
+
+  it('failed/cancelled → succeeded:不是在途完成,不接力', () => {
+    expect(shouldKickCascade('failed', 'succeeded')).toBe(false);
+    expect(shouldKickCascade('cancelled', 'succeeded')).toBe(false);
+  });
+
+  it('非成功终态一律不接力', () => {
+    expect(shouldKickCascade('queued', 'running')).toBe(false);
+    expect(shouldKickCascade('running', 'failed')).toBe(false);
+    expect(shouldKickCascade(undefined, 'running')).toBe(false);
   });
 });

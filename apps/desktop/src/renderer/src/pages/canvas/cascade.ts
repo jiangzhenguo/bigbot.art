@@ -73,3 +73,22 @@ export function pickCascadeTargets(
     return !hasResult || n?.stale === true;
   });
 }
+
+/**
+ * 队列状态迁移是否该触发接力(cascadeKick)。
+ *
+ * 只认「从在途态真正转入成功」——`queued|running → succeeded`。
+ *
+ * ⚠️ **进画布/回首页再进会重挂 CanvasPage**,`prevJobState` 清空后首次 poll
+ * 会把会话里已成功的历史任务全当成「刚完成」(prev=undefined → succeeded)。
+ * 若此时也接力,下游无产物的镜头会被自动入队 —— 用户视角就是
+ * 「点开项目就莫名开始生成视频」(2026-10-22 猫侠传)。
+ * 首次看见终态只做 UI 回填,不接力。
+ */
+export function shouldKickCascade(
+  prev: string | undefined,
+  next: string,
+): boolean {
+  if (next !== 'succeeded') return false;
+  return prev === 'queued' || prev === 'running';
+}

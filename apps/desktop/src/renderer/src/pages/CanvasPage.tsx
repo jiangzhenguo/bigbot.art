@@ -42,7 +42,7 @@ import {
 } from './canvas/node-mapping';
 import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from './canvas/connectors';
 import { ensureToolModels, fetchAccelDefaultShotConfig } from './canvas/tool-models-store';
-import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets } from './canvas/cascade';
+import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets, shouldKickCascade } from './canvas/cascade';
 import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
 import { basenameOf, thumbSrc, previewUrlOf, isVideoPath, isAudioPath } from './canvas/media';
 import { latestTakeResultByNode } from './canvas/inspector/useTakeResult';
@@ -2186,8 +2186,12 @@ export default function CanvasPage({
               );
             }
           }
-          // 接力:上游成功后,直接下游生成节点(无产物/已 stale)依次送入队列,整条链递归跑到尾
-          cascadeKickRef.current?.(j.nodeId, list, freshTail);
+          // 接力:只认「在途 → 成功」的真实迁移。进画布/回首页再进会重挂本组件,
+          // prevJobState 清空后首次 poll 会把历史 succeeded 当成刚完成 —— 若不拦,
+          // 下游无产物镜头会被自动入队(2026-10-22 猫侠传:点开项目就开跑视频)。
+          if (shouldKickCascade(prev, j.status)) {
+            cascadeKickRef.current?.(j.nodeId, list, freshTail);
+          }
         } else if (j.status === 'failed') {
           setNodes((ns) => ns.map((n) => (n.id === j.nodeId ? { ...n, badge: `失败 · ${j.error ?? '未知错误'}`, running: false } : n)));
         } else if (j.status === 'running') {
