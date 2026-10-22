@@ -712,10 +712,25 @@ export interface Asset {
   /** 来源节点 id(仅 source='product',用于反查画布引用与定位) */
   originNodeId?: string;
   tags: string[];
+  /**
+   * 资源文案:用户手写提示词,或 vision.caption 反推落盘的描述。
+   * 画布资源节点经 canvas.get_node / assets.get 可读;Agent 据此理解画面而不必每轮重看图。
+   */
+  caption?: string;
   /** 软删除标记(进回收站);list / list(projectId) 不再返回 */
   deletedAt?: string;
   createdAt: string;
 }
+
+/** 资源更新补丁(重命名 / 文案 / 分类 / 归属 / 标签) */
+export type AssetUpdatePatch = {
+  name?: string;
+  /** 传空字符串 = 清空文案 */
+  caption?: string | null;
+  categoryId?: string | null;
+  projectId?: string | null;
+  tags?: string[];
+};
 
 /** 媒体类型(资源节点检查器「媒体信息」面板据此决定显示哪些字段) */
 export type MediaKind = 'image' | 'video' | 'audio' | 'document';

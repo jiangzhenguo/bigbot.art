@@ -14,6 +14,7 @@ import { ImageGenInspector } from './ImageGenInspector';
 import { ImageEditInspector } from './ImageEditInspector';
 import { MediaInfoPanel } from './MediaInfoPanel';
 import { AssetInspector } from './AssetInspector';
+import { SaveToLibraryButton } from './SaveToLibraryButton';
 
 /** 视频增强进行中的「取消」。成功后由画布收尾提示;这里只在主进程拒绝时提示。 */
 export function VideoPostCancelButton({
@@ -88,6 +89,8 @@ export interface InspectorBodyProps {
   onPlanStoryboard?: (docNode: CanvasNode) => void;
   /** asset 节点:「从资源库选择…」→ 打开资产选择弹层 */
   onOpenAssetPicker?: (nodeId: string) => void;
+  /** 资产库改名/文案后刷新画布侧 assetsList */
+  onRefreshAssets?: () => void;
 }
 
 export function InspectorBody({
@@ -113,12 +116,19 @@ export function InspectorBody({
   onResyncStoryboard,
   onPlanStoryboard,
   onOpenAssetPicker,
+  onRefreshAssets,
 }: InspectorBodyProps) {
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const setData = (patch: Record<string, unknown> | Partial<TimelineData>) => {
     onCommitEdit?.(`修改「${node.title}」参数`);
     setNodes((ns) => ns.map((n) => (n.id === node.id ? { ...n, data: { ...(n.data ?? {}), ...patch } } : n)));
+  };
+  const setTitle = (title: string) => {
+    const t = title.trim();
+    if (!t || t === node.title) return;
+    onCommitEdit?.(`重命名「${node.title}」→「${t}」`);
+    setNodes((ns) => ns.map((n) => (n.id === node.id ? { ...n, title: t } : n)));
   };
   const info = infoMap[node.id];
   const setInfo = (patch: Partial<{ t: string; img: string | null; meta: Array<[string, string]> }>) => {
@@ -184,8 +194,11 @@ export function InspectorBody({
         <AssetInspector
           node={node}
           setData={setData}
+          setTitle={setTitle}
           toastMsg={toastMsg}
           assetCache={assetCache}
+          assetsList={assetsList}
+          onAssetsChanged={onRefreshAssets}
           onOpenAssetPicker={onOpenAssetPicker}
           meta={info?.meta}
         />
@@ -201,6 +214,7 @@ export function InspectorBody({
           runNode={runNode}
           toastMsg={toastMsg}
           onSelectTake={selectImageTake}
+          onSaved={onRefreshAssets}
         />
       );
     }
@@ -217,6 +231,7 @@ export function InspectorBody({
           runNode={runNode}
           toastMsg={toastMsg}
           onSelectTake={selectImageTake}
+          onSaved={onRefreshAssets}
         />
       );
     }
@@ -229,6 +244,12 @@ export function InspectorBody({
           {/* 产物预览置顶:此前该检查器完全没有预览块,产物只能靠底部 Take 历史看;
               统一到与其它图片节点一致 —— 点中节点即见增强结果 */}
           <ImagePreview src={upscaleResult ? previewUrlOf(upscaleResult) : null} label="增强结果" emptyHint="运行后显示增强结果" />
+          <SaveToLibraryButton
+            projectId={projectId}
+            items={[{ nodeId: node.id, path: upscaleResult, name: node.title, caption: String(d.prompt ?? '') }]}
+            toastMsg={toastMsg}
+            onSaved={onRefreshAssets}
+          />
           <div>
             <Lbl>放大倍数</Lbl>
             <div className="row g6">
@@ -318,6 +339,14 @@ export function InspectorBody({
               <div className="mono mut" style={{ fontSize: 11, marginTop: 4 }}>
                 {d.width && d.height ? `${d.width}×${d.height}` : ''}
                 {d.durationSec ? ` · ${d.durationSec}s` : ''}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <SaveToLibraryButton
+                  projectId={projectId}
+                  items={[{ nodeId: node.id, path: outPath, name: node.title }]}
+                  toastMsg={toastMsg}
+                  onSaved={onRefreshAssets}
+                />
               </div>
             </div>
           ) : srcPath ? (
@@ -527,7 +556,7 @@ export function InspectorBody({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* 产物预览置顶:点中节点即可看到裁剪结果(未生成时回退源图),
               不必先滚过目标画幅/锚点这些参数 */}
-          <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} />
+          <CropTakePreview node={node} projectId={projectId} srcFallback={cropSrc} toastMsg={toastMsg} onSaved={onRefreshAssets} />
           <div>
             <Lbl>目标画幅</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -580,6 +609,12 @@ export function InspectorBody({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* 产物预览置顶:点中节点即见拼接结果,不必先滚过拼接方式/列数/间距 */}
           <ImagePreview src={outPath ? previewUrlOf(outPath) : null} label="拼接结果" emptyHint="运行后显示拼接结果" />
+          <SaveToLibraryButton
+            projectId={projectId}
+            items={[{ nodeId: node.id, path: outPath, name: node.title }]}
+            toastMsg={toastMsg}
+            onSaved={onRefreshAssets}
+          />
           <div>
             <Lbl>拼接方式</Lbl>
             <div className="row g6" style={{ flexWrap: 'wrap' }}>
@@ -686,6 +721,15 @@ export function InspectorBody({
                 ))}
               </div>
               <div className="mut" style={{ fontSize: 11, marginTop: 4 }}>下游取片:从本节点连出时在「取第 N 片」里选;不选默认第 1 片</div>
+              <div style={{ marginTop: 8 }}>
+                <SaveToLibraryButton
+                  projectId={projectId}
+                  label="全部存入资源库"
+                  items={pieces.map((p, i) => ({ nodeId: node.id, path: p, name: `${node.title} · 片${i + 1}` }))}
+                  toastMsg={toastMsg}
+                  onSaved={onRefreshAssets}
+                />
+              </div>
             </div>
           ) : (
             <ImagePreview src={splitSrc ? previewUrlOf(splitSrc) : null} label="源图预览" emptyHint="运行后显示切片结果 · 未运行时显示源图" />

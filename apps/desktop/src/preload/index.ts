@@ -60,8 +60,16 @@ const api: BigBotArtApi = {
   // 🆕 媒体信息按需探测(资源节点检查器;只读,不回写资产库)
   probeMedia: (path: string, kind?: MediaKind) => ipcRenderer.invoke('probe-media', path, kind),
   deleteAsset: (id: string) => ipcRenderer.invoke('delete-asset', id),
-  updateAsset: (id: string, patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) =>
-    ipcRenderer.invoke('update-asset', id, patch),
+  updateAsset: (
+    id: string,
+    patch: {
+      name?: string;
+      caption?: string | null;
+      categoryId?: string | null;
+      projectId?: string | null;
+      tags?: string[];
+    },
+  ) => ipcRenderer.invoke('update-asset', id, patch),
   listAssetCategories: () => ipcRenderer.invoke('list-asset-categories'),
   createAssetCategory: (name: string, projectId?: string) => ipcRenderer.invoke('create-asset-category', name, projectId),
   renameAssetCategory: (id: string, name: string) => ipcRenderer.invoke('rename-asset-category', id, name),
@@ -70,8 +78,11 @@ const api: BigBotArtApi = {
   listTrash: () => ipcRenderer.invoke('list-trash'),
   restoreAsset: (id: string) => ipcRenderer.invoke('restore-asset', id),
   emptyTrash: () => ipcRenderer.invoke('empty-trash'),
-  archiveProducts: (input: { projectId: string; items: Array<{ nodeId: string; path: string }>; categoryId?: string }) =>
-    ipcRenderer.invoke('archive-products', input),
+  archiveProducts: (input: {
+    projectId: string;
+    items: Array<{ nodeId: string; path: string; name?: string; caption?: string }>;
+    categoryId?: string;
+  }) => ipcRenderer.invoke('archive-products', input),
   listArchivableProducts: (projectId: string) => ipcRenderer.invoke('list-archivable-products', projectId),
   listSkills: () => ipcRenderer.invoke('list-skills'),
   saveSkill: (input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) =>

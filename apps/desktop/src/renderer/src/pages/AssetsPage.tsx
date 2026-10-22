@@ -139,7 +139,7 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
       if (mtype && a.kind !== mtype) return false;
       if (selTags.length && !selTags.every((t) => (a.tags ?? []).includes(t))) return false;
       if (needle) {
-        const hay = `${a.name} ${a.id} ${(a.tags ?? []).join(' ')}`.toLowerCase();
+        const hay = `${a.name} ${a.id} ${a.caption ?? ''} ${(a.tags ?? []).join(' ')}`.toLowerCase();
         if (!hay.includes(needle)) return false;
       }
       return true;
@@ -223,7 +223,13 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
     await load();
   };
 
-  const updateSel = async (patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }): Promise<boolean> => {
+  const updateSel = async (patch: {
+    name?: string;
+    caption?: string | null;
+    categoryId?: string | null;
+    projectId?: string | null;
+    tags?: string[];
+  }): Promise<boolean> => {
     if (!sel) return false;
     const res = await window.bigbotart.updateAsset(sel, patch).catch(() => ({ ok: false as const, error: t('更新失败') }));
     if (!res.ok) toast(res.error ?? t('更新失败'));
@@ -265,7 +271,7 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
   };
   const confirmArchive = async () => {
     if (!viewPid) return;
-    const items = archItems.filter((i) => archSel.has(i.nodeId)).map((i) => ({ nodeId: i.nodeId, path: i.path }));
+    const items = archItems.filter((i) => archSel.has(i.nodeId)).map((i) => ({ nodeId: i.nodeId, path: i.path, name: i.name }));
     if (!items.length) return;
     const res = await window.bigbotart
       .archiveProducts({ projectId: viewPid, items, categoryId: archCat || undefined })

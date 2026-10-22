@@ -70,6 +70,8 @@ interface InspectorPaneProps {
   running?: boolean;
   /** asset 节点:「从资源库选择…」→ 打开资产选择弹层 */
   onOpenAssetPicker?: (nodeId: string) => void;
+  /** 资产库改名/文案后刷新画布侧 assetsList */
+  onRefreshAssets?: () => void;
 }
 
 export function InspectorPane({
@@ -106,6 +108,7 @@ export function InspectorPane({
   onRemoveEdge,
   onRerunSelected,
   onOpenAssetPicker,
+  onRefreshAssets,
   running,
 }: InspectorPaneProps) {
   return (
@@ -171,6 +174,7 @@ export function InspectorPane({
               onOpenTimelinePage={onOpenTimelinePage}
               onRemoveEdge={onRemoveEdge}
               onOpenAssetPicker={onOpenAssetPicker}
+              onRefreshAssets={onRefreshAssets}
             />
             {/* 「仅重跑该节点」只对**有生成任务**的节点有意义。
                 asset(资源)节点是纯引用节点:没有推理/后处理可跑(runNode 里没有对应分支,

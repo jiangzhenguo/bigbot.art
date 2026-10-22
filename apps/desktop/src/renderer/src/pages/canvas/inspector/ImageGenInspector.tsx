@@ -15,6 +15,7 @@ import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { AspectPresets, SeedEditor, StepsGuidanceField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
+import { SaveToLibraryButton } from './SaveToLibraryButton';
 
 export interface ImageGenInspectorProps {
   node: CanvasNode;
@@ -24,10 +25,12 @@ export interface ImageGenInspectorProps {
   runNode: (nodeId: string) => void;
   toastMsg: (m: string) => void;
   onSelectTake?: (t: { id: string; attempt: number; status: string; resultPath?: string }) => void;
+  /** 入库后刷新画布侧资产清单 */
+  onSaved?: () => void;
 }
 
 export function ImageGenInspector(p: ImageGenInspectorProps) {
-  const { node, setData, jobs, projectId, runNode, toastMsg, onSelectTake } = p;
+  const { node, setData, jobs, projectId, runNode, toastMsg, onSelectTake, onSaved } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   // 未显式选模型时显示缺省解析结果(设置页工具模型 > 内置默认;2026-09-29 v1)
   // ⚠️ 必须用订阅式 useToolModels(2026-10-14):getToolModelsSync 冷启动时缓存未加载,
@@ -64,14 +67,6 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
     if (!repo) { toastMsg(`当前为自定义模型 ${model},请到设置页下载`); return; }
     void window.bigbotart.mlxgenDownload(repo).then((r) => toastMsg(r.ok ? `已开始下载 ${repo} · 完成后点重新生成` : `下载启动失败:${r.error ?? ''}`));
   };
-  const onArchive = () => {
-    if (!projectId || !resultPath) { toastMsg('暂无产物可入库'); return; }
-    void window.bigbotart
-      .archiveProducts({ projectId, items: [{ nodeId: node.id, path: resultPath }] })
-      .then((r) => toastMsg(r.ok ? `已归档 ${r.assets.length} 项到资产库` : `归档失败:${r.error ?? ''}`))
-      .catch(() => toastMsg('归档失败'));
-  };
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <GenStatePanel
@@ -89,7 +84,12 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
           <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
           <ImagePreview src={previewUrlOf(resultPath)} label="" />
           <div className="row g6">
-            <button className="btn btn-s btn-sm" data-od-id="cta-archive" type="button" onClick={onArchive}>作为素材入库</button>
+            <SaveToLibraryButton
+              projectId={projectId}
+              items={[{ nodeId: node.id, path: resultPath, name: node.title, caption: prompt }]}
+              toastMsg={toastMsg}
+              onSaved={onSaved}
+            />
           </div>
         </div>
       ) : null}

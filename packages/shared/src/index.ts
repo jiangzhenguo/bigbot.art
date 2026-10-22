@@ -130,10 +130,10 @@ export interface BigBotArtApi {
   probeMedia(path: string, kind?: import('./domain').MediaKind): Promise<import('./domain').MediaInfo>;
   /** 软删除 → 回收站(文件移入 trash,7 天后清理);被画布引用时返回引用列表供前端展示警告 */
   deleteAsset(id: string): Promise<{ ok: boolean; error?: string; refs?: import('./domain').AssetRef[] }>;
-  /** 资源更新:重命名 / 改分类(null=未分类) / 改归属(null=总资源库) / 改标签 */
+  /** 资源更新:重命名 / 文案 caption / 改分类(null=未分类) / 改归属(null=总资源库) / 改标签 */
   updateAsset(
     id: string,
-    patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] },
+    patch: import('./domain').AssetUpdatePatch,
   ): Promise<{ ok: boolean; error?: string }>;
   /** 分类字典(项目分类 + 全局分类;过滤由渲染层按 projectId 做) */
   listAssetCategories(): Promise<import('./domain').AssetCategory[]>;
@@ -147,10 +147,10 @@ export interface BigBotArtApi {
   listTrash(): Promise<import('./domain').Asset[]>;
   restoreAsset(id: string): Promise<{ ok: boolean; error?: string }>;
   emptyTrash(): Promise<{ ok: boolean }>;
-  /** 画布产物归档:复制产物文件进资产库并登记(source='product',归入 projectId) */
+  /** 画布产物归档:复制产物文件进资产库并登记(source='product',归入 projectId)。name/caption 可选,缺省用文件名、不写文案 */
   archiveProducts(input: {
     projectId: string;
-    items: Array<{ nodeId: string; path: string }>;
+    items: Array<{ nodeId: string; path: string; name?: string; caption?: string }>;
     categoryId?: string;
   }): Promise<{ ok: boolean; assets: import('./domain').Asset[]; error?: string }>;
   /** 列项目画布中「有产物」的节点(「从画布产物导入」弹层的候选项) */

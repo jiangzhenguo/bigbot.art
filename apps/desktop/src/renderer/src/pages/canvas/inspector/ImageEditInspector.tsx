@@ -18,6 +18,7 @@ import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutputResolutionField, OutputSizeField, OutpaintPads, MaskField, ActionBar } from './image-ui';
 import { previewUrlOf } from '../media';
+import { SaveToLibraryButton } from './SaveToLibraryButton';
 
 export interface ImageEditInspectorProps {
   node: CanvasNode;
@@ -31,6 +32,8 @@ export interface ImageEditInspectorProps {
   runNode: (nodeId: string) => void;
   toastMsg: (m: string) => void;
   onSelectTake?: (t: { id: string; attempt: number; status: string; resultPath?: string }) => void;
+  /** 入库后刷新画布侧资产清单 */
+  onSaved?: () => void;
 }
 
 const MODE_META: Array<{ key: string; label: string; mono: string }> = [
@@ -377,7 +380,7 @@ export function inspectorCardVisibility(args: {
 }
 
 export function ImageEditInspector(p: ImageEditInspectorProps) {
-  const { node, setData, jobs, projectId, nodes, assetCache, assetsList = [], runNode, toastMsg, onSelectTake } = p;
+  const { node, setData, jobs, projectId, nodes, assetCache, assetsList = [], runNode, toastMsg, onSelectTake, onSaved } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'instruction');
   // 未显式选模型时显示缺省解析结果(按当前 mode 对应的能力;2026-09-29 v1)
@@ -455,14 +458,6 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
     } else {
       setData({ mode: m });
     }
-  };
-
-  const onArchive = () => {
-    if (!projectId || !resultPath) { toastMsg('暂无产物可入库'); return; }
-    void window.bigbotart
-      .archiveProducts({ projectId, items: [{ nodeId: node.id, path: resultPath }] })
-      .then((r) => toastMsg(r.ok ? `已归档 ${r.assets.length} 项到资产库` : `归档失败:${r.error ?? ''}`))
-      .catch(() => toastMsg('归档失败'));
   };
 
   // ── 输入图来源解析(Asset 直绑 > shot 抽帧 > 图片直通) ──
@@ -571,7 +566,12 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
           <div className="f-sec-h"><span className="lbl">产物预览</span><span className="mut" style={{ fontSize: 10.5 }}>{hasTake ? 'Take · 可点下方历史切换' : ''}</span></div>
           <ImagePreview src={previewUrlOf(resultPath)} label="" />
           <div className="row g6">
-            <button className="btn btn-s btn-sm" data-od-id="cta-archive" type="button" onClick={onArchive}>作为素材入库</button>
+            <SaveToLibraryButton
+              projectId={projectId}
+              items={[{ nodeId: node.id, path: resultPath, name: node.title, caption: prompt }]}
+              toastMsg={toastMsg}
+              onSaved={onSaved}
+            />
           </div>
         </div>
       ) : null}

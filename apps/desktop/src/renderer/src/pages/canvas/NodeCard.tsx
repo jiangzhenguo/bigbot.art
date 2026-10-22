@@ -140,7 +140,7 @@ function NodeCardInner({
         >
           {TYPE_ICON[n.kind ?? 'plain']}
         </svg>
-        {n.title}
+        {ameta?.name || n.title}
         {/* 所属分组徽标(点按可选中整组) */}
         {group ? (
           <span className="st group-tag" data-od-id="node-group-tag" title={`属于「${group.name}」`}>

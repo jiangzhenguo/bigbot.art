@@ -50,7 +50,7 @@ import {
   type ToolModelBinding,
 } from '@bigbotart/shared';
 import type { ProjectStore } from './store';
-import type { AssetStore } from './assets';
+import { formatAssetBrief, syncAssetNodeLabels, type AssetStore } from './assets';
 import type { SkillStore } from './skills';
 import type { ExportService } from './export';
 import { resolveExportFile } from './export';
@@ -584,7 +584,18 @@ export class ToolHandlers {
         const acc = (d.accel ?? {}) as { enabled?: boolean };
         return acc.enabled ? ' ⚡' : '';
       };
-      const lines = cur.nodes.map((n) => `- 「${n.label || n.id}」 [${n.kind}]${sizeOfNode(n)}${accelMark(n)} (id=${n.id})`).join('\n');
+      // 资源节点:标题优先用资产名(节点标题常是泛称「资源」),有文案标「有文案」
+      const assetMark = (n: CanvasNode): string => {
+        if (n.kind !== 'asset') return '';
+        const a = this.assets.get(String(((n.data ?? {}) as Record<string, unknown>).assetId ?? ''));
+        if (!a) return '';
+        const nameNote = a.name && a.name !== (n.label || '') ? ` 资源名=「${a.name}」` : '';
+        const capNote = a.caption?.trim() ? ' ·有文案' : '';
+        return `${nameNote}${capNote}`;
+      };
+      const lines = cur.nodes
+        .map((n) => `- 「${n.label || n.id}」 [${n.kind}]${sizeOfNode(n)}${accelMark(n)}${assetMark(n)} (id=${n.id})`)
+        .join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
     'canvas.get_node': async (a, ctx) => {
@@ -617,11 +628,21 @@ export class ToolHandlers {
       const dataJson = JSON.stringify(node.data ?? {}, null, 1);
       const dataTrunc =
         dataJson.length > 1600 ? `${dataJson.slice(0, 1600)}\n…(内容截断,完整内容在检查器/表格编辑)` : dataJson;
+      // 资源节点:把资产库里的名称/文案一并注入(Agent 读画布就能拿到,不必再 assets.get)
+      let assetNote = '';
+      if (node.kind === 'asset') {
+        const aid = String(((node.data ?? {}) as Record<string, unknown>).assetId ?? '').trim();
+        const as = aid ? this.assets.get(aid) : undefined;
+        if (as) assetNote = `\n${formatAssetBrief(as, { captionMax: 800 })}\n`;
+        else if (aid) assetNote = `\n资产库中找不到 assetId=${aid}(节点显示「资产未加载」)\n`;
+      }
       return {
         ok: true,
         result:
           `节点「${node.label}」 [${node.kind}] (id=${nodeId})\n` +
-          `位置 (${node.position.x}, ${node.position.y})\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}\ndata:\n${dataTrunc}`,
+          `位置 (${node.position.x}, ${node.position.y})\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}` +
+          assetNote +
+          `\ndata:\n${dataTrunc}`,
       };
     },
     'canvas.connectors': async () => ({
@@ -951,6 +972,7 @@ export class ToolHandlers {
        * 这里在写入点拦下,并把真实候选列出来让模型照抄(与 storyboard.materialize
        * 的「幻觉 id → 列出真实分镜表」同一手法)。
        */
+      let resolvedAssetLabel: string | undefined;
       if (kind === 'asset') {
         const bindId = String((data as Record<string, unknown>).assetId ?? '').trim();
         if (!bindId) {
@@ -961,7 +983,8 @@ export class ToolHandlers {
               '先用 assets.list 查看现有资产,或 assets.import 导入后用返回的 id 原样照抄。',
           };
         }
-        if (!this.assets.get(bindId)) {
+        const bound = this.assets.get(bindId);
+        if (!bound) {
           const all = this.assets.list();
           const candidates = all
             .slice(0, 15)
@@ -974,6 +997,10 @@ export class ToolHandlers {
               `请用 assets.import 返回的 id 或 assets.list 里的真实 id 原样照抄。` +
               (candidates ? `\n当前资产库 ${all.length} 项(前 15):\n${candidates}` : '\n当前资产库为空,请先 assets.import 导入。'),
           };
+        }
+        // 未显式起名时用资产名当节点标题(否则全是「新节点/资源」,Agent 与用户都难认)
+        if (!a.label || String(a.label) === '新节点' || String(a.label) === '资源') {
+          resolvedAssetLabel = bound.name;
         }
       }
       const pc = this.store.loadProjectCanvases(ctx.projectId);
@@ -1036,9 +1063,10 @@ export class ToolHandlers {
         if (dur.note) durationNote += ` · ${dur.note}`;
       }
 
+      const finalLabel = resolvedAssetLabel ?? label;
       const now = new Date().toISOString();
       const node: CanvasNode = {
-        id: nid(kind), kind: kind as CanvasNode['kind'], label,
+        id: nid(kind), kind: kind as CanvasNode['kind'], label: finalLabel,
         position: { x: Number(a.x ?? 80 + cur.nodes.length * 60), y: Number(a.y ?? 80) },
         width: Number(a.width ?? 236),
         data: data as CanvasNode['data'],
@@ -1048,7 +1076,7 @@ export class ToolHandlers {
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已创建节点「${label}」(${kind})${refsNote}${durationNote}`, nodeId: node.id };
+      return { ok: true, result: `已创建节点「${finalLabel}」(${kind})${refsNote}${durationNote}`, nodeId: node.id };
     },
     'canvas.update_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
@@ -1707,13 +1735,49 @@ export class ToolHandlers {
     /* ── assets 域 ── */
     'assets.list': async () => {
       const list = this.assets.list();
-      const lines = list.slice(0, 20).map((a) => `- ${a.id} [${a.kind}] ${a.name} (${a.width ?? '?'}×${a.height ?? '?'})`).join('\n');
-      return { ok: true, result: `资产库 ${list.length} 项:\n${lines || '(空)'}` };
+      const lines = list
+        .slice(0, 20)
+        .map((a) => {
+          const size = `${a.width ?? '?'}×${a.height ?? '?'}`;
+          const cap = a.caption?.trim() ? ' ·有文案' : '';
+          return `- 「${a.name}」 [${a.kind}] ${size}${cap} (assetId=${a.id})`;
+        })
+        .join('\n');
+      return {
+        ok: true,
+        result:
+          `资产库 ${list.length} 项(名称优先,建节点时 data.assetId 必须原样照抄 id):\n${lines || '(空)'}` +
+          (list.length > 20 ? `\n…另有 ${list.length - 20} 项,用 assets.get 按 id 查详情` : ''),
+      };
     },
     'assets.get': async (a) => {
       const asset = this.assets.get(String(a.assetId ?? ''));
       if (!asset) return { ok: false, result: '资产不存在' };
-      return { ok: true, result: `${asset.name}: ${asset.kind} · ${asset.localPath}` };
+      const tags = (asset.tags ?? []).length ? ` · 标签:${asset.tags.join(',')}` : '';
+      return {
+        ok: true,
+        result:
+          `${formatAssetBrief(asset, { captionMax: 1200 })}\n` +
+          `路径:${asset.localPath}${tags}\n` +
+          `(改名/改文案用 assets.update;看图反推用 vision.caption,成功后会自动写入文案)`,
+      };
+    },
+    'assets.update': async (a) => {
+      const assetId = String(a.assetId ?? '').trim();
+      if (!assetId) return { ok: false, result: '需要 assetId' };
+      const hasName = typeof a.name === 'string';
+      const hasCaption = a.caption !== undefined;
+      if (!hasName && !hasCaption) {
+        return { ok: false, result: '至少传 name 或 caption 之一(caption 传空字符串可清空文案)' };
+      }
+      const patch: { name?: string; caption?: string | null } = {};
+      if (hasName) patch.name = String(a.name);
+      if (hasCaption) patch.caption = a.caption == null ? '' : String(a.caption);
+      const res = this.assets.update(assetId, patch);
+      if (!res.ok) return { ok: false, result: res.error ?? '更新失败' };
+      if (patch.name) syncAssetNodeLabels(this.store, assetId, patch.name.trim());
+      const asset = this.assets.get(assetId)!;
+      return { ok: true, result: `已更新资源:\n${formatAssetBrief(asset, { captionMax: 400 })}` };
     },
     // 资产导入:headless paths 仅允许应用数据/产物目录;任意本机文件必须 openDialog=true
     // ⚠️ 必须带 projectId(2026-10-14「测试技能5」事故):此前裸调用,用户经 Agent 导入的素材
@@ -1851,6 +1915,8 @@ export class ToolHandlers {
       // 来源解析:assetId 直取;nodeId 走画布产物解析(asset 节点 → 资产路径;其余 → data.resultPath)
       let imagePath: string | undefined;
       let srcLabel = '';
+      /** 若来源落在资产库,反推成功后把文案写回该资产 */
+      let persistAssetId = '';
       const assetPath = (id: string) => this.assets.get(id)?.localPath;
       // 报错要给出**可执行的下一步**:模型曾把节点 id 当 assetId 传 → 「资产不存在」后
       // 绕道 assets.list 翻全库找 id(47 项),白烧 2 轮。这里直接告诉它去哪查。
@@ -1866,6 +1932,7 @@ export class ToolHandlers {
         }
         imagePath = asset.localPath;
         srcLabel = asset.name ?? assetIdArg;
+        persistAssetId = asset.id;
       } else {
         const pc = this.store.loadProjectCanvases(ctx.projectId);
         const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
@@ -1881,6 +1948,9 @@ export class ToolHandlers {
         }
         const srcNode = srcHit.node;
         srcLabel = srcNode.label || srcNode.id;
+        if (srcNode.kind === 'asset') {
+          persistAssetId = String(((srcNode.data ?? {}) as Record<string, unknown>).assetId ?? '');
+        }
         imagePath = resolveNodeImagePath(srcNode, undefined, assetPath);
         if (!imagePath) {
           return {
@@ -1905,13 +1975,26 @@ export class ToolHandlers {
         return { ok: false, result: `反推失败:${res.error ?? '未知错误'}${hint}` };
       }
       const via = res.backend === 'mlxgen' ? '本地引擎 mlxgen-caption' : '视觉端点';
+      // 反推结果落盘到资产库 caption,下次 canvas.get_node / assets.get 直接可读,不必重看图
+      let persistNote = '';
+      if (
+        persistAssetId &&
+        typeof this.assets.update === 'function' &&
+        this.assets.get(persistAssetId)
+      ) {
+        const wr = this.assets.update(persistAssetId, { caption: res.caption });
+        persistNote = wr.ok
+          ? `\n(已写入资产「${this.assets.get(persistAssetId)!.name}」的文案,之后可用 assets.get / canvas.get_node 直接读)`
+          : `\n(写入资产文案失败:${wr.error ?? '未知'})`;
+      }
       return {
         ok: true,
         result:
           `已用${via}(${res.model})反推「${srcLabel}」:\n\n${res.caption}\n\n` +
           (res.note ? `(注意:${res.note})\n` : '') +
           `(说明:这是对图片内容的文字描述,可据此填写 shot/image-gen 的 prompt;` +
-          `需要调整侧重可再调本工具并传 extra)`,
+          `需要调整侧重可再调本工具并传 extra)` +
+          persistNote,
       };
     },
     'frames.extract': async (a, ctx) => {

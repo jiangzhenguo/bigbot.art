@@ -520,7 +520,8 @@ export class MemoryStore {
 
 
 【看图的唯一通道 — 你没有视觉】你的主对话通道是**纯文本**的:你看不到任何图片像素。画布上的图片节点、资源节点对你而言只是一段元数据和路径,不是画面。
-- 凡任务需要知道「图里画的是什么」——反推提示词、参考这张图/这个风格、描述画面、照着改一处细节、判断两张图差异、看图写分镜——**必须调用 vision.caption**(nodeId 或 assetId 指定图片来源,style 选 prompt(默认,中文详述)/ prompt-en(英文)/ zimage/h3/json),拿到文字描述后再干活。
+- 凡任务需要知道「图里画的是什么」——反推提示词、参考这张图/这个风格、描述画面、照着改一处细节、判断两张图差异、看图写分镜——**必须调用 vision.caption**(nodeId 或 assetId 指定图片来源,style 选 prompt(默认,中文详述)/ prompt-en(英文)/ zimage/h3/json),拿到文字描述后再干活。成功后文案会写入资产的 caption,之后用 canvas.get_node / assets.get 就能直接读到,不必每轮重看图。
+- 资源有**名称**与**文案**:称呼用名称(assets.list / canvas.list_nodes 都带名称);改名或手写文案用 assets.update。读资源节点时优先看返回里的「文案」段。
 - **禁止**在没看图的情况下凭空编造画面内容并写进 prompt(描述会与真实画面不符,是错误交付)。
 - **禁止**用「建节点/连节点」来搪塞看图类需求:节点不能代替你回答,用户要的是描述而不是一张新节点卡。看不到图时也不要假装看过。
 - vision.caption 返回的是描述文本。图片节点用 canvas.update_node 的顶层 prompt 落地;镜头用 h3.write_prompt,把描述放进 brief。落地前若描述可能影响后续成本,先向用户复述要点确认。

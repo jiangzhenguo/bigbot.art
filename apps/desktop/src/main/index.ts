@@ -12,7 +12,7 @@ import { ProjectStore } from './store';
 import { SettingsStore } from './settings';
 import { AccelStore } from './lora';
 import { H3StyleModelBuilder } from './h3-style-model';
-import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots, isValidOutputRelName } from './assets';
+import { AssetStore, OUTPUTS_DIR, ASSETS_DIR, outputSearchRoots, rangeFileResponse, copyAttachmentsToProject, collectAssetRefs, syncAssetNodeLabels, formatAssetBrief, listArchivableProducts, isUnderRoot, importAllowRoots, ffmpegReadRoots, isValidOutputRelName } from './assets';
 import { probeMediaInfo } from './media-probe';
 import { SkillStore } from './skills';
 import { loadSkillPackage } from './skill-import';
@@ -129,7 +129,14 @@ function describeToolAction(name: string, args: Record<string, unknown>, nodeId?
  *  真实事故:用户选中 image-gen 节点说「编辑这个图片」,Agent 绕道 assets.import 复制产物
  *  新建资产节点再连线,没有直接把选中节点连为上游。
  *  2026-10 起支持多节点(右键「添加到聊天窗口」+ 输入框 @ 提及),index/total 用于标注序号。 */
-function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: CanvasNode[], index?: number, total?: number): string {
+function describeSelectedNode(
+  node: CanvasNode,
+  edges: CanvasEdge[],
+  nodes: CanvasNode[],
+  index?: number,
+  total?: number,
+  resolveAsset?: (assetId: string) => import('@bigbotart/shared').Asset | undefined,
+): string {
   const idToLabel = new Map(nodes.map((n) => [n.id, n.label || n.id]));
   const ins = edges
     .filter((e) => e.target === node.id)
@@ -144,6 +151,11 @@ function describeSelectedNode(node: CanvasNode, edges: CanvasEdge[], nodes: Canv
     if (md.trim()) dataNote = `\n内容摘要:${md.trim().slice(0, 300)}${md.length > 300 ? '…' : ''}`;
   } else if (node.kind === 'shot' && typeof d.prompt === 'string') {
     dataNote = `\n提示词:${d.prompt.slice(0, 200)}${d.prompt.length > 200 ? '…' : ''}`;
+  } else if (node.kind === 'asset') {
+    const aid = String(d.assetId ?? '').trim();
+    const as = aid && resolveAsset ? resolveAsset(aid) : undefined;
+    if (as) dataNote = `\n${formatAssetBrief(as, { captionMax: 300 })}`;
+    else if (aid) dataNote = `\n资产未加载 assetId=${aid}`;
   } else {
     const j = JSON.stringify(d);
     if (j && j !== '{}') dataNote = `\ndata:${j.slice(0, 200)}${j.length > 200 ? '…' : ''}`;
@@ -878,8 +890,26 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
     const refs = collectAssetRefs(store, id);
     return { ...assets.delete(id), refs };
   });
-  ipcMain.handle('update-asset', (_e, id: string, patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) =>
-    assets.update(id, patch),
+  ipcMain.handle(
+    'update-asset',
+    (
+      _e,
+      id: string,
+      patch: {
+        name?: string;
+        caption?: string | null;
+        categoryId?: string | null;
+        projectId?: string | null;
+        tags?: string[];
+      },
+    ) => {
+      const res = assets.update(id, patch);
+      // 改名后把绑定该资产的画布资源节点标题同步成新名(Agent 称呼规则靠标题)
+      if (res.ok && typeof patch.name === 'string' && patch.name.trim()) {
+        syncAssetNodeLabels(store, id, patch.name.trim());
+      }
+      return res;
+    },
   );
   ipcMain.handle('list-asset-categories', () => assets.listCategories());
   ipcMain.handle('create-asset-category', (_e, name: string, projectId?: string) => assets.createCategory(name, projectId));
@@ -889,8 +919,16 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
   ipcMain.handle('list-trash', () => assets.listTrash());
   ipcMain.handle('restore-asset', (_e, id: string) => assets.restore(id));
   ipcMain.handle('empty-trash', () => assets.emptyTrash());
-  ipcMain.handle('archive-products', (_e, input: { projectId: string; items: Array<{ nodeId: string; path: string }>; categoryId?: string }) =>
-    assets.archiveProducts(input.projectId, input.items, input.categoryId),
+  ipcMain.handle(
+    'archive-products',
+    (
+      _e,
+      input: {
+        projectId: string;
+        items: Array<{ nodeId: string; path: string; name?: string; caption?: string }>;
+        categoryId?: string;
+      },
+    ) => assets.archiveProducts(input.projectId, input.items, input.categoryId),
   );
   ipcMain.handle('list-archivable-products', (_e, projectId: string) => listArchivableProducts(store, projectId));
 
@@ -1441,7 +1479,7 @@ async function executeAgentChat(opts: {
 
     // 引用节点注入:用户本轮指着哪些节点 → 详情摘要附进本轮 user 消息(风格对齐 canvas.get_node)
     selNote = selNodes.length && ctxSnap
-      ? `\n\n${selNodes.map((n, i) => describeSelectedNode(n, ctxSnap.edges, ctxSnap.nodes, i, selNodes.length)).join('\n\n')}`
+      ? `\n\n${selNodes.map((n, i) => describeSelectedNode(n, ctxSnap.edges, ctxSnap.nodes, i, selNodes.length, (id) => assets.get(id))).join('\n\n')}`
       : '';
   } else {
     logger.log('info', `[auto-continue] 自动推进轮开始 · "${opts.text.slice(0, 60).replace(/\n/g, ' ')}"`);

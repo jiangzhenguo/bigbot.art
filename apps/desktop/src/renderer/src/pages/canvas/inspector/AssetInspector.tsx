@@ -21,7 +21,8 @@
  * 配套(必须成对,否则同一张图会在面板里出现两遍):`InspectorPane` 顶部的
  * `selInfo.img` 整块预览对 asset 节点**不再渲染** —— 预览的唯一位置就是本组件最上方。
  */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import type { Asset } from '@bigbotart/shared';
 import { Lbl, KVSection, TextAreaField } from './fields';
 import { ImagePreview } from './ImagePreview';
 import { MediaInfoPanel } from './MediaInfoPanel';
@@ -39,9 +40,15 @@ export interface AssetInspectorProps {
   node: CanvasNode;
   /** 写入节点 data(带撤销提交;由 InspectorBody 注入) */
   setData: (patch: Record<string, unknown>) => void;
+  /** 改节点标题(与资产改名同步时用) */
+  setTitle?: (title: string) => void;
   toastMsg: (msg: string) => void;
   /** assetId → 本地绝对路径(检查器探测与预览都用它) */
   assetCache: Record<string, string>;
+  /** 当前项目可见的资产列表(读名称/文案) */
+  assetsList?: Asset[];
+  /** 资产库字段改完后刷新画布侧缓存 */
+  onAssetsChanged?: () => void;
   onOpenAssetPicker?: (nodeId: string) => void;
   /** InfoMap 里已有的 meta 行(如「资产未加载」提示;缺省不渲染) */
   meta?: Array<[string, string]>;
@@ -50,8 +57,11 @@ export interface AssetInspectorProps {
 export function AssetInspector({
   node,
   setData,
+  setTitle,
   toastMsg,
   assetCache,
+  assetsList = [],
+  onAssetsChanged,
   onOpenAssetPicker,
   meta,
 }: AssetInspectorProps) {
@@ -60,12 +70,33 @@ export function AssetInspector({
   const assetId = String(d.assetId ?? '');
   // 已绑定资产 = 媒体类型锁定(资源节点「不可自变」);未绑定时才允许选类型
   const locked = !!assetId;
+  const bound = assetId ? assetsList.find((a) => a.id === assetId) : undefined;
 
   /** 播放器实测值:仅一次探测失败的兜底,故只在有真值时覆盖 */
   const [liveMeta, setLiveMeta] = useState<LiveMediaMeta>({});
+  const [nameDraft, setNameDraft] = useState(bound?.name ?? '');
+  const [captionDraft, setCaptionDraft] = useState(bound?.caption ?? '');
+  useEffect(() => {
+    setNameDraft(bound?.name ?? '');
+    setCaptionDraft(bound?.caption ?? '');
+  }, [bound?.id, bound?.name, bound?.caption]);
 
   const src = assetId ? assetCache[assetId] : undefined;
   const url = src ? previewUrlOf(src) : null;
+
+  const saveAssetPatch = async (patch: { name?: string; caption?: string | null }) => {
+    if (!assetId) return;
+    const res = await window.bigbotart.updateAsset(assetId, patch).catch((e) => ({
+      ok: false as const,
+      error: (e as Error).message,
+    }));
+    if (!res.ok) {
+      toastMsg(res.error ?? '保存失败');
+      return;
+    }
+    if (patch.name) setTitle?.(patch.name.trim());
+    onAssetsChanged?.();
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -141,6 +172,75 @@ export function AssetInspector({
           <MediaInfoPanel path={src ?? null} kind="document" />
         </>
       )}
+
+      {/* ── ②.5 资源名称 + 文案(落在资产库,Agent 可读)── */}
+      {bound ? (
+        <div className="f-sec" data-od-id="asset-inspector-identity">
+          <div className="f-sec-h">
+            <span className="lbl">资源名称</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>可改 · 同步资产库</span>
+          </div>
+          <input
+            data-od-id="asset-inspector-name"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onBlur={() => {
+              const next = nameDraft.trim();
+              if (!next || next === bound.name) {
+                if (!next) setNameDraft(bound.name);
+                return;
+              }
+              void saveAssetPatch({ name: next }).then(() => toastMsg(`已改名为「${next}」`));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            style={{
+              width: '100%',
+              padding: '6px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              background: 'var(--bg)',
+              fontSize: 12,
+              color: 'var(--fg)',
+              boxSizing: 'border-box',
+            }}
+          />
+          <div className="f-sec-h" style={{ marginTop: 10 }}>
+            <span className="lbl">文案 / 提示词</span>
+            <span className="mut" style={{ fontSize: 10.5 }}>手写或看图反推</span>
+          </div>
+          <textarea
+            data-od-id="asset-inspector-caption"
+            value={captionDraft}
+            rows={4}
+            placeholder="描述画面内容或生成提示词…"
+            onChange={(e) => setCaptionDraft(e.target.value)}
+            onBlur={() => {
+              const next = captionDraft.trim();
+              const prev = (bound.caption ?? '').trim();
+              if (next === prev) return;
+              void saveAssetPatch({ caption: next || null }).then(() =>
+                toastMsg(next ? '文案已保存' : '文案已清空'),
+              );
+            }}
+            style={{
+              width: '100%',
+              padding: '8px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              background: 'var(--bg)',
+              fontSize: 12,
+              color: 'var(--fg)',
+              resize: 'vertical',
+              minHeight: 72,
+              boxSizing: 'border-box',
+              fontFamily: 'inherit',
+              lineHeight: 1.45,
+            }}
+          />
+        </div>
+      ) : null}
 
       {/* ── ③ 绑定参数:媒体类型 / 资产 ID / 换绑按钮 ──
           改绑是低频且有副作用的操作,排在预览与媒体信息之后(点开资源先看到东西,

@@ -18,7 +18,13 @@ interface AssetDetailProps {
   /** 全库标签频次(联想候选,按频次降序) */
   tagStats: Array<{ t: string; n: number }>;
   toastMsg: (m: string) => void;
-  onUpdate: (patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] }) => Promise<boolean>;
+  onUpdate: (patch: {
+    name?: string;
+    caption?: string | null;
+    categoryId?: string | null;
+    projectId?: string | null;
+    tags?: string[];
+  }) => Promise<boolean>;
   onDelete: () => void;
   onUseInCanvas: () => void;
 }
@@ -44,12 +50,16 @@ export function AssetDetail({
   onDelete,
   onUseInCanvas,
 }: AssetDetailProps) {
-  /* 标签编辑:本地态随资产切换重置;回车或逗号添加 */
+  /* 标签/名称/文案:本地态随资产切换重置;失焦或回车提交 */
   const [tags, setTags] = useState<string[]>(a?.tags ?? []);
   const [tagInput, setTagInput] = useState('');
+  const [nameDraft, setNameDraft] = useState(a?.name ?? '');
+  const [captionDraft, setCaptionDraft] = useState(a?.caption ?? '');
   useEffect(() => {
     setTags(a?.tags ?? []);
     setTagInput('');
+    setNameDraft(a?.name ?? '');
+    setCaptionDraft(a?.caption ?? '');
   }, [a?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!a) {
@@ -86,6 +96,32 @@ export function AssetDetail({
     void onUpdate({ projectId: pid || null }).then((ok) => {
       if (ok) toastMsg(pid ? `已归入项目` : '已移到总资源库');
     });
+  const commitName = () => {
+    const next = nameDraft.trim();
+    if (!next) {
+      setNameDraft(a.name);
+      toastMsg('名称不能为空');
+      return;
+    }
+    if (next === a.name) return;
+    void onUpdate({ name: next }).then((ok) => {
+      if (!ok) {
+        setNameDraft(a.name);
+        toastMsg('重命名失败');
+      } else toastMsg(`已改名为「${next}」`);
+    });
+  };
+  const commitCaption = () => {
+    const next = captionDraft.trim();
+    const prev = (a.caption ?? '').trim();
+    if (next === prev) return;
+    void onUpdate({ caption: next || null }).then((ok) => {
+      if (!ok) {
+        setCaptionDraft(a.caption ?? '');
+        toastMsg('文案保存失败');
+      } else toastMsg(next ? '文案已保存' : '文案已清空');
+    });
+  };
 
   const catOptions = categories
     .filter((c) => !c.projectId || c.projectId === projectId || c.projectId === a.projectId)
@@ -125,12 +161,57 @@ export function AssetDetail({
         )}
       </div>
 
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, wordBreak: 'break-all' }}>{a.name}</div>
-          <div className="mono mut" style={{ fontSize: 10.5 }}>{a.id}</div>
-        </div>
+      <div className="lbl" style={{ margin: '4px 0 6px' }}>名称</div>
+      <input
+        data-od-id="asset-detail-name"
+        value={nameDraft}
+        onChange={(e) => setNameDraft(e.target.value)}
+        onBlur={() => commitName()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        style={{
+          width: '100%',
+          padding: '6px 10px',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          background: 'var(--bg)',
+          fontSize: 13,
+          fontWeight: 600,
+          color: 'var(--fg)',
+          boxSizing: 'border-box',
+        }}
+      />
+      <div className="mono mut" style={{ fontSize: 10.5, marginTop: 4 }}>{a.id}</div>
+
+      <div className="lbl" style={{ margin: '10px 0 6px' }}>
+        文案 / 提示词 <span className="mut" style={{ fontWeight: 400 }}>· 手写或看图反推</span>
       </div>
+      <textarea
+        data-od-id="asset-detail-caption"
+        value={captionDraft}
+        rows={5}
+        placeholder="描述这张图/这段视频的内容或生成提示词…"
+        onChange={(e) => setCaptionDraft(e.target.value)}
+        onBlur={() => commitCaption()}
+        style={{
+          width: '100%',
+          padding: '8px 10px',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          background: 'var(--bg)',
+          fontSize: 12,
+          color: 'var(--fg)',
+          resize: 'vertical',
+          minHeight: 88,
+          boxSizing: 'border-box',
+          fontFamily: 'inherit',
+          lineHeight: 1.45,
+        }}
+      />
 
       <div className="lbl" style={{ margin: '10px 0 6px' }}>分类</div>
       <select className="dcat-select" style={{ width: '100%', padding: '6px 10px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', fontSize: 12, color: 'var(--fg)' }} value={a.categoryId ?? ''} onChange={(e) => applyCat(e.target.value)}>

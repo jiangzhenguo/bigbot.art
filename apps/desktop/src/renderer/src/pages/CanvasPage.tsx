@@ -1770,13 +1770,17 @@ export default function CanvasPage({
     setAssetPickFor(nodeId);
   }, []);
 
-  /** 换绑资产到节点:更新 assetId + mediaType 锁定为资产 kind(「不可自变」) */
+  /** 换绑资产到节点:更新 assetId + mediaType 锁定为资产 kind;节点标题跟资产名 */
   const bindAssetToNode = useCallback(
     (nodeId: string, asset: Asset) => {
       setNodes((ns) =>
         ns.map((n) =>
           n.id === nodeId
-            ? { ...n, data: { ...(n.data ?? {}), assetId: asset.id, mediaType: asset.kind } }
+            ? {
+                ...n,
+                title: asset.name || n.title,
+                data: { ...(n.data ?? {}), assetId: asset.id, mediaType: asset.kind },
+              }
             : n,
         ),
       );
@@ -4291,6 +4295,7 @@ export default function CanvasPage({
               if (!isLongTask) toastMsg(`已提交重跑 · ${inspectTitle}`);
             }}
             onOpenAssetPicker={openAssetPicker}
+            onRefreshAssets={() => void refreshAssets()}
           />
 
           {/* 左:节点面板 */}

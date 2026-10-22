@@ -292,6 +292,27 @@ interface AssetStoreFile {
 }
 
 /**
+ * Agent 可读的资源摘要(名称优先、id 附后;有文案则附上)。
+ * canvas.get_node / assets.get / list_nodes 共用,避免各处拼装口径分叉。
+ */
+export function formatAssetBrief(
+  a: Asset,
+  opts?: { captionMax?: number; oneLine?: boolean },
+): string {
+  const capMax = opts?.captionMax ?? 400;
+  const size = a.width && a.height ? ` ${a.width}×${a.height}` : '';
+  const head = `资源「${a.name}」 [${a.kind}]${size} (assetId=${a.id})`;
+  const cap = a.caption?.trim();
+  if (!cap) return head;
+  const clipped = cap.length > capMax ? `${cap.slice(0, capMax)}…` : cap;
+  if (opts?.oneLine) {
+    const short = clipped.length > 80 ? `${clipped.slice(0, 80)}…` : clipped;
+    return `${head} · 文案:${short}`;
+  }
+  return `${head}\n文案:${clipped}`;
+}
+
+/**
  * 遍历项目画布查找资产引用(删除安全警告 / 「定位画布」)。
  * 引用字段:asset 节点 / audio-ref 节点 data.assetId;image-edit / image-upscale data.inputAssetId;
  * shot data.refs[].assetId;workflow-input slots[].value.assetId。
@@ -334,6 +355,40 @@ export function collectAssetRefs(store: MainProjectStore, assetId: string): Asse
     }
   }
   return refs;
+}
+
+/**
+ * 资源改名后,把绑定该资产的画布「资源节点」标题同步成新名。
+ * 只改 kind=asset 且 data.assetId 匹配的节点(audio-ref / 其它引用不动)。
+ * 版本用当前快照 version 写回,避免被版本防护拒绝。
+ */
+export function syncAssetNodeLabels(store: MainProjectStore, assetId: string, name: string): number {
+  const label = name.trim();
+  if (!label || !assetId) return 0;
+  let touched = 0;
+  for (const p of store.listProjects()) {
+    let pc;
+    try {
+      pc = store.loadProjectCanvases(p.id);
+    } catch {
+      continue;
+    }
+    for (const c of pc.canvases) {
+      let changed = false;
+      const nodes = (c.nodes ?? []).map((n) => {
+        if (n.kind !== 'asset') return n;
+        const d = (n.data ?? {}) as Record<string, unknown>;
+        if (String(d.assetId ?? '') !== assetId) return n;
+        if ((n.label || '') === label) return n;
+        changed = true;
+        return { ...n, label };
+      });
+      if (!changed) continue;
+      const saved = store.saveCanvasSnapshot({ ...c, nodes, version: c.version ?? 0 });
+      if (saved.ok) touched += 1;
+    }
+  }
+  return touched;
 }
 
 /** 列项目画布中「有产物」的节点(「从画布产物导入」弹层候选项) */
@@ -589,14 +644,29 @@ export class AssetStore {
     return { added, idMap };
   }
 
-  /* ── 更新:重命名 / 改分类 / 改归属 / 改标签 ── */
+  /* ── 更新:重命名 / 文案 / 改分类 / 改归属 / 改标签 ── */
   update(
     id: string,
-    patch: { name?: string; categoryId?: string | null; projectId?: string | null; tags?: string[] },
+    patch: {
+      name?: string;
+      caption?: string | null;
+      categoryId?: string | null;
+      projectId?: string | null;
+      tags?: string[];
+    },
   ): { ok: boolean; error?: string } {
     const a = this.assets.find((x) => x.id === id);
     if (!a) return { ok: false, error: '资产不存在' };
-    if (patch.name !== undefined) a.name = patch.name;
+    if (patch.name !== undefined) {
+      const n = String(patch.name).trim();
+      if (!n) return { ok: false, error: '名称不能为空' };
+      a.name = n;
+    }
+    if (patch.caption !== undefined) {
+      const c = patch.caption == null ? '' : String(patch.caption).trim();
+      if (c) a.caption = c;
+      else delete a.caption;
+    }
     if (patch.categoryId !== undefined) a.categoryId = patch.categoryId ?? undefined;
     if (patch.projectId !== undefined) a.projectId = patch.projectId ?? undefined;
     if (patch.tags !== undefined) a.tags = patch.tags;
@@ -701,7 +771,7 @@ export class AssetStore {
   /* ── 画布产物归档:复制产物进资产库 + 登记(source='product') ── */
   async archiveProducts(
     projectId: string,
-    items: Array<{ nodeId: string; path: string }>,
+    items: Array<{ nodeId: string; path: string; name?: string; caption?: string }>,
     categoryId?: string,
   ): Promise<{ ok: boolean; assets: Asset[]; error?: string }> {
     const created: Asset[] = [];
@@ -720,10 +790,11 @@ export class AssetStore {
         continue; // 产物文件不可读/正在写入:跳过该项
       }
       const meta = await probeMedia(dest, kind);
+      const caption = it.caption?.trim();
       const asset: Asset = {
         id,
         kind,
-        name: basename(it.path, extname(it.path)),
+        name: it.name?.trim() || basename(it.path, extname(it.path)),
         localPath: dest,
         mime: MIME_BY_EXT[ext],
         ...meta,
@@ -732,13 +803,18 @@ export class AssetStore {
         source: 'product',
         originNodeId: it.nodeId,
         tags: ['产物'],
+        ...(caption ? { caption } : {}),
         createdAt: new Date().toISOString(),
       };
       this.assets.push(asset);
       created.push(asset);
     }
     if (created.length) this.save();
-    return { ok: created.length > 0, assets: created };
+    return {
+      ok: created.length > 0,
+      assets: created,
+      error: created.length ? undefined : '没有可入库的产物文件',
+    };
   }
 
   /* ── 对话附件登记:副本已在项目目录,只登记不复制(幂等:按 localPath 复用) ── */
