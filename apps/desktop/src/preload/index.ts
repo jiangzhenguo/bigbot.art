@@ -146,6 +146,7 @@ const api: BigBotArtApi = {
   setSettings: (patch) => ipcRenderer.invoke(ch('setSettings'), patch),
   remoteAccessStatus: () => ipcRenderer.invoke(ch('remoteAccessStatus')),
   remoteAccessRotatePassphrase: () => ipcRenderer.invoke(ch('remoteAccessRotatePassphrase')),
+  relaySetPairingKey: (key: string) => ipcRenderer.invoke(ch('relaySetPairingKey'), key),
   accelList: () => ipcRenderer.invoke(ch('accelList')),
   accelInstall: (input) => ipcRenderer.invoke(ch('accelInstall'), input),
   accelRemove: (id) => ipcRenderer.invoke(ch('accelRemove'), id),

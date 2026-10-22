@@ -294,6 +294,7 @@ describe('远程不能弹系统对话框', () => {
     expect((await post('revealInFinder', [{ path: '/tmp/x' }])).status).toBe(403);
     expect((await post('importAssets', [{}])).status).toBe(403);
     expect((await post('remoteAccessRotatePassphrase', [])).status).toBe(403);
+    expect((await post('relaySetPairingKey', ['not-the-real-key'])).status).toBe(403);
     const imported = await post('importAssets', [{ paths: ['/tmp/ref.png'] }]);
     expect(imported.status).toBe(200);
     const settings = await post('setSettings', [{ language: 'en', remoteAccess: { enabled: true, port: 1 } }]);

@@ -12,16 +12,19 @@ const root = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   resolve: {
-    alias: {
-      '@bigbotart/shared': resolve(root, 'packages/shared/src/index.ts'),
-      electron: resolve(root, 'apps/desktop/src/main/__tests__/electron-stub.ts'),
-    },
+    alias: [
+      { find: '@bigbotart/shared', replacement: resolve(root, 'packages/shared/src/index.ts') },
+      { find: '@bigbotart/relay/protocol', replacement: resolve(root, 'apps/relay/src/protocol.ts') },
+      { find: /^@bigbotart\/relay$/, replacement: resolve(root, 'apps/relay/src/index.ts') },
+      { find: 'electron', replacement: resolve(root, 'apps/desktop/src/main/__tests__/electron-stub.ts') },
+    ],
   },
   test: {
     environment: 'node',
     include: [
       'packages/**/*.{test,spec}.ts',
       'apps/desktop/src/**/*.{test,spec}.ts',
+      'apps/relay/src/**/*.{test,spec}.ts',
     ],
     // 每个测试文件独立进程,避免模块级常量(OUTPUTS_DIR 等)跨用例污染
     isolate: true,

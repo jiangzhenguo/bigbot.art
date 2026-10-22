@@ -155,6 +155,8 @@ export interface DesktopIpcDeps {
   onRemoteSettings?: (next: AppSettings) => void;
   remoteStatus?: () => RemoteAccessStatus;
   rotatePassphrase?: () => { ok: boolean; passphrase?: string; error?: string };
+  /** 保存中继配对密钥。不写入 settings。 */
+  setRelayPairingKey?: (key: string) => { ok: boolean; error?: string };
   probeSimple: (id: RuntimeProbe['id'], label: string, port: number) => Promise<RuntimeProbe>;
   executeAgentChat: (opts: {
     projectId: string;
@@ -195,6 +197,7 @@ export function registerDesktopIpc(ctx: DesktopIpcDeps): Map<string, IpcHandler>
     onRemoteSettings,
     remoteStatus,
     rotatePassphrase,
+    setRelayPairingKey,
     probeSimple,
     executeAgentChat,
     compactContext,
@@ -789,10 +792,14 @@ ipcMain.handle('remote-access-status', (): RemoteAccessStatus =>
     urls: [],
     hasPassphrase: false,
     pageReady: false,
+    relay: { enabled: false, url: '', connected: false, hasPairingKey: false },
   },
 );
 ipcMain.handle('remote-access-rotate-passphrase', () =>
   rotatePassphrase?.() ?? { ok: false, error: '远程访问未初始化' },
+);
+ipcMain.handle('relay-set-pairing-key', (_e, key: string) =>
+  setRelayPairingKey?.(typeof key === 'string' ? key : '') ?? { ok: false, error: '远程访问未初始化' },
 );
 
 // ---------- IPC:h3 模型包(加速 / 风格)管理 ----------

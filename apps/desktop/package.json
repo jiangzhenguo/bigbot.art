@@ -6,13 +6,14 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "pnpm --filter @bigbotart/relay build && electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@bigbotart/agent": "workspace:*",
     "@bigbotart/providers": "workspace:*",
+    "@bigbotart/relay": "workspace:*",
     "@bigbotart/shared": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -20,6 +20,7 @@ export function remoteDialogBlock(method: string, params: unknown[]): string | n
     return DIALOG_ERROR;
   }
   if (method === 'remoteAccessRotatePassphrase') return '远程不能轮换口令';
+  if (method === 'relaySetPairingKey') return '远程不能设置中继密钥';
   if (method === 'importAssets') {
     const opts = params[0] as { paths?: unknown } | undefined;
     const paths = opts?.paths;

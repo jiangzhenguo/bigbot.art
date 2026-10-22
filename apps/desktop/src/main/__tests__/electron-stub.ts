@@ -45,3 +45,8 @@ export const ipcMain = {
 };
 export const protocol = { registerSchemesAsPrivileged: () => {}, handle: async () => {} };
 export const net = { fetch: async () => new Response() };
+export const safeStorage = {
+  isEncryptionAvailable: () => false,
+  encryptString: (plain: string) => Buffer.from(plain, 'utf8'),
+  decryptString: (buf: Buffer) => Buffer.from(buf).toString('utf8'),
+};

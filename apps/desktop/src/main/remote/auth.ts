@@ -152,6 +152,8 @@ export function readCookie(header: string | undefined, name: string): string | n
   return null;
 }
 
-export function sessionSetCookie(id: string, maxAgeSec: number): string {
-  return `${SESSION_COOKIE}=${encodeURIComponent(id)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}`;
+/** secure 只在确认来自 HTTPS 隧道时加上。明文的 Tailscale 路径不加,浏览器会丢掉 Secure cookie。 */
+export function sessionSetCookie(id: string, maxAgeSec: number, secure = false): string {
+  const base = `${SESSION_COOKIE}=${encodeURIComponent(id)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}`;
+  return secure ? `${base}; Secure` : base;
 }

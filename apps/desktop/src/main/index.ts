@@ -4,7 +4,10 @@
  */
 import { registerDesktopIpc } from './api-surface';
 import { createRemoteServer, type RemoteControl } from './remote/server';
-import { DEFAULT_REMOTE_PORT, type RemoteAccessStatus } from '@bigbotart/shared';
+import { connectTunnel } from './remote/tunnel-client';
+import { readPairingKey, writePairingKey } from './remote/relay-secret';
+import { DEFAULT_REMOTE_PORT, type AppSettings, type RelayTunnelStatus, type RemoteAccessStatus } from '@bigbotart/shared';
+import { randomBytes } from 'node:crypto';
 import {
   app,
   BrowserWindow,
@@ -662,6 +665,9 @@ async function createWindow() {
 
 // ---------- IPC:业务面在 api-surface.ts(原样搬出,行为不变) ----------
 const remoteSlot: { current: RemoteControl | null } = { current: null };
+const tunnelSecret = randomBytes(32).toString('base64url');
+const relayLive: RelayTunnelStatus = { enabled: false, url: '', connected: false, hasPairingKey: false };
+let tunnelStop: (() => void) | null = null;
 const remoteStatusFallback = (): RemoteAccessStatus => ({
   enabled: false,
   port: DEFAULT_REMOTE_PORT,
@@ -669,7 +675,49 @@ const remoteStatusFallback = (): RemoteAccessStatus => ({
   urls: [],
   hasPassphrase: false,
   pageReady: false,
+  relay: { enabled: false, url: '', connected: false, hasPairingKey: false },
 });
+
+function syncTunnel(next: AppSettings): void {
+  tunnelStop?.();
+  tunnelStop = null;
+  const remote = next.remoteAccess;
+  const key = readPairingKey(DATA_DIR);
+  relayLive.enabled = remote?.relayEnabled === true;
+  relayLive.url = (remote?.relayUrl ?? '').trim();
+  relayLive.hasPairingKey = !!key;
+  relayLive.connected = false;
+  const current = remoteSlot.current?.status();
+  if (!relayLive.enabled) {
+    relayLive.error = undefined;
+    return;
+  }
+  if (!key) {
+    relayLive.error = '还没有配对密钥';
+    return;
+  }
+  if (!relayLive.url) {
+    relayLive.error = '还没有中继地址';
+    return;
+  }
+  if (!current?.listening) {
+    relayLive.error = '本机远程服务还没在听,隧道未连接';
+    return;
+  }
+  relayLive.error = undefined;
+  tunnelStop = connectTunnel({
+    relayUrl: relayLive.url,
+    pairingKey: key,
+    localPort: current.port,
+    tunnelSecret,
+    logger,
+    onStatus: (s) => {
+      relayLive.connected = s.connected;
+      relayLive.error = s.error;
+    },
+  }).stop;
+}
+
 const ipcHandlers = registerDesktopIpc({
   logger,
   registry,
@@ -688,10 +736,18 @@ const ipcHandlers = registerDesktopIpc({
   getWin: () => win,
   publish: (channel, payload) => hub.publish(channel, payload),
   onRemoteSettings: (next) => {
-    void remoteSlot.current?.apply(next);
+    void remoteSlot.current?.apply(next).then(() => syncTunnel(next));
   },
   remoteStatus: () => remoteSlot.current?.status() ?? remoteStatusFallback(),
   rotatePassphrase: () => remoteSlot.current?.rotatePassphrase() ?? { ok: false, error: '远程访问未初始化' },
+  setRelayPairingKey: (key) => {
+    const saved = writePairingKey(DATA_DIR, key);
+    if (saved.ok && key && !saved.encrypted) {
+      logger.log('warn', '系统钥匙串不可用,中继配对密钥以 0600 文件保存在数据目录');
+    }
+    syncTunnel(settings.get());
+    return saved.ok ? { ok: true } : { ok: false, error: saved.error };
+  },
   probeSimple,
   executeAgentChat,
   compactContext,
@@ -703,8 +759,10 @@ remoteSlot.current = createRemoteServer({
   staticDir: process.env.BIGBOTART_REMOTE_STATIC
     ? resolve(process.env.BIGBOTART_REMOTE_STATIC)
     : join(__dirname, '../renderer'),
+  tunnelSecret,
+  getRelayStatus: () => ({ ...relayLive }),
 });
-void remoteSlot.current.apply(settings.get()).catch((e) => {
+void remoteSlot.current.apply(settings.get()).then(() => syncTunnel(settings.get())).catch((e) => {
   logger.log('error', `远程访问启动失败: ${(e as Error).message}`);
 });
 

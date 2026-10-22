@@ -1,0 +1,18 @@
+[Unit]
+Description=BigBotArt reverse tunnel relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bigbotart
+Group=bigbotart
+EnvironmentFile=/etc/bigbotart-relay.env
+WorkingDirectory=/opt/bigbotart
+ExecStart=/usr/bin/node /opt/bigbotart/apps/relay/dist/cli.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

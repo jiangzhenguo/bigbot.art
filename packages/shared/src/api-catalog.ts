@@ -105,6 +105,7 @@ export const API_CATALOG = [
   rpc('setSettings', 'set-settings'),
   rpc('remoteAccessStatus', 'remote-access-status'),
   rpc('remoteAccessRotatePassphrase', 'remote-access-rotate-passphrase', ['desktopOnly', 'secret']),
+  rpc('relaySetPairingKey', 'relay-set-pairing-key', ['desktopOnly', 'secret']),
   rpc('accelList', 'accel-list'),
   rpc('accelInstall', 'accel-install', ['pathArg']),
   rpc('accelRemove', 'accel-remove'),

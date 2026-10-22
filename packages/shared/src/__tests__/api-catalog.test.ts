@@ -5,10 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { API_CATALOG, EVENT_CATALOG, RPC_CATALOG } from '../api-catalog.js';
 
 describe('API 目录', () => {
-  it('118 个 RPC + 6 个事件,名字不重复', () => {
-    expect(RPC_CATALOG).toHaveLength(118);
+  it('119 个 RPC + 6 个事件,名字不重复', () => {
+    expect(RPC_CATALOG).toHaveLength(119);
     expect(EVENT_CATALOG).toHaveLength(6);
-    expect(API_CATALOG).toHaveLength(124);
+    expect(API_CATALOG).toHaveLength(125);
     const names = API_CATALOG.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
   });

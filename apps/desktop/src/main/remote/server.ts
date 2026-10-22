@@ -1,15 +1,21 @@
 /**
  * 可选的远程访问 HTTP 服务。默认不监听。
  *
- * 绑 Tailscale IPv4 + 127.0.0.1。没有 Tailscale 时不对外监听。
- * BIGBOTART_REMOTE_LOOPBACK=1 只绑回环,给没有 Tailscale 的 dry-run 冒烟用,绝不绑 0.0.0.0。
+ * 绑 Tailscale IPv4 + 127.0.0.1。没有 Tailscale、也没开中继时不对外监听。
+ * 中继开启时即使没有 Tailscale 也只绑 127.0.0.1,供本机隧道回连。绝不绑 0.0.0.0。
+ * BIGBOTART_REMOTE_LOOPBACK=1 只绑回环,给没有 Tailscale 的 dry-run 冒烟用。
+ *
+ * 回到 127.0.0.1 不等于免登录。/rpc、/media、/events 仍要会话 cookie。
+ * 只有带进程内隧道密钥的回环连接,才采信它带来的客户端 IP 和 https。
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { WebSocket, WebSocketServer, type WebSocket as WebSocketSocket } from 'ws';
-import { DEFAULT_REMOTE_PORT, type AppSettings, type RemoteAccessStatus } from '@bigbotart/shared';
+import { DEFAULT_REMOTE_PORT, type AppSettings, type RelayTunnelStatus, type RemoteAccessStatus } from '@bigbotart/shared';
+import { CLIENT_IP_HEADER, PROTO_HEADER, TUNNEL_SECRET_HEADER, keysEqual } from '@bigbotart/relay/protocol';
 import { DATA_DIR } from '../workspace-paths';
 import { rangeFileResponse } from '../assets';
 import type { DebugLogger } from '../logger';
@@ -64,6 +70,10 @@ export interface RemoteServerDeps {
   lookupTailscale?: () => Promise<{ ip: string | null; dns: string | null; selfLogin: string | null }>;
   /** 测试注入 whois。缺省走 `tailscale whois`。 */
   whois?: (ip: string) => Promise<string | null>;
+  /** 隧道客户端才知道的进程内密钥。公网请求带不上。 */
+  tunnelSecret?: string;
+  /** 中继连接状态。缺省视为没开。 */
+  getRelayStatus?: () => RelayTunnelStatus;
 }
 
 export interface RemoteControl {
@@ -106,6 +116,8 @@ function clientIp(req: IncomingMessage): string {
   const addr = req.socket.remoteAddress ?? '';
   return addr.replace(/^::ffff:/, '');
 }
+
+const EMPTY_RELAY: RelayTunnelStatus = { enabled: false, url: '', connected: false, hasPairingKey: false };
 
 async function pipeWebResponse(res: ServerResponse, web: Response): Promise<void> {
   const headers: Record<string, string> = {};
@@ -174,6 +186,7 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
       urls: [...urls],
       hasPassphrase: hasPassphrase(dataDir),
       pageReady: pageReady(),
+      relay: deps.getRelayStatus?.() ?? EMPTY_RELAY,
       ...(error ? { error } : {}),
     };
   }
@@ -204,12 +217,33 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
     return sessions.touch(readCookie(req.headers.cookie, SESSION_COOKIE));
   }
 
+  /**
+   * 回环(含中继转到 127.0.0.1)跳过 Tailscale whois。这不是免登录。
+   */
   async function allowPeer(req: IncomingMessage): Promise<boolean> {
     const ip = clientIp(req);
     if (isLoopback(ip) || loopbackOnly) return true;
     if (!selfLogin) return false;
     const login = await (deps.whois ?? tailscaleLogin)(ip);
     return !!login && login === selfLogin;
+  }
+
+  /** 隧道密钥只在回环上认。认错或不带密钥时,忽略客户端自己写的转发头。 */
+  function trustedTunnel(req: IncomingMessage): { ip: string; https: boolean } | null {
+    const secret = deps.tunnelSecret;
+    if (!secret || !isLoopback(clientIp(req))) return null;
+    const got = req.headers[TUNNEL_SECRET_HEADER];
+    if (typeof got !== 'string' || !keysEqual(got, secret)) return null;
+    const forwarded = req.headers[CLIENT_IP_HEADER];
+    const raw = typeof forwarded === 'string' ? forwarded.replace(/^::ffff:/, '') : '';
+    const ip = raw && isIP(raw) ? raw : clientIp(req);
+    return { ip, https: req.headers[PROTO_HEADER] === 'https' };
+  }
+
+  function requestClient(req: IncomingMessage): { ip: string; secureCookie: boolean } {
+    const trust = trustedTunnel(req);
+    if (trust) return { ip: trust.ip, secureCookie: trust.https };
+    return { ip: clientIp(req), secureCookie: false };
   }
 
   async function onRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -235,8 +269,9 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
         return;
       }
       if (req.method === 'POST' && path === '/session/logout') {
+        const client = requestClient(req);
         sessions.revoke(readCookie(req.headers.cookie, SESSION_COOKIE));
-        json(res, 200, { ok: true }, { 'set-cookie': sessionSetCookie('', 0) });
+        json(res, 200, { ok: true }, { 'set-cookie': sessionSetCookie('', 0, client.secureCookie) });
         return;
       }
       if (path === '/rpc' || path.startsWith('/media/') || path === '/events') {
@@ -271,7 +306,8 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
   }
 
   async function handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const ip = clientIp(req);
+    const client = requestClient(req);
+    const ip = client.ip;
     if (limiter.isLocked(ip)) {
       deps.logger.log('warn', `远程登录已锁定 ${ip}(15 分钟内失败达到 ${LOGIN_MAX_FAILS} 次)`);
       json(res, 429, { ok: false, error: '登录失败次数过多,请 15 分钟后再试' });
@@ -298,7 +334,7 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
     }
     limiter.succeed(ip);
     const id = sessions.issue();
-    json(res, 200, { ok: true }, { 'set-cookie': sessionSetCookie(id, Math.floor(SESSION_TTL_MS / 1000)) });
+    json(res, 200, { ok: true }, { 'set-cookie': sessionSetCookie(id, Math.floor(SESSION_TTL_MS / 1000), client.secureCookie) });
   }
 
   async function handleRpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -431,6 +467,8 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
       deps.logger.log('warn', '远程访问未启动:未设置口令');
       return;
     }
+    const relayOn = settings.remoteAccess?.relayEnabled === true;
+    const relayUrl = (settings.remoteAccess?.relayUrl ?? '').trim().replace(/\/$/, '');
     let bindHosts: string[] = [];
     let dns: string | null = null;
     if (loopbackOnly) {
@@ -438,34 +476,52 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
       selfLogin = null;
     } else if (deps.lookupTailscale) {
       const found = await deps.lookupTailscale();
-      if (!found.ip) {
+      if (found.ip) {
+        bindHosts = [found.ip, '127.0.0.1'];
+        dns = found.dns;
+        selfLogin = found.selfLogin;
+      } else if (relayOn) {
+        bindHosts = ['127.0.0.1'];
+        selfLogin = null;
+      } else {
         await closeServers();
         error = '未检测到 Tailscale,远程访问未启动';
         deps.logger.log('warn', error);
         return;
       }
-      bindHosts = [found.ip, '127.0.0.1'];
-      dns = found.dns;
-      selfLogin = found.selfLogin;
     } else {
       const ip = await tailscaleIpv4();
-      if (!ip) {
+      if (ip) {
+        bindHosts = [ip, '127.0.0.1'];
+        dns = await tailscaleDnsName();
+        selfLogin = await tailscaleLogin(ip);
+        if (!selfLogin) deps.logger.log('warn', 'Tailscale whois 未得到本机用户,非回环连接会被拒绝');
+      } else if (relayOn) {
+        bindHosts = ['127.0.0.1'];
+        selfLogin = null;
+      } else {
         await closeServers();
         error = '未检测到 Tailscale,远程访问未启动';
         deps.logger.log('warn', error);
         return;
       }
-      bindHosts = [ip, '127.0.0.1'];
-      dns = await tailscaleDnsName();
-      selfLogin = await tailscaleLogin(ip);
-      if (!selfLogin) deps.logger.log('warn', 'Tailscale whois 未得到本机用户,非回环连接会被拒绝');
     }
+    const buildUrls = (listenPort: number) => {
+      const shown = new Set<string>();
+      for (const host of bindHosts) shown.add(`http://${host}:${listenPort}/`);
+      if (dns) shown.add(`http://${dns}:${listenPort}/`);
+      if (relayOn && relayUrl) shown.add(`${relayUrl}/`);
+      return [...shown];
+    };
     const same =
       listening &&
       port === requested &&
       hosts.length === bindHosts.length &&
       hosts.every((h, i) => h === bindHosts[i]);
-    if (same) return;
+    if (same) {
+      urls = buildUrls(port);
+      return;
+    }
     port = requested;
     await closeServers();
     try {
@@ -473,10 +529,7 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
       hosts = bindHosts;
       listening = true;
       error = undefined;
-      const shown = new Set<string>();
-      for (const host of bindHosts) shown.add(`http://${host}:${port}/`);
-      if (dns) shown.add(`http://${dns}:${port}/`);
-      urls = [...shown];
+      urls = buildUrls(port);
       deps.logger.log('info', `远程访问开 · ${urls.join(' ')}`);
     } catch (e) {
       await closeServers();

@@ -287,6 +287,11 @@ export interface BigBotArtApi {
    * 远程调用会被拒绝,只能在桌面设置页轮换。
    */
   remoteAccessRotatePassphrase(): Promise<{ ok: boolean; passphrase?: string; error?: string }>;
+  /**
+   * 保存中继配对密钥。明文不进 settings.json。远程调用会被拒绝。
+   * 传空字符串表示清除。
+   */
+  relaySetPairingKey(key: string): Promise<{ ok: boolean; error?: string }>;
   // LLM 来源(五档:lmstudio / ollama / pimlx / openai-compatible / cloud)
   /** 枚举本地运行时模型(仅支持工具调用的;含体积/显存预估/已加载标记) */
   llmLocalModels(kind: 'lmstudio' | 'ollama' | 'pimlx'): Promise<import('./domain').LocalRuntimeModels>;
