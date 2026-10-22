@@ -1078,6 +1078,33 @@ export interface AppSettings {
   cloudProviders?: CloudProviderEntry[];
   /** 🆕 工具模型绑定(设置页「工具模型」;缺省走 DEFAULT_TOOL_MODELS / vision env 回退链) */
   toolModels?: ToolModelBinding;
+  /**
+   * 网页远程访问(Tailscale)。缺省视为关闭;老 settings.json 无此字段,不需要迁移。
+   * 只放开关和端口。口令哈希在 remote-access.json,不进本对象,也不进 getSettings()。
+   */
+  remoteAccess?: RemoteAccessSettings;
+}
+
+/** 远程访问默认端口(设置页未填时) */
+export const DEFAULT_REMOTE_PORT = 47321;
+
+/** 远程访问的非秘密设置。enabled 缺省 = 关。 */
+export interface RemoteAccessSettings {
+  enabled?: boolean;
+  port?: number;
+}
+
+/** 桌面设置页展示的监听状态。永不包含口令明文或哈希。 */
+export interface RemoteAccessStatus {
+  enabled: boolean;
+  port: number;
+  listening: boolean;
+  urls: string[];
+  hasPassphrase: boolean;
+  /** out/renderer 是否存在。没有构建产物时页面打不开,RPC 仍可按开关监听。 */
+  pageReady: boolean;
+  /** 未在监听时的原因(未开启 / 未设口令 / 未检测到 Tailscale / 端口被占用) */
+  error?: string;
 }
 
 /**

@@ -15,12 +15,14 @@
     "@bigbotart/providers": "workspace:*",
     "@bigbotart/shared": "workspace:*",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^38.8.6",
     "electron-builder": "^26.15.3",

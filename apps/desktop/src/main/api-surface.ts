@@ -124,6 +124,8 @@ import type {
   ProjectExportResult,
   ProjectImportResult,
   ProjectCover,
+  AppSettings,
+  RemoteAccessStatus,
 } from '@bigbotart/shared';
 import {
   referenceMediaIssues,
@@ -149,6 +151,10 @@ export interface DesktopIpcDeps {
   getWin: () => BrowserWindow | null;
   /** 进程内扇出(EventHub.publish)。进度类事件不要再只推给一个窗口。 */
   publish: (channel: string, payload: unknown) => void;
+  /** 设置里的远程访问开关变了。缺省时桌面行为与以前一样。 */
+  onRemoteSettings?: (next: AppSettings) => void;
+  remoteStatus?: () => RemoteAccessStatus;
+  rotatePassphrase?: () => { ok: boolean; passphrase?: string; error?: string };
   probeSimple: (id: RuntimeProbe['id'], label: string, port: number) => Promise<RuntimeProbe>;
   executeAgentChat: (opts: {
     projectId: string;
@@ -166,7 +172,9 @@ export interface DesktopIpcDeps {
   };
 }
 
-export function registerDesktopIpc(ctx: DesktopIpcDeps): void {
+export type IpcHandler = (event: unknown, ...args: unknown[]) => unknown;
+
+export function registerDesktopIpc(ctx: DesktopIpcDeps): Map<string, IpcHandler> {
   const {
     logger,
     registry,
@@ -184,10 +192,20 @@ export function registerDesktopIpc(ctx: DesktopIpcDeps): void {
     autoContinue,
     getWin,
     publish,
+    onRemoteSettings,
+    remoteStatus,
+    rotatePassphrase,
     probeSimple,
     executeAgentChat,
     compactContext,
   } = ctx;
+  const captured = new Map<string, IpcHandler>();
+  const originalHandle = ipcMain.handle.bind(ipcMain);
+  (ipcMain as unknown as { handle: (channel: string, listener: IpcHandler) => void }).handle = (channel, listener) => {
+    captured.set(channel, listener);
+    originalHandle(channel, listener as never);
+  };
+  try {
 
 // ---------- IPC:引擎引导 ----------
 ipcMain.handle('probe-runtimes', async (): Promise<RuntimeProbe[]> => {
@@ -760,8 +778,22 @@ ipcMain.handle('set-settings', (_e, patch: Partial<import('@bigbotart/shared').A
     applyThemeSource(normalizeTheme(next.theme));
     syncWindowBackground(getWin());
   }
+  if (patch && 'remoteAccess' in patch) onRemoteSettings?.(next);
   return next;
 });
+ipcMain.handle('remote-access-status', (): RemoteAccessStatus =>
+  remoteStatus?.() ?? {
+    enabled: false,
+    port: 47321,
+    listening: false,
+    urls: [],
+    hasPassphrase: false,
+    pageReady: false,
+  },
+);
+ipcMain.handle('remote-access-rotate-passphrase', () =>
+  rotatePassphrase?.() ?? { ok: false, error: '远程访问未初始化' },
+);
 
 // ---------- IPC:h3 模型包(加速 / 风格)管理 ----------
 ipcMain.handle('accel-list', () => accel.list());
@@ -977,4 +1009,8 @@ ipcMain.handle('memory-compact', async (_e, projectId: string, canvasId: string)
   return { ok: true, summary: fallback, replaced: res.replaced, fallback: true };
 });
 
+  } finally {
+    (ipcMain as unknown as { handle: typeof originalHandle }).handle = originalHandle;
+  }
+  return captured;
 }

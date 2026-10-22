@@ -280,6 +280,13 @@ export interface BigBotArtApi {
   // 设置
   getSettings(): Promise<import('./domain').AppSettings>;
   setSettings(patch: Partial<import('./domain').AppSettings>): Promise<import('./domain').AppSettings>;
+  /** 远程访问当前状态(地址、是否在听、有没有口令)。不含口令。 */
+  remoteAccessStatus(): Promise<import('./domain').RemoteAccessStatus>;
+  /**
+   * 生成新口令并让旧会话失效。明文只在这一次返回。
+   * 远程调用会被拒绝,只能在桌面设置页轮换。
+   */
+  remoteAccessRotatePassphrase(): Promise<{ ok: boolean; passphrase?: string; error?: string }>;
   // LLM 来源(五档:lmstudio / ollama / pimlx / openai-compatible / cloud)
   /** 枚举本地运行时模型(仅支持工具调用的;含体积/显存预估/已加载标记) */
   llmLocalModels(kind: 'lmstudio' | 'ollama' | 'pimlx'): Promise<import('./domain').LocalRuntimeModels>;
@@ -424,6 +431,7 @@ export interface BigBotArtApi {
 }
 
 export * from './domain.js';
+export * from './api-catalog.js';
 export * from './provider.js';
 export * from './tool-defs.js';
 export * from './table.js';

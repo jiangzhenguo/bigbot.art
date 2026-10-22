@@ -3,6 +3,8 @@
  * M1 闭环:项目/画布持久化 · 渲染队列(槽位互斥) · 资产导入 · Skills · 时间线导出 · 设置(LLM/渲染模式)
  */
 import { registerDesktopIpc } from './api-surface';
+import { createRemoteServer, type RemoteControl } from './remote/server';
+import { DEFAULT_REMOTE_PORT, type RemoteAccessStatus } from '@bigbotart/shared';
 import {
   app,
   BrowserWindow,
@@ -659,7 +661,16 @@ async function createWindow() {
 }
 
 // ---------- IPC:业务面在 api-surface.ts(原样搬出,行为不变) ----------
-registerDesktopIpc({
+const remoteSlot: { current: RemoteControl | null } = { current: null };
+const remoteStatusFallback = (): RemoteAccessStatus => ({
+  enabled: false,
+  port: DEFAULT_REMOTE_PORT,
+  listening: false,
+  urls: [],
+  hasPassphrase: false,
+  pageReady: false,
+});
+const ipcHandlers = registerDesktopIpc({
   logger,
   registry,
   queue,
@@ -676,9 +687,25 @@ registerDesktopIpc({
   autoContinue,
   getWin: () => win,
   publish: (channel, payload) => hub.publish(channel, payload),
+  onRemoteSettings: (next) => {
+    void remoteSlot.current?.apply(next);
+  },
+  remoteStatus: () => remoteSlot.current?.status() ?? remoteStatusFallback(),
+  rotatePassphrase: () => remoteSlot.current?.rotatePassphrase() ?? { ok: false, error: '远程访问未初始化' },
   probeSimple,
   executeAgentChat,
   compactContext,
+});
+remoteSlot.current = createRemoteServer({
+  hub,
+  handlers: ipcHandlers,
+  logger,
+  staticDir: process.env.BIGBOTART_REMOTE_STATIC
+    ? resolve(process.env.BIGBOTART_REMOTE_STATIC)
+    : join(__dirname, '../renderer'),
+});
+void remoteSlot.current.apply(settings.get()).catch((e) => {
+  logger.log('error', `远程访问启动失败: ${(e as Error).message}`);
 });
 
 

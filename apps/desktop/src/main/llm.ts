@@ -346,7 +346,9 @@ export async function credentialSet(providerId: string, apiKey: string): Promise
     ]);
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    // security CLI 失败时 message 会带上 argv,其中有 apiKey。不能原样回到渲染层或远程响应。
+    const message = (e as Error).message.split(apiKey).join('***');
+    return { ok: false, error: message };
   }
 }
 
