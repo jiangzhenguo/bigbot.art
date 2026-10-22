@@ -8,11 +8,14 @@
  *   ③ ref-image 连线在提交时被 .filter(Boolean) / `if (!as) continue` 静默吞掉,
  *      references 为空照样提交 → 纯文生图,参考图根本没进生成命令(假成功)。
  *
- * 本测试锁四条修复:
+ * 本测试锁五条修复:
  *   1. assets.import 把 ctx.projectId 传给 importFromDialog / importFromPaths
  *   2. canvas.create_node(kind='asset') 拒绝不存在的/缺失的 assetId,并列出真实候选
- *   3. engine.submit(image-gen/image-edit):有 ref-image 入边但解析不到图 → 指名拒绝
+ *   3. engine.submit(image-edit,以及非资产来源的 image-gen):有 ref-image 入边但解析不到图 → 指名拒绝
  *   4. engine.submit(shot):派生 ref 的资产 id 不存在 → 拒绝(不再 `continue` 静默吞)
+ *   5. engine.submit(image-gen):入边是用户素材的 ref-image → 角色参考闸拒绝,不入队
+ *      (2026-10-22 checkCharacterRefEditGate。事故③的「解析不到 / 解析得到」改在 image-edit 上锁,
+ *      因为 image-gen + 用户素材 ref-image 会更早被这条闸拦住,到不了资产解析)
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -178,16 +181,25 @@ describe('canvas.create_node(kind=asset) 资产绑定校验(事故②)', () => {
 });
 
 describe('engine.submit ref-image 连线必须解析出图(事故③·图片节点)', () => {
-  it('image-gen 有 ref-image 入边但源资产不存在 → 指名拒绝,不入队', async () => {
+  // 2026-10-22:用户素材的参考图必须走 image-edit(Qwen-Image-2.1 允许只连 ref-image、无 input 底图)。
+  // image-gen + 资产 ref-image 由角色参考闸拒绝,到不了这里的解析闸。
+  const edit = (id: string) => ({
+    id,
+    kind: 'image-edit' as const,
+    label: '镜1',
+    data: { engine: 'mlxgen', mode: 'instruction', model: 'Qwen/Qwen-Image-2.1', prompt: '画一个符号' },
+  });
+
+  it('image-edit 有 ref-image 入边但源资产不存在 → 指名拒绝,不入队', async () => {
     store.seed(
       [
         { id: 'a-logo', kind: 'asset', label: 'BigBotArt LOGO', data: { assetId: 'asset-ghost' } },
-        { id: 'g1', kind: 'image-gen', label: '镜1', data: { engine: 'mlxgen', prompt: '画一个符号' } },
+        edit('e1'),
       ],
-      [{ source: 'a-logo', target: 'g1', label: 'ref-image' }],
+      [{ source: 'a-logo', target: 'e1', label: 'ref-image' }],
     );
     const before = captured.length;
-    const res = await handlers.call('engine.submit', { nodeId: 'g1' }, ctx);
+    const res = await handlers.call('engine.submit', { nodeId: 'e1' }, ctx);
     expect(res.ok).toBe(false);
     expect(res.result).toContain('BigBotArt LOGO');
     expect(res.result).toContain('asset-ghost');
@@ -198,18 +210,36 @@ describe('engine.submit ref-image 连线必须解析出图(事故③·图片节�
     store.seed(
       [
         { id: 'a-logo', kind: 'asset', label: 'LOGO', data: { assetId: 'asset-real-1' } },
-        { id: 'g1', kind: 'image-gen', label: '镜1', data: { engine: 'mlxgen', prompt: '画一个符号' } },
+        edit('e1'),
       ],
-      [{ source: 'a-logo', target: 'g1', label: 'ref-image' }],
+      [{ source: 'a-logo', target: 'e1', label: 'ref-image' }],
     );
     const before = captured.length;
-    const res = await handlers.call('engine.submit', { nodeId: 'g1' }, ctx);
+    const res = await handlers.call('engine.submit', { nodeId: 'e1' }, ctx);
     expect(res.ok).toBe(true);
     expect(captured.length).toBe(before + 1);
     const refs = captured.at(-1)!.req.references as Array<{ role: string; localPath: string }>;
     expect(refs).toHaveLength(1);
     expect(refs[0]!.role).toBe('ref-image');
     expect(refs[0]!.localPath).toBe('/lib/logo.png');
+  });
+
+  it('image-gen 把用户素材连成 ref-image → 角色参考闸拒绝,不入队', async () => {
+    // 资产真实存在,排除「解析不到图」那条旧闸:拒绝来自 checkCharacterRefEditGate
+    store.seed(
+      [
+        { id: 'a-logo', kind: 'asset', label: 'BigBotArt LOGO', data: { assetId: 'asset-real-1' } },
+        { id: 'g1', kind: 'image-gen', label: '镜1', data: { engine: 'mlxgen', prompt: '画一个符号' } },
+      ],
+      [{ source: 'a-logo', target: 'g1', label: 'ref-image' }],
+    );
+    const before = captured.length;
+    const res = await handlers.call('engine.submit', { nodeId: 'g1' }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.result).toContain('BigBotArt LOGO');
+    expect(res.result).toContain('image-edit');
+    expect(res.result).toContain('ref-image');
+    expect(captured.length).toBe(before);
   });
 
   it('图片产物源未生成(无 resultPath) → 同样拒绝并说明原因', async () => {
