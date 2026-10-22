@@ -49,6 +49,7 @@ import { TakeStore } from './takes';
 import { runDataMigration } from './migrate';
 import { DATA_DIR } from './workspace-paths';
 import { DebugLogger } from './logger';
+import { EventHub } from './event-hub';
 import { installCrashGuard } from './crash-guard';
 import { packagedToolPath } from './tool-path';
 import {
@@ -222,6 +223,26 @@ const logger = new DebugLogger();
 // 原生错误框(「A JavaScript error occurred in the main process」)——有我们自己的监听后它不再弹,
 // 异常改走日志总线(调试面板 + 终端),进程继续运行。详见 crash-guard.ts
 installCrashGuard(logger);
+/** 桌面窗口与远程 WebSocket 共用的事件总线。Electron 侧在这里扇出到所有窗口。 */
+const hub = new EventHub();
+let hubBroadcasting = false;
+hub.subscribe((channel, payload) => {
+  if (hubBroadcasting) return;
+  hubBroadcasting = true;
+  try {
+    for (const target of BrowserWindow.getAllWindows()) {
+      if (target.isDestroyed()) continue;
+      try {
+        target.webContents.send(channel, payload);
+      } catch (e) {
+        logger.log('error', `窗口事件发送失败 ${channel}: ${(e as Error).message}`);
+      }
+    }
+  } finally {
+    hubBroadcasting = false;
+  }
+});
+logger.subscribe((entry) => hub.publish('debug-log', entry));
 const dryRun = process.env.BIGBOTART_DRYRUN !== '0';
 logger.log(
   'info',
@@ -245,9 +266,7 @@ const settings = new SettingsStore({ onWarn: (m) => logger.log('warn', m) });
 const accel = new AccelStore(settings);
 /** 风格模型包(mystic 等)下载 + 融合构建;进度推送到渲染层设置页 */
 const styleModels = new H3StyleModelBuilder((ev) => {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('style-model-progress', ev);
-  }
+  hub.publish('style-model-progress', ev);
   logger.log(ev.stage === 'error' ? 'error' : 'info', `[style-model] ${ev.packId} ${ev.stage}: ${ev.message}`);
 });
 
@@ -268,7 +287,7 @@ const store = new ProjectStore();
 /** 任何画布快照写盘(Agent 工具增量 / 渲染层整体保存)都广播给渲染层,
  *  画布页订阅后刷新本地状态 —— Agent 改的画布实时可见,并且渲染层保存不再带旧版本覆盖。 */
 store.onCanvasSaved = (snap) => {
-  if (win && !win.isDestroyed()) win.webContents.send('canvas-snapshot-updated', snap);
+  hub.publish('canvas-snapshot-updated', snap);
 };
 const assets = new AssetStore();
 const skills = new SkillStore();
@@ -404,7 +423,7 @@ agent.onEvent = (ev: AgentEvent) => {
     list.push(describeToolAction(ev.toolName ?? '', ev.toolArgs ?? {}, ev.nodeId));
     toolActivity.set(key, list.slice(-20));
   }
-  win?.webContents.send('agent-event', {
+  hub.publish('agent-event', {
     ...ev,
     projectId: ev.projectId || currentToolCtx?.projectId || '',
     canvasId: ev.canvasId || currentToolCtx?.canvasId || '',
@@ -453,7 +472,7 @@ queue.onJobFinish = async (job) => {
   const ctx = { projectId: job.projectId, canvasId: job.canvasId };
   void tools.call('continuity.check', {}, ctx).then((res) => {
     const issues = res.result && res.result.includes('建议') ? [res.result] : [];
-    win?.webContents.send('agent-event', {
+    hub.publish('agent-event', {
       kind: 'continuity',
       projectId: job.projectId ?? '',
       canvasId: job.canvasId ?? '',
@@ -471,9 +490,7 @@ queue.onJobFinish = async (job) => {
  *  画布若在另一个窗口打开,队列事件就永远到不了它的 CanvasPage →
  *  节点上的「排队中/生成中」不刷新,只能等 8s 兜底轮询(实测:dur 里半天没状态)。 */
 queue.onChange = (jobs) => {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('render-queue-changed', jobs);
-  }
+  hub.publish('render-queue-changed', jobs);
 };
 
 /** 当前活跃 chat 的工具上下文(按 chatKey 隔离,避免并发串写) */
@@ -506,7 +523,7 @@ const autoContinue = new AutoContinueController({
   },
   onCapReached: (projectId, canvasId) => {
     // 达上限必须让用户可见(不是静默停住):推一张连续性卡说明现状与怎么继续
-    win?.webContents.send('agent-event', {
+    hub.publish('agent-event', {
       kind: 'continuity',
       projectId,
       canvasId,
@@ -595,14 +612,6 @@ function wireConsole(win: BrowserWindow) {
   });
 }
 
-/** 调试日志 → 渲染层面板实时推送(窗口销毁自动退订) */
-function wireDebugLog(win: BrowserWindow) {
-  const unsub = logger.subscribe((entry) => {
-    if (!win.isDestroyed()) win.webContents.send('debug-log', entry);
-  });
-  win.on('closed', () => unsub());
-}
-
 async function createWindow() {
   // 自定义应用图标。macOS 安装包的 Dock 图标由 electron-builder 的 mac.icon 写入。
   const iconPath = join(__dirname, '../../resources/icon.png');
@@ -626,7 +635,6 @@ async function createWindow() {
     },
   });
   wireConsole(win);
-  wireDebugLog(win);
 
   // 外链/弹窗:仅允许 https 经系统浏览器打开,禁止应用内导航到任意 URL
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -667,6 +675,7 @@ registerDesktopIpc({
   agent,
   autoContinue,
   getWin: () => win,
+  publish: (channel, payload) => hub.publish(channel, payload),
   probeSimple,
   executeAgentChat,
   compactContext,
@@ -857,7 +866,7 @@ async function executeAgentChat(opts: {
   } else {
     logger.log('info', `[auto-continue] 自动推进轮开始 · "${opts.text.slice(0, 60).replace(/\n/g, ' ')}"`);
     // 通知渲染层切入「执行中」(loading 气泡 + 输入锁定);done/failed 终局事件照旧收尾
-    win?.webContents.send('agent-event', {
+    hub.publish('agent-event', {
       kind: 'auto-start',
       projectId: opts.projectId,
       canvasId: opts.canvasId,
@@ -922,7 +931,7 @@ async function executeAgentChat(opts: {
       ok: true, reply: result.reply, thinking: result.thinking,
       toolCalls: result.toolCalls, ask: result.ask, aborted: result.aborted,
     };
-    win?.webContents.send('agent-event', {
+    hub.publish('agent-event', {
       kind: 'done', projectId: opts.projectId, canvasId: opts.canvasId, threadId, final,
     } satisfies AgentEvent);
     return final;
@@ -935,7 +944,7 @@ async function executeAgentChat(opts: {
       : '';
     const msg = `${(e as Error).message}${summary}`;
     logger.log('error', `agent.chat 失败${opts.auto ? '(自动推进)' : ''}:${msg}`);
-    win?.webContents.send('agent-event', {
+    hub.publish('agent-event', {
       kind: 'failed', projectId: opts.projectId, canvasId: opts.canvasId, threadId, error: msg,
     } satisfies AgentEvent);
     return { ok: false, error: msg };

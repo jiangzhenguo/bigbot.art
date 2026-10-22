@@ -147,6 +147,8 @@ export interface DesktopIpcDeps {
   autoContinue: AutoContinueController;
   /** 注册当时窗口还没建;推送时再读 index.ts 里的那一个 live binding */
   getWin: () => BrowserWindow | null;
+  /** 进程内扇出(EventHub.publish)。进度类事件不要再只推给一个窗口。 */
+  publish: (channel: string, payload: unknown) => void;
   probeSimple: (id: RuntimeProbe['id'], label: string, port: number) => Promise<RuntimeProbe>;
   executeAgentChat: (opts: {
     projectId: string;
@@ -181,6 +183,7 @@ export function registerDesktopIpc(ctx: DesktopIpcDeps): void {
     agent,
     autoContinue,
     getWin,
+    publish,
     probeSimple,
     executeAgentChat,
     compactContext,
@@ -680,13 +683,10 @@ ipcMain.handle('video-upscale', (_e, input: VideoUpscaleRequest) =>
   // 长任务(分钟级):把主进程阶段回调实时推给渲染层,否则 invoke 期间的 UI 完全没有反馈
   videoUpscale(input, {
     onProgress: (p) => {
-      const win = getWin();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('video-post-progress', {
-          ...p,
-          nodeId: input?.nodeId ?? '',
-        } satisfies VideoPostProgressEvent);
-      }
+      publish('video-post-progress', {
+        ...p,
+        nodeId: input?.nodeId ?? '',
+      } satisfies VideoPostProgressEvent);
     },
   }));
 // 视频增强工具链探测(检查器防呆:realesrgan / 修脸脚本 / venv / 权重是否就绪)
