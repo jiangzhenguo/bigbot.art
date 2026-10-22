@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RuntimeProbe, SelfCheckItem } from '@bigbotart/shared';
+import { isDesktopShell } from '../api/shell';
 
 interface OnboardingPageProps {
   onNavigate: (
@@ -488,7 +489,7 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                 <span className="badge ok">已就绪</span>
               ) : mgen.state === 'busy' ? (
                 <span className="badge">安装中…</span>
-              ) : (
+              ) : isDesktopShell() ? (
                 <button
                   className="btn btn-s"
                   id="mgenInstall"
@@ -497,6 +498,8 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                 >
                   安装
                 </button>
+              ) : (
+                <span className="badge">请在 Mac 上安装</span>
               )}
             </div>
             <div className="d-row" id="lmsRow">
@@ -508,6 +511,7 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                 </div>
               </div>
               {lms.state === 'idle' ? (
+                isDesktopShell() ? (
                 <button
                   className="btn btn-s"
                   id="lmsInstall"
@@ -516,6 +520,9 @@ export default function OnboardingPage({ onNavigate }: OnboardingPageProps) {
                 >
                   安装
                 </button>
+                ) : (
+                  <span className="badge">请在 Mac 上安装</span>
+                )
               ) : lms.state === 'busy' ? (
                 <span className="badge">安装中…</span>
               ) : (

@@ -9,6 +9,7 @@
 import React from 'react';
 import type { CanvasNode } from './types';
 import { NODE_INFO_BASE } from './constants';
+import { isDesktopShell } from '../../api/shell';
 
 interface ContextMenuProps {
   ctx: { x: number; y: number; id: string } | null;
@@ -119,6 +120,7 @@ export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDel
         </svg>
         另存为…
       </button>
+      {isDesktopShell() ? (
       <button
         className={`pop-it${isCtxGhost(ctx, nodes) ? ' dim' : ''}`}
         data-od-id="ctx-reveal-finder"
@@ -134,6 +136,7 @@ export function ContextMenu({ ctx, nodes, toastMsg, onRename, onDuplicate, onDel
         </svg>
         在 Finder 中显示
       </button>
+      ) : null}
       <div className="ctx-sep"></div>
       {/* 添加到聊天窗口:设为 Agent 对话的关注节点(点按选中不再自动绑定,这里显式添加) */}
       {onAddToChat ? (

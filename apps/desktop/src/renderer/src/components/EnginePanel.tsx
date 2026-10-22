@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { RuntimeProbe } from '@bigbotart/shared';
+import { isDesktopShell } from '../api/shell';
 
 /** 引擎引导浮层 — 样式走 design-pages.css `.engine-panel*` + 主题 token */
 export default function EnginePanel({
@@ -66,7 +67,7 @@ export default function EnginePanel({
             </span>
           </div>
           {p.detail && <div className="engine-panel-detail">{p.detail}</div>}
-          {p.status !== 'ready' && p.id !== 'h3c' && (
+          {isDesktopShell() && p.status !== 'ready' && p.id !== 'h3c' && (
             <button
               type="button"
               className="engine-panel-install"

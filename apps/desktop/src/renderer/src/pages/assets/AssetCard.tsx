@@ -7,6 +7,7 @@
 import React from 'react';
 import type { Asset } from '@bigbotart/shared';
 import { SafeImage } from '../../components/SafeImage';
+import { assetUrlOf } from '../canvas/media';
 
 interface AssetCardProps {
   asset: Asset;
@@ -18,7 +19,7 @@ interface AssetCardProps {
 }
 
 function thumbOf(a: Asset): string | null {
-  if (a.kind === 'image' && a.localPath) return `bba-asset://${a.localPath.split('/').pop()}`;
+  if (a.kind === 'image' && a.localPath) return assetUrlOf(a.localPath);
   return null;
 }
 

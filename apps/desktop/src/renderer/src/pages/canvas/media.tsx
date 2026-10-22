@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { WAVE_BARS } from './constants';
 
+/** 网页入口把 bigbotartShell 设为 false。未设置(桌面与单测)仍用 bba-asset / bba-output。 */
+function webMedia(): boolean {
+  return typeof window !== 'undefined' && window.bigbotartShell === false;
+}
+
 export function basenameOf(p: string): string {
   const parts = p.replace(/\\/g, '/').split('/');
   return parts[parts.length - 1] ?? p;
@@ -14,10 +19,12 @@ export function outputUrlOf(p: string): string {
     const i = norm.lastIndexOf(m);
     if (i >= 0) {
       const rel = norm.slice(i + m.length);
-      return `bba-output://${rel.split('/').map(encodeURIComponent).join('/')}`;
+      const encoded = rel.split('/').map(encodeURIComponent).join('/');
+      return webMedia() ? `/media/output/${encoded}` : `bba-output://${encoded}`;
     }
   }
-  return `bba-output://${encodeURIComponent(basenameOf(p))}`;
+  const encoded = encodeURIComponent(basenameOf(p));
+  return webMedia() ? `/media/output/${encoded}` : `bba-output://${encoded}`;
 }
 
 /**
@@ -38,10 +45,17 @@ export function formatDurationSec(sec: number | null | undefined): string | null
   return rest === 0 ? `${m}分` : `${m}分${rest}秒`;
 }
 
-/** 缩略图 src(asset localPath → bba-asset://) */
+/** 资产文件名 → 可显示 URL。桌面是 bba-asset://,网页是 /media/asset/。 */
+export function assetUrlOf(localPath: string | undefined | null): string | null {
+  if (!localPath) return null;
+  const name = localPath.split('/').pop();
+  if (!name) return null;
+  return webMedia() ? `/media/asset/${encodeURIComponent(name)}` : `bba-asset://${name}`;
+}
+
+/** 缩略图 src(asset localPath → bba-asset:// 或网页 /media/asset/) */
 export function thumbSrc(assetPath: string | undefined): string | null {
-  if (!assetPath) return null;
-  return `bba-asset://${assetPath.split('/').pop()}`;
+  return assetUrlOf(assetPath);
 }
 
 /** 统一本地路径 → 可显示 URL:产物(outputs/)走 bba-output,资产库走 bba-asset */

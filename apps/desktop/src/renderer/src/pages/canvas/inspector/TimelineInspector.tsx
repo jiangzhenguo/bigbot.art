@@ -11,6 +11,7 @@ import type { CanvasNode } from '../types';
 import { KVSection, Lbl } from './fields';
 import { basenameOf, outputUrlOf } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
+import { isDesktopShell } from '../../../api/shell';
 
 /** 产物 URL 是否为视频(决定用 <video> 还是 <img>) */
 function isVideoSrc(src: string | null | undefined): boolean {
@@ -375,9 +376,11 @@ export function TimelineInspector({
             <TimelineExportPreview lastExport={lastExport} compact={false} />
           </div>
           <div className="row g6" style={{ padding: '0 8px 8px', display: 'flex', gap: 6 }}>
-            <button className="btn btn-s btn-sm" type="button" onClick={onSaveAs}>
-              另存为…
-            </button>
+            {isDesktopShell() ? (
+              <button className="btn btn-s btn-sm" type="button" onClick={onSaveAs}>
+                另存为…
+              </button>
+            ) : null}
             <button className="btn btn-s btn-sm" type="button" onClick={onArchiveExport} disabled={!projectId}>
               存入资源库
             </button>

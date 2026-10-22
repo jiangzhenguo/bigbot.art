@@ -16,6 +16,8 @@ import { ToolModelsSection } from './ToolModelsSection';
 import { setAccelDefaultCache } from './canvas/tool-models-store';
 import { useColorScheme } from '../hooks/useColorScheme';
 import { useI18n, useT } from '../i18n';
+import { isDesktopShell } from '../api/shell';
+import { RemoteAccessSection } from './settings/RemoteAccessSection';
 
 interface SettingsPageProps {
   onNavigate: (
@@ -1407,6 +1409,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   English
                 </span>
               </div>
+              {isDesktopShell() ? <RemoteAccessSection /> : null}
               <div className="srow">
                 <div className="grow">
                   <b>{t('启动时恢复上次项目')}</b>
@@ -2327,7 +2330,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   );
                 })
               )}
-              <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+              {isDesktopShell() ? <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
                 <b>{t('安装模型包')}</b>
                 <div className="row g8" style={{ flexWrap: 'wrap' }}>
                   <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('类型')}</span>
@@ -2378,7 +2381,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                     {t('目录须存在且含 FL2VA/(模型目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora,加速/风格都是换 -d 模型目录(手册 §8/§9)')}
                   </div>
                 )}
-              </div>
+              </div> : null}
             </div>
           </div>
         </main>

@@ -14,6 +14,7 @@ import type { AgentChatApi } from './useAgentChat';
 import { composerPrimaryAction } from './composer-action';
 import { ComposerToolRow } from './ComposerToolRow';
 import { isImeComposingKey } from './ime-composing';
+import { assetUrlOf } from '../canvas/media';
 
 export function AgentComposer({
   chat,
@@ -191,7 +192,7 @@ export function AgentComposer({
           <span className="attach" key={a.id} title={a.localPath}>
             <span className="thumb">
               {a.kind === 'image' ? (
-                <img src={`bba-asset://${a.localPath.split('/').pop()}`} alt="" />
+                <img src={assetUrlOf(a.localPath) ?? ''} alt="" />
               ) : (
                 <span className={`attach-kind attach-kind--${a.kind}`}>
                   {a.kind === 'video' ? '🎬' : a.kind === 'audio' ? '🎵' : '📄'}
