@@ -10,7 +10,7 @@ import ProjectsPage from './pages/ProjectsPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import { I18nProvider, translate, type Lang } from './i18n';
 import { useColorScheme } from './hooks/useColorScheme';
-import type { CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
+import type { CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
 
@@ -282,9 +282,11 @@ export default function App() {
        切画布时把当前快照写回 list 中 active 那份,再切到目标画布 ── */
 
   /** CanvasPage 调用:把当前画布快照写回(自动持久化) */
-  const handleSaveCanvas = useCallback(async (snap: CanvasSnapshot) => {
+  const handleSaveCanvas = useCallback(async (snap: CanvasSnapshot, opts?: CanvasSaveOptions) => {
     try {
-      await window.bigbotart.saveCanvasSnapshot(snap);
+      const r = await window.bigbotart.saveCanvasSnapshot(snap, opts);
+      // 被拒要留痕:allowEmpty 的清空仍被拒 = 真正的 bug,别静默(store 侧还会广播 latest 刷新本地)
+      if (!r?.ok && !r?.stale) console.error('保存画布被拒绝', { canvasId: snap.id, opts, r });
     } catch (e) {
       console.error('保存画布失败', e);
     }

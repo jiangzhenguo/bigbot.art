@@ -33,7 +33,11 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
   // ⚠️ 必须用订阅式 useToolModels(2026-10-14):getToolModelsSync 冷启动时缓存未加载,
   //    会显示内置默认 z-image 而非设置页配置的模型(实际提交是对的,显示在说谎)。
   const toolModels = useToolModels();
-  const model = String(d.model ?? '').trim() || (resolveImageModel(toolModels, capabilityOf('image-gen')) ?? '');
+  // 有 ref-image 入边时缺省走参考编辑(image.instruction → 2.1),不是 Klein multi-reference
+  const hasRefImages = Array.isArray(d.refImageFrom) && (d.refImageFrom as unknown[]).length > 0;
+  const model =
+    String(d.model ?? '').trim() ||
+    (resolveImageModel(toolModels, capabilityOf('image-gen', undefined, hasRefImages)) ?? '');
   const prompt = String(d.prompt ?? '');
   const negative = String(d.negativePrompt ?? '');
   const w = Number(d.width ?? 1024);
@@ -116,6 +120,11 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
       <div className="f-sec">
         <div className="f-sec-h"><span className="lbl">模型</span><span className="mut" style={{ fontSize: 10.5 }}>来自 capabilities().models</span></div>
         <ModelCombo value={model} onChange={(v) => setData({ model: v })} disabled={running} />
+        {hasRefImages ? (
+          <div className="f-hint" style={{ marginTop: 6 }}>
+            已连参考图 · 缺省走 Qwen-Image-2.1 参考编辑(指令驱动);要「首图定构图」的多参考生成请显式选 Flux.2 Klein
+          </div>
+        ) : null}
       </div>
 
       <AspectPresets

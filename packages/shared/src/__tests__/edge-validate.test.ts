@@ -7,6 +7,7 @@ import {
   validateEdge,
   allowedPortLabels,
   deriveShotRefsFromEdges,
+  pendingImageUpstreamLabels,
   deriveAudioRefSource,
   validateRefsForSubmit,
   referenceMediaIssues,
@@ -274,6 +275,22 @@ describe('B · deriveShotRefsFromEdges(refs 由边推导)', () => {
 });
 
 describe('D · 提交前防呆', () => {
+  it('图片上游无产物 ⇒ pendingImageUpstreamLabels 点名', () => {
+    const still: EdgeNodeMin = { id: 'img1', kind: 'image-gen', label: '分镜静帧 01', data: {} };
+    const ready: EdgeNodeMin = {
+      id: 'img2',
+      kind: 'image-gen',
+      label: '角色卡',
+      data: { resultPath: '/tmp/char.png' },
+    };
+    const shot = shotNode('s');
+    const edges: EdgeMin[] = [
+      { id: 'e1', source: 'img1', target: 's', label: 'ref-image' },
+      { id: 'e2', source: 'img2', target: 's', label: 'ref-image' },
+    ];
+    expect(pendingImageUpstreamLabels([still, ready, shot], edges, 's')).toEqual(['分镜静帧 01']);
+  });
+
   it('析出两个 first-frame 来源 ⇒ ref-multi-source 错误', () => {
     const nodes = [assetNode('a'), cropNode('c'), shotNode('s')];
     const refs = deriveShotRefsFromEdges(

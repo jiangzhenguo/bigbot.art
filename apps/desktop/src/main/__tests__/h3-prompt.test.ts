@@ -168,6 +168,63 @@ describe('requestH3PromptCompletion', () => {
     expect(got).toEqual({ ok: true, text: LONG, model: 'm' });
   });
 
+  it('protocol=responses(grok 等只开 /responses)→ 打 /responses,报文用 instructions/input/max_output_tokens', async () => {
+    let url = '';
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      url = input;
+      body = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          status: 'completed',
+          output: [{ type: 'message', content: [{ type: 'output_text', text: LONG }] }],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const got = await requestH3PromptCompletion({ ...endpoint, protocol: 'responses' }, { system: 'SYS', user: 'U' }, fetchImpl);
+    expect(url).toBe('http://llm.example/v1/responses');
+    expect(body.instructions).toBe('SYS');
+    expect(body.input).toBe('U');
+    expect(body.max_output_tokens).toBe(8000);
+    expect(body.messages).toBeUndefined();
+    expect(got).toEqual({ ok: true, text: LONG, model: 'm' });
+  });
+
+  it('端点回 ModelProtocolUnsupported → 自动切另一套协议重试一次(2026-10-20 grok 事故)', async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (input: string) => {
+      urls.push(input);
+      if (input.endsWith('/chat/completions')) {
+        return new Response(
+          JSON.stringify({ type: 'error', error: { type: 'ModelProtocolUnsupported', message: 'Model does not support this protocol.' } }),
+          { status: 400 },
+        );
+      }
+      return new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: LONG }] }] }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    const got = await requestH3PromptCompletion(endpoint, { system: 's', user: 'u' }, fetchImpl);
+    expect(urls).toEqual(['http://llm.example/v1/chat/completions', 'http://llm.example/v1/responses']);
+    expect(got).toEqual({ ok: true, text: LONG, model: 'm' });
+  });
+
+  it('responses 被截断(status=incomplete)→ 不写回', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' },
+          output: [{ type: 'message', content: [{ type: 'output_text', text: LONG }] }],
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    const got = await requestH3PromptCompletion({ ...endpoint, protocol: 'responses' }, { system: 's', user: 'u' }, fetchImpl);
+    expect(got.ok).toBe(false);
+    expect(String((got as { error?: string }).error)).toContain('截断');
+  });
+
   it('截断、空内容、HTTP 错误、网络失败都不返回可写正文', async () => {
     const lengthFetch = (async () =>
       new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: LONG } }] }), {

@@ -132,10 +132,13 @@ export default function CanvasSwitcher({
   const handleDelete = async () => {
     if (!cur) return;
     if (!confirm(`删除「${cur.name}」？此操作不可撤销。`)) return;
-    const nextActiveId = await onDeleteCanvas(cur.id);
-    if (nextActiveId) {
-      await onSwitchCanvas(nextActiveId);
-    }
+    setOpen(false);
+    /* ⚠️ 删完不要再 onSwitchCanvas:
+     * switchCanvas 会先 flushSaveNow 把「已删画布」的本地节点再写回 store,
+     * store 旧逻辑对未知 id 会 push → 画布当场复活(2026-10-22 删「未命名画布 2」无效)。
+     * deleteCanvas 已把 activeCanvasId 切到剩余画布,App 刷新 projectCanvases 后
+     * CanvasPage 跟 props 重载即可。 */
+    await onDeleteCanvas(cur.id);
   };
 
   if (!cur) return null;

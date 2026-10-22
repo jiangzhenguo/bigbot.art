@@ -13,9 +13,9 @@ import type { NodeKind, ToolModelBinding } from './domain.js';
 /** 图片能力 key(按能力而非节点类型:一个节点类型可对应多种能力,一个模型可覆盖多种能力) */
 export type ImageCapability =
   | 'image.generate' // 文生图(image-gen 无参考图)
-  | 'image.multiReference' // 多参考生成(image-gen 带 ref-image 连线)
+  | 'image.multiReference' // Klein 多参考生成(flux2.multi-reference · 首图定构图;仅节点显式选 Klein 时走)
   | 'image.img2img' // 图生图(image-edit mode=img2img,latent)
-  | 'image.instruction' // 指令编辑(image-edit mode=instruction;2.1 支持 1-10 张参考图)
+  | 'image.instruction' // 指令/参考编辑(edit-reference;image-edit 默认,也是 image-gen 带 ref-image 的默认路径)
   | 'image.inpaint' // 局部重绘(image-edit mode=inpaint,需 mask)
   | 'image.outpaint' // 扩图(image-edit mode=outpaint)
   | 'image.upscale'; // 图片超分(image-upscale)
@@ -27,9 +27,9 @@ export type ImageCapability =
  */
 export const DEFAULT_TOOL_MODELS: Record<ImageCapability, string> = {
   'image.generate': 'AbstractFramework/z-image-turbo-8bit', // 快 · ~11GB(决策 4:保持 turbo)
-  'image.multiReference': 'AbstractFramework/flux.2-klein-9b-8bit', // 唯一支持无上限多参考(实测 flux2.multi-reference)
+  'image.multiReference': 'AbstractFramework/flux.2-klein-9b-8bit', // 唯一无上限 multi-reference(首图定构图);非「连参考图」默认
   'image.img2img': 'AbstractFramework/z-image-turbo-8bit',
-  'image.instruction': 'Qwen/Qwen-Image-2.1', // 决策 1:qwen21.edit 支持 1-10 张参考图
+  'image.instruction': 'Qwen/Qwen-Image-2.1', // qwen21.edit 1-10 张;image-gen 带 ref-image 默认也用这条
   'image.inpaint': 'mlx-community/Qwen-Image-Edit-8bit', // 2.1 实测无 mask 能力
   'image.outpaint': 'mlx-community/Qwen-Image-Edit-8bit', // 2.1 实测无 outpaint 能力
   'image.upscale': 'AbstractFramework/seedvr2-3b-8bit',
@@ -112,14 +112,17 @@ export function supportsCapability(model: string, cap: ImageCapability): boolean
 
 /**
  * 节点 kind + 可选编辑 mode → 能力 key(纯函数;三方共用的关键接缝)。
- * - image-gen:带 ref-image 连线时是「多参考生成」,否则「文生图」
+ * - image-gen:无参考图 → 文生图;有 ref-image → **参考编辑**(image.instruction → 默认 2.1)
+ *   ⚠️ 不是 image.multiReference。引擎里 multi-reference = Klein「首图定构图」,
+ *   与 2.1 的 edit-reference(指令驱动多图)是两条能力行;连参考图的常见意图是后者
+ *   (2026-10-22 口径纠正)。要走 Klein multi-reference 须节点显式选 flux.2-klein。
  * - image-edit:按 mode 细分;未知 mode 回退 instruction(与 Provider 缺省同口径)
  * - 纯 ffmpeg 节点 / 视频节点:undefined(无模型可选)
  */
 export function capabilityOf(kind: NodeKind | string, mode?: string, hasRefImages = false): ImageCapability | undefined {
   switch (kind) {
     case 'image-gen':
-      return hasRefImages ? 'image.multiReference' : 'image.generate';
+      return hasRefImages ? 'image.instruction' : 'image.generate';
     case 'image-edit': {
       const m = String(mode ?? 'instruction');
       if (m === 'img2img' || m === 'inpaint' || m === 'outpaint') return `image.${m}` as ImageCapability;

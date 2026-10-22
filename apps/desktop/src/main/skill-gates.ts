@@ -89,8 +89,9 @@ export function checkCharacterCardGate(
       ok: false,
       reason:
         `提交被拒绝:当前技能要求先出 ${min} 张角色卡(已出图 ${ready.length} 张),再生成主菜单静帧与视频。${have}` +
-        `请先 canvas.create_node(kind="image-gen", label="角色卡·PLAYER1") 写角色设定提示词(半身/¾ 正面、简洁背景、无 UI)` +
-        `→ engine.submit → ask.user 确认,${min > 1 ? '再做「角色卡·PLAYER2」,' : ''}之后再提交「${labelOf(target)}」。`,
+        `请先建角色卡「角色卡·PLAYER1」(有参考图→image-edit 以原图为 input;无参考→image-gen;` +
+        `默认全身正面、简洁背景、无 UI)→ engine.submit → ask.user 确认,` +
+        `${min > 1 ? '再做「角色卡·PLAYER2」,' : ''}之后再提交「${labelOf(target)}」。`,
     };
   }
 
@@ -183,6 +184,45 @@ export function checkProductPhotoEditGate(
   };
 }
 
+/**
+ * 角色参考图编辑闸(全局,2026-10-22)。
+ *
+ * 事故:用户上传猫照片说「根据图片生成角色图」,Agent 建 image-gen 并把资产连成
+ * ref-image(Klein 多参考)——约定要求走 image-edit + input 底图编辑。
+ * 系统提示曾只在「激活技能」时注入,无技能时整段丢失。
+ *
+ * 规则:提交 image-gen 且入边有来自 **asset** 的 ref-image → 拒绝。
+ * 资产是用户真图;把它当多参考文生图等于绕开编辑保真。无资产参考的纯文生图放行。
+ */
+export function checkCharacterRefEditGate(
+  target: CanvasNode,
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+): GateResult {
+  if (target.kind !== 'image-gen') return { ok: true };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const assetRefs = edges.filter(
+    (e) =>
+      e.target === target.id &&
+      e.label === 'ref-image' &&
+      byId.get(e.source)?.kind === 'asset',
+  );
+  if (assetRefs.length === 0) return { ok: true };
+  const names = assetRefs
+    .map((e) => byId.get(e.source))
+    .filter(Boolean)
+    .map((n) => `「${labelOf(n!)}」`)
+    .join('、');
+  return {
+    ok: false,
+    reason:
+      `提交被拒绝:「${labelOf(target)}」是 image-gen,却把用户素材 ${names} 连成了 ref-image。` +
+      `有参考图出角色卡/角色图时必须走编辑:canvas.create_node(kind="image-edit")` +
+      `→ canvas.connect 把参考图以 label="input" 连入 → 写编辑提示词(默认全身正面)→ engine.submit。` +
+      `不要用 image-gen + ref-image 多参考重画。无参考图时才允许纯 image-gen 文生图。`,
+  };
+}
+
 /** 聚合所有技能提交闸;任一拒绝即返回该拒绝 */
 export function checkSkillSubmitGates(
   skillId: string | undefined,
@@ -194,5 +234,7 @@ export function checkSkillSubmitGates(
   if (!a.ok) return a;
   const b = checkMasterAudioGate(skillId, target, nodes, edges);
   if (!b.ok) return b;
-  return checkProductPhotoEditGate(skillId, target, nodes, edges);
+  const c = checkProductPhotoEditGate(skillId, target, nodes, edges);
+  if (!c.ok) return c;
+  return checkCharacterRefEditGate(target, nodes, edges);
 }

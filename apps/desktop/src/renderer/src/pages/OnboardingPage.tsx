@@ -13,7 +13,7 @@ const IMAGE_MODELS: Array<{ id: string; name: string; desc: string; recommended?
   { id: 'qwen-image-2.1', name: 'Qwen-Image-2.1', desc: '文生图 / 参考编辑 · 7.1B · ~33GB' },
   { id: 'qwen-image-2.1-turbo', name: 'Qwen-Image-2.1 Turbo', desc: '文生图 / 参考编辑 · 8步蒸馏 · 快 · ~33GB' },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', desc: '指令编辑 / Inpaint · 37.5GB' },
-  { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', desc: '多参考生成/编辑 · Outpain ~18GB' },
+  { id: 'flux2-klein-9b', name: 'FLUX.2 Klein 9B', desc: '多参考生成(首图定构图)/编辑 · Outpaint · ~18GB' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', desc: '超分修复 · ~4.7GB' },
   { id: 'qwen3-vl-8b-caption', name: 'Qwen3-VL 8B caption', desc: '看图反推 · Agent 识图(本地 mlxgen-caption)· ~5.4GB · 建议在 LM Studio 下载' },
 ];

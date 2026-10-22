@@ -12,7 +12,7 @@
  *   1. h3.c 引擎   → spawn `h3 --info -d <模型目录>` 并**解析输出**,
  *                    要求同时证明「二进制可执行」+「模型目录里真有 checkpoint」
  *   2. mlxgen 引擎 → `command -v mlxgen` + `--help` 取版本,再核对模型缓存完整性
- *   3. LLM 工具回环 → 真发一次 OpenAI 兼容 /chat/completions 请求,
+ *   3. LLM 工具回环 → 真发一次 OpenAI 兼容对话请求(按协议选 /chat/completions 或 /responses),
  *                    并用工具 schema 探「端点是否接受 tools 字段」(Agent 能干活的硬前提)
  *   4. 存储与队列   → 真实检查数据目录可写 + 并发闸门状态
  */
@@ -21,6 +21,9 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, unlinkSync
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SelfCheckItem, SelfCheckReport } from '@bigbotart/shared';
+import { withOpenCodeGoHeaders } from '@bigbotart/shared';
+import type { LlmProtocol } from '@bigbotart/shared';
+import { responseError, textCallBody, textCallUrl } from './llm-http.js';
 import type { DebugLogger } from './logger';
 import { mlxgenModelInfo } from './mlxgen-models';
 import { resolveVisionEndpoint } from './vision';
@@ -207,35 +210,38 @@ async function checkMlxgen(logger?: DebugLogger): Promise<SelfCheckItem> {
 
 /**
  * 校验 3:LLM 工具调用回环。
- * 真发一次 /chat/completions,带 tools schema —— 判「端点可达」+「支持工具调用」两件事。
+ * 真发一次对话请求(chat/completions 或 responses,按 BIGBOTART_LLM_PROTOCOL),带 tools schema ——
+ * 判「端点可达」+「支持工具调用」两件事。
  * 只探 1 个 token(不生成内容,成本可忽略)。
  */
 async function checkLlm(logger?: DebugLogger): Promise<SelfCheckItem> {
   const started = Date.now();
   const ep = resolveVisionEndpoint();
-  const url = `${ep.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const protocol: LlmProtocol = ep.protocol ?? 'chat';
+  const url = textCallUrl(ep.baseUrl, protocol);
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
+      headers: withOpenCodeGoHeaders(ep.baseUrl, 'selfcheck-llm', {
         'content-type': 'application/json',
         ...(ep.apiKey ? { authorization: `Bearer ${ep.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: ep.model,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-        tools: [
-          {
-            type: 'function',
-            function: {
-              name: 'selfcheck_ping',
-              description: 'connectivity probe',
-              parameters: { type: 'object', properties: {} },
-            },
-          },
-        ],
       }),
+      body: JSON.stringify(
+        textCallBody(
+          { baseUrl: ep.baseUrl, model: ep.model, protocol },
+          {
+            user: 'ping',
+            maxTokens: 1,
+            tools: [
+              {
+                name: 'selfcheck_ping',
+                description: 'connectivity probe',
+                parameters: { type: 'object', properties: {} },
+              },
+            ],
+          },
+        ),
+      ),
       signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     });
     const ms = Date.now() - started;
@@ -254,13 +260,14 @@ async function checkLlm(logger?: DebugLogger): Promise<SelfCheckItem> {
         ms,
       };
     }
-    const json = (await res.json()) as { choices?: unknown[]; error?: { message?: string } };
-    if (json.error) {
+    const json = (await res.json()) as { choices?: unknown[]; output?: unknown[]; error?: unknown; type?: string; message?: string };
+    const remoteErr = responseError(json);
+    if (remoteErr) {
       return {
         id: 'llm',
         label: 'LLM 工具调用回环',
         ok: false,
-        detail: `端点报错:${json.error.message ?? '未知'}`,
+        detail: `端点报错:${remoteErr.slice(0, 200)}`,
         hint: '模型可能不支持工具调用,换一个带 tools 能力的模型',
         ms,
       };

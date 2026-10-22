@@ -8,23 +8,28 @@
  *
  * 新策略(按行决策,优先级从上到下):
  *  1. 上一镜可接续且本行不是硬切 → `continue`(shot→shot first-frame,FL2VA)
- *  2. 画布上有角色卡/场景卡 → `ref`(全部连 ref-image,Ref2VA;不建静帧)
- *  3. 「需配图=是」→ `keyframe`(建 image-gen 作首帧)
+ *  2. 本行选中的角色卡/场景卡 → `ref`(连 ref-image,Ref2VA;需配图=是才另建静帧)
+ *  3. 「需配图=是」或硬切 → `keyframe`(建 image-gen 作首帧)
  *  4. 否则 → `text`(纯文生视频)
  *
  * 渲染层 / Agent tool-handlers / 确定性 plan 三处必须同口径调用本模块。
  */
 import { rowCell, rowNeedsImage, type PromptSubject } from './prompt.js';
 
-/** 可当参考卡的图片节点 kind */
-const CARD_KINDS = new Set(['image-gen', 'image-edit', 'asset']);
+/** 可当参考卡的图片节点 kind(含拼图角色卡) */
+const CARD_KINDS = new Set(['image-gen', 'image-edit', 'asset', 'image-stitch']);
 
-const CHARACTER_LABEL_RE = /角色卡|角色设定|character\s*card/i;
+const CHARACTER_LABEL_RE = /角色卡|人物卡|角色设定|character\s*card/i;
 const SCENE_LABEL_RE = /场景卡|场景设定|环境底图|环境卡|scene\s*card|environment\s*card/i;
+
+/** 视图/变体后缀:同一角色的侧面/背面/特写不当作另一张卡 */
+const VIEW_HINT_RE = /侧面|背面|正面|头部|特写|全身|立姿|bust|side|back|front|3\s*[dD]|写实版|设定图/i;
 
 /** 硬切/换场 → 打断镜间接续,重新走 ref 或 keyframe */
 const HARD_CUT_RE =
   /硬切|切换场景|切到|转场|另一场景|新场景|场景切换|换场|cut\s*to|hard\s*cut|scene\s*change/i;
+
+const ROLE_SPLIT_RE = /[,，、/;；|]+/;
 
 export type MaterializeStrategy = 'ref' | 'continue' | 'keyframe' | 'text';
 
@@ -36,6 +41,10 @@ export interface MaterializeCard {
   kind: 'character' | 'scene';
   /** 写入 Subject 标签的名字(从标题剥离「角色卡·」等前缀) */
   name: string;
+  /** 源节点 kind(拼图优先) */
+  sourceKind?: string;
+  /** 原始标题(去重视图判定) */
+  label?: string;
 }
 
 /** 单行铺节点计划(纯数据,调用方负责分配 id / 落盘) */
@@ -45,8 +54,14 @@ export interface MaterializeRowPlan {
   shotMode: MaterializeShotMode;
   /** 锁定模式,避免派生态把 mode 从连线改回 text2video */
   modeOverride: boolean;
-  /** 是否新建 image-gen 并以 first-frame 连到本镜 */
+  /** 是否新建 image-gen 静帧 */
   createKeyframe: boolean;
+  /**
+   * 静帧接到镜头的端口。
+   * ref-image:有参考卡的硬切镜,静帧和角色卡同属 Ref2VA,不占首帧。
+   * first-frame:没有参考卡,静帧就是这一镜的第一帧。
+   */
+  keyframeAs: 'first-frame' | 'ref-image';
   /** 连到本镜的 ref-image 源节点 id(角色卡/场景卡) */
   refNodeIds: string[];
   /**
@@ -80,7 +95,7 @@ export function isSceneCardNode(n: MaterializeNodeLike): boolean {
   return CARD_KINDS.has(String(n.kind ?? '')) && SCENE_LABEL_RE.test(nodeDisplayLabel(n));
 }
 
-/** 从标题抽出主体名:「角色卡·苏青」→「苏青」 */
+/** 从标题抽出主体名:「角色卡·苏青」→「苏青」;「锦衣卫猫猫人 · 人物卡」→「锦衣卫猫猫人」 */
 export function cardNameFromLabel(label: string, kind: 'character' | 'scene'): string {
   const cleaned = String(label ?? '')
     .replace(CHARACTER_LABEL_RE, '')
@@ -91,23 +106,132 @@ export function cardNameFromLabel(label: string, kind: 'character' | 'scene'): s
   return kind === 'scene' ? '场景' : '角色';
 }
 
-/** 扫描画布:角色卡在前、场景卡在后(与 Ref2VA Picture 编号习惯一致) */
-export function collectMaterializeCards(nodes: MaterializeNodeLike[]): MaterializeCard[] {
+/** 同一角色的身份键:取第一个 ·/— 分段,忽略视图后缀 */
+export function cardIdentityKey(name: string): string {
+  const head = (String(name).split(/[·\-—:/]/)[0] ?? name).trim();
+  return head.replace(/\s+/g, '').toLowerCase() || String(name).replace(/\s+/g, '').toLowerCase();
+}
+
+function cardPreferScore(c: MaterializeCard): number {
+  const label = c.label ?? c.name;
+  let s = 0;
+  if (c.sourceKind === 'image-stitch') s += 100;
+  if (CHARACTER_LABEL_RE.test(label) || SCENE_LABEL_RE.test(label)) s += 40;
+  if (!VIEW_HINT_RE.test(label)) s += 20;
+  s -= Math.min(label.length, 80);
+  return s;
+}
+
+/** 同一身份只留一张卡:拼图 > 无视图后缀的「角色卡/人物卡」> 其余 */
+export function dedupeMaterializeCards(cards: MaterializeCard[]): MaterializeCard[] {
+  const best = new Map<string, MaterializeCard>();
+  for (const c of cards) {
+    const key = `${c.kind}:${cardIdentityKey(c.name)}`;
+    const prev = best.get(key);
+    if (!prev || cardPreferScore(c) > cardPreferScore(prev)) best.set(key, c);
+  }
   const chars: MaterializeCard[] = [];
   const scenes: MaterializeCard[] = [];
-  for (const n of nodes) {
-    const label = nodeDisplayLabel(n);
-    if (isCharacterCardNode(n)) {
-      chars.push({ nodeId: n.id, kind: 'character', name: cardNameFromLabel(label, 'character') });
-    } else if (isSceneCardNode(n)) {
-      scenes.push({ nodeId: n.id, kind: 'scene', name: cardNameFromLabel(label, 'scene') });
-    }
+  for (const c of best.values()) {
+    if (c.kind === 'character') chars.push(c);
+    else scenes.push(c);
   }
   return [...chars, ...scenes];
 }
 
+/** 扫描画布:角色卡在前、场景卡在后(与 Ref2VA Picture 编号习惯一致);同身份去重 */
+export function collectMaterializeCards(nodes: MaterializeNodeLike[]): MaterializeCard[] {
+  const raw: MaterializeCard[] = [];
+  for (const n of nodes) {
+    const label = nodeDisplayLabel(n);
+    if (isCharacterCardNode(n)) {
+      raw.push({
+        nodeId: n.id,
+        kind: 'character',
+        name: cardNameFromLabel(label, 'character'),
+        sourceKind: String(n.kind ?? ''),
+        label,
+      });
+    } else if (isSceneCardNode(n)) {
+      raw.push({
+        nodeId: n.id,
+        kind: 'scene',
+        name: cardNameFromLabel(label, 'scene'),
+        sourceKind: String(n.kind ?? ''),
+        label,
+      });
+    }
+  }
+  return dedupeMaterializeCards(raw);
+}
+
 export function cardsToSubjects(cards: MaterializeCard[]): PromptSubject[] {
-  return cards.map((c) => ({ name: c.name, kind: c.kind }));
+  return cards.map((c) => {
+    const short = (c.name.split(/[·\-—]/)[0] ?? c.name).trim();
+    return { name: short || c.name, kind: c.kind };
+  });
+}
+
+/** 「角色」列拆成名字列表 */
+export function parseRoleTokens(cell: string): string[] {
+  return String(cell ?? '')
+    .split(ROLE_SPLIT_RE)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export function cardMatchesToken(cardName: string, token: string): boolean {
+  const a = String(cardName ?? '').replace(/\s+/g, '');
+  const b = String(token ?? '').replace(/\s+/g, '');
+  if (!a || !b) return false;
+  const aKey = cardIdentityKey(a);
+  const bKey = cardIdentityKey(b);
+  return a.includes(b) || b.includes(a) || aKey.includes(bKey) || bKey.includes(aKey);
+}
+
+function descMentionsCard(desc: string, card: MaterializeCard): boolean {
+  const d = String(desc ?? '');
+  if (!d) return false;
+  const key = (card.name.split(/[·\-—]/)[0] ?? card.name).trim();
+  if (key.length >= 2 && d.includes(key)) return true;
+  /* 「锦衣卫猫猫人」对「猫猫人从阴影中走出」:用身份键的后缀短名命中 */
+  if (key.length >= 2) {
+    for (let i = 0; i <= key.length - 2; i++) {
+      const sub = key.slice(i);
+      if (sub.length >= 2 && d.includes(sub)) return true;
+    }
+  }
+  return cardMatchesToken(card.name, d);
+}
+
+/**
+ * 按行选出本镜该连的卡。
+ * - 表头有「角色」列:只连列里点名的角色;场景卡仍可按画面描述命中。
+ * - 无「角色」列(旧表):按画面描述命中;一个都没命中时回退全部(兼容模糊行)。
+ */
+export function selectCardsForRow(
+  row: string[] | undefined,
+  head: string[],
+  allCards: MaterializeCard[],
+): MaterializeCard[] {
+  if (!allCards.length) return [];
+  const hasRoleCol = head.indexOf('角色') >= 0;
+  const desc = rowCell(row, head, '画面描述');
+  if (hasRoleCol) {
+    const tokens = parseRoleTokens(rowCell(row, head, '角色'));
+    const out: MaterializeCard[] = [];
+    for (const c of allCards) {
+      if (c.kind === 'character') {
+        if (tokens.some((t) => cardMatchesToken(c.name, t))) out.push(c);
+      } else if (tokens.some((t) => cardMatchesToken(c.name, t)) || descMentionsCard(desc, c)) {
+        out.push(c);
+      }
+    }
+    return out;
+  }
+  const matched = allCards.filter((c) => descMentionsCard(desc, c));
+  if (matched.length > 0) return matched;
+  return allCards;
 }
 
 /** 运镜 / 画面描述暗示硬切换场 */
@@ -115,6 +239,26 @@ export function isHardCutRow(row: string[] | undefined, head: string[]): boolean
   const move = rowCell(row, head, '运镜');
   const scene = rowCell(row, head, '画面描述');
   return HARD_CUT_RE.test(move) || HARD_CUT_RE.test(scene);
+}
+
+/** 「衔接」列:硬切 / 接尾帧 / 没写(沿用硬切词与接续) */
+export type RowLink = 'cut' | 'continue' | 'auto';
+
+/**
+ * 读「衔接」列。显式值优先于画面描述里的硬切词。
+ * 旧表没有这一列时返回 auto,铺节点行为与加列之前一致。
+ */
+export function rowLink(row: string[] | undefined, head: string[]): RowLink {
+  const v = rowCell(row, head, '衔接').trim();
+  if (!v) return 'auto';
+  if (/硬切|换场|不接尾帧|\bhard\s*cut\b/i.test(v)) return 'cut';
+  if (/接尾帧|接续/.test(v)) return 'continue';
+  return 'auto';
+}
+
+/** 静帧边的端口。调用方三处(plan / tool-handlers / CanvasPage)都用它,避免一处写死 first-frame。 */
+export function keyframeEdgeLabel(plan: Pick<MaterializeRowPlan, 'keyframeAs'>): 'first-frame' | 'ref-image' {
+  return plan.keyframeAs === 'ref-image' ? 'ref-image' : 'first-frame';
 }
 
 /**
@@ -150,10 +294,7 @@ export function planStoryboardMaterializeRows(opts: {
 }): MaterializeRowPlan[] {
   const head = opts.head;
   const done = new Set(opts.doneRows ?? []);
-  const cards = collectMaterializeCards(opts.canvasNodes ?? []);
-  const subjects = cardsToSubjects(cards);
-  const refIds = cards.map((c) => c.nodeId);
-  const hasRefs = refIds.length > 0;
+  const allCards = collectMaterializeCards(opts.canvasNodes ?? []);
 
   const plans: MaterializeRowPlan[] = [];
   /** 已有 shot 的行 + 本批刚计划的行 —— 判断「上一行是否有 shot 可接」 */
@@ -163,9 +304,19 @@ export function planStoryboardMaterializeRows(opts: {
     const rowNo = r + 1;
     if (done.has(rowNo)) continue;
     const row = opts.rows[r];
-    const hardCut = isHardCutRow(row, head);
+    const link = rowLink(row, head);
+    /* 显式「接尾帧」压过文案里的硬切词;显式「硬切」一定断开。没写列时仍看硬切词。 */
+    const hardCut = link === 'cut' || (link !== 'continue' && isHardCutRow(row, head));
     const prevRow = rowNo - 1;
     const canContinue = !hardCut && prevRow >= 1 && coveredRows.has(prevRow);
+    const rowCards = selectCardsForRow(row, head, allCards);
+    const subjects = cardsToSubjects(rowCards);
+    const refIds = rowCards.map((c) => c.nodeId);
+    const hasRefs = refIds.length > 0;
+    const needImg = rowNeedsImage(row, head);
+    /* 有参考卡时:只有显式硬切且「需配图=是」才另建静帧(卡已够用时不要白造一张)。
+       静帧走 ref-image,和角色卡一起给 Ref2VA,不和上一镜尾帧混用。 */
+    const stillWithRefs = link === 'cut' && needImg;
 
     let plan: MaterializeRowPlan;
     if (canContinue) {
@@ -175,6 +326,7 @@ export function planStoryboardMaterializeRows(opts: {
         shotMode: 'first-frame',
         modeOverride: true,
         createKeyframe: false,
+        keyframeAs: 'first-frame',
         refNodeIds: [],
         continueFromRow: prevRow,
         subjects: [],
@@ -185,17 +337,19 @@ export function planStoryboardMaterializeRows(opts: {
         strategy: 'ref',
         shotMode: 'ref-image',
         modeOverride: true,
-        createKeyframe: false,
+        createKeyframe: stillWithRefs,
+        keyframeAs: 'ref-image',
         refNodeIds: [...refIds],
         subjects: [...subjects],
       };
-    } else if (rowNeedsImage(row, head)) {
+    } else if (needImg || link === 'cut') {
       plan = {
         rowNo,
         strategy: 'keyframe',
         shotMode: 'first-frame',
         modeOverride: true,
         createKeyframe: true,
+        keyframeAs: 'first-frame',
         refNodeIds: [],
         subjects: [],
       };
@@ -206,6 +360,7 @@ export function planStoryboardMaterializeRows(opts: {
         shotMode: 'text2video',
         modeOverride: false,
         createKeyframe: false,
+        keyframeAs: 'first-frame',
         refNodeIds: [],
         subjects: [],
       };
@@ -223,9 +378,11 @@ export function summarizeMaterializePlans(plans: MaterializeRowPlan[]): string {
   const refs = plans.filter((p) => p.strategy === 'ref').length;
   const cont = plans.filter((p) => p.strategy === 'continue').length;
   const keys = plans.filter((p) => p.strategy === 'keyframe').length;
+  const stills = plans.filter((p) => p.createKeyframe).length;
   const text = plans.filter((p) => p.strategy === 'text').length;
   const parts = [`${n} shot`];
-  if (keys) parts.push(`${keys} 静帧`);
+  if (stills) parts.push(`${stills} 静帧`);
+  else if (keys) parts.push(`${keys} 静帧`);
   if (refs) parts.push(`${refs} 镜绑定参考卡`);
   if (cont) parts.push(`${cont} 镜接续上一镜尾帧`);
   if (text) parts.push(`${text} 镜纯文生`);

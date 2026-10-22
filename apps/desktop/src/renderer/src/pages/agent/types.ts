@@ -38,7 +38,10 @@ export interface ChatMsg {
   contextNodes?: Array<{ id: string; title: string }>;
   /** 模型思考内容(ThinkingBlock 折叠展示;不进记忆) */
   thinking?: string;
-  /** 设计稿里的 data-od-id 标识 */
+  /**
+   * 设计稿里的 data-od-id 标识。
+   * `agent-reply` = 本轮最终回答正文(可挂复制);`agent-tools` / `agent-ask` 等其它卡不挂。
+   */
   odId?: string;
   /** 执行计划卡(PlanCard) */
   plan?: PlanData;

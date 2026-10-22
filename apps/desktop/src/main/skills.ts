@@ -216,11 +216,17 @@ const LEGACY_BUILTIN_FINGERPRINTS = new Set<string>([
   // 3d-animation-short:2026-10-09 第三次修订(16322 字,官方六段结构 + 逐字抄规则,
   // 但未写「提交即收尾 vs 多步流程」的关系 → Agent 会卡在「等出图」)
   'fnv1a-a90fae91-16322',
+  // 3d-animation-short:2026-10-22 之前(17333 字)。角色卡写死 image-gen + 主 3/4 视角,
+  // 未写「有参考图→image-edit / 无参考→image-gen」与默认全身正面。
+  'fnv1a-289805d7-17333',
   // co-op-game-intro:初版(20704 字,主菜单是「先出一张静帧」,无角色卡硬门)
   'fnv1a-3c5b8bf8-20704',
   // co-op-game-intro:2026-10-12 角色卡先行修订(21952 字)。主菜单仍写 image-gen+ref-image,
   // 实跑落到 Klein 多参考,竖版角色卡把 16:9 请求改写成 800×1168。
   'fnv1a-bbcf1b5f-21952',
+  // co-op-game-intro:2026-10-22 之前(22777 字)。角色卡一律 image-gen + 半身/¾,
+  // 有上传图也只作 ref-image 重绘,未改为 image-edit 底图编辑 + 默认全身正面。
+  'fnv1a-837b6798-22777',
   // music-video-subtitle:初版(7829 字,只在文案谈 Master Audio、未强制 ref-audio 连线)
   'fnv1a-16230625-7829',
   // handdrawn-live-video:2026-10-13 之前(3486 字)。只写「可先做 image-gen 首帧」,
@@ -483,16 +489,12 @@ export class SkillStore {
       target: idMap.get(e.target) ?? e.target,
     }));
     const project = store.createProject(projectName);
-    const now = new Date().toISOString();
+    // 必须先 createCanvas 再 save —— store 不再对未知 id 静默 push(防删除后 flush 复活)
+    const canvas = store.createCanvas(project.id, '主画布');
     store.saveCanvasSnapshot({
-      id: project.activeCanvasId || 'main',
-      projectId: project.id,
-      name: '主画布',
+      ...canvas,
       nodes,
       edges,
-      version: 1,
-      createdAt: now,
-      updatedAt: now,
     });
     return project;
   }

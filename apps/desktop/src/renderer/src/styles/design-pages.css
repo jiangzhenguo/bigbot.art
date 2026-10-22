@@ -506,9 +506,18 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 /* 关键:子项禁止收缩。卡片(.trc/.ask 带 overflow:hidden)的 min-height:auto 会算成 0,
    默认 flex-shrink 会把卡片压扁成一条线、列表失去滚动——所有直接子项一律 flex:none */
 .pg-canvas .chat > *{flex:none}
-.pg-canvas .msg-user{margin-left:auto;max-width:92%;background:color-mix(in oklab,var(--fg) 8%,transparent);border-radius:16px 16px 4px 16px;padding:10px 13px;font-size:var(--text-xs);line-height:1.55}
+.pg-canvas .msg-user-wrap{align-self:flex-end;display:flex;flex-direction:column;align-items:flex-end;gap:4px;max-width:92%}
+.pg-canvas .msg-user{max-width:100%;background:color-mix(in oklab,var(--fg) 8%,transparent);border-radius:16px 16px 4px 16px;padding:10px 13px;font-size:var(--text-xs);line-height:1.55}
 .pg-canvas .msg-agent{max-width:100%;background:var(--bg);border:1px solid var(--border-soft);border-radius:16px 16px 16px 4px;padding:11px 13px;font-size:var(--text-xs);line-height:1.55;box-shadow:var(--shadow-card)}
 .pg-canvas .msg-sys{text-align:center;font-size:11px;color:var(--muted);line-height:1.5}
+/* 对话复制:用户气泡常显 + 每轮最终回答(agent-reply)常显;已执行 xxx / 工具卡不挂 */
+.pg-canvas .msg-copy{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);font-size:10.5px;line-height:1.3;cursor:pointer;transition:color var(--motion-fast),background var(--motion-fast)}
+.pg-canvas .msg-copy svg{width:12px;height:12px;flex:none}
+.pg-canvas .msg-copy:hover{color:var(--fg);background:color-mix(in oklab,var(--fg) 7%,transparent)}
+.pg-canvas .msg-copy:focus-visible{outline:2px solid color-mix(in oklab,var(--accent) 55%,transparent);outline-offset:1px}
+.pg-canvas .msg-copy.ok{color:color-mix(in oklab,var(--success) 70%,var(--fg))}
+.pg-canvas .msg-agent-actions{display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid var(--border-soft)}
+.pg-canvas .msg-copy--agent{margin-left:-4px}
 .pg-canvas .tool{border:1px solid var(--border-soft);border-radius:var(--radius-sm);margin-top:8px;background:var(--surface-warm)}
 .pg-canvas .tool .th{display:flex;align-items:center;gap:7px;padding:6px 9px;border-bottom:1px solid var(--border-soft)}
 .pg-canvas .tool .tb{padding:7px 10px;color:var(--muted);font-size:11px}
@@ -644,7 +653,11 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .msg-user .badge.ctx-node{background:color-mix(in oklab,var(--accent) 14%,transparent);color:var(--fg);cursor:pointer}
 /* 聊天里的内联媒体:用户附件气泡(图片/视频)与工具卡产物共用尺寸约束 */
 .pg-canvas .att-media-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.pg-canvas .att-tile{position:relative;display:block;max-width:100%;line-height:0}
 .pg-canvas .att-media{max-width:100%;max-height:180px;border-radius:8px;display:block;background:var(--media-bg)}
+/* 附件文件名叠在画面上(图片贴底、视频贴顶,避开原生控制条);能出画面的不再在正文下重复一排徽标 */
+.pg-canvas .att-cap{position:absolute;left:6px;bottom:6px;max-width:calc(100% - 12px);padding:2px 8px;border-radius:var(--radius-pill);background:var(--on-media-bg);color:var(--on-media);font-size:10px;line-height:1.4;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none}
+.pg-canvas .att-tile--video .att-cap{top:6px;bottom:auto}
 .pg-canvas .att-media-row .aud{width:100%}
 /* 工具卡内联产物媒体:左缘与上方参数文本(.tr-arg 的 23px 缩进)对齐,右缘与行内容右 padding(7px)对齐,
    不再用 4px 左右margin 漂在文本左边(2026-10-15 用户反馈「视频/图片展示位置要对齐上面的文本」) */
@@ -694,8 +707,24 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .refrow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px dashed var(--border-soft);font-size:var(--text-xs)}
 .pg-canvas .refrow:last-child{border-bottom:0}
 .pg-canvas .refrow .thumb{width:34px;height:24px;border-radius:5px}
-.pg-canvas .queue{height:44px;flex:none;border-top:1px solid var(--border-soft);display:flex;align-items:center;gap:18px;padding:0 14px;background:var(--surface-warm);font-size:var(--text-xs)}
+.pg-canvas .queue{height:44px;flex:none;border-top:1px solid var(--border-soft);display:flex;align-items:center;gap:18px;padding:0 14px;background:var(--surface-warm);font-size:var(--text-xs);cursor:pointer;user-select:none}
+.pg-canvas .queue:hover,.pg-canvas .queue.open{background:color-mix(in oklab,var(--fg) 4%,var(--surface-warm))}
 .pg-canvas .queue .qitem{display:flex;align-items:center;gap:8px;min-width:0}
+.pg-canvas .queue .queue-hint{flex:none;opacity:.55}
+.pg-canvas .queue-panel{position:absolute;left:10px;right:auto;bottom:calc(100% + 6px);z-index:80;width:min(360px,calc(100% - 20px));max-height:min(240px,36vh);display:flex;flex-direction:column;border:1px solid var(--glass-border);border-radius:12px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec);cursor:default;overflow:hidden}
+.pg-canvas .queue-panel-h{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border-soft);flex:none;font-size:var(--text-xs)}
+.pg-canvas .queue-panel-h .spacer{flex:1}
+.pg-canvas .queue-empty{padding:16px 12px;text-align:center;font-size:var(--text-xs)}
+.pg-canvas .queue-list{list-style:none;margin:0;padding:4px;overflow:auto;flex:1;min-height:0}
+.pg-canvas .queue-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px}
+.pg-canvas .queue-row:hover{background:color-mix(in oklab,var(--fg) 5%,transparent)}
+.pg-canvas .queue-row .dot{flex:none}
+.pg-canvas .queue-row-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.pg-canvas .queue-row-title{display:flex;align-items:baseline;gap:6px;min-width:0}
+.pg-canvas .queue-row-title b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.pg-canvas .queue-row-sub{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pg-canvas .queue-row-bar{width:100%;max-width:160px;height:3px;border-radius:2px;background:color-mix(in oklab,var(--fg) 10%,transparent);overflow:hidden;display:block}
+.pg-canvas .queue-row-bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .pg-canvas{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var(--accent) 7%,transparent), transparent 62%),radial-gradient(900px 640px at -8% 108%, color-mix(in oklab,var(--fg) 7%,transparent), transparent 58%),var(--bg);background-attachment:fixed;min-height:100vh}
 .pg-canvas .app{position:relative}
 .pg-canvas .topbar{position:absolute;top:10px;left:12px;right:12px;z-index:60;height:46px;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg-strong);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);box-shadow:var(--glass-shadow),var(--glass-spec)}

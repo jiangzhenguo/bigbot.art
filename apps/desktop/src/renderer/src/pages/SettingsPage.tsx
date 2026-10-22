@@ -103,7 +103,20 @@ const PV_CATALOG: PvCatalogEntry[] = [
   { id: 'nim', av: 'N', name: '英伟达 NIM', sub: 'NVIDIA NIM 端点', host: 'https://integrate.api.nvidia.com/v1', models: [
     { id: 'meta/llama-3.1-70b-instruct', note: 'Llama 3.1 · 70B' },
   ] },
-  { id: 'opencode-go', av: 'OC', name: 'opencode go', sub: 'OpenAI 兼容', host: '', models: [] },
+  // OpenCode Go 套餐(opencode.ai/zen/go):$10/$40 订阅,Key 在 Console 申请。
+  // 该端点按模型分三套协议:chat = deepseek/glm/kimi…;responses = Grok/GPT Luna/Muse(2026-10
+  // 起本 App 已支持,自动走 /v1/responses);messages = MiniMax/Qwen/Claude(本 App 未实现,
+  // 拉「添加模型」时被滤掉,见 llm.filterOpenCodeGoModels)。
+  { id: 'opencode-go', av: 'OC', name: 'opencode go', sub: 'OpenCode Go 套餐 · Chat + Responses', host: 'https://opencode.ai/zen/go/v1', models: [
+    { id: 'kimi-k2.7-code', note: '编程' }, { id: 'kimi-k3', note: 'K3' }, { id: 'kimi-k2.6', note: 'K2.6' },
+    { id: 'deepseek-v4-pro', note: 'DeepSeek · 旗舰' }, { id: 'deepseek-v4.1-flash', note: 'DeepSeek · 高速' },
+    { id: 'glm-5.3', note: 'GLM · 旗舰' }, { id: 'glm-5.3-flash', note: 'GLM · 高速' }, { id: 'glm-5.2', note: 'GLM · 5.2' },
+    { id: 'mimo-v2.6-pro', note: 'MiMo · Pro' }, { id: 'mimo-v2.6-flash', note: 'MiMo · 高速' },
+    { id: 'longcat-2.5-preview-free', note: '限时免费' }, { id: 'step-5-preview', note: '限时免费' },
+    { id: 'hy4-preview', note: 'Hy4' }, { id: 'hy3', note: 'Hy3' },
+    { id: 'grok-4.7', note: 'Grok · Responses 协议' }, { id: 'grok-4.6', note: 'Grok · Responses 协议' },
+    { id: 'gpt-6-luna', note: 'GPT Luna · Responses 协议' },
+  ] },
   { id: 'minimax', av: 'M', name: 'MiniMax', sub: 'MiniMax 系列', host: 'https://api.minimaxi.com/v1', models: [] },
   { id: 'kimi', av: 'K', name: 'Kimi 开放平台（月之暗面）', sub: '按量计费 · moonshot/kimi-k2 系列', host: 'https://api.moonshot.cn/v1', models: [] },
   // Kimi 编程套餐(kimi.com 会员)与开放平台是两套账号体系:sk-kimi- 前缀的 Key 只认
@@ -260,7 +273,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   const [group, setGroup] = useState<GroupKey>('llm');
 
   /* ---- LLM 单选(五档) ---- */
-  const [llm, setLlm] = useState<LlmKey>('lmstudio');
+  /**
+   * 初始 **null = 还不知道用户选的是哪一档**,而不是「默认 LM Studio」。
+   * 旧写法 `useState('lmstudio')` 会让首帧先把 LM Studio 那一行点亮,等 getSettings 回来
+   * 才跳到真正的来源 —— 用户看到的就是「进页面先闪一下 LM Studio」(2026-10-21 反馈)。
+   * 选中项只由持久化设置决定,读到之前宁可不选中。
+   */
+  const [llm, setLlm] = useState<LlmKey | null>(null);
   /** 最近一次持久化的 llm 来源(云端当前模型高亮 / radio 联动用) */
   const [llmSource, setLlmSource] = useState<LlmSource | null>(null);
 
@@ -881,7 +900,10 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
           s.theme === 'light' || s.theme === 'dark' || s.theme === 'system' ? s.theme : 'system',
         );
         setLlmSource(s.llm ?? null);
-        if (s.llm?.kind) setLlm(KIND_TO_KEY[s.llm.kind] ?? 'lmstudio');
+        // 首帧不预设档位(见 state 注释):拿到持久化设置后才点亮对应 radio;
+        // 设置里没有 llm(缺省/老文件)时按主进程 DEFAULTS 兜底 lmstudio。
+        // 函数式更新:若用户在回填前已经点过某档,不覆盖他的选择。
+        setLlm((cur) => cur ?? (s.llm?.kind ? (KIND_TO_KEY[s.llm.kind] ?? 'lmstudio') : 'lmstudio'));
         if (s.llm?.kind === 'openai-compatible') {
           if (s.llm.baseUrl) setCompatUrl(s.llm.baseUrl);
           if (s.llm.model) setCompatModel(s.llm.model);
@@ -892,7 +914,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         if (provs[0]) setExpandedPv(new Set([provs[0].id]));
       })
       .catch(() => {
-        /* 设置读取失败:保持设计稿默认值 */
+        /* 设置读取失败:按主进程 DEFAULTS 兜底成 lmstudio(不能让单选框一直空着) */
+        setLlm((cur) => cur ?? 'lmstudio');
       });
     return () => {
       alive = false;
@@ -2121,7 +2144,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   'qwen-image-2.1-turbo': { name: 'Qwen-Image-2.1 Turbo (8步蒸馏)', desc: t('文生图 / 参考编辑 · 采样表锁 8 步 · 快 · ~33GB(本地 4bit ~13GB)') },
                   'qwen-image-2.1-uncensored': { name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)', desc: t('文生图 / 图生图 · ~22GB · 本地构建包(mlx-gen tools/build_qwen21_uncensored_package.sh)') },
                   'qwen-image-edit': { name: 'Qwen Image Edit', desc: t('指令编辑 / Inpaint · 推荐 · 37.5GB') },
-                  'flux2-klein-9b': { name: 'FLUX.2 Klein 9B', desc: t('多参考生成/编辑 · Outpaint · ~18GB') },
+                  'flux2-klein-9b': { name: 'FLUX.2 Klein 9B', desc: t('多参考生成(首图定构图)/编辑 · Outpaint · ~18GB') },
                   'seedvr2-3b': { name: 'SeedVR2 3B', desc: t('超分修复 · 可选 · ~4.7GB') },
                   'qwen3-vl-8b-caption': { name: 'Qwen3-VL 8B caption 微调', desc: t('看图反推 · Agent 识图(本地 mlxgen-caption)· ~5.4GB · 无 MS 镜像,HF 不通时请在 LM Studio 下载') },
                 };

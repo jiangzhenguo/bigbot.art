@@ -20,6 +20,7 @@ import {
   rowCell,
   SB_SIZE,
   planStoryboardMaterializeRows,
+  keyframeEdgeLabel,
   existingShotByRow,
   summarizeMaterializePlans,
   chunkText,
@@ -27,6 +28,7 @@ import {
   validateEdge,
   PIECE_LABEL_RE,
   deriveShotRefsFromEdges,
+  pendingImageUpstreamLabels,
   validateRefsForSubmit,
   validateTodoList,
   formatTodoResult,
@@ -857,8 +859,16 @@ export class ToolHandlers {
             } as CanvasNode['data'],
             createdAt: now, updatedAt: now,
           });
+          const port = keyframeEdgeLabel(plan);
           cur.edges.push({ id: nid('edge'), source: nodeId, target: imgId, label: 'prompt' });
-          cur.edges.push({ id: nid('edge'), source: imgId, target: shotId, label: 'first-frame' });
+          cur.edges.push({ id: nid('edge'), source: imgId, target: shotId, label: port });
+          if (port === 'ref-image') {
+            for (const refId of plan.refNodeIds) {
+              if (cur.nodes.some((n) => n.id === refId)) {
+                cur.edges.push({ id: nid('edge'), source: refId, target: imgId, label: 'ref-image' });
+              }
+            }
+          }
         }
       }
       sb.data = { ...sd, lastTable: gfm } as CanvasNode['data'];
@@ -870,7 +880,7 @@ export class ToolHandlers {
         ok: true,
         result:
           `已从分镜表铺出 ${summarizeMaterializePlans(plans)}(共 ${created + imgs} 节点)· 未触发运行 · ` +
-          `有参考卡的镜走 Ref2VA;后续镜接续上一镜尾帧(FL2VA)· 改表后需「重新同步」`,
+          `「衔接=硬切」按「角色」列挂卡;需配图=是才建静帧。「接尾帧」接上一镜尾帧。改表后需「重新同步」`,
       };
     },
     'canvas.create_node': async (a, ctx) => {
@@ -1370,7 +1380,11 @@ export class ToolHandlers {
         const planGate = shotSubmitAllowed({
           nodeId,
           nodes: cur.nodes,
-          approvedShotIds: this.memory.getApprovedShotIds(ctx.projectId, ctx.canvasId),
+          // 可选调用(与紧邻的 getActiveSkillId 同口径):缺失时按「未批准」处理 ——
+          // 缺方法会让 ≥2 个未出片镜头继续被拦(**fail-closed**),不会因为存根不全就放宽闸门。
+          // 不加可选调用的后果(2026-10-20):5 个 engine.submit 测试的文件级存根 memory 是 `{}`,
+          // 直接抛 `getApprovedShotIds is not a function`,被包成「工具执行异常」,整批提交全部失败。
+          approvedShotIds: this.memory.getApprovedShotIds?.(ctx.projectId, ctx.canvasId),
         });
         if (!planGate.ok) return { ok: false, result: planGate.reason };
       }
@@ -1410,6 +1424,22 @@ export class ToolHandlers {
       let references: Array<{ asset: import('@bigbotart/shared').Asset; role: string; localPath: string }> = [];
       let warnNote = '';
       if (node.kind === 'shot') {
+        /*
+         * ── 静帧/参考图必须先出图(2026-10-22 麦麦画布)──
+         *
+         * deriveShotRefsFromEdges 对无 resultPath 的图片上游是静默跳过的,
+         * 镜头会以「缺参考」入队,视频先跑完、分镜静帧后跑完却接不上。
+         * pendingImageUpstreamLabels 点名未出图的上游,拒绝提交。
+         */
+        const pendingImageRefs = pendingImageUpstreamLabels(cur.nodes, cur.edges, nodeId);
+        if (pendingImageRefs.length > 0) {
+          return {
+            ok: false,
+            result:
+              `「${node.label || nodeId}」的参考图/首帧上游还未出图:${pendingImageRefs.join('、')}。` +
+              `请先 engine.submit 这些图片节点,等出图后再提交本镜头(静帧完成后 cascade 也会自动接力)。`,
+          };
+        }
         const refs = deriveShotRefsFromEdges(
           cur.nodes,
           cur.edges,

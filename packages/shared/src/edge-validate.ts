@@ -19,6 +19,8 @@ import { CONNECTOR_MAP, CONNECTOR_OUTPUT_TARGET, PORT_SEMANTICS, SINGLE_VALUE_PO
 export interface EdgeNodeMin {
   id: string;
   kind: string;
+  /** 展示用标题(pendingImageUpstreamLabels 点名未出图上游) */
+  label?: string;
   data?: unknown;
 }
 
@@ -418,6 +420,28 @@ export function deriveShotRefsFromEdges(
     else merged.push(r);
   }
   return merged;
+}
+
+/**
+ * 镜头入边里「图片上游还没产物」的节点标题列表。
+ * deriveShotRefsFromEdges 对无 resultPath 是静默跳过的,提交前必须用本函数拦住。
+ */
+export function pendingImageUpstreamLabels(
+  nodes: EdgeNodeMin[],
+  edges: EdgeMin[],
+  shotId: string,
+): string[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const out: string[] = [];
+  for (const e of edges) {
+    if (e.target !== shotId) continue;
+    if (e.label !== 'ref-image' && e.label !== 'first-frame') continue;
+    const src = byId.get(e.source);
+    if (!src || !IMAGE_KINDS.includes(src.kind)) continue;
+    const rp = String((src.data as Record<string, unknown> | undefined)?.resultPath ?? '');
+    if (!rp) out.push(src.label || src.id);
+  }
+  return out;
 }
 
 /* ─────────────── audio-ref 节点的输入来源(视频 → 音频参考) ─────────────── */

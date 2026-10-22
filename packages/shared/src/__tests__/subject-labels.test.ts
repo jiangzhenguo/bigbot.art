@@ -13,7 +13,7 @@
  * 编号与图错位比不写标签更糟(模型会拿场景图当角色继承)。
  */
 import { describe, it, expect } from 'vitest';
-import { assembleH3Prompt, buildSubjectLabels, buildRetentionAnalysis } from '../prompt';
+import { assembleH3Prompt, assembleZImagePrompt, buildSubjectLabels, buildRetentionAnalysis } from '../prompt';
 
 const HEAD = ['镜号', '画面描述', '对白/旁白', '景别', '运镜', '时长(s)', '需配图'];
 const ROW = ['1', '机翼上两人对峙', '无', '远景', '航拍侧移', '5', '是'];
@@ -261,11 +261,24 @@ describe('assembleH3Prompt — 回归:原有五段结构不变', () => {
   it('无对白镜保持「无对白」文案', () => {
     const { text } = assembleH3Prompt(ROW, HEAD, '写实');
     expect(text).toContain('Action: 无对白 · 以肢体动作推进');
-    expect(text).toContain('Audio: 环境音 · 水声与风声');
+    expect(text).toContain('Audio: 环境音');
+    expect(text).not.toContain('水声与风声');
   });
 
   it('basePrompt 缺省兜底不变', () => {
     const { text } = assembleH3Prompt(ROW, HEAD);
     expect(text).toContain('Look: 电影感，自然光影，写实');
+  });
+});
+
+describe('assembleZImagePrompt — 场景/光影跟本行走', () => {
+  it('不再写死秋日河谷与黄昏侧光', () => {
+    const head = ['镜号', '画面描述', '对白/旁白', '景别', '运镜', '时长(s)', '需配图', '提示词(可选)'];
+    const row = ['1', '破败宫殿大殿全景,画面无人', '', '大远景', '横摇', '5', '是', ''];
+    const { text } = assembleZImagePrompt(row, head, '冷青与暗紫主色,幽蓝鬼火为唯一强光源,高反差电影级布光');
+    expect(text).toContain('破败宫殿大殿全景');
+    expect(text).not.toContain('秋日河谷');
+    expect(text).not.toContain('黄昏侧光');
+    expect(text).toMatch(/光影：/);
   });
 });

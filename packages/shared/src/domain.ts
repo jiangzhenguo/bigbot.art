@@ -62,13 +62,21 @@ export type H3Mode =
   | 'first-last' // --first-frame + --last-frame (FL2VA)
   | 'ref-image'; // --ref-image (Ref2VA)
 
+/**
+ * LLM 对话协议(决定打哪个端点、用哪套报文形状)。
+ * - `chat`      = `/v1/chat/completions`(2022 经典接口,绝大多数 OpenAI 兼容端点都实现它)
+ * - `responses` = `/v1/responses`(OpenAI 新接口:类型化 output item、可 stateful;部分模型/供应商只开这一个口子)
+ * 详见 docs/LLM协议-ChatCompletions与Responses.md。
+ */
+export type LlmProtocol = 'chat' | 'responses';
+
 /** LLM 来源(全局默认 + 项目级覆盖两档;设置页五档单选) */
 export type LlmSource =
-  | { kind: 'cloud'; provider: string; model?: string } // provider = CloudProviderEntry.id
+  | { kind: 'cloud'; provider: string; model?: string; protocol?: LlmProtocol } // provider = CloudProviderEntry.id
   | { kind: 'lmstudio'; model?: string }
   | { kind: 'ollama'; model?: string }
   | { kind: 'mlx-provider'; model: string }
-  | { kind: 'openai-compatible'; baseUrl: string; apiKey?: string; model?: string }
+  | { kind: 'openai-compatible'; baseUrl: string; apiKey?: string; model?: string; protocol?: LlmProtocol }
   | { kind: 'none' };
 
 /** 本地运行时发现的模型条目(仅列支持工具调用的) */
@@ -115,6 +123,14 @@ export interface CloudProviderEntry {
   enabled: boolean;
   /** 钥匙串里是否已有凭据 */
   hasKey: boolean;
+  /**
+   * 该供应商默认对话协议(缺省 `'chat'`)。同一个供应商可能混用协议
+   * (OpenCode Go:deepseek/glm 走 chat,grok/gpt-luna 走 responses),
+   * 单模型例外写在 `modelProtocols` 里。
+   */
+  protocol?: LlmProtocol;
+  /** 单模型协议覆盖:model id → 协议(优先级高于 `protocol` 与内置知识表) */
+  modelProtocols?: Record<string, LlmProtocol>;
 }
 
 /** 连接检查结果(GET {baseUrl}/models) */
@@ -279,6 +295,12 @@ export interface ImageGenParams {
   seeds: number[];
   /** 🆕 提示词来源追溯(文档标记选段 / 分镜表某行) */
   promptFrom?: PromptSource;
+  /**
+   * 🆕 参考图来源(ref-image 入边,多值,渲染层写入;删除边即撤销)。
+   * 有参考图时缺省模型走 `image.instruction`(Qwen-Image-2.1 edit-reference),
+   * 不是 Klein 的 multi-reference;显式选 flux.2-klein 才走多参考生成。
+   */
+  refImageFrom?: Array<{ nodeId: string }>;
 }
 
 /** 图片编辑参数(mlxgen:指令编辑 / I2I / Inpaint / Outpaint) */
@@ -851,6 +873,18 @@ export interface CanvasNodeGroup {
 }
 
 /** 单个画布的快照(节点 + 连线);持久化在 canvases-${projectId}.json 中 */
+/**
+ * 画布快照保存选项(`BigBotArtApi.saveCanvasSnapshot` 第二参数)。
+ *
+ * 为什么需要:`ProjectStore.saveCanvasSnapshot` 有「0 节点不许覆盖有节点的画布」这条最后防线
+ * (2026-09-22 未装填 flush 抹掉整张画布的事故)。但**用户删掉最后一个节点**时 0 节点是合法结果,
+ * 必须由调用方显式声明 —— 于是有了这个开关。渲染层只在「本地已装填该画布且是内容改动触发」时传 true。
+ */
+export interface CanvasSaveOptions {
+  /** 明确「这次清空是用户编辑的合法结果」,放行 0 节点快照 */
+  allowEmpty?: boolean;
+}
+
 export interface CanvasSnapshot {
   /** 画布 id,全局唯一;通过 projectId 字段归属项目 */
   id: string;

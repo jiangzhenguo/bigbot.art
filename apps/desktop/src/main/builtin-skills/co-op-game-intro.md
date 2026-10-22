@@ -7,8 +7,8 @@
 > ⚠️ **一致性靠参考图连线,不是提示词。** 事故形态:只出了一张主菜单静帧、没出 PLAYER 角色卡 → 后续镜头 mode 停在「文生」→ 7 镜并行提交 → 人物锁不住、成片接不齐。
 
 1. **先角色卡,再主菜单静帧,最后视频**(顺序不可颠倒):
-   - 用户已上传 P1/P2 图 → `assets.import` 入库,再各建一个 image-gen「角色卡·PLAYER1/2」用上传图作 `ref-image` 重绘为所选风格(半身/¾ 正面、简洁背景、**无 UI/无菜单**)。
-   - 无上传图 → 仍必须先建两张角色卡 image-gen 并 `engine.submit` 出图,`ask.user` 确认后再进主菜单静帧。
+   - 用户已上传 P1/P2 图 → `assets.import` 入库,再各建一个 **`image-edit`**「角色卡·PLAYER1/2」:`mode=instruction`,把上传图以 `input` 连为底图,按所选风格重绘(**全身正面**、简洁背景、**无 UI/无菜单**)。**禁止**对该角色再用 `image-gen` 凭空重画。
+   - 无上传图 → 建两张角色卡 **`image-gen`** 文生图(同样默认全身正面、简洁背景、无 UI),`engine.submit` 出图后 `ask.user` 确认,再进主菜单静帧。
    - **禁止**把「主菜单双人合影静帧」当成唯一人物锁——合影图锁不住分镜里的单独脸部。
 2. **默认交付路径 = 2 角色卡 + 1 确认静帧 + 1 个 ~15 秒 shot**(不要拆附录 B 时间轴为 7 个独立镜头并行提交)。一个 shot 用完整英文视频 prompt 覆盖整段时间轴事件。
 3. **多镜仅当用户明确要求**;若拆镜必须同时满足:
@@ -29,14 +29,14 @@
 产出一条包含双人角色、玩家信息卡和主菜单交互动效的游戏开场视频(默认约 15 秒、16:9),路径为:
 
 1. 锁定视觉风格 + 玩家/游戏信息;
-2. **两张角色卡**(image-gen,用户确认);
+2. **两张角色卡**(有参考图→`image-edit` 以原图为 input;无参考→`image-gen`;默认全身正面;用户确认);
 3. 一张经用户确认的 16:9 主菜单静帧(`image-edit` + `Qwen/Qwen-Image-2.1`,1024×576,角色卡经 `ref-image` 注入);
 4. **一个** shot 节点回填完整视频 prompt(角色卡 + 静帧作 `ref-image`,mode=`ref-image`),经 h3.c 出片后 `timeline.export`。
 
 ## 任务流程
 
 1. **读需求与素材入库**:`document.read` / `canvas.list_nodes`;上传的 PLAYER 参考图先 `assets.import`。缺玩家名、游戏名、视觉风格时用 `ask.user` 补齐。
-2. **出角色卡(强制门)**:建「角色卡·PLAYER1」「角色卡·PLAYER2」两个 image-gen → 提交 → 用户确认。未确认前不得铺视频镜头。
+2. **出角色卡(强制门)**:建「角色卡·PLAYER1」「角色卡·PLAYER2」——有上传参考图用 `image-edit`(参考图连 `input`);无参考用 `image-gen`。默认全身正面。提交 → 用户确认。未确认前不得铺视频镜头。
 3. **主菜单确认静帧**:建 `image-edit`(见核心硬规矩 §5:模型 `Qwen/Qwen-Image-2.1`、1024×576、`mode=instruction`),把两张角色卡 `canvas.connect`(label=`ref-image`)连上再 `engine.submit`。不要建成 image-gen。用户确认前不得进视频。
 4. **铺视频节点(默认单镜)**:建 **一个** shot(~15s,16:9,tier 先 preview)。把角色卡×2 + 确认静帧连为 `ref-image`,并 `update_node` 设 `mode=ref-image, modeOverride=true`。若分镜表被 materialize 成多行,删除多余 shot 或只提交主镜头,勿七镜齐发。
 5. **回填并提交视频**:按附录 B 把风格/角色锚点/玩家名/游戏名/UI/时间轴事件写成**一条**英文 prompt 写入该 shot,`engine.submit`;用 `engine.queue_status` 跟踪。先 preview,确认后再提档。
@@ -48,7 +48,7 @@
 
 ## 玩家与游戏信息收集
 
-收集 PLAYER 1 名字、PLAYER 2 名字、游戏名字。角色参考图经 `assets.import` 入库后,**必须**再落到画布 image-gen「角色卡」节点并出图确认(见核心硬规矩 §1);上传图只用于身份映射:可识别脸型轮廓、发型、眼镜、五官相对比例和个人特征。**不要**继承真人摄影质感、皮肤纹理、现实光影、相机质感或原图风格;人脸必须在保留身份锚点的前提下重绘为用户选择的视觉风格。
+收集 PLAYER 1 名字、PLAYER 2 名字、游戏名字。角色参考图经 `assets.import` 入库后,**必须**再落到画布 `image-edit`「角色卡」节点(上传图作 `input` 底图)并出图确认(见核心硬规矩 §1);上传图只用于身份映射:可识别脸型轮廓、发型、眼镜、五官相对比例和个人特征。**不要**继承真人摄影质感、皮肤纹理、现实光影、相机质感或原图风格;人脸必须在保留身份锚点的前提下重绘为用户选择的视觉风格。默认出图为全身正面。
 
 ## 确认首图 Prompt 框架(14 条规则)
 
@@ -264,4 +264,4 @@ No third player, no female character unless explicitly requested by user, no dup
 2. **节点 id 一律用 `canvas.list_nodes` 现拉**,禁止凭记忆引用旧 id。
 3. **不静默跳过失败镜头/失败首图**:生成失败必须如实报告原因,给出修正方案(按「常见失败修正」改写 prompt)并经用户确认后重试。
 4. 首图未获用户确认前,禁止提交视频生成;「跳过确认」只对本次运行生效。
-5. 不虚构工具能力:本技能只涉及 image-gen 角色卡、image-edit 主菜单静帧(Qwen-Image-2.1)与 h3.c 视频生成,不承诺 UI 可交互 Demo 或多页面界面。
+5. 不虚构工具能力:本技能角色卡=有参考走 image-edit / 无参考走 image-gen;主菜单静帧=image-edit(Qwen-Image-2.1);视频=h3.c。不承诺 UI 可交互 Demo 或多页面界面。

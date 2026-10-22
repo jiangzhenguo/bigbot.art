@@ -508,7 +508,14 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           if (res.thinking) out.push({ id: ++msgId.current, kind: 'agent', thinking: res.thinking });
           out.push({ id: ++msgId.current, kind: 'agent', odId: 'agent-ask', ask: { question: res.ask.question, options: res.ask.options } });
         } else if (res.ok && (res.reply || res.thinking)) {
-          out.push({ id: ++msgId.current, kind: 'agent', text: res.reply, thinking: res.thinking });
+          // odId=agent-reply:本轮最终回答(有正文才挂复制;纯思考不挂)
+          out.push({
+            id: ++msgId.current,
+            kind: 'agent',
+            odId: res.reply?.trim() ? 'agent-reply' : undefined,
+            text: res.reply,
+            thinking: res.thinking,
+          });
         } else if (!res.ok) {
           const detail = res.error ?? '未知错误';
           out.push({

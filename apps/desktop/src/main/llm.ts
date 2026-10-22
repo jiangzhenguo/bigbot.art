@@ -14,10 +14,12 @@ import type {
   AppSettings,
   CloudProviderEntry,
   LlmConnectionTest,
+  LlmProtocol,
   LlmSource,
   LocalModelInfo,
   LocalRuntimeModels,
 } from '@bigbotart/shared';
+import { isOpenCodeGoUrl } from '@bigbotart/shared';
 import { readLmStudioContext, readOllamaContext } from './context-budget.js';
 
 const execFileP = promisify(execFile);
@@ -64,9 +66,19 @@ async function getJson(url: string, apiKey?: string, timeoutMs = 4000): Promise<
 }
 
 /* ═══ LM Studio ═══ */
-export async function listLmStudio(): Promise<LocalRuntimeModels> {
-  const mem = await memTotalGb();
-  // lms CLI 有体积/参数/工具调用标记(API 的 /api/v0/models 常缺 sizeBytes),先拉来 enrich
+
+/**
+ * `lms ls --json` 的真实清单(补 sizeBytes / 工具调用标记 —— REST 的 `/api/v0/models`
+ * 常缺这两项)。
+ *
+ * ⚠️ **只在 LM Studio 已在运行时才允许调用**。LM Studio 的 `lms` CLI 自带「唤醒」逻辑
+ * (二进制里是 `wakeUpServiceFromLocation` → `LM Studio started (PID …)`):服务没跑时,
+ * 执行任何 `lms` 子命令都会把 LM Studio 拉起来。而本文件的探测函数全部被设置页 / 对话页 /
+ * 引导页的**被动探测**调用(只想看清有哪些模型),绝不该有这种副作用。
+ * 2026-10-21 用户反馈「进设置 → LLM 来源总是先闪一下 LM Studio,然后它被自动启动」,
+ * 根因正是这里在服务未运行时也 exec 了 `lms ls`。
+ */
+async function readLmsCliModels(): Promise<Map<string, { size?: number; name?: string; tools?: boolean }>> {
   const cliInfo = new Map<string, { size?: number; name?: string; tools?: boolean }>();
   for (const cli of ['lms', join(homedir(), '.lmstudio', 'bin', 'lms')]) {
     try {
@@ -81,6 +93,23 @@ export async function listLmStudio(): Promise<LocalRuntimeModels> {
       break;
     } catch { /* 下个路径 */ }
   }
+  return cliInfo;
+}
+
+export async function listLmStudio(): Promise<LocalRuntimeModels> {
+  const mem = await memTotalGb();
+  // ① 无副作用探活:`/v1/models` 新旧版本都有。服务没跑就到此为止 —— 绝不 exec lms。
+  let probe: any;
+  try {
+    probe = await getJson(`${LMS_BASE}/models`, undefined, 3000);
+  } catch (e) {
+    return {
+      kind: 'lmstudio', available: false, endpoint: LMS_BASE, models: [], memTotalGb: mem,
+      detail: `未检测到 LM Studio(${LMS_BASE}):${(e as Error).message}`,
+    };
+  }
+  // ② 服务确认在跑:此时 lms CLI 只是「连上去问一句」,不会再拉起任何东西
+  const cliInfo = await readLmsCliModels();
   try {
     // 新版 REST API:全量已下载模型 + 加载状态
     const data = await getJson(`${LMS_API}/models`);
@@ -107,21 +136,13 @@ export async function listLmStudio(): Promise<LocalRuntimeModels> {
       .filter((m) => m.supportsTools);
     return { kind: 'lmstudio', available: true, endpoint: LMS_BASE, models, memTotalGb: mem };
   } catch {
-    // 旧版兜底:仅 /v1/models(只有已加载模型)
-    try {
-      const data = await getJson(`${LMS_BASE}/models`);
-      const models: LocalModelInfo[] = (data.data ?? []).map((m: any) => ({
-        id: m.id,
-        supportsTools: guessSupportsTools(m.id),
-        loaded: true,
-      }));
-      return { kind: 'lmstudio', available: true, endpoint: LMS_BASE, models, memTotalGb: mem };
-    } catch (e) {
-      return {
-        kind: 'lmstudio', available: false, endpoint: LMS_BASE, models: [], memTotalGb: mem,
-        detail: `未检测到 LM Studio(${LMS_BASE}):${(e as Error).message}`,
-      };
-    }
+    // 旧版兜底:仅 /v1/models(只有已加载模型)。复用 ① 的响应,不再二次请求
+    const models: LocalModelInfo[] = (probe?.data ?? []).map((m: any) => ({
+      id: m.id,
+      supportsTools: guessSupportsTools(m.id),
+      loaded: true,
+    }));
+    return { kind: 'lmstudio', available: true, endpoint: LMS_BASE, models, memTotalGb: mem };
   }
 }
 
@@ -373,6 +394,133 @@ export async function testConnection(input: {
   }
 }
 
+/**
+ * OpenCode Go 里只提供 `/v1/responses` 的模型(官方 docs/go Endpoints 表)。
+ *
+ * 2026-10-20 起本 App **已支持该协议**(pi-chat 按 `resolveModelProtocol` 选 pi-ai 的
+ * `openAIResponsesApi`),所以它们不再被过滤 —— 选它们会自动改走 /v1/responses。
+ * 名单随官方变更;未知新模型默认仍按 chat 试探,撞上 ModelProtocolUnsupported 会自动切换(见 pi-chat)。
+ */
+export const OPENCODE_GO_RESPONSES_MODELS = new Set([
+  'grok-4.7', 'grok-4.6',
+  'gpt-6-luna', 'gpt-5.6-luna',
+  'muse-spark-1.3-contributor', 'muse-spark-1.2-contributor',
+]);
+
+/**
+ * OpenCode Go 里只提供 `/v1/messages`(Anthropic 形状)的模型(官方 docs/go Endpoints 表)。
+ * 本 App 目前只实现 chat / responses 两套协议 —— 这些选了必失败,拉清单时滤掉。
+ * 名单随官方变更;未知新模型默认放行(允许试探)。
+ */
+export const OPENCODE_GO_NON_CHAT_MODELS = new Set([
+  // /v1/messages(Anthropic)
+  'claude-haiku-5-5',
+  'minimax-m3', 'minimax-m2.7', 'minimax-m2.5', 'minimax-m3.1-flash-free',
+  'qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen3.7-max', 'qwen3.6-plus',
+  // Gemini 族
+  'gemini-4-argon-contributor',
+]);
+
+/** 是否 OpenCode Go 端点(按 providerId 或 host 识别)。host 判定与 shared.isOpenCodeGoUrl 同口径。 */
+export function isOpenCodeGoEndpoint(input: { providerId?: string; baseUrl?: string }): boolean {
+  if (input.providerId === 'opencode-go') return true;
+  return isOpenCodeGoUrl(input.baseUrl);
+}
+
+/** 该模型是否只提供 `/v1/responses`(本 App 已支持,会改走新协议)。 */
+export function isOpenCodeGoResponsesModel(model: string | undefined): boolean {
+  if (!model) return false;
+  return OPENCODE_GO_RESPONSES_MODELS.has(model.trim().toLowerCase());
+}
+
+/** 过滤出本 App 可用的 OpenCode Go 模型。 */
+export function filterOpenCodeGoModels(models: string[]): string[] {
+  return models.filter((id) => !OPENCODE_GO_NON_CHAT_MODELS.has(id));
+}
+
+/** 该模型在 OpenCode Go 上是否只能走 /responses 或 /messages(即不能直接按 chat 发)。 */
+export function isOpenCodeGoNonChatModel(model: string | undefined): boolean {
+  return isOpenCodeGoResponsesModel(model) || (model ? OPENCODE_GO_NON_CHAT_MODELS.has(model.trim().toLowerCase()) : false);
+}
+
+/**
+ * 决定某个模型该走哪套协议。优先级:
+ * ① 显式选择(`LlmSource.protocol`)> ② 供应商 `modelProtocols[model]` > ③ 供应商 `protocol`
+ * > ④ 内置知识表(OpenCode Go 的 responses 模型)> ⑤ 默认 `chat`。
+ *
+ * 为什么需要「单模型」粒度:同一供应商会混协议(OpenCode Go:deepseek/glm 走 chat、
+ * grok/gpt-luna 走 responses),一个供应商级开关表达不了。
+ */
+export function resolveModelProtocol(
+  input: {
+    providerId?: string;
+    baseUrl?: string;
+    protocol?: LlmProtocol;
+    modelProtocols?: Record<string, LlmProtocol>;
+  },
+  model: string | undefined,
+): LlmProtocol {
+  if (model && input.modelProtocols?.[model]) return input.modelProtocols[model]!;
+  if (input.protocol) return input.protocol;
+  if (isOpenCodeGoEndpoint({ providerId: input.providerId, baseUrl: input.baseUrl }) && isOpenCodeGoResponsesModel(model)) {
+    return 'responses';
+  }
+  return 'chat';
+}
+
+
+/**
+ * 存量设置自愈:清掉 OpenCode Go 供应商里「本 App 打不通」的模型,并把失效的选中模型落到首个可用模型。
+ *
+ * 为什么需要:`OPENCODE_GO_NON_CHAT_MODELS` 是后加的(官方把模型迁到 /responses、/messages 时),
+ * 老 settings.json 不会自己更新 —— 2026-10-20 实测:设置里选着 `grok-4.6`,每轮对话都被端点
+ * 400 `ModelProtocolUnsupported` 拒掉,而报错文案完全看不出「模型选错了协议」。
+ * 纯函数(不写盘、不读钥匙串):返回 `{ next, fixes }`,由 SettingsStore 落盘 + 写日志。
+ */
+export function sanitizeOpenCodeGoSettings(settings: AppSettings): { next: AppSettings; fixes: string[] } {
+  const fixes: string[] = [];
+  const providers = settings.cloudProviders;
+  if (!providers?.length) return { next: settings, fixes };
+
+  let changed = false;
+  const nextProviders = providers.map((p) => {
+    if (!isOpenCodeGoEndpoint({ providerId: p.id, baseUrl: p.host })) return p;
+    const all = p.models ?? [];
+    const kept = filterOpenCodeGoModels(all);
+    const dropped = all.filter((m) => !kept.includes(m));
+    // 全被滤光时保留原列表:至少让用户看见自己配过什么;提交期由 resolveLlmEndpoint 明确报错
+    if (!dropped.length || !kept.length) return p;
+    changed = true;
+    // 只滤 /v1/messages 模型(new-chat 家族);responses 模型已支持,不再清除
+    fixes.push(`供应商「${p.name}」移除本应用未实现协议(/v1/messages)的模型:${dropped.join(' / ')}`);
+    return { ...p, models: kept };
+  });
+
+  let next: AppSettings = changed ? { ...settings, cloudProviders: nextProviders } : settings;
+
+  // 已选中的模型若失效,落到该供应商首个可用模型 —— 否则每次对话都撞同一个 400
+  const llm = next.llm;
+  if (llm?.kind === 'cloud' && llm.provider) {
+    const prov = nextProviders.find((p) => p.id === llm.provider);
+    if (prov && isOpenCodeGoEndpoint({ providerId: prov.id, baseUrl: prov.host })) {
+      const usable = filterOpenCodeGoModels(prov.models ?? []);
+      const cur = llm.model;
+      // 只改「确定不可用」的选中项:只提供 /v1/messages 的模型(本 App 未实现) / 未选模型。
+      // ⚠️ 这里刻意用 OPENCODE_GO_NON_CHAT_MODELS(messages 名单)而不是 isOpenCodeGoNonChatModel ——
+      // 后者把 responses 模型也算「非 chat」,而 responses 已支持,误用会把 grok 的选中项又踢走。
+      const broken = !!cur && OPENCODE_GO_NON_CHAT_MODELS.has(cur.trim().toLowerCase());
+      if (usable.length && (!cur || broken)) {
+        next = { ...next, llm: { ...llm, model: usable[0] } };
+        fixes.push(
+          `LLM 来源「${prov.name}」原来的模型「${cur ?? '(空)'}」不可用` +
+            `(该模型只提供 /v1/messages 协议),已切换到「${usable[0]}」`,
+        );
+      }
+    }
+  }
+  return { next, fixes };
+}
+
 export async function listRemoteModels(input: {
   baseUrl: string; apiKey?: string; providerId?: string;
 }): Promise<{ ok: boolean; models: string[]; error?: string }> {
@@ -380,7 +528,10 @@ export async function listRemoteModels(input: {
   try {
     const key = await resolveKey(input);
     const data = await getJson(`${base}/models`, key, 10_000);
-    const models: string[] = (data?.data ?? []).map((m: any) => m.id).filter(Boolean);
+    let models: string[] = (data?.data ?? []).map((m: any) => m.id).filter(Boolean);
+    if (isOpenCodeGoEndpoint({ providerId: input.providerId, baseUrl: base })) {
+      models = filterOpenCodeGoModels(models);
+    }
     return { ok: true, models };
   } catch (e) {
     return { ok: false, models: [], error: (e as Error).message };
@@ -393,6 +544,23 @@ export interface ResolvedLlm {
   apiKey?: string;
   model: string;
   label: string; // 日志/报错用(不含 key)
+  /** 该模型应使用的对话协议:chat = /v1/chat/completions,responses = /v1/responses */
+  protocol: LlmProtocol;
+}
+
+/**
+ * ResolvedLlm → worker 侧 LlmSource(单一收口)。
+ * 为什么收口:此前 5 处调用点各写一份 `{kind:'openai-compatible', baseUrl, apiKey, model}`,
+ * 新增字段(protocol)时漏一处的表现是「某个入口悄悄退回 chat 协议」——正是本次要消灭的故障形态。
+ */
+export function toChatLlm(ep: ResolvedLlm): LlmSource {
+  return {
+    kind: 'openai-compatible',
+    baseUrl: ep.baseUrl,
+    apiKey: ep.apiKey,
+    model: ep.model,
+    protocol: ep.protocol,
+  };
 }
 
 export async function resolveLlmEndpoint(
@@ -406,15 +574,16 @@ export async function resolveLlmEndpoint(
         baseUrl: LMS_BASE,
         model: src.model ?? settings.lmStudioModel ?? 'ornith-1.5-35b-a3b-abliterated-mlx',
         label: `LM Studio(${LMS_BASE})`,
+        protocol: 'chat',
       };
     case 'ollama':
       if (!src.model) throw new Error('Ollama 未选择模型,请到设置页「加载模型」');
-      return { baseUrl: `${OLLAMA_BASE}/v1`, model: src.model, label: `Ollama(${OLLAMA_BASE})` };
+      return { baseUrl: `${OLLAMA_BASE}/v1`, model: src.model, label: `Ollama(${OLLAMA_BASE})`, protocol: 'chat' };
     case 'mlx-provider': {
       if (!pimlxProc || pimlxModel !== src.model) {
         throw new Error(`pi-mlx 模型未加载(${src.model}),请到设置页「加载模型」`);
       }
-      return { baseUrl: PIMLX_ENDPOINT, model: src.model, label: `pi-mlx(:${PIMLX_PORT})` };
+      return { baseUrl: PIMLX_ENDPOINT, model: src.model, label: `pi-mlx(:${PIMLX_PORT})`, protocol: 'chat' };
     }
     case 'openai-compatible':
       return {
@@ -422,6 +591,11 @@ export async function resolveLlmEndpoint(
         apiKey: src.apiKey ?? (await credentialGet('openai-compat')) ?? undefined,
         model: src.model ?? '',
         label: `OpenAI 兼容端点(${src.baseUrl})`,
+        // 自建端点默认 chat;用户显式声明 responses(或该 host 是 OpenCode Go)时按知识表判定
+        protocol: resolveModelProtocol(
+          { baseUrl: src.baseUrl, protocol: src.protocol },
+          src.model,
+        ),
       };
     case 'cloud': {
       const prov: CloudProviderEntry | undefined = settings.cloudProviders?.find(
@@ -429,11 +603,36 @@ export async function resolveLlmEndpoint(
       );
       if (!prov) throw new Error(`云端供应商不存在:${src.provider}`);
       if (!prov.enabled) throw new Error(`云端供应商已停用:${prov.name}`);
+      const picked = src.model ?? prov.models[0];
+      if (!picked) throw new Error(`供应商「${prov.name}」尚未添加模型`);
+      const protocol = resolveModelProtocol(
+        {
+          providerId: prov.id,
+          baseUrl: prov.host,
+          protocol: src.protocol ?? prov.protocol,
+          modelProtocols: prov.modelProtocols,
+        },
+        picked,
+      );
+      // 协议闸(2026-10-20):只拦**本 App 尚未实现**的 /v1/messages 模型(responses 已支持,不再拦)。
+      // 放在取钥匙串之前 —— 这是配置错误,不是凭据错误,先给能直接执行的说法。
+      if (
+        protocol === 'chat' &&
+        isOpenCodeGoEndpoint({ providerId: prov.id, baseUrl: prov.host }) &&
+        isOpenCodeGoNonChatModel(picked) &&
+        !isOpenCodeGoResponsesModel(picked)
+      ) {
+        const usable = filterOpenCodeGoModels(prov.models ?? []).slice(0, 6);
+        throw new Error(
+          `「${picked}」在 OpenCode Go 只提供 /v1/messages(Anthropic 形状)协议,` +
+            `本应用目前支持 Chat Completions 与 Responses 两套。请到设置页「LLM 来源」改选:${
+              usable.length ? usable.join(' / ') : '该供应商暂无可用模型,请添加'
+            }`,
+        );
+      }
       const apiKey = await credentialGet(prov.id);
       if (!apiKey) throw new Error(`供应商「${prov.name}」未配置 API Key(设置页 → LLM 来源)`);
-      const model = src.model ?? prov.models[0];
-      if (!model) throw new Error(`供应商「${prov.name}」尚未添加模型`);
-      return { baseUrl: prov.host, apiKey, model, label: `云端 ${prov.name}` };
+      return { baseUrl: prov.host, apiKey, model: picked, label: `云端 ${prov.name}`, protocol };
     }
     case 'none':
       throw new Error('未配置 LLM 来源');

@@ -1,4 +1,4 @@
-import type { NodeKind, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
+import type { NodeKind, CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
 
 export interface CanvasPageProps {
   onNavigate: (
@@ -15,7 +15,8 @@ export interface CanvasPageProps {
   projectId: string | null;
   projectName: string;
   projectCanvases: ProjectCanvases | null;
-  onSaveCanvas: (snap: CanvasSnapshot) => Promise<void> | void;
+  /** 保存快照。opts.allowEmpty:用户删空画布时放行 0 节点(见 canvas/empty-save-guard) */
+  onSaveCanvas: (snap: CanvasSnapshot, opts?: CanvasSaveOptions) => Promise<void> | void;
   onSwitchCanvas: (canvasId: string) => Promise<CanvasSnapshot | null>;
   onCreateCanvas: (name?: string) => Promise<CanvasSnapshot | null>;
   onDeleteCanvas: (canvasId: string) => Promise<string | null>;

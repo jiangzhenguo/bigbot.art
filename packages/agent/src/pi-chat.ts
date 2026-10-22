@@ -11,8 +11,9 @@
  */
 import { createModels, createProvider, type Context, type Message, type AssistantMessage, type ToolCall } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import type { LlmSource, AskOption } from '@bigbotart/shared';
-import { PLAN_APPROVE_LABEL, PLAN_REVISE_LABEL } from '@bigbotart/shared';
+import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
+import type { LlmSource, LlmProtocol, AskOption } from '@bigbotart/shared';
+import { PLAN_APPROVE_LABEL, PLAN_REVISE_LABEL, withOpenCodeGoHeaders } from '@bigbotart/shared';
 import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
@@ -723,8 +724,26 @@ function annotateLlmError(raw: string): string {
  * 否则第二轮请求又会因历史里的点号名被 400)。
  * 全部工具名均为单点号且无短横线(tool-name-sanitize 测试锁定),映射可逆。
  * 切换只会实际发生在第 0 轮:任何一轮成功都说明端点接受了当时的工具名。
+ *
+ * 错误文案有多个变种,全部要接住(漏一个就是「每轮对话都 400」的硬故障):
+ *  - Kimi coding:「function name is invalid, must start with a letter…」
+ *  - DeepSeek 系(OpenCode Go 实测 2026-10-20):
+ *    「Invalid 'tools[0].function.name': string does not match pattern.
+ *      Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'」
+ *    这条上游把 OpenAPI 的 schema 校验原话透出来了,不含 "invalid function name" 字样。
  */
-const FUNC_NAME_INVALID_RE = /function name is invalid|invalid function name/i;
+export const FUNC_NAME_INVALID_RE =
+  /function name is invalid|invalid function name|function\.name[^\n]*?(does not match pattern|matches the pattern)/i;
+
+/**
+ * 端点声明「该模型不支持这套协议」(OpenCode Go:grok-4.6 只开 /v1/responses,
+ * 2026-10-20 实测 400 `{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}`;
+ * 部分网关还会回 404 unknown endpoint)。
+ * 撞上即换另一套协议重试本轮 —— 与工具名净化 / temperature 降级同一手法,
+ * 这样自建端点或官方后续迁移模型协议都不需要用户去改配置。
+ */
+export const PROTOCOL_UNSUPPORTED_RE =
+  /ModelProtocolUnsupported|does not support this protocol|unsupported (?:api|protocol)|unknown (?:endpoint|url)/i;
 
 /**
  * 端点拒绝自定义 temperature 的错误特征(Kimi k3,2026-10-10 实测:
@@ -831,20 +850,34 @@ export class PiChatSession {
     const signal = this.abort.signal;
     const toolCalls: ChatResult['toolCalls'] = [];
 
-    const model = {
-      id: ep.modelId, name: ep.modelId, api: 'openai-completions' as const,
-      provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
-      input: ['text'] as ('text' | 'image')[],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: params.contextWindow && params.contextWindow > 0 ? params.contextWindow : LLM_CONTEXT_WINDOW, maxTokens: LLM_MAX_TOKENS,
+    /**
+     * 对话协议(chat = /v1/chat/completions,responses = /v1/responses)。
+     * pi-ai 把两套报文的差异归一化在 api 实现里:上层 Context/AssistantMessage/工具调用
+     * 形状完全一致,所以切换协议只是换 api 实现 + model.api,不动消息构造与工具桥。
+     */
+    let protocol: LlmProtocol = ep.protocol ?? 'chat';
+    /** 换错方向不反复翻:已试过的协议记下来,另一套也不认就如实抛错 */
+    const triedProtocols = new Set<LlmProtocol>([protocol]);
+    const buildModels = () => {
+      const model = {
+        id: ep.modelId, name: ep.modelId,
+        api: (protocol === 'responses' ? 'openai-responses' : 'openai-completions') as string,
+        provider: 'bigbotart-llm' as const, baseUrl: ep.baseUrl, reasoning: false,
+        input: ['text'] as ('text' | 'image')[],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: params.contextWindow && params.contextWindow > 0 ? params.contextWindow : LLM_CONTEXT_WINDOW, maxTokens: LLM_MAX_TOKENS,
+      };
+      const provider = createProvider({
+        id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,
+        auth: { apiKey: { name: 'BigBotArt LLM', resolve: async () => ({ auth: {} }) } },
+        models: [model],
+        api: protocol === 'responses' ? openAIResponsesApi() : openAICompletionsApi(),
+      });
+      const m = createModels();
+      m.setProvider(provider);
+      return m;
     };
-    const provider = createProvider({
-      id: 'bigbotart-llm', name: 'BigBotArt LLM', baseUrl: ep.baseUrl,
-      auth: { apiKey: { name: 'BigBotArt LLM', resolve: async () => ({ auth: {} }) } },
-      models: [model], api: openAICompletionsApi(),
-    });
-    const models = createModels();
-    models.setProvider(provider);
+    let models = buildModels();
 
     // 历史消息:pi-ai 的 AssistantMessage.content 必须是块数组(string 会触发 flatMap 错误)
     // 确认闸判定:上一轮挂起了敏感操作确认 → 本轮用户消息若是其中的确认类选项,放行敏感工具
@@ -949,6 +982,8 @@ export class PiChatSession {
           ...(dropTemperature ? {} : { temperature: 0.4 }),
           apiKey: ep.apiKey ?? 'unused',
           signal,
+          // OpenCode Go 强制 x-opencode-session(缺则 400 MissingSessionID);canvasId 作会话稳定 id
+          headers: withOpenCodeGoHeaders(ep.baseUrl, params.canvasId),
         });
       } catch (e) {
         if (signal.aborted) return { reply: '', toolCalls, aborted: true };
@@ -966,6 +1001,19 @@ export class PiChatSession {
           console.error('[pi-chat] 端点不接受自定义 temperature,已改走端点默认重试');
           round--;
           continue;
+        }
+        // 端点不支持当前协议(抛异常形态)→ 换另一套协议重试本轮(见 PROTOCOL_UNSUPPORTED_RE)
+        const thrownMsg = e instanceof Error ? e.message : String(e);
+        if (PROTOCOL_UNSUPPORTED_RE.test(thrownMsg)) {
+          const other: LlmProtocol = protocol === 'responses' ? 'chat' : 'responses';
+          if (!triedProtocols.has(other)) {
+            triedProtocols.add(other);
+            protocol = other;
+            models = buildModels();
+            console.error(`[pi-chat] 端点不支持当前协议,已切换 ${protocol} 协议重试`);
+            round--;
+            continue;
+          }
         }
         // LLM 请求失败(401/超时/不可达)必须向上抛,让主进程返回 {ok:false, error}
         // ——静默吞掉会让错误端点表现为"成功但空回复"
@@ -992,6 +1040,18 @@ export class PiChatSession {
           console.error('[pi-chat] 端点不接受自定义 temperature,已改走端点默认重试');
           round--;
           continue;
+        }
+        // 端点不支持当前协议(stopReason=error 形态)→ 换另一套协议重试本轮
+        if (PROTOCOL_UNSUPPORTED_RE.test(errMsg)) {
+          const other: LlmProtocol = protocol === 'responses' ? 'chat' : 'responses';
+          if (!triedProtocols.has(other)) {
+            triedProtocols.add(other);
+            protocol = other;
+            models = buildModels();
+            console.error(`[pi-chat] 端点不支持当前协议,已切换 ${protocol} 协议重试`);
+            round--;
+            continue;
+          }
         }
         throw new Error(`LLM 返回错误: ${annotateLlmError(errMsg)}`);
       }

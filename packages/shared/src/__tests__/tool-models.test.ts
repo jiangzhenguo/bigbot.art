@@ -15,9 +15,13 @@ import {
 } from '../tool-models.js';
 
 describe('capabilityOf:节点 kind + mode → 能力', () => {
-  it('image-gen:无参考图 → 文生图;有参考图 → 多参考生成', () => {
+  it('image-gen:无参考图 → 文生图;有参考图 → 参考编辑(不是 Klein multi-reference)', () => {
     expect(capabilityOf('image-gen')).toBe('image.generate');
-    expect(capabilityOf('image-gen', undefined, true)).toBe('image.multiReference');
+    // 2026-10-22:连参考图的常见意图是 edit-reference(2.1),不是 flux2.multi-reference
+    expect(capabilityOf('image-gen', undefined, true)).toBe('image.instruction');
+    expect(resolveImageModel(undefined, capabilityOf('image-gen', undefined, true))).toBe(
+      'Qwen/Qwen-Image-2.1',
+    );
   });
 
   it('image-edit:按 mode 细分;未知 mode 回退 instruction(与 Provider 缺省同口径)', () => {

@@ -356,8 +356,9 @@ export class MlXGenProvider implements Provider {
       cmd.push('--steps', String(p.steps ?? defSteps));
       if (!isFlux2Klein) cmd.push('--guidance', String(p.guidance ?? 1.0));
       if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
-      // 参考图(ref-image 连线):多参考生成路由 —— 实测(2026-09)CLI 接受 `--i2i-mode multi-reference`
-      // + 重复 `--image`(仅多参考 i2i 可重复);z-image-turbo 是纯文生图,带参考图时给明确指引报错
+      // 参考图(ref-image 连线):按模型能力行分流 ——
+      //   2.1 → edit-reference(`qwen21.edit`,App 缺省);klein 多图 → multi-reference;
+      //   z-image 等纯文生图 → 明确指引报错。App 侧缺省模型见 capabilityOf(image-gen,hasRefs)→instruction。
       //
       // ⚠️ 根因记录(2026-09,真实事故:klein 多参考 exit 2):
       // `--image` 是 mlx-gen **路由器入口**参数(router_options.py),后端不认识它。

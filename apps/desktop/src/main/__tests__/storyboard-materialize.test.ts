@@ -31,7 +31,7 @@ const MARKDOWN = [
   '',
   '| 镜号 | 画面描述 | 对白/旁白 | 景别 | 运镜 | 时长(s) | 需配图 |',
   '|---|---|---|---|---|---|---|',
-  '| 1 | 机翼上两人对峙 | 无 | 远景 | 航拍侧移 | 5 | 是 |',
+  '| 1 | 机翼上红衣两人对峙 | 无 | 远景 | 航拍侧移 | 5 | 是 |',
   '| 2 | 红衣特写 | 无 | 近景 | 慢推 | 3 | 是 |',
 ].join('\n');
 
@@ -233,6 +233,59 @@ describe('storyboard.materialize · 智能连线(不再机械每行静帧)', () 
     );
     // 接续镜不得再挂 ref-image(与 first-frame 互斥)
     expect(snap.edges.filter((e) => e.target === shot2.id && e.label === 'ref-image')).toHaveLength(0);
+  });
+});
+
+describe('storyboard.materialize · 衔接=硬切', () => {
+  it('有角色卡时硬切镜建静帧并走 ref-image,不接上一镜尾帧', async () => {
+    const { h, store } = makeHandlers(undefined);
+    store.__snapshot.nodes[0]!.data = {
+      markdown: [
+        '# 分镜表',
+        '',
+        '| 镜号 | 画面描述 | 对白/旁白 | 景别 | 运镜 | 时长(s) | 需配图 | 提示词(可选) | 衔接 |',
+        '|---|---|---|---|---|---|---|---|---|',
+        '| 1 | 夜街 | 无 | 中景 | 固定 | 5 | 是 |  | 硬切 |',
+        '| 2 | 走廊 | 无 | 中景 | 固定 | 5 | 是 |  | 硬切 |',
+        '| 3 | 走廊里接着走 | 无 | 中景 | 固定 | 4 | 否 |  | 接尾帧 |',
+      ].join('\n'),
+      aspect: '16:9',
+      tier: 'default',
+    };
+    store.__snapshot.nodes.push({
+      id: 'char-1',
+      kind: 'image-gen',
+      label: '角色卡·林晚秋',
+      position: { x: 0, y: 0 },
+      data: {},
+    } as never);
+    const res = await h.call('storyboard.materialize', { nodeId: 'sb-1' }, ctx);
+    expect(res.ok).toBe(true);
+    const snap = store.__snapshot as {
+      nodes: Array<{ id: string; kind: string; label?: string; data: Record<string, unknown> }>;
+      edges: Array<{ source: string; target: string; label?: string }>;
+    };
+    const shot = (rowNo: number) =>
+      snap.nodes.find((n) => n.kind === 'shot' && (n.data.promptFrom as { row?: number })?.row === rowNo)!;
+    const still = (rowNo: number) =>
+      snap.nodes.find(
+        (n) =>
+          n.kind === 'image-gen' &&
+          String(n.label ?? '').includes('分镜静帧') &&
+          (n.data.promptFrom as { row?: number })?.row === rowNo,
+      )!;
+    const s1 = shot(1);
+    const s2 = shot(2);
+    const s3 = shot(3);
+    expect(s1.data.mode).toBe('ref-image');
+    expect(s2.data.mode).toBe('ref-image');
+    expect(s3.data.mode).toBe('first-frame');
+    expect(snap.edges.some((e) => e.source === s1.id && e.target === s2.id && e.label === 'first-frame')).toBe(false);
+    expect(snap.edges.some((e) => e.source === still(2).id && e.target === s2.id && e.label === 'ref-image')).toBe(true);
+    expect(snap.edges.some((e) => e.source === 'char-1' && e.target === still(2).id && e.label === 'ref-image')).toBe(true);
+    expect(snap.edges.some((e) => e.source === 'char-1' && e.target === s2.id && e.label === 'ref-image')).toBe(true);
+    expect(snap.edges.some((e) => e.source === s2.id && e.target === s3.id && e.label === 'first-frame')).toBe(true);
+    expect(snap.edges.filter((e) => e.target === s3.id && e.label === 'ref-image')).toHaveLength(0);
   });
 });
 

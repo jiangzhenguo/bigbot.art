@@ -221,9 +221,12 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
     }
     case 'image-gen': {
       const prompt = String(d.prompt ?? '');
-      // 未显式选模型 → 显示缺省解析结果(设置页工具模型 > 内置默认),与检查器同口径
+      // 未显式选模型 → 显示缺省解析结果(有参考图 → 参考编辑/2.1;否则文生图),与检查器同口径
+      const hasRefImages = Array.isArray(d.refImageFrom) && (d.refImageFrom as unknown[]).length > 0;
       const model =
-        String(d.model ?? '').trim() || resolveImageModel(toolModels, capabilityOf('image-gen')) || 'mlxgen';
+        String(d.model ?? '').trim() ||
+        resolveImageModel(toolModels, capabilityOf('image-gen', undefined, hasRefImages)) ||
+        'mlxgen';
       const w = Number(d.width ?? 1024);
       const h = Number(d.height ?? 1024);
       const seeds = (d.seeds as number[]) ?? [];

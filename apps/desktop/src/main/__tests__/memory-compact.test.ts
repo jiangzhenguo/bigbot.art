@@ -246,7 +246,21 @@ describe('MemoryStore.buildContext 注入激活技能指令(@当前技能」段)
     expect(ctx.systemPrompt).toContain('2 个及以上镜头');
     expect(ctx.systemPrompt).toContain('技能正文写了「必须先出角色卡/场景卡」');
     expect(ctx.systemPrompt).toContain('不要额外建卡');
+    expect(ctx.systemPrompt).toContain('【角色图 / 角色卡建卡分流');
+    expect(ctx.systemPrompt).toContain('全身正面照');
+    expect(ctx.systemPrompt).toContain('image-edit');
     expect(ctx.systemPrompt).not.toContain('正确做法:先建 image-gen 角色卡');
+    expect(ctx.systemPrompt).not.toContain('每个建一张 image-gen,标题「角色卡·名字」');
+  });
+
+  /* 2026-10-22:建卡分流曾只挂在激活技能块 → 无技能时「根据图片生成角色图」仍走 image-gen+ref-image */
+  it('未激活技能时仍注入角色图建卡分流(有参考→image-edit)', () => {
+    const pid = `p-card-path-global-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '根据图片生成角色图');
+    expect(ctx.systemPrompt).toContain('【角色图 / 角色卡建卡分流');
+    expect(ctx.systemPrompt).toContain('label="input"');
+    expect(ctx.systemPrompt).toContain('禁止**建 `image-gen` 再把参考图连成 ref-image');
+    expect(ctx.systemPrompt).not.toContain('【要不要角色卡 / 场景卡】');
   });
 
   it('summary 技能的必读警告不再把「跳过角色卡」当成唯一反例', () => {

@@ -21,6 +21,7 @@ import {
   STORYBOARD_HEAD,
   SB_SIZE,
   planStoryboardMaterializeRows,
+  keyframeEdgeLabel,
 } from '@bigbotart/shared';
 import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 
@@ -194,8 +195,14 @@ export function buildStoryboardMaterialized(
         updatedAt: new Date().toISOString(),
       };
       images.push(img);
+      const port = keyframeEdgeLabel(plan);
       edges.push({ id: nid('edge'), source: storyboardId, target: img.id, label: 'prompt' });
-      edges.push({ id: nid('edge'), source: img.id, target: shot.id, label: 'first-frame' });
+      edges.push({ id: nid('edge'), source: img.id, target: shot.id, label: port });
+      if (port === 'ref-image') {
+        for (const refId of plan.refNodeIds) {
+          edges.push({ id: nid('edge'), source: refId, target: img.id, label: 'ref-image' });
+        }
+      }
     }
   }
   return { images, shots, edges };
@@ -218,6 +225,8 @@ export function planStoryboardDeterministic(params: PlanStoryboardParams): PlanS
     '固定',
     String(4 + (i % 3)),
     '是',
+    '',
+    i === 0 ? '硬切' : '接尾帧',
     '',
   ]);
   const gfm = tableToGfm(head, rows);

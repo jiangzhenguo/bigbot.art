@@ -14,6 +14,8 @@ export const STORYBOARD_HEAD = [
   '时长(s)',
   '需配图',
   '提示词(可选)',
+  '衔接',
+  '角色',
 ] as const;
 
 /** 新分镜表节点的默认 markdown(表头 + 一行占位) */
@@ -21,9 +23,9 @@ export function defaultStoryboardMarkdown(): string {
   return [
     '# 新分镜',
     '',
-    '说明:一行 = 一个分镜;可在检查器表格视图编辑,或点「从分镜表生成节点」铺出镜头。',
+    '说明:一行 = 一个分镜;可在检查器表格视图编辑,或点「从分镜表生成节点」铺出镜头。「角色」列写本镜出场的角色卡/场景卡名(逗号分隔)。',
     '',
-    tableToGfm([...STORYBOARD_HEAD], [['1', '', '', '', '', '5', '是', '']]),
+    tableToGfm([...STORYBOARD_HEAD], [['1', '', '', '', '', '5', '是', '', '硬切', '']]),
   ].join('\n');
 }
 
@@ -111,6 +113,8 @@ const HEAD_DEFAULT_IDX: Record<string, number> = {
   需配图: 6,
   提示词: 7,
   '提示词(可选)': 7,
+  衔接: 8,
+  角色: 9,
 };
 
 export function colIndex(head: string[], name: string): number {
@@ -305,7 +309,7 @@ export function assembleH3Prompt(
       `Action: ${action}`,
       `Camera: ${size} · ${move}`,
       `Look: ${look}`,
-      `Audio: ${hasDial ? '口型同步 · 环境音' : '环境音 · 水声与风声'}`,
+      `Audio: ${hasDial ? '口型同步 · 环境音' : '环境音'}`,
     ].join('\n');
     return { explicit: false, text: body };
   }
@@ -316,9 +320,7 @@ export function assembleH3Prompt(
     `Action: ${action}`,
     `Look: ${look}`,
   ].join('\n');
-  const soundscape = hasDial
-    ? '口型同步的人声 · 环境音'
-    : '环境音 · 水声与风声';
+  const soundscape = hasDial ? '口型同步的人声 · 环境音' : '环境音';
   return {
     explicit: false,
     text: [
@@ -331,6 +333,27 @@ export function assembleH3Prompt(
   };
 }
 
+/**
+ * 从 basePrompt / 画面描述抽出场景与光影短句(静帧六段式用)。
+ * 禁止再写死「秋日河谷」「黄昏侧光」——那是旧模板事故。
+ */
+export function deriveStillSceneAndLight(
+  row: string[] | undefined,
+  head: string[],
+  basePrompt?: string,
+): { scene: string; light: string } {
+  const desc = rowCell(row, head, '画面描述').trim();
+  const look = (basePrompt ?? '').trim();
+  const scene =
+    desc.split(/[。.!！？\n]/)[0]?.trim().slice(0, 80) ||
+    (look ? `继承风格锁 · ${look.slice(0, 40)}` : '按画面描述');
+  const lightFromLook =
+    look.match(/(?:光影|布光|光源|侧光|逆光|顶光|体积光|电影级布光)[^,，;；]{0,24}/)?.[0]?.trim() ||
+    look.match(/(?:冷青|暗紫|幽蓝|暖黄|高反差)[^,，;；]{0,16}/)?.[0]?.trim();
+  const light = lightFromLook || (look ? `继承风格锁` : '自然光影');
+  return { scene, light };
+}
+
 /** Z-Image 六段式组装(image-gen 节点) */
 export function assembleZImagePrompt(
   row: string[] | undefined,
@@ -340,13 +363,14 @@ export function assembleZImagePrompt(
   const p = rowCell(row, head, '提示词(可选)').trim();
   if (p) return { explicit: true, text: p };
   const look = (basePrompt ?? '').trim() || '电影感，自然光影，写实';
+  const { scene, light } = deriveStillSceneAndLight(row, head, basePrompt);
   return {
     explicit: false,
     text: [
       `主体：${rowCell(row, head, '画面描述')}`,
-      '场景：秋日河谷 · 草原河岸（继承 Brief）',
+      `场景：${scene}`,
       `构图：${rowCell(row, head, '景别')}`,
-      '光影：黄昏侧光（继承 Brief）',
+      `光影：${light}`,
       `风格：${look}`,
       '约束：无文字，不变形，主体身份措辞锁定',
     ].join('\n'),

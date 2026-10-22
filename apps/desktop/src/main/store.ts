@@ -221,6 +221,19 @@ export class ProjectStore {
     // 而事故快照是「0 节点 + 1 条悬空边」(pal4→new6,重挂载窗口期 nodesRef 已空、edgesRef 还有边)
     // —— 边引用的节点不存在,本身就是损坏快照,却被放行覆盖了整个画布。
     // 故判定收紧为**只看 nodes**:0 节点 + N 边永远是坏快照;0+0 的合法清空依然被拦(同原设计)。
+    // 🛡️ 结构性损坏:0 节点 + 有连线 = 悬空边(边引用的节点不存在)。**任何情况都不许落盘**,
+    // 连 allowEmpty 也不例外 —— allowEmpty 的语义是「用户合法清空」,合法清空不会有悬空边。
+    // 事故背景(2026-10-20):渲染层在某个窗口期构造出「nodes 空、edges 还在」的快照,
+    // 而 allowEmpty 放行了它,两个项目的画布被抹成 0 节点 + 11/16 悬空边(节点全丢,只能从 .bak 抢救)。
+    // 这条闸与 2026-10-11 的「只看 nodes」互补:那条管「空快照覆盖有内容画布」,这条管「快照自身不自洽」。
+    if ((snap.nodes?.length ?? 0) === 0 && (snap.edges?.length ?? 0) > 0) {
+      console.error(
+        `[store] 拒绝结构损坏快照(0 节点 + ${snap.edges?.length} 悬空边):canvas=${snap.id} ` +
+          `version=${snap.version}(allowEmpty=${!!opts?.allowEmpty}),store 现有 ${cur?.nodes?.length ?? 0} 节点`,
+      );
+      if (cur) this.onCanvasSaved?.(cur);
+      return { ok: false, stale: true, current: cur };
+    }
     if (!opts?.allowEmpty && cur && (cur.nodes?.length ?? 0) > 0 && (snap.nodes?.length ?? 0) === 0) {
       // R6 留痕:拒绝必须可查——这类写入一旦出现就是事故前兆(2026-10-11 实测:
       // 旧判定被「0 节点 + 1 悬空边」绕过,整个画布被覆盖)
@@ -236,14 +249,23 @@ export class ProjectStore {
       this.onCanvasSaved?.(cur);
       return { ok: false, stale: true, current: cur };
     }
+    // 🛡️ 禁止「删除画布后 flush 复活」(2026-10-22):渲染层删完当前画布再 switchCanvas
+    // 会先 flushSaveNow,把已删 id 再 save 一遍;旧逻辑 idx<0 就 push,画布删不掉。
+    // 新建画布唯一入口 = createCanvas;skills.apply 等也必须先 create 再 save。
+    if (idx < 0) {
+      console.error(
+        `[store] 拒绝写入不存在的画布(可能已被删除):canvas=${snap.id} project=${snap.projectId} ` +
+          `nodes=${snap.nodes?.length ?? 0}`,
+      );
+      return { ok: false };
+    }
     const next: CanvasSnapshot = {
       ...snap,
       version: (snap.version ?? 0) + 1,
       createdAt: cur?.createdAt ?? now,
       updatedAt: now,
     };
-    if (idx >= 0) pc.canvases[idx] = next;
-    else pc.canvases.push(next);
+    pc.canvases[idx] = next;
     // 没活动画布就设它
     if (!pc.activeCanvasId || !pc.canvases.some((c) => c.id === pc.activeCanvasId)) {
       pc.activeCanvasId = pc.canvases[0]?.id ?? snap.id;

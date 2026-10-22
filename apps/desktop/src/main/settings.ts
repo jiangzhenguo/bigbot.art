@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AppSettings } from '@bigbotart/shared';
+import { sanitizeOpenCodeGoSettings } from './llm.js';
 
 const DATA_DIR = process.env.BIGBOTART_HOME ?? join(homedir(), '.bigbotart');
 const SETTINGS_FILE = join(DATA_DIR, 'settings.json');
@@ -22,18 +23,29 @@ const DEFAULTS: AppSettings = {
 
 export class SettingsStore {
   private data: AppSettings;
+  private onWarn?: (msg: string) => void;
 
-  constructor() {
+  constructor(opts: { onWarn?: (msg: string) => void } = {}) {
+    this.onWarn = opts.onWarn;
     mkdirSync(DATA_DIR, { recursive: true });
-    this.data = this.read();
+    const { data, fixes } = this.read();
+    this.data = data;
+    // 自愈结果必须立刻落盘:否则每次启动都重复做同一次修正,用户也看不到改了什么
+    if (fixes.length > 0) {
+      for (const f of fixes) this.onWarn?.(`[settings] ${f}`);
+      this.save();
+    }
   }
 
-  private read(): AppSettings {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULTS };
+  private read(): { data: AppSettings; fixes: string[] } {
+    if (!existsSync(SETTINGS_FILE)) return { data: { ...DEFAULTS }, fixes: [] };
     try {
-      return { ...DEFAULTS, ...JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')) };
+      const raw = { ...DEFAULTS, ...JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')) } as AppSettings;
+      // 存量设置自愈(OpenCode Go 的非 Chat Completions 模型会让每轮对话 400,见 llm.ts)
+      const { next, fixes } = sanitizeOpenCodeGoSettings(raw);
+      return { data: next, fixes };
     } catch {
-      return { ...DEFAULTS };
+      return { data: { ...DEFAULTS }, fixes: [] };
     }
   }
 

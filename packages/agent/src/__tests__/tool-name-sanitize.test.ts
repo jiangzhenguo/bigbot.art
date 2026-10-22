@@ -228,3 +228,52 @@ describe('端点拒绝点号工具名 → 自动切换短横线别名', () => {
     expect(names.some((n) => n.includes('-'))).toBe(false);
   });
 });
+
+/* ═══ 错误文案变种(2026-10-20 OpenCode Go / DeepSeek 上游 schema 原话) ═══ */
+
+describe('FUNC_NAME_INVALID_RE 覆盖各家端点文案', () => {
+  beforeEach(() => {
+    script = [];
+    roundIndex = 0;
+    seenContexts = [];
+    seenOptions = [];
+  });
+
+  it('DeepSeek 系 OpenAPI 校验原话 → 命中', async () => {
+    const { FUNC_NAME_INVALID_RE } = await import('../pi-chat.js');
+    const msg =
+      '400: {"param":null,"type":"invalid_request_error","code":"invalid_request_error",' +
+      '"message":"Upstream request failed: [invalid_request_error] Invalid \'tools[0].function.name\': ' +
+      'string does not match pattern. Expected a string that matches the pattern \'^[a-zA-Z0-9_-]+$\'."}';
+    expect(FUNC_NAME_INVALID_RE.test(msg)).toBe(true);
+  });
+
+  it('不误伤其他错误(401 / temperature / 上下文超窗)', async () => {
+    const { FUNC_NAME_INVALID_RE } = await import('../pi-chat.js');
+    expect(FUNC_NAME_INVALID_RE.test('401: {"message":"Incorrect API key provided"}')).toBe(false);
+    expect(FUNC_NAME_INVALID_RE.test('400: {"message":"invalid temperature: only 1 is allowed"}')).toBe(false);
+    expect(FUNC_NAME_INVALID_RE.test('400: {"message":"context length exceeded"}')).toBe(false);
+  });
+
+  it('DeepSeek 形态:首轮被拒 → 改用短横线别名后正常收尾', async () => {
+    script = [
+      {
+        errorMessage:
+          '400: {"type":"invalid_request_error","message":"Invalid \'tools[0].function.name\': ' +
+          "string does not match pattern. Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'.\"}",
+      },
+      { calls: [{ name: 'canvas-list_nodes', args: {} }] },
+      { text: '好' },
+    ];
+    const s = new PiChatSession();
+    const bridged: string[] = [];
+    s.onToolCall = async (req: { id: number; params: { tool: string } }) => {
+      bridged.push(req.params.tool);
+      return { id: req.id, result: { ok: true, result: 'ok' } } as never;
+    };
+    const r = await s.chat(mkParams());
+    expect(r.reply).toBe('好');
+    expect(bridged).toEqual(['canvas.list_nodes']);
+    for (const t of seenContexts[1]!.tools ?? []) expect(t.name.includes('.')).toBe(false);
+  });
+});

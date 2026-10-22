@@ -59,7 +59,7 @@ mlxgen --help          # 应打印帮助;版本行形如 MLX-Gen 0.1.0
 | 文生图 + 参考编辑(新一代) | `Qwen/Qwen-Image-2.1`(本地目录 `Qwen-Image-2.1-bf16`) | ~33GB | Qwen-Image-2.1 全量 bf16(7.1B 单流 block-causal + Qwen3-VL 文本编码器 + 4 通道因果 VAE)。**2.1 的唯一模型**(2026-09-28 收敛,原 `JoyFusionAI/...-8bit` 已移除 —— 它无 vision tower、做不了编辑)。能力:**文生图 / latent img2img / 参考编辑 `qwen21.edit`(1-10 张 / 原生 RGBA)**。Provider 自动追加 `--base-model qwen-image-2.1`(仓库全名不在 catalog 里、本地目录同样要给,否则被家族兜底误路由成旧 `qwen.generate`,transformer/编码器/VAE 全不同,加载必失败);默认 **40 步**(官方推荐,guidance 1.0 时负向 pass 整体跳过)。**不支持** ControlNet / outpaint / reframe |
 | 文生图(备选) | `qwen-image` | 中等 | Qwen Image(初代,与 2.1 不是同一模型族) |
 | 指令编辑 / mask | `mlx-community/Qwen-Image-Edit-8bit` | ~37.5GB | image-edit `instruction` / `inpaint`;8bit 量化版(官方原版 57.7GB,64GB 内存跑不动)。生成时 Provider 自动追加 `--base-model Qwen/Qwen-Image-Edit`(不给会被误路由成文生图 handler) |
-| 多参考编辑 / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | image-edit 多参考 / 扩图 |
+| 多参考生成(首图定构图) / outpaint | `AbstractFramework/flux.2-klein-9b-8bit` | ~18GB | 显式选 Klein 时 image-gen 多参考;扩图也靠它。连参考图的**默认**路径是 2.1 参考编辑 |
 | 图片增强(超分) | `AbstractFramework/seedvr2-3b-8bit` | ~4.7GB | image-upscale |
 | 看图反推(图片 → 文本) | `gavinmroy/Qwen3-VL-8B-NSFW-Caption-V4.5-affine-4bit` | ~5.4GB | Agent `vision.caption` 的**本地通道**(`mlxgen-caption`,2026-10 接入,见 §6.1)。V4.5 caption 微调(专为提示词反推),必须是 **MLX 格式 dense Qwen3-VL**;原 `qwen2.5-vl`(torch 布局)mlx-gen 加载不了,已替换。⚠️ **无 ModelScope 镜像** → 应用内下载走 HF 通道;HF 不通时在 LM Studio 里下(下完自动认「已就绪」) |
 

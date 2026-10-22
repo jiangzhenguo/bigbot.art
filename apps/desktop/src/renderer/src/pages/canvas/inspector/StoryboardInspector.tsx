@@ -156,8 +156,8 @@ export default function StoryboardInspector({
               csv
               pasteSample
               sampleData={() => [
-                ['6', '黄昏两人并肩远去', '「明天见」', '远景', '固定', '5', '是', ''],
-                ['7', '黑场 · 片名字幕', '无', '—', '固定', '3', '否', ''],
+                ['6', '黄昏两人并肩远去', '「明天见」', '远景', '固定', '5', '是', '', '硬切'],
+                ['7', '黑场 · 片名字幕', '无', '—', '固定', '3', '否', '', '接尾帧'],
               ]}
               foot="镜号自动续号 · 删行不改其他行内容 · 已铺节点保留(仅提示) · 改表标 stale,可用「重新同步」写回"
               snapshot={tblSnapshot}
@@ -268,8 +268,8 @@ export default function StoryboardInspector({
               </span>
             </div>
             <ul>
-              <li>每行一个 <span className="mono">shot</span>;画布上有「角色卡/场景卡」时首镜(及硬切后)自动 <span className="mono">ref-image</span> 绑定(Ref2VA)</li>
-              <li>后续镜把上一镜以 <span className="mono">first-frame</span> 接续(FL2VA,尾帧当首帧);无参考卡时仅序列起点按「需配图」建静帧</li>
+              <li>「衔接=硬切」不接上一镜尾帧。「角色」列点名的卡走 <span className="mono">ref-image</span>;需配图=是才另建静帧;没有卡时静帧作为 <span className="mono">first-frame</span></li>
+              <li>「衔接=接尾帧」只把上一镜成片作为 <span className="mono">first-frame</span>,不再挂参考卡。同一场戏连续动作用接尾帧,不要整表硬切</li>
               <li>时长取每行「时长(s)」列;画幅与档位为全局默认,仅作用于本次铺出的节点</li>
               <li><b>只创建节点,不触发运行</b> —— 生成须逐节点或批跑,避免误烧资源;一次原子操作,可整体撤销(⌘Z)</li>
             </ul>

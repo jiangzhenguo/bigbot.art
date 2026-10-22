@@ -81,11 +81,34 @@ describe('断点②:派生态 — image-edit 的 ref-image 累积为多值 refIm
     expect(twice.changed).toBe(false);
   });
 
-  it('image-upscale 不受影响:ref-image 入边不写入 refImageFrom(只 image-edit 有)', () => {
+  it('image-upscale 不受影响:ref-image 入边不写入 refImageFrom', () => {
     const nodes = [assetNode('a1'), node('u1', 'image-upscale')];
     const edges: Edge[] = [{ from: 'a1', to: 'u1', cls: '', label: 'ref-image' }];
     const { nextNodes } = computeEdgeDerivations(nodes, edges);
     const d = nextNodes.find((n) => n.id === 'u1')!.data as { refImageFrom?: unknown };
+    expect(d.refImageFrom).toBeUndefined();
+  });
+});
+
+describe('image-gen 也写 refImageFrom(2026-10-22:缺省模型靠它判 hasRefs → instruction)', () => {
+  it('两条 ref-image → image-gen.data.refImageFrom 累积 2 项', () => {
+    const nodes = [assetNode('a1'), assetNode('a2'), node('g1', 'image-gen')];
+    const edges: Edge[] = [
+      { from: 'a1', to: 'g1', cls: '', label: 'ref-image' },
+      { from: 'a2', to: 'g1', cls: '', label: 'ref-image' },
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const d = nextNodes.find((n) => n.id === 'g1')!.data as { refImageFrom?: Array<{ nodeId: string }> };
+    expect(d.refImageFrom?.map((r) => r.nodeId)).toEqual(['a1', 'a2']);
+  });
+
+  it('删边 → image-gen.refImageFrom 清理', () => {
+    const nodes = [
+      assetNode('a1'),
+      node('g1', 'image-gen', { refImageFrom: [{ nodeId: 'a1' }] }),
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, []);
+    const d = nextNodes.find((n) => n.id === 'g1')!.data as { refImageFrom?: unknown };
     expect(d.refImageFrom).toBeUndefined();
   });
 });

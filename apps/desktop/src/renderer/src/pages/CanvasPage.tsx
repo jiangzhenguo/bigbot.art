@@ -9,6 +9,7 @@ import {
   rowCell,
   resolveMaterializeSeconds,
   planStoryboardMaterializeRows,
+  keyframeEdgeLabel,
   existingShotByRow,
   summarizeMaterializePlans,
   tableToGfm,
@@ -21,6 +22,7 @@ import {
 } from '@bigbotart/shared';
 import type { VideoAspect } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
+import { shouldBlockEmptySave } from './canvas/empty-save-guard';
 import {
   NODE_TYPES,
   SHOT_SIZES,
@@ -383,6 +385,16 @@ export default function CanvasPage({
   /** 运行标记走 state 同步一份,供按钮置灰(仅 ref 改动不会触发重渲染) */
   const [videoPostRunning, setVideoPostRunning] = useState<string[]>([]);
   const bootRef = useRef(true); // 挂载期跳过首轮保存(等加载/规划落地)
+  /** 本地 nodes/edges 当前代表的画布 id —— 「合法清空」只对已装填的那张画布成立(见 empty-save-guard) */
+  const hydratedCanvasRef = useRef<string | null>(null);
+  /** 用户是否**确实**用删除操作把这张画布删空了(唯一允许「0 节点落盘」的凭证;
+   *  换画布/加载时复位 —— 见 canvas/empty-save-guard)。2026-10-20 事故:只凭 allowEmpty 放行,
+   *  渲染层窗口期的「空 nodes + 旧 edges」快照把两个项目的画布抹空。 */
+  const userClearedRef = useRef(false);
+  /** 从 store 重新拉当前画布(在 refreshCanvasFromStore 定义后注入)。
+   *  maybePersist 拒绝可疑快照后用它把屏幕内容恢复成 store 的真值 —— 不能只拒绝不修,
+   *  否则用户会盯着一个「屏幕上空了但磁盘还在」的画布。 */
+  const refreshFromStoreRef = useRef<() => void>(() => {});
   const prevJobState = useRef<Record<string, string>>({});
   /** 接力轮次中已提交、仍存活的任务(去重防重复入队;终态后移除) */
   const cascadePendingRef = useRef<Set<string>>(new Set());
@@ -1486,20 +1498,42 @@ export default function CanvasPage({
       // (边引用的节点不存在),旧判定要求 nodes 与 edges 同时为空,把它放行了(store 侧同口径收紧)。
       const localEmpty = (snap.nodes?.length ?? 0) === 0;
       const storeHasNodes = (activeCanvas?.nodes?.length ?? 0) > 0;
-      if (localEmpty && storeHasNodes) return;
+      // 空快照闸:用户删掉最后一个节点是**合法编辑**,必须能落盘(否则节点被广播推回来 = 删不掉)。
+      // 但只对「已装填这张画布 + 调用方声明 allowEmpty」放行,未装填 flush 继续拦(2026-09-22 事故)。
+      if (
+        shouldBlockEmptySave({
+          localEmpty,
+          localEdges: snap.edges?.length ?? 0,
+          storeHasNodes,
+          allowEmpty: !!opts?.allowEmpty,
+          hydrated: hydratedCanvasRef.current === activeCanvas?.id,
+          userCleared: userClearedRef.current,
+        })
+      ) {
+        // 留痕必须带调用栈:这两类快照一旦出现,说明上游有个「把 nodes 清空但留着 edges」的窗口,
+        // 光拒绝只能保住数据,指认不出是谁(2026-10-20 两个画布被抹空就是这么丢的溯源机会)。
+        console.error(
+          `[canvas] 拒绝落盘可疑快照:${localEmpty ? '0 节点' : `${snap.nodes?.length} 节点`}/${snap.edges?.length ?? 0} 边 · ` +
+            `store ${activeCanvas?.nodes?.length ?? 0} 节点 · userCleared=${userClearedRef.current}`,
+          new Error('empty-save-guard').stack,
+        );
+        // 屏幕内容与 store 不一致(本地空 / 有悬空边)→ 立刻用真值自愈,而不是让用户盯着空画布
+        if (localEmpty) refreshFromStoreRef.current();
+        return;
+      }
       if (local === lastSavedRef.current) {
         // 内容没变:视口(平移/缩放)变了也要落盘,否则重进画布会回到上次内容改动时的位置
         const last = lastViewRef.current;
         const vp = snap.viewport;
         if (vp && last && last.x === vp.x && last.y === vp.y && last.z === vp.z) return;
         lastViewRef.current = vp ? { ...vp } : last;
-        void onSaveCanvas(snap);
+        void onSaveCanvas(snap, { allowEmpty: !!opts?.allowEmpty });
         return;
       }
 
       lastSavedRef.current = local;
       lastViewRef.current = snap.viewport ? { ...snap.viewport } : lastViewRef.current;
-      void onSaveCanvas(snap);
+      void onSaveCanvas(snap, { allowEmpty: !!opts?.allowEmpty });
     },
     [onSaveCanvas, activeCanvas],
   );
@@ -1527,6 +1561,22 @@ export default function CanvasPage({
     [activeCanvasId, activeCanvas, flushSaveNow, onSwitchCanvas],
   );
 
+  /** 删除画布:取消待写盘定时器且**不 flush**(flush 会把已删 id 写回并复活) */
+  const deleteCanvasSafe = useCallback(
+    async (canvasId: string): Promise<string | null> => {
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (viewTimer.current) {
+        window.clearTimeout(viewTimer.current);
+        viewTimer.current = null;
+      }
+      return onDeleteCanvas(canvasId);
+    },
+    [onDeleteCanvas],
+  );
+
   /* ⚠️ 卸载前把待写的防抖保存强制落盘。
      自动保存是 800ms 防抖;组件卸载时 effect cleanup 会 clearTimeout,
      于是"刚编辑过、还没到 800ms"的内容会被整段丢弃 —— 导航离开、热更新重挂载
@@ -1552,6 +1602,8 @@ export default function CanvasPage({
   useEffect(() => {
     if (!projectCanvases || !activeCanvas) return;
     bootRef.current = true;
+    hydratedCanvasRef.current = activeCanvas.id;
+    userClearedRef.current = false;
     setKnownVersion(activeCanvas.version ?? 0);
     // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
     // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
@@ -1764,6 +1816,10 @@ export default function CanvasPage({
       console.error('刷新画布失败', e);
     }
   }, [projectId, activeCanvasId]);
+
+  refreshFromStoreRef.current = () => {
+    void refreshCanvasFromStore();
+  };
 
   /** 画布内容同步(推送的快照或 store 拉取结果)→ 本地 nodes/edges + knownVersion。
    *  内容与版本都没变化时跳过 setState——推送可能来自渲染层自身的保存,重设会触发
@@ -2250,7 +2306,16 @@ export default function CanvasPage({
     // 即使 state 早已含派生态(changed=false)也要同步,否则历史遗留的 ref 裂口永远合不上
     // (reducer 侧对同一份 state 重算一次,幂等;此处多读一次纯函数只为拿结果同步 ref)
     const r = computeEdgeDerivations(nodes, edges);
-    nodesRef.current = r.changed ? r.nextNodes : nodes;
+    // ⚠️ 回写 ref **不能无条件用 state**:ref 与 state 是双轨,而 effect 里读到的 `nodes` 可能还是
+    // **上一次渲染的旧值**(挂载首帧 = 初始空数组;React StrictMode 还会 mount→unmount→mount 重放一遍)。
+    // 2026-10-20 画布被抹空事故真因就在这一行:加载 effect 刚把 7 个节点写进 nodesRef(同步),
+    // 紧接着本 effect 用「旧渲染的空 state」把 ref 清成 [],而 edgesRef 还是 11 ——
+    // 随后 StrictMode 的模拟卸载 flush(saveFlushRef)就把「0 节点 + 11 悬空边」写进了 store,
+    // 用户重新进项目看到的就是空画布(只能从 .bak 抢回)。
+    // 现在的规则:派生态有变化就用算出来的结果;**没有变化时,只有 state 真的是这一轮内容
+    // (非空,或 ref 本来就是空)才拿它回写** —— 空 state 永远不许覆盖非空 ref。
+    if (r.changed) nodesRef.current = r.nextNodes;
+    else if (nodes.length > 0 || nodesRef.current.length === 0) nodesRef.current = nodes;
     dispatchNodes({ type: 'derive-from-edges', edges });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edges, nodes]);
@@ -2739,6 +2804,9 @@ export default function CanvasPage({
     (ids: string[]) => {
       if (ids.length === 0) return;
       const set = new Set(ids);
+      const remaining = nodesRef.current.filter((n) => !set.has(n.id));
+      // 删空画布 = 用户确实要清空:这是唯一允许 0 节点落盘的凭证(见 empty-save-guard)
+      if (remaining.length === 0) userClearedRef.current = true;
       setNodes((ns) => ns.filter((n) => !set.has(n.id)));
       setEdges((es) => es.filter((e) => !set.has(e.from) && !set.has(e.to)));
       commitEdit(ids.length > 1 ? `删除 ${ids.length} 个节点` : '删除节点');
@@ -3311,9 +3379,9 @@ export default function CanvasPage({
       }
 
       /* image-gen / image-edit 的参考图:ref-image 入边 → references。
-         - image-gen:多参考生成(mlxgen 对不支持的模型给指引报错)。
+         - image-gen:参考图默认走 2.1 参考编辑(缺省模型 image.instruction);显式选 Klein 才 multi-reference。
            真实事故:连线在画布上可见但提交时被丢弃,参考图没进生成命令
-         - image-edit:多参考编辑(Qwen-Image-2.1 `qwen21.edit`,1-10 张;2026-09-29 接线,
+         - image-edit:参考编辑(Qwen-Image-2.1 `qwen21.edit`,1-10 张;2026-09-29 接线,
            此前该分支只认 image-gen,image-edit 的参考图恒为空 → 2.1 被压成单图编辑) */
       if (n.kind === 'image-gen' || n.kind === 'image-edit') {
         /* 2026-10-14「测试技能5」事故:资源节点绑了不存在的资产 id 时,旧 `if (p)` 把这条
@@ -3820,8 +3888,14 @@ export default function CanvasPage({
               promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
             },
           } as CanvasNode);
+          const port = keyframeEdgeLabel(plan);
           newEdges.push({ from: sbNode.id, to: imgId, cls: '', label: 'prompt' });
-          newEdges.push({ from: imgId, to: shotId, cls: '', label: 'first-frame' });
+          newEdges.push({ from: imgId, to: shotId, cls: '', label: port });
+          if (port === 'ref-image') {
+            for (const refId of plan.refNodeIds) {
+              newEdges.push({ from: refId, to: imgId, cls: '', label: 'ref-image' });
+            }
+          }
         }
       }
       const ids = created.map((c) => c.id);
@@ -4112,7 +4186,7 @@ export default function CanvasPage({
           projectCanvases={projectCanvases}
           onSwitchCanvas={switchCanvas}
           onCreateCanvas={onCreateCanvas}
-          onDeleteCanvas={onDeleteCanvas}
+          onDeleteCanvas={deleteCanvasSafe}
           onRenameCanvas={onRenameCanvas}
           openPop={openPop}
           setOpenPop={setOpenPop}

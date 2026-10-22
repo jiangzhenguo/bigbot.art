@@ -4,6 +4,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   BigBotArtApi,
+  CanvasSaveOptions,
   CanvasSnapshot,
   LlmSource,
   MediaKind,
@@ -42,7 +43,8 @@ const api: BigBotArtApi = {
   loadCanvas: (projectId: string) => ipcRenderer.invoke('load-canvas', projectId),
   saveCanvas: (snapshot: CanvasSnapshot) => ipcRenderer.invoke('save-canvas', snapshot),
   loadProjectCanvases: (projectId: string) => ipcRenderer.invoke('load-project-canvases', projectId),
-  saveCanvasSnapshot: (snapshot: CanvasSnapshot) => ipcRenderer.invoke('save-canvas-snapshot', snapshot),
+  saveCanvasSnapshot: (snapshot: CanvasSnapshot, opts?: CanvasSaveOptions) =>
+    ipcRenderer.invoke('save-canvas-snapshot', snapshot, opts),
   onCanvasSnapshotUpdated: (cb) => {
     const listener = (_e: unknown, snap: unknown) => cb(snap as never);
     ipcRenderer.on('canvas-snapshot-updated', listener);

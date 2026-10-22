@@ -63,9 +63,16 @@ export function restoreMsgsFromRecall(
       });
     } else {
       flushTools();
+      // system「已执行 vision.caption」等 → sys(居中灰字,不挂复制);
+      // assistant 正文 → agent-reply(每轮最终回答,可复制)
+      if (r.role === 'system') {
+        restored.push({ id: nextId(), kind: 'sys', text: r.content });
+        continue;
+      }
       restored.push({
         id: nextId(),
         kind: r.role === 'user' ? 'user' : 'agent',
+        odId: r.role === 'assistant' && r.content?.trim() ? 'agent-reply' : undefined,
         text: r.content,
         contextNodes:
           r.role === 'user'

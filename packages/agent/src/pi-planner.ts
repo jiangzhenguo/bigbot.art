@@ -12,8 +12,10 @@
  */
 import { createModels, createProvider, type Context, type Message } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import type { CanvasEdge, CanvasNode, LlmSource } from '@bigbotart/shared';
-import { STORYBOARD_HEAD, tableToGfm, storyboardMarkdown } from '@bigbotart/shared';
+import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
+import { randomUUID } from 'node:crypto';
+import type { CanvasEdge, CanvasNode, LlmProtocol, LlmSource } from '@bigbotart/shared';
+import { STORYBOARD_HEAD, tableToGfm, storyboardMarkdown, withOpenCodeGoHeaders } from '@bigbotart/shared';
 import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 import { planDeterministic, planStoryboardDeterministic, buildStoryboardMaterialized } from './plan.js';
 
@@ -56,6 +58,10 @@ export interface LlmStoryboardOutput {
     时长?: number;
     需配图?: boolean;
     提示词?: string;
+    /** 硬切 = 新构图(换场景/服装/体位);接尾帧 = 从上一镜最后一帧接着动 */
+    衔接?: '硬切' | '接尾帧';
+    /** 本镜出场的角色卡/场景卡名,逗号分隔;空镜留空 */
+    角色?: string;
   }[];
   report: string;
 }
@@ -74,12 +80,14 @@ const SYSTEM_PROMPT = `你是 BigBotArt 的视频导演 Agent。把用户的创�
 const STORYBOARD_SYSTEM_PROMPT = `你是 BigBotArt 的分镜导演 Agent。把用户的创作需求拆成一张分镜表(表格的一行 = 一个分镜 = 一个 shot 节点)。
 
 规则:
-1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 提示词?: string}], "report": string(写给人类的一句话)}
-2. 每个镜头默认 2-6 秒;短剧 3-8 行。单段硬上限 15 秒。
+1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 衔接: "硬切"|"接尾帧", 角色?: string, 提示词?: string}], "report": string(写给人类的一句话)}
+2. 每个镜头默认 2-6 秒;短剧 3-8 行。单段硬上限 15 秒。一行只写一个连续动作,不要把进门、换衣服、换姿势塞进同一行。
 3. ⚠️ **单镜长片不要拆行**:需求写「单镜 / 只铺1个shot / 一条 Ns 视频 / 按 0-3、3-6…区间组织提示词」时,**只输出 1 行**,「时长」填总秒数(如 15),五个时间区间全部写进该行「画面描述」。区间是提示词结构,不是多个分镜行 —— 拆成多行会导致时长列变短片、文案仍写总时长(真实事故)。
 4. 涉及人物时在「画面描述」显式锁定身份:同一人物全程长相/服装一致、面部不变形。
-5. 「需配图」默认 true(该行需要关键帧/首帧图);对白较多或纯转场镜头可为 false。
-6. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。`;
+5. 「衔接」每行必填,只能是「硬切」或「接尾帧」。第 1 行一定是硬切。**硬切**只用于换场景、换人出场、换服装/体位、或时间跳开。**同一地点、同一批角色、动作顺着往下**(对峙→特写→反应→交锋)写接尾帧 —— 不要只因为换了景别/机位就硬切。
+6. 「角色」列写本镜出场的角色卡/场景卡短名(与画布标题对应,逗号分隔)。空镜/无人景只写场景卡名或留空,禁止把未出场的角色填进去。
+7. 「需配图」:只有这一镜需要单独构图静帧时为 true(角色卡/场景卡已够用则 false)。接尾帧行一律 false。
+8. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。`;
 
 /** 解析后的 LLM 端点配置 */
 export interface LlmEndpoint {
@@ -88,6 +96,18 @@ export interface LlmEndpoint {
   modelId: string;
   /** 是否远端(带鉴权) */
   remote: boolean;
+  /** 对话协议:chat = /v1/chat/completions(默认),responses = /v1/responses */
+  protocol?: LlmProtocol;
+}
+
+/** 按协议选 pi-ai 的 api 实现(与 pi-chat 同口径)。 */
+function apiImplFor(protocol: LlmProtocol | undefined): ReturnType<typeof openAICompletionsApi> {
+  return (protocol === 'responses' ? openAIResponsesApi() : openAICompletionsApi()) as ReturnType<typeof openAICompletionsApi>;
+}
+
+/** 按协议给 model.api 打标(pi-ai 用它挑实现)。 */
+function modelApiFor(protocol: LlmProtocol | undefined): string {
+  return protocol === 'responses' ? 'openai-responses' : 'openai-completions';
 }
 
 export interface PiPlannerOptions {
@@ -117,6 +137,7 @@ export class PiPlanner {
       apiKey: process.env.BIGBOTART_LLM_API_KEY,
       modelId: process.env.BIGBOTART_LLM_MODEL ?? 'deepseek-chat',
       remote: true,
+      protocol: process.env.BIGBOTART_LLM_PROTOCOL === 'responses' ? 'responses' : 'chat',
     };
   }
 
@@ -128,6 +149,7 @@ export class PiPlanner {
         apiKey: llm.apiKey,
         modelId: llm.model ?? (this.opts.remote?.modelId ?? 'deepseek-chat'),
         remote: true,
+        protocol: llm.protocol ?? 'chat',
       };
     }
     const env = PiPlanner.remoteFromEnv();
@@ -200,7 +222,7 @@ export class PiPlanner {
     const model = {
       id: ep.modelId,
       name: ep.modelId,
-      api: 'openai-completions' as const,
+      api: modelApiFor(ep.protocol),
       provider: 'bigbotart-llm' as const,
       baseUrl: ep.baseUrl,
       reasoning: false,
@@ -215,7 +237,7 @@ export class PiPlanner {
       baseUrl: ep.baseUrl,
       auth: { apiKey: { name: 'BigBotArt LLM', resolve: async () => ({ auth: {} }) } },
       models: [model],
-      api: openAICompletionsApi(),
+      api: apiImplFor(ep.protocol),
     });
     const models = createModels();
     models.setProvider(provider);
@@ -229,6 +251,8 @@ export class PiPlanner {
       maxTokens: 2400,
       temperature: 0.7,
       apiKey: ep.apiKey ?? 'unused',
+      // OpenCode Go:x-opencode-session 必填;规划是单次调用,用一次性 session
+      headers: withOpenCodeGoHeaders(ep.baseUrl, `plan-sb-${randomUUID()}`),
     });
     const blocks = assistant.content ?? [];
     const textContent = blocks
@@ -258,6 +282,8 @@ export class PiPlanner {
       String(typeof r.时长 === 'number' ? r.时长 : 5),
       r.需配图 === false ? '否' : '是',
       String(r.提示词 ?? ''),
+      r.衔接 === '硬切' || (r.衔接 !== '接尾帧' && i === 0) ? '硬切' : '接尾帧',
+      String(r.角色 ?? ''),
     ]);
     const gfm = tableToGfm(head, rows);
     const title = out.title || '新分镜 · 分镜表';
@@ -287,7 +313,7 @@ export class PiPlanner {
     const model = {
       id: ep.modelId,
       name: ep.modelId,
-      api: 'openai-completions' as const,
+      api: modelApiFor(ep.protocol),
       provider: 'bigbotart-llm' as const,
       baseUrl: ep.baseUrl,
       reasoning: false,
@@ -302,7 +328,7 @@ export class PiPlanner {
       baseUrl: ep.baseUrl,
       auth: { apiKey: { name: 'BigBotArt LLM', resolve: async () => ({ auth: {} }) } },
       models: [model],
-      api: openAICompletionsApi(),
+      api: apiImplFor(ep.protocol),
     });
     const models = createModels();
     models.setProvider(provider);
@@ -317,6 +343,7 @@ export class PiPlanner {
       temperature: 0.7,
       // 远端带真 key;本地无鉴权用占位(pi-ai 需要显式 apiKey)
       apiKey: ep.apiKey ?? 'unused',
+      headers: withOpenCodeGoHeaders(ep.baseUrl, `plan-${randomUUID()}`),
     });
     // thinking 模型:JSON 只从 text 块提取(thinking 里常有模型的 JSON 草稿干扰解析)
     const blocks = assistant.content ?? [];

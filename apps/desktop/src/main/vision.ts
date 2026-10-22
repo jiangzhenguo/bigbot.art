@@ -21,6 +21,9 @@
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
+import { withOpenCodeGoHeaders } from '@bigbotart/shared';
+import type { LlmProtocol } from '@bigbotart/shared';
+import { extractTextResult, responseError, textCallUrl, visionCallBody } from './llm-http.js';
 import { ffmpegReadRoots, isUnderRoot } from './assets';
 import {
   resolveCaptionConfig,
@@ -56,6 +59,8 @@ export interface VisionEndpoint {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  /** 对话协议:缺省 chat(/chat/completions);grok 等只开 /responses 的端点走 responses */
+  protocol?: LlmProtocol;
 }
 
 export interface CaptionResult {
@@ -95,7 +100,9 @@ export function resolveVisionEndpoint(env: NodeJS.ProcessEnv = process.env): Vis
     (vlBase ? undefined : env.BIGBOTART_LLM_MODEL) ??
     DEFAULT_VL_MODEL;
   const apiKey = env.BIGBOTART_VL_API_KEY ?? (vlBase ? undefined : env.BIGBOTART_LLM_API_KEY);
-  return { baseUrl: base.replace(/\/+$/, ''), apiKey, model };
+  // 协议跟主 LLM 同一开关(BIGBOTART_LLM_PROTOCOL=responses);否则看图端点仍是 chat
+  const protocol: LlmProtocol = env.BIGBOTART_LLM_PROTOCOL === 'responses' ? 'responses' : 'chat';
+  return { baseUrl: base.replace(/\/+$/, ''), apiKey, model, protocol };
 }
 
 /** 端点通道(包装成 route,便于两条通道统一处理) */
@@ -166,27 +173,15 @@ export function buildCaptionInstruction(style: string, extra?: string): string {
   return `${base}\n\n${prefix}:${extra.trim()}`;
 }
 
-/** 视觉请求体构造(纯函数,便于单测):OpenAI 兼容多模态消息格式 */
+/** 视觉请求体构造(纯函数,便于单测):按协议选多模态消息形状(chat: image_url / responses: input_image) */
 export function buildVisionRequest(
   model: string,
   dataUrl: string,
   instruction: string,
   maxTokens = 700,
+  protocol: LlmProtocol = 'chat',
 ): Record<string, unknown> {
-  return {
-    model,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: instruction },
-          { type: 'image_url', image_url: { url: dataUrl } },
-        ],
-      },
-    ],
-    max_tokens: maxTokens,
-    temperature: 0.2,
-  };
+  return visionCallBody({ baseUrl: '', model, protocol }, dataUrl, instruction, maxTokens);
 }
 
 /** 端点通道执行体(原 captionImage 的 fetch 部分,行为零改动) */
@@ -197,14 +192,15 @@ async function captionViaEndpoint(
 ): Promise<CaptionResult> {
   const mime = MIME_BY_EXT[extname(imagePath).slice(1).toLowerCase()] ?? 'image/png';
   const dataUrl = `data:${mime};base64,${readFileSync(imagePath).toString('base64')}`;
-  const body = buildVisionRequest(endpoint.model, dataUrl, instruction);
+  const protocol = endpoint.protocol === 'responses' ? 'responses' : 'chat';
+  const body = buildVisionRequest(endpoint.model, dataUrl, instruction, 700, protocol);
 
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+  const res = await fetch(textCallUrl(endpoint.baseUrl, protocol), {
     method: 'POST',
-    headers: {
+    headers: withOpenCodeGoHeaders(endpoint.baseUrl, `vision-${imagePath}`, {
       'Content-Type': 'application/json',
       ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
-    },
+    }),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(180_000),
   });
@@ -214,21 +210,10 @@ async function captionViaEndpoint(
     return { ok: false, error: `视觉端点返回 ${res.status}:${text.slice(0, 300)}` };
   }
 
-  const json = (await res.json()) as {
-    choices?: { message?: { content?: unknown } }[];
-  };
-  // 视觉模型 content 可能是字符串或多模态块数组,两种都兜住
-  const raw = json.choices?.[0]?.message?.content;
-  const caption =
-    typeof raw === 'string'
-      ? raw.trim()
-      : Array.isArray(raw)
-        ? raw
-            .map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: unknown }).text ?? '') : ''))
-            .join('')
-            .trim()
-        : '';
-
+  const json = await res.json().catch(() => undefined);
+  const caption = extractTextResult(json, protocol).text;
+  const errMsg = responseError(json);
+  if (errMsg && !caption) return { ok: false, error: `视觉端点报错:${errMsg.slice(0, 200)}` };
   if (!caption) return { ok: false, error: '视觉模型返回空内容(可检查端点模型是否支持视觉输入)' };
   return { ok: true, caption, model: endpoint.model, backend: 'endpoint' };
 }

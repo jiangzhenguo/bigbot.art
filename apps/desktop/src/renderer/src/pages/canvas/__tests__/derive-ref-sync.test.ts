@@ -10,7 +10,11 @@
  *
  * 修法:derive effect 里先 computeEdgeDerivations 算出结果,**先把同一份结果同步进
  * nodesRef**(changed=false 也要同步,愈合历史裂口),再 dispatch。
- * 本测试锁死这段接线的三个要点:算 → 同步 ref → 再 dispatch(顺序不能反)。
+ *
+ * 2026-10-20 追加(画布被抹空事故):同步 ref 时**不许无条件用 state** ——
+ * effect 里读到的 `nodes` 可能还是上一次渲染的旧值(挂载首帧为初始空数组,StrictMode 还会重放),
+ * 无条件回写会把刚加载的节点清成 [],而 edgesRef 仍有边 ⇒ 卸载 flush 写出「0 节点 + N 悬空边」,
+ * 两个项目画布被抹空。本测试同时锁死:算 → 同步 ref → 再 dispatch,且空 state 不得覆盖非空 ref。
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -34,7 +38,7 @@ describe('derive-from-edges 必须同步 nodesRef(2026-10-11 事故)', () => {
   it('derive effect 先算派生结果、同步 nodesRef,再 dispatch(顺序锁死)', () => {
     const body = deriveEffectBody();
     const iCompute = body.indexOf('computeEdgeDerivations(nodes, edges)');
-    const iSync = body.indexOf('nodesRef.current = r.changed ? r.nextNodes : nodes');
+    const iSync = body.indexOf('nodesRef.current = r.nextNodes');
     const iDispatch = body.indexOf("dispatchNodes({ type: 'derive-from-edges', edges });");
     expect(iCompute, 'derive effect 里缺少 computeEdgeDerivations 预算').toBeGreaterThan(-1);
     expect(iSync, 'derive effect 里缺少 nodesRef 同步(派生态只进 state 不进 ref 的事故会复活)').toBeGreaterThan(-1);
@@ -45,7 +49,17 @@ describe('derive-from-edges 必须同步 nodesRef(2026-10-11 事故)', () => {
 
   it('ref 同步不依赖 changed(历史裂口:state 已有派生态时 changed=false,也要同步)', () => {
     const body = deriveEffectBody();
-    // 同步语句必须**无条件**执行(不能包在 if (r.changed) 里)
-    expect(body).not.toMatch(/if\s*\(r\.changed\)\s*nodesRef\.current/);
+    // 同步语句本身必须有(派生态不能只进 state),但允许按 changed 分支
+    expect(body).toMatch(/nodesRef\.current = r\.nextNodes/);
+  });
+
+  it('⚠️ 空 state 不许覆盖非空 ref(2026-10-20 画布被抹空事故)', () => {
+    const body = deriveEffectBody();
+    // 旧的「无条件回写」是事故真因:`nodesRef.current = r.changed ? r.nextNodes : nodes`
+    expect(body, '无条件用 state 回写 ref 的写法回来了').not.toMatch(
+      /nodesRef\.current = r\.changed \? r\.nextNodes : nodes/,
+    );
+    // 必须带守卫:nodes 非空、或 ref 本来就是空,才允许用 state 回写
+    expect(body).toMatch(/nodes\.length > 0 \|\| nodesRef\.current\.length === 0/);
   });
 });

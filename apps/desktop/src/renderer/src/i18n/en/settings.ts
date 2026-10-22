@@ -190,6 +190,14 @@ export default {
   '文生图 · 推荐 · ~11GB': 'Text-to-image · Recommended · ~11GB',
   '指令编辑 / Inpaint · 推荐 · 37.5GB': 'Instruction editing / Inpaint · Recommended · 37.5GB',
   '多参考生成/编辑 · Outpaint · ~18GB': 'Multi-reference generation/editing · Outpaint · ~18GB',
+  '多参考生成(首图定构图)/编辑 · Outpaint · ~18GB':
+    'Multi-reference generation (first image anchors layout) / editing · Outpaint · ~18GB',
+  '指令/参考编辑': 'Instruction / reference edit',
+  'image-edit · 也是 image-gen 连参考图的默认路径(Qwen-Image-2.1 · 1-10 张)':
+    'image-edit · also the default for image-gen with ref-image (Qwen-Image-2.1 · 1–10 refs)',
+  '多参考生成(Klein)': 'Multi-reference generation (Klein)',
+  '首图定构图 · 仅 Flux.2 Klein;须节点显式选 Klein(连参考图默认不走这条)':
+    'First image anchors layout · Flux.2 Klein only; set model to Klein explicitly (not the default for ref-image)',
   '超分修复 · 可选 · ~4.7GB': 'Upscaling & restoration · Optional · ~4.7GB',
   '视觉 LLM · Agent 识图 · 可选 · ~16.6GB': 'Vision LLM · Agent image understanding · Optional · ~16.6GB',
   下载: 'Download',

@@ -8,6 +8,9 @@
  * 另一次只出正文的模型调用负责落笔。`canvas.update_node` / `create_node` 直接写 shot prompt 会被拒绝。
  * 分镜表铺节点仍走 `assembleH3Prompt` 模板,不经过这里。
  */
+import { withOpenCodeGoHeaders } from '@bigbotart/shared';
+import type { LlmProtocol } from '@bigbotart/shared';
+import { PROTOCOL_UNSUPPORTED_RE, extractTextResult, protocolOf, responseError, textCallBody, textCallUrl } from './llm-http.js';
 import h3PromptWriting from './builtin-skills/h3-prompt-writing.md?raw';
 
 /** 出厂规范全文(技能库里的副本被删或为空时用这份) */
@@ -165,6 +168,8 @@ export interface H3ChatEndpoint {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  /** 对话协议:缺省 chat(/chat/completions);grok 等只开 /responses 的模型走 responses */
+  protocol?: LlmProtocol;
 }
 
 export type H3PromptCompletion =
@@ -190,7 +195,10 @@ function messageText(content: unknown): string {
 export const TEMPERATURE_INVALID_RE = /invalid temperature|temperature.*only .*allowed/i;
 
 /**
- * 一次无工具的 chat/completions。截断(finish_reason=length)与空内容都是失败,
+ * 一次无工具的写作调用。**按 protocol 选 URL/报文形状**(chat/completions 或 responses),
+ * 撞上「端点不支持该协议」自动换另一套重试一次 —— 与主对话 pi-chat 同口径的降级。
+ *
+ * 截断(chat: finish_reason=length / responses: status=incomplete)与空内容都是失败,
  * 调用方不得把半截提示词写进节点。
  *
  * 默认带 temperature=0.2(写作偏稳);若端点只允许默认值,去掉该字段重试一次。
@@ -200,62 +208,81 @@ export async function requestH3PromptCompletion(
   messages: H3PromptMessages,
   fetchImpl: typeof fetch = fetch,
 ): Promise<H3PromptCompletion> {
-  const base = endpoint.baseUrl.replace(/\/+$/, '');
-  const headers = {
+  // OpenCode Go 强制 x-opencode-session;写作是单次调用,用 model 名作会话 id
+  const headers = withOpenCodeGoHeaders(endpoint.baseUrl, `h3-prompt-${endpoint.model}`, {
     'Content-Type': 'application/json',
     ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
-  };
-  const msgPayload = [
-    { role: 'system', content: messages.system },
-    { role: 'user', content: messages.user },
-  ];
+  });
 
-  const post = async (includeTemperature: boolean): Promise<Response> =>
-    fetchImpl(`${base}/chat/completions`, {
+  let protocol = protocolOf(endpoint);
+  const tried = new Set<LlmProtocol>([protocol]);
+
+  const post = async (includeTemperature: boolean): Promise<Response> => {
+    const target = { baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model: endpoint.model, protocol };
+    return fetchImpl(textCallUrl(endpoint.baseUrl, protocol), {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: endpoint.model,
-        messages: msgPayload,
-        ...(includeTemperature ? { temperature: 0.2 } : {}),
-        max_tokens: 8000,
-      }),
+      body: JSON.stringify(
+        textCallBody(target, {
+          system: messages.system,
+          user: messages.user,
+          maxTokens: 8000,
+          ...(includeTemperature ? { temperature: 0.2 } : {}),
+        }),
+      ),
       signal: AbortSignal.timeout(180_000),
     });
+  };
+
+  const fail = async (res: Response): Promise<H3PromptCompletion> => {
+    const errText = await res.text().catch(() => '');
+    return { ok: false, error: `写提示词的模型返回 ${res.status}:${errText.slice(0, 300)}` };
+  };
 
   let res: Response;
+  let includeTemperature = true;
   try {
-    res = await post(true);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
+    res = await post(includeTemperature);
+    // 协议不匹配(OpenCode Go:grok 只开 /responses)→ 换另一套协议重试一次
+    if (!res.ok && res.status !== 401 && res.status !== 403) {
+      const errText = await res.clone().text().catch(() => '');
+      if (PROTOCOL_UNSUPPORTED_RE.test(errText)) {
+        const other: LlmProtocol = protocol === 'responses' ? 'chat' : 'responses';
+        if (!tried.has(other)) {
+          tried.add(other);
+          protocol = other;
+          res = await post(includeTemperature);
+        }
+      }
       // Kimi 等:自定义 temperature 被拒 → 不下发该字段重试(走端点默认)
-      if (res.status === 400 && TEMPERATURE_INVALID_RE.test(errText)) {
-        res = await post(false);
-      } else {
-        return { ok: false, error: `写提示词的模型返回 ${res.status}:${errText.slice(0, 300)}` };
+      if (!res.ok && res.status === 400) {
+        const t2 = await res.clone().text().catch(() => '');
+        if (TEMPERATURE_INVALID_RE.test(t2)) {
+          includeTemperature = false;
+          res = await post(false);
+        }
       }
     }
+    if (!res.ok) return fail(res);
   } catch (e) {
     return { ok: false, error: `写提示词的模型请求失败:${(e as Error).message}` };
   }
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    return { ok: false, error: `写提示词的模型返回 ${res.status}:${text.slice(0, 300)}` };
-  }
-  let json: { choices?: Array<{ finish_reason?: string; message?: { content?: unknown } }> };
+
+  let json: unknown;
   try {
-    json = (await res.json()) as typeof json;
+    json = await res.json();
   } catch (e) {
     return { ok: false, error: `写提示词的模型返回了无法解析的内容:${(e as Error).message}` };
   }
-  const choice = json.choices?.[0];
-  if (choice?.finish_reason === 'length') {
+  const err = responseError(json);
+  if (err) return { ok: false, error: `写提示词的模型返回错误:${err.slice(0, 300)}` };
+  const { text, truncated } = extractTextResult(json, protocol);
+  if (truncated) {
     return {
       ok: false,
       error: '写提示词时输出被截断(stop=length),没有写回节点。请缩短简述后重试 h3.write_prompt。',
     };
   }
-  const text = messageText(choice?.message?.content);
   if (!text) return { ok: false, error: '写提示词的模型返回空内容,没有写回节点。' };
   return { ok: true, text, model: endpoint.model };
 }

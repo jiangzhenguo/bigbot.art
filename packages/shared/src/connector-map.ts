@@ -144,7 +144,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   // 资产引用:端口按媒体类型动态(渲染层 connectors.ts 四类矩阵为准,此处给 Agent 综合摘要)
   asset: {
     shot: 'first-frame/ref-image/ref-video/ref-audio/prompt', // 按媒体类型:图片=首帧参考(first-frame)/参考图(ref-image) · 视频 ref-video · 音频 ref-audio · 文档 prompt
-    image: 'ref-image', // 图片参考图(多参考生成,需 flux.2-klein 模型)
+    image: 'ref-image', // 图片参考图(默认 → 2.1 参考编辑;显式选 Klein 才走 multi-reference)
     edit: 'input/ref-image', // 输入图/取帧源
     upscale: 'input', // 超分源
     crop: 'input', // 裁切源
@@ -168,7 +168,7 @@ export const PORT_SEMANTICS: Record<string, string> = {
   prompt: '提示词注入(文档/分镜表 → 生成节点)',
   'first-frame': '首帧直通(图片/上游尾帧 → 镜头)',
   'last-frame': '尾帧条件(FL2VA)',
-  'ref-image': '参考图(→ shot 是 Ref2VA 身份/场景锁定;→ image-gen 是多参考生成,需多参考模型 flux.2-klein)',
+  'ref-image': '参考图(→ shot 是 Ref2VA 身份/场景锁定;→ image-gen 默认走 Qwen-Image-2.1 参考编辑(1-10 张),显式选 flux.2-klein 才是多参考生成;→ image-edit 是指令/参考编辑)',
   'ref-audio': '音轨参考(带声直出)',
   'ref-video': '参考视频(风格/动作参考;→ shot 时走 h3 --ref-video,默认连同源片内嵌音轨一起注入,可在检查器勾「忽略音轨」改走 --ref-silent-video)',
   input: '输入图/输入帧(编辑/超分源;→ video-upscale 时是待增强视频)',
@@ -255,7 +255,7 @@ export const NODE_KIND_GUIDE = [
   ['document', '文档/提示词:Markdown(含 GFM 表格与 ```prompt / #shot-N 选段标记)'],
   ['storyboard', '分镜表(脚本):Markdown 表格,一行 = 一个分镜;可「从分镜表生成节点」铺 shot/image-gen'],
   ['asset', '资产引用(图片/视频/音频/文档)'],
-  ['image-gen', '图片生成(mlxgen 文生图;连 ref-image 参考图 = 多参考生成,需把模型改为 AbstractFramework/flux.2-klein-9b-8bit,z-image-turbo 不支持参考图)'],
+  ['image-gen', '图片生成(mlxgen 文生图;连 ref-image = 参考编辑,缺省 Qwen-Image-2.1 的 qwen21.edit(1-10 张)。要「首图定构图」的多参考生成须节点显式选 AbstractFramework/flux.2-klein-9b-8bit;z-image-turbo 不支持参考图)'],
   ['image-edit', '图片编辑(指令/I2I/Inpaint/Outpaint)'],
   ['image-crop', '图片裁切(按目标画幅裁剪,如 1:1 → 9:16,供下游作输入图)'],
   ['image-stitch', '图片拼接(纯 ffmpeg:多张图横排/竖排/网格拼成一张;piece 多值入边,按源节点画布位置排序)'],

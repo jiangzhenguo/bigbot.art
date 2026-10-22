@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '@bigbotart/shared';
 import {
   checkCharacterCardGate,
+  checkCharacterRefEditGate,
   checkMasterAudioGate,
   checkProductPhotoEditGate,
   checkSkillSubmitGates,
@@ -45,7 +46,16 @@ describe('checkCharacterCardGate', () => {
     if (!r.ok) {
       expect(r.reason).toContain('2 张角色卡');
       expect(r.reason).toContain('角色卡·PLAYER1');
+      expect(r.reason).toContain('全身正面');
+      expect(r.reason).toContain('image-edit');
+      expect(r.reason).not.toContain('半身');
     }
+  });
+
+  it('image-edit 出的角色卡也算已出图(有参考图分流)', () => {
+    const editCard = node('e1', 'image-edit', '角色卡·PLAYER1', { resultPath: '/o/e1.png' });
+    const editCard2 = node('e2', 'image-edit', '角色卡·PLAYER2', { resultPath: '/o/e2.png' });
+    expect(checkCharacterCardGate('co-op-game-intro', menu, [editCard, editCard2, menu], []).ok).toBe(true);
   });
 
   it('只有 1 张已出图角色卡(co-op 需要 2 张)→ 拒绝', () => {
@@ -170,6 +180,46 @@ describe('checkProductPhotoEditGate(minimalist-product-ad)', () => {
     const g = node('g', 'image-gen', '分镜静帧 01');
     const a = node('a', 'asset', '产品图', { assetId: 'asset-x' });
     const r = checkSkillSubmitGates('minimalist-product-ad', g, [a, g], []);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('image-edit');
+  });
+});
+
+describe('checkCharacterRefEditGate(全局 · 有资产参考禁止 image-gen+ref-image)', () => {
+  it('事故形态:image-gen 把上传资产连成 ref-image → 拒绝并指引 image-edit+input', () => {
+    const g = node('g', 'image-gen', '猫猫女侠 · 3D 角色图');
+    const a = node('a', 'asset', '哈哈 · 虎斑猫参考图', { assetId: 'asset-cat' });
+    const edges = [edge('a', 'g', 'ref-image')];
+    const r = checkCharacterRefEditGate(g, [a, g], edges);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('image-edit');
+      expect(r.reason).toContain('input');
+      expect(r.reason).toContain('哈哈');
+    }
+  });
+
+  it('纯 image-gen 无资产参考 → 放行', () => {
+    const g = node('g', 'image-gen', '角色卡·PLAYER1');
+    expect(checkCharacterRefEditGate(g, [g], []).ok).toBe(true);
+  });
+
+  it('image-edit 以资产为 input → 放行', () => {
+    const e = node('e', 'image-edit', '角色卡·猫猫女侠');
+    const a = node('a', 'asset', '哈哈', { assetId: 'asset-cat' });
+    expect(checkCharacterRefEditGate(e, [a, e], [edge('a', 'e', 'input')]).ok).toBe(true);
+  });
+
+  it('image-gen 参考的是另一张生成图(非 asset) → 放行', () => {
+    const g = node('g', 'image-gen', '变体');
+    const src = node('s', 'image-gen', '风格源', { resultPath: '/o/s.png' });
+    expect(checkCharacterRefEditGate(g, [src, g], [edge('s', 'g', 'ref-image')]).ok).toBe(true);
+  });
+
+  it('聚合入口无技能时也会拦截', () => {
+    const g = node('g', 'image-gen', '角色图');
+    const a = node('a', 'asset', '参考', { assetId: 'asset-x' });
+    const r = checkSkillSubmitGates(undefined, g, [a, g], [edge('a', 'g', 'ref-image')]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('image-edit');
   });

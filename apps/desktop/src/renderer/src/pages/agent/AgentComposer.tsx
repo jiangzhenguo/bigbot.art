@@ -8,11 +8,12 @@
  * 技能:弹层选项来自真实技能库(listSkills),选中即真实激活(skillActivate)——
  * 激活/停用是画布级配置事件,由 useAgentChat.activateSkill/deactivateSkill 落盘并生成注入卡。
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { Asset, Skill } from '@bigbotart/shared';
 import type { AgentChatApi } from './useAgentChat';
 import { composerPrimaryAction } from './composer-action';
 import { ComposerToolRow } from './ComposerToolRow';
+import { isImeComposingKey } from './ime-composing';
 
 export function AgentComposer({
   chat,
@@ -47,6 +48,12 @@ export function AgentComposer({
   const [slashIdx, setSlashIdx] = useState(0);
   /** 技能弹层选项(真实技能库;unmounted 清理) */
   const [skillOptions, setSkillOptions] = useState<Skill[]>([]);
+  /**
+   * 输入法组词态(中/日/韩等)。部分 Chromium 在「回车上屏」那一拍已把
+   * nativeEvent.isComposing 清成 false,单靠事件字段会误发;用 composition 事件
+   * 钉住,compositionend 后再延一帧清掉,盖过同一次回车的 keydown。
+   */
+  const imeComposingRef = useRef(false);
 
   const {
     sending, agentBusy, replacing, send, interrupt, chatInput,
@@ -285,7 +292,23 @@ export function AgentComposer({
           ref={inputRef}
           placeholder="追问 / 修改需求，如「镜2 改低机位仰拍」…（@ 引用节点 · / 命令）"
           onChange={(e) => onInputChange(e.target)}
+          onCompositionStart={() => {
+            imeComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            // 延一帧再清:上屏回车的 keydown 常紧跟 compositionend,且此时 isComposing 已是 false
+            window.setTimeout(() => {
+              imeComposingRef.current = false;
+            }, 0);
+          }}
           onKeyDown={(e) => {
+            // 组词中回车/Tab = 输入法上屏或选词,禁止发送与弹层点选
+            if (
+              (e.key === 'Enter' || e.key === 'Tab') &&
+              (isImeComposingKey(e) || imeComposingRef.current)
+            ) {
+              return;
+            }
             // / 命令弹层打开时:方向键/回车/Tab/Esc 先给弹层,不发送
             if (slashPop) {
               if (e.key === 'ArrowDown') {
@@ -341,6 +364,8 @@ export function AgentComposer({
             }
           }}
           onBlur={() => {
+            // 失焦可能打断组词且不发 compositionend,避免卡住发送
+            imeComposingRef.current = false;
             // 失焦关弹层(延迟一拍,让弹层里的 click 先触发)
             window.setTimeout(() => {
               setMentionPop(null);

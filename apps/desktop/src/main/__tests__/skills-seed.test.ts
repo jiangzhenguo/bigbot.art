@@ -206,6 +206,9 @@ describe('SkillStore 内置技能正文升级', () => {
     // 历史出厂版必须在白名单里,否则用户库(无 fingerprint 的旧正文)升不上来
     expect(M.isLegacyBuiltinFingerprint('fnv1a-3c5b8bf8-20704')).toBe(true);
     expect(M.isLegacyBuiltinFingerprint('fnv1a-bbcf1b5f-21952')).toBe(true);
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-837b6798-22777')).toBe(true);
+    expect(ins).toContain('全身正面');
+    expect(ins).toContain('image-edit');
   });
 
   it('handdrawn-live-video 全量注入并锁关联生成(技能4事故)', () => {
@@ -225,6 +228,9 @@ describe('SkillStore 内置技能正文升级', () => {
     expect(ins).toContain('最多 9 张'); // 纠正「只能 1 张」的错误认知
     expect(ins).toContain('逐镜模式选择'); // 方案③ 按镜二选一
     expect(ins).toContain('modeOverride'); // 防止模式被自动推导覆盖
+    expect(ins).toContain('全身正面');
+    expect(ins).toContain('有参考图');
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-289805d7-17333')).toBe(true);
   });
 
   it('新 seed 的技能带 builtinFingerprint', () => {

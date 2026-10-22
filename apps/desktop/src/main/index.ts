@@ -58,6 +58,7 @@ import {
   resolveLlmEndpoint,
   probeLoadedContextTokens,
   testConnection,
+  toChatLlm,
 } from './llm';
 import { placementOf, planContext } from './context-budget';
 import type { RuntimeProbe, RenderRequest, LlmSource, RenderStatus, AgentChatRequest, AgentChatResponse, AgentEvent, RecallMessage, CanvasNode, CanvasEdge, VideoUpscaleRequest, VideoPostProgressEvent, MediaInfo, MediaKind, ProjectExportRequest, ProjectExportResult, ProjectImportResult, ProjectCover } from '@bigbotart/shared';
@@ -211,7 +212,7 @@ const registry = createRegistry({
   },
 });
 
-const settings = new SettingsStore();
+const settings = new SettingsStore({ onWarn: (m) => logger.log('warn', m) });
 const accel = new AccelStore(settings);
 /** 风格模型包(mystic 等)下载 + 融合构建;进度推送到渲染层设置页 */
 const styleModels = new H3StyleModelBuilder((ev) => {
@@ -280,7 +281,7 @@ const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, 
       const llm = project?.llmOverride ?? settings.get().llm;
       const ep = await resolveLlmEndpoint(settings.get(), llm);
       const result = await requestH3PromptCompletion(
-        { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model },
+        { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model, protocol: ep.protocol },
         messages,
       );
       if (!result.ok) logger.log('warn', `[h3.write_prompt] ${result.error}`);
@@ -306,7 +307,7 @@ const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, 
     if (!v) return undefined;
     try {
       const ep = await resolveLlmEndpoint(settings.get(), v);
-      return { kind: 'endpoint' as const, endpoint: { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model } };
+      return { kind: 'endpoint' as const, endpoint: { baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model, protocol: ep.protocol } };
     } catch (e) {
       console.warn(`[toolModels] 看图端点解析失败,回退 env 链: ${(e as Error).message}`);
       return undefined;
@@ -321,7 +322,7 @@ const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, 
     else if (settings.get().llm) llm = settings.get().llm;
     try {
       const ep = await resolveLlmEndpoint(settings.get(), llm);
-      llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+      llm = toChatLlm(ep);
     } catch (e) {
       console.warn(`[tool storyboard.plan] LLM 来源解析失败,回退确定性分镜表: ${(e as Error).message}`);
       llm = { kind: 'none' };
@@ -816,7 +817,7 @@ ipcMain.handle('clear-project-cover', (_e, projectId: string) => {
 ipcMain.handle('set-project-llm', (_e, projectId: string, llm: LlmSource | null) => store.setProjectLlm(projectId, llm));
 // 多画布
 ipcMain.handle('load-project-canvases', (_e, projectId: string) => store.loadProjectCanvases(projectId));
-ipcMain.handle('save-canvas-snapshot', (_e, snap) => store.saveCanvasSnapshot(snap));
+ipcMain.handle('save-canvas-snapshot', (_e, snap, opts) => store.saveCanvasSnapshot(snap, opts));
 ipcMain.handle('create-canvas', (_e, projectId: string, name?: string) => store.createCanvas(projectId, name));
 ipcMain.handle('rename-canvas', (_e, projectId: string, canvasId: string, name: string) => store.renameCanvas(projectId, canvasId, name));
 ipcMain.handle('delete-canvas', (_e, projectId: string, canvasId: string) => store.deleteCanvas(projectId, canvasId));
@@ -1229,7 +1230,7 @@ ipcMain.handle('agent-plan', async (_e, brief: string, opts?: { projectId?: stri
   else if (settings.get().llm) llm = settings.get().llm;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
-    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    llm = toChatLlm(ep);
   } catch (e) {
     console.warn(`[agent-plan] LLM 来源解析失败,回退确定性规划: ${(e as Error).message}`);
     llm = { kind: 'none' };
@@ -1248,7 +1249,7 @@ ipcMain.handle('agent-plan-storyboard', async (_e, brief: string, opts?: { proje
   else if (settings.get().llm) llm = settings.get().llm;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
-    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    llm = toChatLlm(ep);
   } catch (e) {
     console.warn(`[agent-plan-storyboard] LLM 来源解析失败,回退确定性分镜表: ${(e as Error).message}`);
     llm = { kind: 'none' };
@@ -1319,7 +1320,7 @@ async function executeAgentChat(opts: {
   let historyTokenBudget: number | undefined;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
-    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    llm = toChatLlm(ep);
     const placement = placementOf(source, ep.baseUrl);
     const loaded = placement === 'local' ? await probeLoadedContextTokens(ep.baseUrl, ep.model) : undefined;
     const plan = planContext({ placement, model: ep.model, loadedContextTokens: loaded });
@@ -1327,7 +1328,7 @@ async function executeAgentChat(opts: {
     historyTokenBudget = plan.compactAt;
     logger.log(
       'info',
-      `[agent.context] ${placement} · 模型 ${ep.model} · 窗口 ${plan.windowTokens} · 本轮工作集 ${plan.compactAt}${loaded ? ` · 已加载 ${loaded}` : ''}`,
+      `[agent.context] ${placement} · 模型 ${ep.model} · 协议 ${ep.protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'} · 窗口 ${plan.windowTokens} · 本轮工作集 ${plan.compactAt}${loaded ? ` · 已加载 ${loaded}` : ''}`,
     );
   } catch (e) {
     if (opts.auto) {
@@ -1694,7 +1695,7 @@ ipcMain.handle('memory-compact', async (_e, projectId: string, canvasId: string)
   else if (settings.get().llm) llm = settings.get().llm;
   try {
     const ep = await resolveLlmEndpoint(settings.get(), llm);
-    llm = { kind: 'openai-compatible', baseUrl: ep.baseUrl, apiKey: ep.apiKey, model: ep.model };
+    llm = toChatLlm(ep);
   } catch (e) {
     // 不静默吞错(R6):压缩摘要回退确定性兜底,但把真实原因写进日志总线
     console.warn(`[compact] LLM 来源解析失败,回退确定性摘要: ${(e as Error).message}`);

@@ -40,7 +40,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const outputPatch = new Map<string, Record<string, string[]>>();
   const slotPatch = new Map<string, Array<{ name: string; value: unknown }>>();
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
-  /** 🆕 参考图端口 ref-image(多值):image-edit 多参考编辑(Qwen-Image-2.1 `qwen21.edit` 支持 1-10 张) */
+  /** 🆕 参考图端口 ref-image(多值):image-edit / image-gen → data.refImageFrom(2.1 edit-reference) */
   const editRefPatch = new Map<string, string[]>();
   /** 视频输入端口(video-upscale / frame-grab 的输入):只收视频来源(shot/video-upscale/视频 asset) */
   const videoFromPatch = new Map<string, { nodeId: string } | null>();
@@ -287,7 +287,23 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         }
         break;
       }
-      case 'image-gen':
+      case 'image-gen': {
+        // 参考图端口 ref-image(多值):与 image-edit 同口径写入 refImageFrom,
+        // 供检查器/节点卡缺省模型解析(有参考图 → image.instruction → 2.1)。
+        if ((IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') && e.label === 'ref-image') {
+          const arr = editRefPatch.get(e.to) ?? [];
+          if (!arr.includes(e.from)) arr.push(e.from);
+          editRefPatch.set(e.to, arr);
+        }
+        if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
+          const cur = d.promptFrom as PromptSource | undefined;
+          const next: PromptSource = { nodeId: e.from, ...inferPromptSource(String(s.markdown ?? '')) };
+          if (!cur || cur.nodeId !== e.from || cur.mode !== next.mode || (cur.blockId ?? '') !== (next.blockId ?? '')) {
+            promptFromPatch.set(e.to, next);
+          }
+        }
+        break;
+      }
       case 'director': {
         // 提示词端口 prompt:document → 下游 prompt
         if (src.kind === 'document' && String(s.markdown ?? '').trim()) {
@@ -442,8 +458,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       if (target) data.inputImageFrom = target;
       else delete data.inputImageFrom;
     }
-    // 🆕 参考图端口 ref-image(多值,仅 image-edit):与边同步,删除边即撤销
-    if (n.kind === 'image-edit') {
+    // 🆕 参考图端口 ref-image(多值,image-edit / image-gen):与边同步,删除边即撤销
+    if (n.kind === 'image-edit' || n.kind === 'image-gen') {
       const refs = editRefPatch.get(n.id) ?? [];
       if (refs.length) data.refImageFrom = refs.map((id) => ({ nodeId: id }));
       else delete data.refImageFrom;

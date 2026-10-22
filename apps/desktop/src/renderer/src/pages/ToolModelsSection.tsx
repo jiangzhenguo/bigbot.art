@@ -20,9 +20,17 @@ import { useT } from '../i18n';
 /** 图片能力行的展示元数据(顺序即 UI 顺序) */
 const IMAGE_ROWS: Array<{ cap: ImageCapability; label: string; hint: string }> = [
   { cap: 'image.generate', label: '文生图', hint: 'image-gen 节点 · 无参考图' },
-  { cap: 'image.multiReference', label: '多参考生成', hint: 'image-gen 带 ref-image 连线 · 当前仅 Flux.2 Klein 支持(无上限)' },
+  {
+    cap: 'image.instruction',
+    label: '指令/参考编辑',
+    hint: 'image-edit · 也是 image-gen 连参考图的默认路径(Qwen-Image-2.1 · 1-10 张)',
+  },
+  {
+    cap: 'image.multiReference',
+    label: '多参考生成(Klein)',
+    hint: '首图定构图 · 仅 Flux.2 Klein;须节点显式选 Klein(连参考图默认不走这条)',
+  },
   { cap: 'image.img2img', label: '图生图', hint: 'image-edit · 图生图(latent)' },
-  { cap: 'image.instruction', label: '指令编辑', hint: 'image-edit · 指令编辑(2.1 支持 1-10 张参考图)' },
   { cap: 'image.inpaint', label: '局部重绘', hint: 'image-edit · Inpaint(需遮罩)' },
   { cap: 'image.outpaint', label: '扩图', hint: 'image-edit · Outpaint' },
   { cap: 'image.upscale', label: '图片超分', hint: 'image-upscale · SeedVR2' },
