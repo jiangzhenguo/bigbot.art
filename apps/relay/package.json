@@ -1,0 +1,33 @@
+{
+  "name": "@bigbotart/relay",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bba-relay": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "default": "./dist/protocol.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "acme-client": "^5.4.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.5.0"
+  }
+}

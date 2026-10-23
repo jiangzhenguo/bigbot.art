@@ -4,6 +4,7 @@ import { paramDisplayLabel, paramTokenKey } from '@bigbotart/shared';
 import { usePrompt } from '../components/usePrompt';
 import PageTopBar from '../components/PageTopBar';
 import { useT } from '../i18n';
+import { isDesktopShell } from '../api/shell';
 
 /** 卡片上最多露出几个可读参数名(其余收进「需 N 个参数」) */
 const CARD_PARAM_PREVIEW = 2;
@@ -617,7 +618,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
             </div>
             <div className="sgrid" data-sect-grid="mine" style={{ display: mineShown ? '' : 'none' }}>
               {mineCards.map(renderCard)}
-              <div
+              {isDesktopShell() ? <div
                 className="scard new"
                 data-kind="mine"
                 data-od-id="skill-import-card"
@@ -650,7 +651,7 @@ export default function SkillsPage({ onNavigate, projectId, canvasId }: SkillsPa
                   <br />
                   {t('选择文件夹或 .zip 包')}
                 </span>
-              </div>
+              </div> : null}
             </div>
           </main>
 

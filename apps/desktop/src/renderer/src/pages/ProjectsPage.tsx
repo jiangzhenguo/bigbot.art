@@ -4,6 +4,7 @@ import { usePrompt } from '../components/usePrompt';
 import { useProjectCovers, ProjectCoverImage } from '../components/ProjectCover';
 import { useT } from '../i18n';
 import PageTopBar from '../components/PageTopBar';
+import { isDesktopShell } from '../api/shell';
 
 interface Project {
   id: string;
@@ -169,6 +170,7 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
                     style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2, marginTop: 'auto', paddingTop: spacing[2], borderTop: `1px solid ${colors.borderSoft}` }}
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {isDesktopShell() ? (
                     <button
                       type="button"
                       className="ibtn"
@@ -184,6 +186,7 @@ export default function ProjectsPage({ onBack, backLabel, projects, onSelectProj
                         <path d="m4 17 4.5-4.5 3.5 3.5 3-3L20 17" />
                       </svg>
                     </button>
+                    ) : null}
                     {cover?.mode === 'manual' ? (
                       <button
                         type="button"

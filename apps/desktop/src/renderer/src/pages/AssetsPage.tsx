@@ -12,6 +12,7 @@
  * 详情面板由 pages/assets/AssetDetail 承担,卡片由 pages/assets/AssetCard 承担。
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { isDesktopShell } from '../api/shell';
 import { createPortal } from 'react-dom';
 import type { Asset, AssetCategory, AssetRef, Project } from '@bigbotart/shared';
 import { AssetCard } from './assets/AssetCard';
@@ -328,12 +329,12 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
               {t('从画布产物导入')}
             </button>
           ) : null}
-          <button className="btn btn-p btn-sm" id="importBtn" data-od-id="assets-import" onClick={handleImport}>
+          {isDesktopShell() ? <button className="btn btn-p btn-sm" id="importBtn" data-od-id="assets-import" onClick={handleImport}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
               <path d="M12 5v14M5 12h14" />
             </svg>
             {t('导入')}
-          </button>
+          </button> : null}
           <span className="sep" />
           <button className="btn btn-s btn-sm" data-od-id="trash-view" onClick={() => void openTrash()}>
             {t('回收站')}
@@ -497,7 +498,7 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
                 <div className="mut" style={{ fontSize: 11, marginTop: 6 }}>
                   {baseList.length === 0 ? t('点击「导入」添加图片 / 视频 / 音频 / 文档') : t('试着清空标签或换个分类')}
                 </div>
-                {baseList.length === 0 ? (
+                {baseList.length === 0 && isDesktopShell() ? (
                   <button className="btn btn-p btn-sm" style={{ marginTop: 12 }} data-od-id="empty-import" onClick={handleImport}>
                     {t('导入资产')}
                   </button>

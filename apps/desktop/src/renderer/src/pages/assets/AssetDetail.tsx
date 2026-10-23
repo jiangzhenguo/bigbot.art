@@ -8,6 +8,7 @@ import React, { useEffect, useState } from 'react';
 import type { Asset, AssetCategory, AssetRef } from '@bigbotart/shared';
 import { MediaInfoPanel } from '../canvas/inspector/MediaInfoPanel';
 import { SafeImage } from '../../components/SafeImage';
+import { assetUrlOf } from '../canvas/media';
 
 interface AssetDetailProps {
   asset: Asset | null;
@@ -135,10 +136,10 @@ export function AssetDetail({
     <div className="detail-in">
       <div className="dpreview">
         {a.kind === 'image' && a.localPath ? (
-          <SafeImage src={`bba-asset://${a.localPath.split('/').pop()}`} alt={a.name} style={{ aspectRatio: '16/10' }} />
+          <SafeImage src={assetUrlOf(a.localPath) ?? ''} alt={a.name} style={{ aspectRatio: '16/10' }} />
         ) : a.kind === 'video' && a.localPath ? (
           <video
-            src={`bba-asset://${a.localPath.split('/').pop()}`}
+            src={assetUrlOf(a.localPath) ?? ''}
             muted
             loop
             playsInline

@@ -17,11 +17,36 @@ export const BrowserWindow = class {
 };
 
 export const app = {
+  isPackaged: false,
+  getVersion: () => '0.0.0-test',
   getPath: () => '/tmp',
   whenReady: () => Promise.resolve(),
+  on: () => {},
+  quit: () => {},
+  dock: undefined as { setIcon: (img: unknown) => void } | undefined,
+};
+
+export const nativeImage = {
+  createFromPath: () => ({
+    isEmpty: () => true,
+    getSize: () => ({ width: 0, height: 0 }),
+  }),
+};
+
+export const nativeTheme = {
+  shouldUseDarkColors: false,
   on: () => {},
 };
 
 export const shell = { openPath: async () => 'ok', showItemInFolder: () => {} };
+export const ipcMain = {
+  handle: (_channel: string, _fn: unknown) => {},
+  on: () => {},
+};
 export const protocol = { registerSchemesAsPrivileged: () => {}, handle: async () => {} };
 export const net = { fetch: async () => new Response() };
+export const safeStorage = {
+  isEncryptionAvailable: () => false,
+  encryptString: (plain: string) => Buffer.from(plain, 'utf8'),
+  decryptString: (buf: Buffer) => Buffer.from(buf).toString('utf8'),
+};

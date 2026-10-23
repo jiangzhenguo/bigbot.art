@@ -1078,6 +1078,47 @@ export interface AppSettings {
   cloudProviders?: CloudProviderEntry[];
   /** 🆕 工具模型绑定(设置页「工具模型」;缺省走 DEFAULT_TOOL_MODELS / vision env 回退链) */
   toolModels?: ToolModelBinding;
+  /**
+   * 网页远程访问。缺省视为关闭;老 settings.json 无此字段,不需要迁移。
+   * 只放开关、端口和中继地址。口令哈希在 remote-access.json,配对密钥另存,都不进 getSettings()。
+   */
+  remoteAccess?: RemoteAccessSettings;
+}
+
+/** 远程访问默认端口(设置页未填时) */
+export const DEFAULT_REMOTE_PORT = 47321;
+
+/** 远程访问的非秘密设置。enabled 缺省 = 关。配对密钥不在这里。 */
+export interface RemoteAccessSettings {
+  enabled?: boolean;
+  port?: number;
+  /** 自建中继。开启后即使没有 Tailscale 也在 127.0.0.1 监听,供隧道回连。 */
+  relayEnabled?: boolean;
+  /** 例如 https://art.example.com ,不要带路径。 */
+  relayUrl?: string;
+}
+
+/** 中继隧道状态。只有 hasPairingKey,没有密钥本身。 */
+export interface RelayTunnelStatus {
+  enabled: boolean;
+  url: string;
+  connected: boolean;
+  hasPairingKey: boolean;
+  error?: string;
+}
+
+/** 桌面设置页展示的监听状态。永不包含口令明文、哈希或配对密钥。 */
+export interface RemoteAccessStatus {
+  enabled: boolean;
+  port: number;
+  listening: boolean;
+  urls: string[];
+  hasPassphrase: boolean;
+  /** out/renderer 是否存在。没有构建产物时页面打不开,RPC 仍可按开关监听。 */
+  pageReady: boolean;
+  /** 未在监听时的原因(未开启 / 未设口令 / 未检测到 Tailscale / 端口被占用) */
+  error?: string;
+  relay: RelayTunnelStatus;
 }
 
 /**

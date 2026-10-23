@@ -6,6 +6,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import type { Asset, AssetCategory } from '@bigbotart/shared';
+import { assetUrlOf } from './media';
 
 interface AssetPickerPopProps {
   open: boolean;
@@ -28,7 +29,7 @@ function KindMark({ a }: { a: Asset }) {
   if (a.localPath) {
     return (
       <img
-        src={`bba-asset://${a.localPath.split('/').pop()}`}
+        src={assetUrlOf(a.localPath) ?? ''}
         alt=""
         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
         loading="lazy"

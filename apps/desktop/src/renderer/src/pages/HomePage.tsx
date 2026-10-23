@@ -6,6 +6,8 @@ import { useProjectCovers, ProjectCoverImage } from '../components/ProjectCover'
 import { useT } from '../i18n';
 import { llmDisplayName } from './agent/llm-display';
 import brandIcon from '../assets/icon.png';
+import { assetUrlOf } from './canvas/media';
+import { isDesktopShell } from '../api/shell';
 
 export type HomePageTarget =
   | 'home'
@@ -74,7 +76,7 @@ const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', a
 
 /** 资产缩略图(仅图片有;与 AssetCard.thumbOf 同口径) */
 function thumbOf(a: { kind: string; localPath: string }): string | null {
-  if (a.kind === 'image' && a.localPath) return `bba-asset://${a.localPath.split('/').pop()}`;
+  if (a.kind === 'image' && a.localPath) return assetUrlOf(a.localPath);
   return null;
 }
 
@@ -627,12 +629,12 @@ export default function HomePage({
               onKeyDown={handleKeyDown}
             />
             <div className="row g8" style={{ borderTop: '1px solid var(--border-soft)', paddingTop: '10px', marginTop: '8px', position: 'relative' }}>
-              <button className="btn btn-g btn-sm" id="attachBtn" onClick={handleAddAttachment}>
+              {isDesktopShell() ? <button className="btn btn-g btn-sm" id="attachBtn" onClick={handleAddAttachment}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path d="m21 11.5-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.85 1.85 0 0 1-2.6-2.6l7.8-7.8" />
                 </svg>
                 {t('参考图 / 文件')}
-              </button>
+              </button> : null}
               <button
                 className="chip"
                 id="modelChip"
@@ -769,10 +771,12 @@ export default function HomePage({
                   <span className="mut">{s.description ?? t('官方精选技能')}</span>
                 </div>
               ))}
+              {isDesktopShell() ? (
               <div className="card" data-od-id="alt-import" onClick={() => onImportProject?.()} style={{ cursor: 'pointer' }}>
                 <b>{t('导入项目包(.bba)')}</b>
                 <span className="mut">{t('换机 / 协作 · 结构+历史+附件')}</span>
               </div>
+              ) : null}
             </div>
           </div>
         </main>
@@ -881,7 +885,7 @@ export default function HomePage({
                         }}
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <button
+                        {isDesktopShell() ? <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
                           aria-label={t('编辑封面')}
@@ -895,7 +899,7 @@ export default function HomePage({
                             <circle cx="8.5" cy="9.5" r="1.5" />
                             <path d="m4 17 4.5-4.5 3.5 3.5 3-3L20 17" />
                           </svg>
-                        </button>
+                        </button> : null}
                         {coverIsManual && (
                           <button
                             className="ibtn"
@@ -911,7 +915,7 @@ export default function HomePage({
                             </svg>
                           </button>
                         )}
-                        <button
+                        {isDesktopShell() ? <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
                           aria-label={t('导出项目包')}
@@ -923,7 +927,7 @@ export default function HomePage({
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
                             <path d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
                           </svg>
-                        </button>
+                        </button> : null}
                         <button
                           className="ibtn"
                           style={{ width: '24px', height: '24px' }}
@@ -952,7 +956,7 @@ export default function HomePage({
                 );
               })
             )}
-            <div
+            {isDesktopShell() ? <div
               className="proj-card"
               data-od-id="project-import"
               style={{ borderStyle: 'dashed', justifyContent: 'center', color: 'var(--muted)', cursor: 'pointer' }}
@@ -962,7 +966,7 @@ export default function HomePage({
                 <path d="M12 5v14M5 12h14" />
               </svg>
               {t('导入项目包(.bba)…')}
-            </div>
+            </div> : null}
           </div>
         </aside>
       </div>

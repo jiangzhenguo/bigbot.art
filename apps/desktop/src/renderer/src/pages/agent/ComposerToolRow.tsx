@@ -5,6 +5,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { Asset, Skill } from '@bigbotart/shared';
 import type { ModelOption } from './types';
+import { isDesktopShell } from '../../api/shell';
 
 export function ComposerToolRow({
   toastMsg,
@@ -35,6 +36,7 @@ export function ComposerToolRow({
 }) {
   return (
     <div className="toolrow">
+      {isDesktopShell() ? (
       <button
         className="chip"
         onClick={(e) => {
@@ -57,6 +59,7 @@ export function ComposerToolRow({
       >
         ＋ 参考图 / 文件
       </button>
+      ) : null}
       <button
         className="chip"
         onClick={(e) => {
