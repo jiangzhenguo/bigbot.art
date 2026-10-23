@@ -1666,3 +1666,212 @@ html,body{height:100%;overflow:hidden}
 }
 .engine-panel-install:disabled{cursor:wait;opacity:.7}
 .engine-panel-probe{position:static;width:100%;margin-top:6px;padding:6px 0;display:block}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   触控档(coarse pointer)· 触屏第二期(《网页远程访问-改造方案》§11.3 / §11.5)
+   ─────────────────────────────────────────────────────────────────────────────
+   为什么单独开一档:桌面(鼠标 / 触控板)的手感是逐条调过的,动一行都可能回归;
+   而 iPad 这类「主指针是粗指针」的设备另有一套硬约束 —— 手指热区、浏览器默认手势。
+   所以本段**只**在 @media (pointer: coarse) 内生效:
+     · Mac 台式机(主指针 = 鼠标)不命中 → 桌面端一个字节都不变;
+     · iPad Safari / 触屏笔记本命中 → 热区与手势按下面的口径改写。
+   本段之外不新增任何选择器(桌面规则一行未改)。
+
+   三条口径:
+   ① 热区按**屏幕像素**算。画布内容在 .world 里,而 .world 带 scale(var(--vz))
+      (缩放范围 0.4–1.3,渲染层直接写 CSS 变量 --vz,不 setState)。写在世界坐标里的
+      44px,缩到 0.4 时屏幕上只剩约 18px —— §11.3 的原话:「只把 CSS 改成 44px 而不除以 z,
+      缩小后仍然点不中「+」」。所以 .world 内的控件一律用 calc(44px / var(--vz)) 抵消缩放;
+      不在 .world 里的(顶栏 / 面板 / 缩放条)直接给 44px。
+   ② 触摸手势按「谁需要什么」分:舞台自己吞掉单指拖动(不让浏览器把画布拖着滚页面),
+      面板与正文保留纵向滚动(聊天 / 检查器正文必须能滚)。
+   ③ 本段只改「能不能点中」,不改「点了做什么」—— 长按菜单、捏合缩放、单指平移的
+      判定都在 JS 侧(gesture-intent,接线方负责)。
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (pointer: coarse){
+
+  /* ── ① 舞台:吞掉浏览器的默认手势 + 长按不弹系统选单 ──────────────────────
+     为什么 touch-action:none:
+       单指拖节点 / 平移画布时,浏览器若同时认领这次触摸,画布会被拖着滚页面
+       (iPad 上是整页跟着动);捏合也会被浏览器拿去缩放整页而不是画布。
+       §11.5 的口径就是:舞台里的手势我们自己处理,浏览器别插手。
+     为什么**不能**给 html/body 全局加 touch-action:none:
+       Agent 消息列表(.chat)与检查器正文(.insp)内容比屏幕长,手指必须能上下滑;
+       全局掐掉手势这两处就再也滚不动,网页端的聊天直接废掉。所以只掐 .stage 这一块。
+     规范细节:有效 touch-action 是「触碰点及其祖先」的 touch-action 求交集,
+       **到第一个滚动容器为止**。所以 .stage 的 none 不会掐掉 .add-pop 内部列表的滚动
+       (列表自己就是滚动容器,交集在它这里就停了)。
+     为什么 user-select:none + -webkit-touch-callout:none:
+       长按节点是我们自己的右键菜单入口(长按 → context-menu)。不掐掉系统的文字选单与
+       放大镜,系统菜单会先弹出来抢手势 —— 我们的菜单永远轮不到,放大镜还会挡住节点,
+       用户以为卡死。
+     ⚠️ 依赖 JS(接线方负责,这里只写明依赖):iOS Safari 的捏合不会变成 ctrl+wheel,
+       它会去缩放整页。需要在 .stage 上监听 gesturestart 并 preventDefault。
+       本条 CSS 只是「不再邀请浏览器插手」的兜底,替代不了那个 preventDefault。 */
+  .pg-canvas .stage{touch-action:none;user-select:none;-webkit-touch-callout:none}
+
+  /* 长按/选中的例外:输入框、textarea、contentEditable 不该被上面那条掐住 ——
+     .add-pop 的搜索框就挂在 .world 里(是 .stage 的后代),不放开就没法选中/编辑文字。
+     (user-select 与 -webkit-touch-callout 都是**继承**属性,必须显式开回来。) */
+  .pg-canvas .stage input,
+  .pg-canvas .stage textarea,
+  .pg-canvas .stage [contenteditable]{user-select:text;-webkit-touch-callout:default}
+
+  /* ── ② 面板与正文:保留纵向滚动 ───────────────────────────────────────────
+     为什么:聊天(.chat)与检查器正文(.insp)内容比屏幕长,手指必须能上下滑。
+     pan-y = 只给纵向平移(不给横向):横向留给画布平移,避免两边抢同一根手指。
+     .add-pop 及其两个滚动列表同理(§11.5 明确要求弹层保持 pan-y,弹层已有
+     overscroll-behavior:contain,滚动到底不会带动后面的页面)。 */
+  .pg-canvas .agent,
+  .pg-canvas .chat,
+  .pg-canvas .insp-panel,
+  .pg-canvas .insp,
+  .pg-canvas .add-pop,
+  .pg-canvas .ap-list,
+  .pg-canvas .ap-conn{touch-action:pan-y}
+
+  /* ── ③ 可点元素:去掉 iOS 双击放大带来的 300ms 点击延迟 ───────────────────
+     manipulation = pan-x pan-y pinch-zoom,只去掉「双击缩放」这一项:
+     滚动与捏合都还在,但 click 不再被浏览器延迟 300ms(否则点一下按钮像没反应)。
+     舞台内的按钮不单独写 —— 祖先 .stage 的 none 更严(有效值取交集),舞台里本来
+     就不该滚动,写不写都一样。
+     ⚠️ 不碰 .aud-wave:它的 touch-action:none 是刻意写的(波形上拖动 = 定位),
+       被这里覆盖成 manipulation 会把拖动定位的手势抢走。 */
+  .pg-canvas button,
+  .pg-canvas .chip,
+  .pg-canvas .pop-it,
+  .pg-canvas .ap-row,
+  .pg-canvas .ap-more,
+  .pg-canvas .ask-opt,
+  .pg-canvas .thread-row,
+  .pg-canvas .msg-copy,
+  .pg-canvas .locate,
+  .pg-canvas .skc-toggle,
+  .pg-canvas .npv .pv-track{touch-action:manipulation}
+
+  /* ── ④ .world 内的热区:除以 --vz 抵消缩放 ────────────────────────────────
+     为什么:节点与连线都在 .world 里,而 .world 带 scale(var(--vz))。
+     世界坐标里写 44px,缩到 0.4 时屏幕上只剩约 18px,手指点不中。
+     所以 world 内的控件尺寸写成 calc(44px / var(--vz)):世界坐标里变大,
+     乘回缩放后**屏幕尺寸恒定约 44px**。偏移量同理要除(见下面的 right / margin-top)。 */
+  .pg-canvas .node-add{
+    width:calc(44px / var(--vz));
+    height:calc(44px / var(--vz));
+    /* 「+」必须仍然挂在卡片**外侧**:原来 26px 时 right:-13px 恰好等于半个自身宽,
+       圆心正落在卡片右边缘上。放大后按同比例往外挪(22px = 44 的一半),
+       否则它会压到卡片内容上(盖住标题 / 缩略图)。margin-top 同理保持垂直居中。 */
+    right:calc(-22px / var(--vz));
+    margin-top:calc(-22px / var(--vz));
+    /* 加号字形也跟着放大,否则 44px 的圆里只剩一个 16px 的小加号 */
+    font-size:calc(22px / var(--vz));
+    /* 触控没有 hover:显式把 transform 归零。两条都要写 ——
+       ① .pg-canvas .node-add:hover 的选择器更具体(多一个伪类),
+          只写基础规则压不过它;
+       ② iOS Safari 点按后可能短暂保留 :hover 态,那时按钮会被 scale(1.12),
+          而 transform 会连命中区一起缩放,与上面算好的 44px 对不上。 */
+    transform:none
+  }
+  .pg-canvas .node-add:hover{transform:none}
+
+  /* 未选中的节点:「+」只淡化视觉、**不缩尺寸** —— 44px 的热区必须留着
+     (手指点不中就没意义),但一屏几十个实心圆环太重、把画布本身盖住了;
+     淡到 .45 才看得清画布,选中节点(.node.sel)再恢复全不透明。
+     (opacity 走的是 node-add 既有的 transition:all,淡入淡出是渐变的,不会突兀。) */
+  .pg-canvas .node:not(.sel) .node-add{opacity:.45}
+  .pg-canvas .node.sel .node-add{opacity:1}
+
+  /* ── ⑤ 视频播放钮:触控没有 hover,必须常显 ──────────────────────────────
+     为什么:.nthumb .play 默认 opacity:0,靠 .nthumb:hover .play 才显形。
+     触控屏没有稳定的 hover(手指抬起后 :hover 不成立)→ 这个按钮**永远看不见**,
+     iPad 上视频节点就没法播(§11.3:「选中节点时播放钮常显,不要等 :hover」)。
+     尺寸同样要除以 --vz(它也在 .world 里)。
+     顺带:这一层是铺满缩略图的遮罩(scrim),整层常显会把每张视频卡都压暗一档;
+     改成「只在播放钮周围留一圈光晕」,画面本身不再被整块压暗。 */
+  .pg-canvas .nthumb .play{
+    opacity:1;
+    background:radial-gradient(circle at center,var(--media-scrim) 0 calc(30px / var(--vz)),transparent calc(30px / var(--vz)))
+  }
+  .pg-canvas .nthumb .play span{
+    width:calc(44px / var(--vz));
+    height:calc(44px / var(--vz));
+    box-shadow:var(--shadow-play)
+  }
+  .pg-canvas .nthumb .play svg{width:calc(16px / var(--vz));height:calc(16px / var(--vz))}
+
+  /* ── ⑥ .world 外的热区:直接 44px ────────────────────────────────────────
+     为什么不用除 --vz:顶栏 / 调色板 / 检查器 / Agent 面板 / 缩放条都不在 .world 里,
+     没有缩放,直接给 44px(§11.3:「缩放条、顶栏、底栏不在 .world 里,直接用 44px」)。
+     顺带按 §11.3 表格把「发送钮」也补齐(原 32px)。 */
+  .pg-canvas .ibtn{width:44px;height:44px}
+  .pg-canvas .agent-icon-btn{width:44px;height:44px}
+  .pg-canvas .insp-close{width:44px;height:44px}
+  .pg-canvas .pal-fold{width:44px;height:44px}
+  .pg-canvas .send-orb{width:44px;height:44px}
+  .pg-canvas .pal-expand{min-height:44px}
+
+  /* 缩放条的百分比:点它复位视图,是「双击空白」在触控端的替代(双击在手机上会触发
+     页面缩放)。它是 span,不是 button,所以要自己给 display + 命中高度。 */
+  .pg-canvas .zoomctl .zv{display:grid;place-items:center;min-width:44px;min-height:44px}
+
+  /* 缩放条上 +/- 两个按钮的尺寸:内联样式已改成 var(--zoom-btn-size, 26px)
+     (StageView.tsx 由接线方改的)—— 变量缺省 26px,桌面观感一字不变;
+     触控档在这里给 44px,两个按钮一起放大(§11.3:「.zoomctl 的 +/- 和百分比 → 44px」)。
+     min-width/min-height 是兜底:万一某次构建里的 StageView 还是旧的(内联写死 26px),
+     内联的 width 顶不掉 min-width(used width = max(min-width, width)),
+     触控档里它仍然是 44px 可点。 */
+  .pg-canvas .zoomctl{--zoom-btn-size:44px}
+  .pg-canvas .zoomctl .ibtn{min-width:44px;min-height:44px}
+
+  /* ── ⑦ 面板拖宽把手:可点宽度扩到 44px,视觉条仍是 2px ──────────────────
+     为什么:把手本体只有 12px 宽(§11.3),手指捏不住;但把本体直接加宽到 44px
+     又会盖住面板里的内容(它是浮在面板边缘上的,检查器右边距只有 14px)。
+     做法:本体宽度不动,用一个 ::before 伪元素把**命中区**向面板外侧(画布那一侧)
+     扩 32px(12 + 32 = 44)。伪元素是 grip 的子盒,命中后事件仍算在 grip 上。
+     向外扩而不是向内扩:向内扩会挡住面板正文。
+     视觉竖条(原来的 ::after,2px)完全不动 —— 看着还是那条细线,只是手好捏。
+     (手机竖屏改成底栏后不再靠这条缝拖宽度,是 §11.4 那一期的布局改造,不在本段范围。) */
+  .pg-canvas .agent-grip::before,
+  .pg-canvas .insp-grip::before{content:"";position:absolute;top:0;bottom:0;width:32px}
+  .pg-canvas .agent-grip::before{left:-32px}
+  .pg-canvas .insp-grip::before{right:-32px}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   网页端外壳(web-shell)· 触屏第二期配套(《网页远程访问-改造方案》§11.4)
+   ─────────────────────────────────────────────────────────────────────────────
+   为什么放在触控档**外面**:网页端在手机、iPad、电脑浏览器里都可能出现,
+   「没有那条 34px 拖拽条」是**外壳形态**的差别,和指针类型无关 ——
+   塞进触控档会漏掉「电脑浏览器打开网页端」这一档(那一档是鼠标,但同样没有红绿灯)。
+   为什么不会影响桌面 App(Electron):这两条规则都挂在 .web-shell 下,
+   而 web-shell 这个 class 只在网页构建里加(渲染层 main.tsx 走的是「网页壳」分支;
+   Electron 里 preload 先设了 bigbotartShell=true,走不到那个分支)——
+   桌面 App 的 html 上永远没有这个 class,这两条规则永远不命中。
+   做法:只**新增**覆盖规则,不改第 1634–1635 行的既有行(桌面端那 34px 还要留着)。 */
+.web-shell .titlebar-drag{display:none}
+/* 拖拽条没了,它扣掉的 34px 要还回来:网页端整页高度回到一屏。
+   ⚠️ 高度用 **dvh 而不是 vh**:iOS Safari 的 100vh 是**含地址栏**的固定高度,
+   地址栏收起/展开时底栏(检查器、Agent 输入框)会被挡在外面。
+   渐进增强写法:同一条规则里先写 100vh 再写 100dvh —— 不认识 dvh 的浏览器
+   会把不认识的那条整条丢掉、自动回退 100vh,不需要 @supports(iPad Safari 15.4+ 支持 dvh)。
+   ⚠️ .app 那组只有 5 个页面(没有 .pg-onboarding.app),min-height 那组有 6 个 ——
+   两组的成员不同,别互相照抄。 */
+.web-shell .pg-home .app,
+.web-shell .pg-canvas .app,
+.web-shell .pg-assets .app,
+.web-shell .pg-skills .app,
+.web-shell .pg-settings .app{height:100vh;height:100dvh}
+.web-shell .pg-home,
+.web-shell .pg-canvas,
+.web-shell .pg-assets,
+.web-shell .pg-skills,
+.web-shell .pg-settings,
+.web-shell .pg-onboarding{min-height:100vh;min-height:100dvh}
+
+/* toast 让开 Home 指示条:桌面值是 bottom:58px,网页端 iPad Safari 横屏底部有
+   Home 指示条(inset-bottom 约 21px),不抬的话 toast 的下沿会被压住。
+   为什么只挂 .web-shell:桌面端没有刘海,env() 在 Electron 里恒为 0 ——
+   塞进触控档只会让桌面规则多出一条没意义的声明。
+   为什么 env() 不写兜底值:不认 env() 的浏览器会把整条声明丢掉,
+   自动回落到既有的 bottom:58px(渐进增强,不需要 @supports)。
+   ⚠️ 目前只有画布页渲染 toast(CanvasPage),所以不限定 .pg-canvas 也等价。 */
+.web-shell .toast{bottom:calc(58px + env(safe-area-inset-bottom))}

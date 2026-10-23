@@ -67,6 +67,15 @@ import {
 } from './canvas/selection';
 import { panOffset, wheelIntent, zoomFactorFor } from './canvas/wheel-intent';
 import {
+  LONG_PRESS_MS,
+  TOUCH_DRAG_THRESHOLD_PX,
+  classifyGesture,
+  classifyGestureUp,
+  dragThresholdFor,
+  shouldArmLongPress,
+  type GestureHit,
+} from './canvas/gesture-intent';
+import {
   clampInspWidth,
   DEFAULT_INSP_W,
   ensureWorldBoxVisible,
@@ -697,6 +706,13 @@ export default function CanvasPage({
      * 主路径是 beginNodeDrag(不经 selectNode),必须在这里记一笔,否则避让永远不跑。
      */
     revealOnUp: boolean;
+    /**
+     * 「算不算拖动」的位移阈值(px):触控 8 / 鼠标 3。
+     *
+     * 为什么参数化:手指按住时的自然抖动就能超过鼠标的 3px,触控沿用 3px 会一碰就开拖,
+     * 长按菜单几乎弹不出来(§11.7 风险 2)。桌面沿用 3px,手感一个字不变。
+     */
+    threshold: number;
   } | null>(null);
   /** 拖动开始时的内容(撤销要回到的位置):拖拽过程中每帧 setState 只写状态,不动历史 */
   const dragPrevRef = useRef<HistoryContent | null>(null);
@@ -708,13 +724,41 @@ export default function CanvasPage({
    */
   const [draggingIds, setDraggingIds] = useState<string[]>([]);
 
+  /* ── 触控长按定时器(M5)──
+   * 为什么长按判定放在**定时器**里,而不是每次 pointermove 都算「按住了多久」:
+   * 后者会出现「按住 600ms 后第一次移动就带着 40px 位移」的漏判 ——
+   * 长按成立的条件是「500ms 那一刻手指还没动」,那一刻的位移才是判据。
+   * 定时器回调里读当时的 dist,天然拿到的就是「长按那一刻」的位移。
+   * 成立后由调用方锁存(armed),此后每一帧都带着这个标记走判定。 */
+  const longPressTimerRef = useRef<number | null>(null);
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current === null) return;
+    window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }, []);
+  /** 起一个长按定时器;重复调用会顶掉上一个(同一时间只有一个长按候选) */
+  const startLongPressTimer = useCallback(
+    (onFire: () => void) => {
+      clearLongPressTimer();
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null;
+        onFire();
+      }, LONG_PRESS_MS);
+    },
+    [clearLongPressTimer],
+  );
+  useEffect(() => () => clearLongPressTimer(), [clearLongPressTimer]);
+
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
       if (!d) return;
       const z = viewRef.current.z;
-      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) {
+      // 阈值按指针类型取(触控 8px / 鼠标 3px),见 dragRef.threshold
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > d.threshold) {
         d.moved = true;
+        // 已经在拖了 → 长按不成立(长按与拖动抢,§11.7 风险 2)
+        clearLongPressTimer();
         // 用户在拖节点 → 取消避让动画,避免和手势抢视口
         cancelViewAnim();
       }
@@ -732,6 +776,7 @@ export default function CanvasPage({
       );
     };
     const onUp = () => {
+      clearLongPressTimer();
       const d = dragRef.current;
       if (!d) return;
       dragRef.current = null;
@@ -755,13 +800,23 @@ export default function CanvasPage({
         requestAnimationFrame(() => revealNodeRef.current(id));
       }
     };
+    /**
+     * pointercancel:系统手势把指针抢走(来电、浏览器边缘返回、iOS 的系统手势)。
+     * 与 pointerup 同一条收尾 —— 丢弃这次手势却不清 dragging 类,节点会永远挂着
+     * will-change(合成层不卸),而且下次按下会带着上一次的 origins(§11.2 风险 4)。
+     */
+    const onCancel = () => {
+      onUp();
+    };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
     return () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
     };
-  }, [cancelViewAnim, markViewportAnimating]);
+  }, [cancelViewAnim, markViewportAnimating, clearLongPressTimer]);
 
   /* ── 「+」按钮 → 拖拽连接到已有节点(松开命中目标即建边)──
    * 拖动期间:跟手画临时虚线 + 命中节点高亮(可连=绿,不可连=红);
@@ -939,17 +994,30 @@ export default function CanvasPage({
   const spaceDownRef = useRef(false);
   /** 空格按下的**渲染态**(仅用于把光标切成抓手;平移判定仍以 spaceDownRef 为准) */
   const [spacePanning, setSpacePanning] = useState(false);
-  const beginPan = (e: React.PointerEvent) => {
-    cancelViewAnim();
-    panStartRef.current = {
-      sx: e.clientX,
-      sy: e.clientY,
-      vx: viewRef.current.x,
-      vy: viewRef.current.y,
-    };
-    perfMonitor.beginPhase('pan');
-    setPanning(true);
-  };
+  /**
+   * 开始平移。参数只要坐标 —— 触控路径的锚点是 **pointerdown 的位置**,
+   * 不是「此刻的指针位置」:单指平移要等越过 8px 阈值才切换,若锚点取那一刻的
+   * 位置,画布会先跳 8px 再跟手(手指没动,画布却动了)。
+   *
+   * 用 useCallback 是为了引用稳定:它同时是触控手势 effect 的依赖,
+   * 每次渲染换新身份会让那套 window 监听反复解绑重绑。
+   */
+  const beginPan = useCallback(
+    (e: { clientX: number; clientY: number }) => {
+      cancelViewAnim();
+      panStartRef.current = {
+        sx: e.clientX,
+        sy: e.clientY,
+        vx: viewRef.current.x,
+        vy: viewRef.current.y,
+      };
+      perfMonitor.beginPhase('pan');
+      setPanning(true);
+    },
+    // perfMonitor 的方法本身是稳定的 useCallback(它定义在组件后段,不能进依赖数组)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cancelViewAnim],
+  );
   useEffect(() => {
     if (!panning) return;
     const onMove = (e: PointerEvent) => {
@@ -995,7 +1063,11 @@ export default function CanvasPage({
     }
   }, []);
 
-  const beginMarquee = useCallback((e: React.PointerEvent) => {
+  /**
+   * 开始框选。参数只要坐标 —— 同 beginPan:触控路径的锚点是 pointerdown 的位置。
+   * shiftKey 拆成可选字段:触控没有「按住 shift」这种语义。
+   */
+  const beginMarquee = useCallback((e: { clientX: number; clientY: number; shiftKey?: boolean }) => {
     const p = clientPointOf(e);
     const w = screenToWorld(p.x, p.y);
     selRectRef.current = {
@@ -1004,7 +1076,7 @@ export default function CanvasPage({
       sx: p.x,
       sy: p.y,
       // Shift = 并入现有选区(不清空),与 Figma 一致
-      additive: e.shiftKey,
+      additive: !!e.shiftKey,
       moved: false,
     };
     if (!e.shiftKey) setSelectedIds([]);
@@ -1046,9 +1118,275 @@ export default function CanvasPage({
     };
   }, [selectionRect, applyMarquee]);
 
+  /* ══ 触控手势(M5:iPad 网页端)═════════════════════════════════════════
+   * 桌面鼠标语义**一个字都不改**;触控走一套独立分支。判定在
+   * canvas/gesture-intent.ts(纯函数,可单测),这里只负责把判定结果接到
+   * **现有**入口(beginPan / beginMarquee / 节点拖动 / 节点菜单),不复制业务。
+   *
+   * 手势生命周期:
+   *   pointerdown(触屏)  → mode='pending' + 起长按定时器
+   *   · 单指移动超 8px       → mode='pan'     → beginPan(锚点 = 按下位置)
+   *   · 长按成立(500ms 未动) → armed=true
+   *       · 再移动超阈值     → mode='marquee' → beginMarquee(锚点同上)
+   *       · 抬手未移动       → 空白清选区 / 节点弹菜单
+   *   · 第二根手指落下       → mode='pinch'   → 两指中点锚点缩放
+   *   pointerup / pointercancel → 收尾(commitView、卸 dragging 类)
+   */
+  /** 节点菜单弹出的时刻(抬手那一瞬间记的)。
+   *  用途:吞掉紧随抬手而来的那次**兼容 click** —— 长按刚弹出的菜单会被这记 click
+   *  顺手关掉(菜单开了就消失,用户以为没弹出来)。§11.2 明写这条。 */
+  const ctxOpenedAtRef = useRef(0);
+  type TouchMode = 'idle' | 'pending' | 'pan' | 'marquee' | 'pinch';
+  const touchRef = useRef<{
+    /** 当前按下的触点(pointerId → 屏幕坐标);两指时用来算捏合 */
+    pointers: Map<number, { x: number; y: number }>;
+    mode: TouchMode;
+    /** 这次手势命中了什么(stage / node) */
+    hit: GestureHit;
+    startX: number;
+    startY: number;
+    startAt: number;
+    /** 长按是否已成立(锁存;判定层不管锁存,这里负责) */
+    armed: boolean;
+    /** 节点长按要弹菜单时用的节点 id */
+    nodeId: string | null;
+    /** 捏合基准:起始两指距离/中点 + 起始视口 */
+    pinch: { dist: number; midX: number; midY: number; vx: number; vy: number; vz: number } | null;
+  }>({
+    pointers: new Map(),
+    mode: 'idle',
+    hit: 'stage',
+    startX: 0,
+    startY: 0,
+    startAt: 0,
+    armed: false,
+    nodeId: null,
+    pinch: null,
+  });
+
+  /** 取消进行中的节点拖动(捏合接管 / 长按弹菜单时用)。   *  必须把 dragging 类卸掉 —— 它挂着 will-change,不卸就是常驻合成层(§11.2 风险 4)。 */
+  const cancelNodeDrag = useCallback(() => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    dragPrevRef.current = null;
+    setDraggingIds([]);
+    perfMonitor.endPhase();
+  }, []);
+
+  /** 捏合基准:两指距离/中点 + 当前视口 */
+  const beginPinch = useCallback(() => {
+    const t = touchRef.current;
+    const pts = [...t.pointers.values()];
+    const a = pts[0];
+    const b = pts[1];
+    if (!a || !b) return;
+    t.mode = 'pinch';
+    t.armed = false;
+    t.pinch = {
+      dist: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+      midX: (a.x + b.x) / 2,
+      midY: (a.y + b.y) / 2,
+      vx: viewRef.current.x,
+      vy: viewRef.current.y,
+      vz: viewRef.current.z,
+    };
+    perfMonitor.beginPhase('zoom');
+  }, []);
+
+  /** 按当前两指位置算视口。
+   *
+   *  锚点语义:「手势开始时两指中点下的那个世界点」始终留在「当前两指中点」下 ——
+   *  缩放与两指平移因此合成一个连续动作,不会在捏合时把画布甩走。
+   *  缩放范围沿用滚轮那一档(0.4–1.3),与桌面一致。
+   */
+  const applyPinch = useCallback(() => {
+    const t = touchRef.current;
+    const base = t.pinch;
+    const stage = stageRef.current;
+    if (!base || !stage) return;
+    const pts = [...t.pointers.values()];
+    const a = pts[0];
+    const b = pts[1];
+    if (!a || !b) return;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    const rect = stage.getBoundingClientRect();
+    // 本次手势累计的缩放倍数(相对手势开始时的两指距离)
+    const nz = Math.min(1.3, Math.max(0.4, base.vz * (dist / base.dist)));
+    // 基准中点下的世界坐标(缩放前后都跟着走)
+    const bx = base.midX - rect.left;
+    const by = base.midY - rect.top;
+    const wx = (bx - base.vx) / base.vz;
+    const wy = (by - base.vy) / base.vz;
+    const mx = midX - rect.left;
+    const my = midY - rect.top;
+    applyViewLive({ x: mx - wx * nz, y: my - wy * nz, z: nz });
+  }, [applyViewLive]);
+
+  /**
+   * 登记一次触控手势的起点。
+   *
+   * 坐标当场拍下来:合成事件在处理器返回后可能被置空(见 selection.ts 的注释),
+   * 定时器回调里再读 e.clientX 会拿到 undefined → NaN 距离 → 长按永远不成立。
+   */
+  const startTouchGesture = useCallback(
+    (hit: GestureHit, e: React.PointerEvent, nodeId: string | null = null) => {
+      const px = e.clientX;
+      const py = e.clientY;
+      const pid = e.pointerId;
+      const t = touchRef.current;
+      t.pointers.set(pid, { x: px, y: py });
+      // 第二根手指落下 → 切捏合:单指手势(平移/框选/节点拖动)必须让位,
+      // 两个一起跑就是 iPad 上最典型的「手势打架」(双指缩放顺带把画布平移走)
+      if (t.pointers.size >= 2) {
+        clearLongPressTimer();
+        cancelNodeDrag();
+        setPanning(false);
+        beginPinch();
+        return;
+      }
+      t.mode = 'pending';
+      t.hit = hit;
+      t.startX = px;
+      t.startY = py;
+      t.startAt = Date.now();
+      t.armed = false;
+      t.nodeId = nodeId;
+      startLongPressTimer(() => {
+        const s = touchRef.current;
+        if (s.mode !== 'pending') return;
+        const dist = Math.hypot(px - s.startX, py - s.startY);
+        const armed = shouldArmLongPress({
+          pointerType: 'touch',
+          touchCount: s.pointers.size,
+          holdMs: Date.now() - s.startAt,
+          dist,
+          hit: s.hit,
+        });
+        if (!armed) return;
+        s.armed = true;
+        // 节点长按 → 弹节点菜单(与右键同一份菜单)
+        if (s.hit === 'node' && s.nodeId) {
+          // 已经在拖了就不升级成菜单(§11.2:长按期间手指已经在拖节点时不再升级)
+          if (dragRef.current?.moved) return;
+          cancelNodeDrag();
+          setOpenPop(null);
+          setApOpen(false);
+          setCtx({ x: px, y: py, id: s.nodeId });
+        }
+      });
+    },
+    [beginPinch, cancelNodeDrag, clearLongPressTimer, startLongPressTimer],
+  );
+
+  /* 触控手势的全局监听:pointermove 判意图,pointerup / pointercancel 收尾。
+     挂 window 而不是 .stage:手指按住后滑出舞台也要继续跟手(与桌面拖动一致)。 */
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch') return;
+      const t = touchRef.current;
+      if (t.mode === 'idle') return;
+      t.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (t.mode === 'pinch') {
+        applyPinch();
+        return;
+      }
+      if (t.mode !== 'pending') return;
+      const dist = Math.hypot(e.clientX - t.startX, e.clientY - t.startY);
+      const intent = classifyGesture({
+        pointerType: 'touch',
+        touchCount: t.pointers.size,
+        holdMs: Date.now() - t.startAt,
+        dist,
+        hit: t.hit,
+        longPressArmed: t.armed,
+        dragThresholdPx: TOUCH_DRAG_THRESHOLD_PX,
+      });
+      if (intent === 'pan') {
+        // 越过阈值才切平移;锚点用按下位置 → 画布不会先跳 8px 再跟手
+        clearLongPressTimer();
+        t.mode = 'pan';
+        beginPan({ clientX: t.startX, clientY: t.startY });
+      } else if (intent === 'marquee') {
+        clearLongPressTimer();
+        t.mode = 'marquee';
+        beginMarquee({ clientX: t.startX, clientY: t.startY, shiftKey: false });
+      }
+      // 'hold'(长按成立但没拖)/'desktop'(短按)/ 节点类意图:
+      // 节点拖动由既有的 dragRef 机制处理,这里不接管(节点长按菜单在定时器里弹)
+    };
+
+    const finish = (e: PointerEvent, cancelled: boolean) => {
+      if (e.pointerType !== 'touch') return;
+      const t = touchRef.current;
+      const mode = t.mode;
+      t.pointers.delete(e.pointerId);
+      if (mode === 'pinch') {
+        // 捏合结束:落盘视口;剩下的一指**不**转成平移/框选(§11.2)
+        t.mode = 'idle';
+        t.pinch = null;
+        t.armed = false;
+        // 触点表要清空:剩下那根手指还按着,若留在表里,下一次按下会被当成
+        // 「第二根手指」→ 立刻又进入捏合
+        t.pointers.clear();
+        perfMonitor.endPhase();
+        commitView({ ...viewRef.current });
+        clearLongPressTimer();
+        return;
+      }
+      if (mode !== 'pending') {
+        t.mode = 'idle';
+        t.armed = false;
+        clearLongPressTimer();
+        return;
+      }
+      // pending → 抬手:长按成立且没拖动 → 空白清选区(同空白右键语义)/ 节点弹菜单
+      const dist = Math.hypot(e.clientX - t.startX, e.clientY - t.startY);
+      const up = classifyGestureUp({
+        pointerType: 'touch',
+        touchCount: t.pointers.size,
+        holdMs: Date.now() - t.startAt,
+        dist,
+        hit: t.hit,
+        longPressArmed: t.armed,
+        dragThresholdPx: TOUCH_DRAG_THRESHOLD_PX,
+      });
+      // pointercancel = 手势被系统抢走(来电/边缘返回):不是「清空选区」的意图
+      if (up === 'clear-selection' && !cancelled) {
+        setSelectedIds([]);
+        setApOpen(false);
+        setCtx(null);
+      }
+      // 节点菜单在长按那一刻已经弹出;这里只记时刻,用于吞掉抬手后的那次兼容 click
+      if (up === 'context-menu') ctxOpenedAtRef.current = Date.now();
+      if (cancelled) cancelNodeDrag();
+      t.mode = 'idle';
+      t.armed = false;
+      clearLongPressTimer();
+    };
+
+    const onUp = (e: PointerEvent) => finish(e, false);
+    const onCancel = (e: PointerEvent) => finish(e, true);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, [applyPinch, beginMarquee, beginPan, cancelNodeDrag, clearLongPressTimer, commitView]);
+
   /** 空白处按下:决定走框选还是平移(中键/空格永远是平移,保底通道) */
   const onStagePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      // 触控:先登记手势(单指平移 / 捏合 / 长按框选),桌面分支一个字不改
+      if (e.pointerType === 'touch') {
+        startTouchGesture('stage', e);
+        return;
+      }
       const spacePan = spaceDownRef.current;
       if (e.button === 1 || spacePan) {
         e.preventDefault();
@@ -1067,8 +1405,30 @@ export default function CanvasPage({
          也避免用户想框选时不小心把画布甩走。需要鼠标平移时有两条保底通道:
          中键拖动 / 空格+拖动(见上方分支)。 */
     },
-    [marqueeMode, beginMarquee],
+    [marqueeMode, beginMarquee, startTouchGesture],
   );
+
+  /**
+   * iOS Safari 的捏合会**缩放整个页面**(不像桌面 Chromium 那样变成 ctrl+wheel),
+   * 于是页面被放大后画布操作全乱。在舞台上把 gesturestart/change/end 挡掉,
+   * 捏合就只由上面那条 Pointer Events 双指分支接管。
+   *
+   * 只绑 .stage:Agent 消息列表、检查器正文仍应能正常滚动与缩放。
+   * 非 Safari 浏览器不会派发这三个事件,挂着无害。
+   */
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const block = (e: Event) => e.preventDefault();
+    stage.addEventListener('gesturestart', block);
+    stage.addEventListener('gesturechange', block);
+    stage.addEventListener('gestureend', block);
+    return () => {
+      stage.removeEventListener('gesturestart', block);
+      stage.removeEventListener('gesturechange', block);
+      stage.removeEventListener('gestureend', block);
+    };
+  }, []);
 
   /* ── 滚轮 / 触控板双指滑动(2026-10 改)──
    * 语义:
@@ -1391,14 +1751,18 @@ export default function CanvasPage({
         origins,
         moved: false,
         revealOnUp,
+        // 触控 8px / 鼠标 3px(手指抖动不该一碰就开拖,见 §11.7 风险 2)
+        threshold: dragThresholdFor(e.pointerType),
       };
       dragPrevRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
       // 挂 dragging 类(合成层提升);即使未真正移动也会在 pointerup 清空
       setDraggingIds(dragIds);
       perfMonitor.beginPhase('drag-node');
       e.stopPropagation();
+      // 触控:登记手势(长按弹节点菜单 / 第二根手指落下时切捏合)
+      if (e.pointerType === 'touch') startTouchGesture('node', e, node.id);
     },
-    [],
+    [startTouchGesture],
   );
 
   /** 组操作:建组(把当前选区收成一个组) */
@@ -4351,6 +4715,9 @@ export default function CanvasPage({
             worldRef={worldRef}
             onStagePointerDown={onStagePointerDown}
             onStageClick={() => {
+              // 长按弹出的节点菜单会被紧随抬手而来的那次兼容 click 顺手关掉
+              // (菜单刚开就消失 = 用户以为没弹出来)。这一小段时间内的空白点击吞掉。
+              if (Date.now() - ctxOpenedAtRef.current < 600) return;
               // 选区清空一律在 onClick **之前**由「节点 pointerdown / 框选 pointerup」
               // 处理完 —— React 合成事件的冒泡顺序是 pointerup → click,
               // 在 click 里读 selRectRef 永远是 null(真实事故:框选刚框出的选区被立刻清掉)。

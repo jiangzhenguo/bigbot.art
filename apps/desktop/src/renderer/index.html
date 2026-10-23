@@ -2,7 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- 视口:补 viewport-fit=cover,网页端才能贴到屏幕安全区外沿,
+       用 env(safe-area-inset-top/bottom) 把顶栏 / 底栏让开刘海与 Home 指示条。
+       ⚠️ 刻意**不**加 user-scalable=no:页面级禁止缩放伤无障碍(低视力用户靠放大阅读),
+       而且 iOS 有时也会忽略它 —— 双击放大该留就留。
+       画布内的捏合由 .stage 的 touch-action:none(iOS 还需在舞台上监听 gesturestart
+       并 preventDefault,见 pages/CanvasPage.tsx 的触控手势 effect)单独挡,
+       不需要靠 user-scalable=no 兜底。 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>BigBotArt</title>
   <link rel="stylesheet" href="./design/colors_and_type.css" />
 </head>

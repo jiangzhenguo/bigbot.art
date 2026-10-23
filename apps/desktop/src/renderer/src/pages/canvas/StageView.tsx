@@ -447,7 +447,7 @@ export function StageView({
       <div className="zoomctl">
         <button
           className="ibtn"
-          style={{ width: 26, height: 26 }}
+          style={{ width: 'var(--zoom-btn-size, 26px)', height: 'var(--zoom-btn-size, 26px)' }}
           onClick={(e) => {
             e.stopPropagation();
             onZoomBy(-0.1);
@@ -469,7 +469,7 @@ export function StageView({
         </span>
         <button
           className="ibtn"
-          style={{ width: 26, height: 26 }}
+          style={{ width: 'var(--zoom-btn-size, 26px)', height: 'var(--zoom-btn-size, 26px)' }}
           onClick={(e) => {
             e.stopPropagation();
             onZoomBy(0.1);

@@ -320,6 +320,27 @@ export function VideoPoster({
 }
 
 /**
+ * 设备是否带粗指针(触屏)。
+ *
+ * 用于「要不要多给触屏用户一个可见的播放入口」这类判断:桌面鼠标靠 hover,
+ * 不需要(多渲染就会改观感);触屏没有 hover,必须有。
+ * any-pointer(而不是 pointer):接了触摸屏的笔记本,主指针仍是鼠标,
+ * 但手指也得能用 —— 只要**有**一根粗指针就该给。
+ */
+export function useHasCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(any-pointer: coarse)');
+    const apply = () => setCoarse(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+  return coarse;
+}
+
+/**
  * 视频封面:从 <video> metadata 读真实宽高,按视频比例展示(不再固定 16:9);
  * 鼠标悬停从头循环播放,移出暂停复位(产品既有交互,保留)。
  *
@@ -337,6 +358,7 @@ export function VideoPoster({
  */
 export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
   const [ar, setAr] = useState<string | undefined>();
+  const [playing, setPlaying] = useState(false);
   const vRef = useRef<HTMLVideoElement | null>(null);
   /** 指针是否停在卡片上(「想播」意图;事件回调据此决定要不要续播) */
   const hoverRef = useRef(false);
@@ -390,18 +412,68 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
     if (v.paused) tryPlay();
   }, [tryPlay]);
 
-  // 换绑视频源时重置意图与重试计数(节点可能被复用渲染另一个 asset)
+  /**
+   * 触控端:点一下播放/暂停(M5 iPad 适配)。
+   *
+   * 为什么必须单独开一条路:桌面是 **hover 自动播**(`onMouseEnter` 播、离开停),
+   * 而触屏没有 hover —— iPad 上手指点住缩略图,hover 事件根本不成立,
+   * 于是「点视频看不了」是触控端最刺眼的缺口。
+   * 桌面路径一个字不改:这里只在 pointerType === 'touch' 时接管。
+   */
+  const togglePlayOnTouch = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType !== 'touch') return;
+      const v = vRef.current;
+      if (!v) return;
+      if (v.paused) {
+        // 播起来后不要再被 mouseleave 停掉:hoverRef 复用「想播」意图
+        hoverRef.current = true;
+        retryRef.current = 0;
+        tryPlay();
+        setPlaying(true);
+      } else {
+        hoverRef.current = false;
+        v.pause();
+        setPlaying(false);
+      }
+    },
+    [tryPlay],
+  );
+
+  /**
+   * 设备是否带粗指针(触屏)。
+   *
+   * 用来决定「要不要渲染播放钮层」:桌面鼠标靠 hover 播放,桌面**不能**多出这层
+   * (它带一层遮罩,hover 时会把整张缩略图压暗 —— 那是观感变更,不是功能)。
+   * 触屏没有 hover,必须另给一个可见的播放入口(触控档把它放大到 44px)。
+   * 用 any-pointer 而不是 pointer:接了触摸屏的笔记本,主指针仍是鼠标,
+   * 但手指也得能播 —— 只要**有**一根粗指针就该给入口。
+   */
+  const coarse = useHasCoarsePointer();
+
+  /** 换绑视频源时重置意图与重试计数(节点可能被复用渲染另一个 asset) */
   useEffect(() => {
     hoverRef.current = false;
     retryRef.current = 0;
+    setPlaying(false);
   }, [src]);
 
   return (
     <div
       className="nthumb"
       style={{ position: 'relative', background: 'var(--media-bg)', aspectRatio: ar ?? '16/9', overflow: 'hidden' }}
-      onMouseEnter={playOnHover}
-      onMouseLeave={pauseOnLeave}
+      /* 用 Pointer Events 而不是 Mouse Events:
+         触屏点按后浏览器会补发一串**兼容鼠标事件**(mouseover/mouseleave),
+         用 mouse 事件会被这串假事件带着走 —— 刚点开播放又被「离开」停掉。
+         pointer 事件能拿到 pointerType,直接把触控挡在 hover 语义之外。 */
+      onPointerEnter={(e) => {
+        if (e.pointerType === 'touch') return;
+        playOnHover();
+      }}
+      onPointerLeave={(e) => {
+        if (e.pointerType === 'touch') return;
+        pauseOnLeave();
+      }}
     >
       <video
         ref={vRef}
@@ -422,6 +494,19 @@ export function VideoThumb({ src, badge }: { src: string; badge?: string }) {
            重采样路径 —— 视频与容器比例一致时它纯属白付代价。 */
         style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
       />
+      {/* 播放钮层:**只在触屏设备渲染**。
+          桌面端不渲染 —— 这层带遮罩,hover 显形会让整张缩略图压暗一档,
+          那是观感变更(桌面语义不许动);桌面继续走 hover 自动播。
+          触屏端没有 hover,必须有一个可见的播放入口(触控档把它放大到 44px)。 */}
+      {coarse ? (
+        <div className="play" onPointerDown={togglePlayOnTouch}>
+          <span>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              {playing ? <path d="M6 5h4v14H6zM14 5h4v14h-4z" /> : <path d="M8 5v14l11-7z" />}
+            </svg>
+          </span>
+        </div>
+      ) : null}
       {badge ? (
         <span
           className="nmeta mono"
