@@ -10,7 +10,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { WebSocket, WebSocketServer, type WebSocket as WebSocketSocket } from 'ws';
@@ -34,10 +34,18 @@ import {
   verifyPassphrase,
 } from './auth';
 import { resolveAssetFile, resolveOutputFile } from './media';
+import { isThumbWidth, thumbnailFor } from './thumbnail';
 import { dispatchRpc, type IpcHandler } from './rpc';
 import { isLoopback, tailscaleDnsName, tailscaleIpv4, tailscaleLogin } from './tailscale';
 
 const BODY_LIMIT = 32 * 1024 * 1024;
+/**
+ * 媒体(资产/产物)的缓存时间。
+ *
+ * 文件名带 id/时间戳,内容不会被原地替换,所以可以放心缓存一周。
+ * 没有这条,每次打开首页都要重下全部封面(实测 27.6MB / ~80 秒)。
+ */
+const MEDIA_CACHE_CONTROL = 'public, max-age=604800';
 const PING_MS = 25_000;
 
 const MIME: Record<string, string> = {
@@ -146,8 +154,15 @@ async function pipeWebResponse(res: ServerResponse, web: Response): Promise<void
   });
 }
 
-function safeStatic(root: string, urlPath: string): string | null {
-  const decoded = decodeURIComponent(urlPath.split('?')[0] ?? '/');
+/** URL 上的 ?w=<像素> → 缩略图宽度;非法或没给就是 null(发原图) */
+function thumbWidth(url: URL): number | null {
+  const raw = url.searchParams.get('w');
+  if (raw === null) return null;
+  const w = Number(raw);
+  return isThumbWidth(w) ? w : null;
+}
+
+function safeStatic(root: string, urlPath: string): string | null {  const decoded = decodeURIComponent(urlPath.split('?')[0] ?? '/');
   const rel = decoded.replace(/^\/+/, '');
   const file = resolve(root, rel);
   const fromRoot = relative(root, file);
@@ -297,15 +312,15 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
         return;
       }
       if (req.method === 'GET' && path.startsWith('/media/asset/')) {
-        await handleMedia(res, 'asset', path.slice('/media/asset/'.length), req.headers.range);
+        await handleMedia(res, 'asset', path.slice('/media/asset/'.length), req.headers.range, thumbWidth(url));
         return;
       }
       if (req.method === 'GET' && path.startsWith('/media/output/')) {
-        await handleMedia(res, 'output', path.slice('/media/output/'.length), req.headers.range);
+        await handleMedia(res, 'output', path.slice('/media/output/'.length), req.headers.range, thumbWidth(url));
         return;
       }
       if (req.method === 'GET') {
-        serveStatic(res, path);
+        serveStatic(req, res, path);
         return;
       }
       json(res, 404, { ok: false, error: '未找到' });
@@ -362,16 +377,56 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
     json(res, outcome.status, outcome.body);
   }
 
-  async function handleMedia(res: ServerResponse, kind: 'asset' | 'output', name: string, range: string | undefined): Promise<void> {
+  /**
+   * 媒体文件(资产/产物)。
+   *
+   * 两处为公网链路做的处理:
+   *  ① **缓存头**:文件名带 id/时间戳,内容不会变,所以给一周的 max-age。
+   *    没有它,每次打开首页都要重下几十 MB(实测 27.6MB)。
+   *  ② **缩略图**(?w=):全尺寸原图在 ~350KB/s 的链路上是灾难,
+   *    首页 19 张封面原图实测 27.6MB。缩略图走 sips,失败就回退原图。
+   */
+  async function handleMedia(
+    res: ServerResponse,
+    kind: 'asset' | 'output',
+    name: string,
+    range: string | undefined,
+    width: number | null,
+  ): Promise<void> {
     const hit = kind === 'asset' ? resolveAssetFile(name) : resolveOutputFile(name);
     if (!hit.ok) {
       json(res, hit.status, { ok: false, error: hit.error });
       return;
     }
-    await pipeWebResponse(res, rangeFileResponse(hit.file, range ?? null));
+    let file = hit.file;
+    if (width !== null) {
+      const thumb = await thumbnailFor(file, width);
+      // 缩略图拿不到就发原图 —— 宁可大,不能空
+      if (thumb) file = thumb;
+    }
+    await pipeWebResponse(res, rangeFileResponse(file, range ?? null, { cacheControl: MEDIA_CACHE_CONTROL }));
   }
 
-  function serveStatic(res: ServerResponse, urlPath: string): void {
+  /**
+   * 静态资源的缓存策略。
+   *
+   * Vite 产物名带内容 hash(/assets/index-xxxx.js),内容变了文件名就变,
+   * 所以可以放心长期缓存 —— 浏览器第二次打开直接用本地副本,一个字节都不用下载。
+   * 这在公网链路上是最大的一笔收益(实测首屏 JS 1.4MB,gzip 后仍有 344KB)。
+   *
+   * index.html 必须每次校验:它引用着带 hash 的产物名,缓存住旧版会导致
+   * 页面去要已经不存在的旧资源。
+   */
+  function staticCacheControl(urlPath: string): string {
+    return urlPath.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache';
+  }
+
+  /** 弱 ETag:mtime + size。不用算内容 hash —— 1.4MB 的文件每次请求都 sha1 反而更慢。 */
+  function staticEtag(st: { size: number; mtimeMs: number }): string {
+    return `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+  }
+
+  function serveStatic(req: IncomingMessage, res: ServerResponse, urlPath: string): void {
     if (!pageReady()) {
       const html = '<!doctype html><meta charset="utf-8"><title>BigBotArt</title><p>远程页面还没构建。请在 Mac 上先完成一次渲染层构建(pnpm build),再刷新。</p>';
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
@@ -391,13 +446,36 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
         return;
       }
     }
-    const body = readFileSync(file);
+    const st = statSync(file);
+    const etag = staticEtag(st);
+    const lastModified = st.mtime.toUTCString();
+    const cacheControl = staticCacheControl(urlPath);
+
+    // 客户端手上已经有这份内容 → 304,只回几十字节的头。
+    // 公网链路上这一条比任何压缩都值钱。
+    const inm = req.headers['if-none-match'];
+    const ims = req.headers['if-modified-since'];
+    const notModified =
+      (typeof inm === 'string' && inm.split(',').some((tag) => tag.trim() === etag)) ||
+      (typeof ims === 'string' && !inm && Date.parse(ims) >= Math.floor(st.mtimeMs / 1000) * 1000);
+    if (notModified) {
+      res.writeHead(304, { etag, 'last-modified': lastModified, 'cache-control': cacheControl });
+      res.end();
+      return;
+    }
+
     res.writeHead(200, {
       'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-      'content-length': body.length,
-      'cache-control': 'no-cache',
+      'content-length': st.size,
+      'cache-control': cacheControl,
+      etag,
+      'last-modified': lastModified,
     });
-    res.end(body);
+    // 流式发送:1.4MB 的 JS 没必要整个读进内存
+    const stream = createReadStream(file);
+    stream.on('error', () => res.destroy());
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
   }
 
   function attach(server: ReturnType<typeof createServer>): void {

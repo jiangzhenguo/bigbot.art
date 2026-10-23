@@ -59,21 +59,28 @@ export function useProjectCovers(refreshKey = 0): UseProjectCoversResult {
  *
  * **失败降级是必须的**:路径存在不等于浏览器能解码(文件损坏、编码不支持)。
  * 破图(alt 文本 + 碎图标)比占位图更像故障,所以 onError 一律回落到占位。
+ *
+ * **缩略图宽度**:网页端让服务端出缩略图。公网链路只有 ~350KB/s,
+ * 全尺寸封面原图(单张能到 5MB)会把首页拖成一分多钟。
+ * 桌面端走自定义协议,拿不到 ?w=,会原样返回(桌面是本地磁盘,无所谓)。
  */
 export function ProjectCoverImage({
   cover,
   alt,
   placeholder,
   style,
+  width = 480,
 }: {
   cover: ProjectCover | undefined;
   alt: string;
   /** 无封面时显示的内容(由调用方给,保持两页视觉各自一致) */
   placeholder: React.ReactNode;
   style?: React.CSSProperties;
+  /** 缩略图最大边(像素);传 0 表示不要缩略图 */
+  width?: number;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = cover?.path ? previewUrlOf(cover.path) : null;
+  const src = cover?.path ? previewUrlOf(cover.path, width > 0 ? width : undefined) : null;
 
   // 换项目/换封面时清掉失败态,否则上一张的失败会粘住下一张
   useEffect(() => setFailed(false), [src]);

@@ -36,13 +36,25 @@ try {
 
   console.log(`[1] 打开 ${base}`);
   await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.locator('[data-od-id=remote-passphrase]').waitFor({ state: 'visible', timeout: 20_000 });
-  ok('登录页出现', true);
 
   console.log('\n[2] 登录');
-  await page.locator('[data-od-id=remote-passphrase]').fill(passphrase);
-  await page.locator('[data-od-id=remote-login-submit]').click();
-  await page.locator('[data-od-id=home-new-project]').waitFor({ timeout: 30_000 });
+  // 已经有会话时直接就是首页,没有登录页 —— 两种都要能走通。
+  // ⚠️ 不能用 isVisible() 判断:它不等待,页面刚 goto 完时登录页可能还没渲染出来,
+  // 会被误判成"已登录",然后死等首页按钮。
+  const homeReady = await page
+    .locator('[data-od-id=home-new-project]')
+    .waitFor({ state: 'visible', timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  if (homeReady) {
+    ok('已有会话(免登录)', true);
+  } else {
+    await page.locator('[data-od-id=remote-passphrase]').waitFor({ state: 'visible', timeout: 20_000 });
+    ok('登录页出现', true);
+    await page.locator('[data-od-id=remote-passphrase]').fill(passphrase);
+    await page.locator('[data-od-id=remote-login-submit]').click();
+    await page.locator('[data-od-id=home-new-project]').waitFor({ timeout: 30_000 });
+  }
   ok('进到首页(首页按钮可见)', true);
   ok('网页端模式(window.bigbotartShell=false)', (await page.evaluate(() => window.bigbotartShell)) === false);
   ok('接口前缀推导正确', (await page.evaluate(() => location.pathname)) === '/bba/', await page.evaluate(() => location.pathname));

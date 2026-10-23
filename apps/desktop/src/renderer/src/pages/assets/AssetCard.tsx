@@ -19,7 +19,9 @@ interface AssetCardProps {
 }
 
 function thumbOf(a: Asset): string | null {
-  if (a.kind === 'image' && a.localPath) return assetUrlOf(a.localPath);
+  // 网页端要缩略图:资产库是网格,全尺寸原图一屏就是几十 MB
+  // (公网链路实测 ~350KB/s,首页/资产库因此要等一分多钟)。
+  if (a.kind === 'image' && a.localPath) return assetUrlOf(a.localPath, 480);
   return null;
 }
 

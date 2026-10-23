@@ -12,8 +12,14 @@ export function basenameOf(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
-/** 绝对产物路径 → bba-output:// 相对 URL(保留 mock/、images/ 等子目录) */
-export function outputUrlOf(p: string): string {
+/**
+ * 绝对产物路径 → bba-output:// 相对 URL(保留 mock/、images/ 等子目录)
+ *
+ * `width` 只在网页端有意义:加 ?w= 让服务端出缩略图。
+ * 公网链路实测只有 ~350KB/s,首页 19 张全尺寸封面原图就是 27.6MB —— 
+ * 必须让服务端缩,否则页面要等一分多钟。
+ */
+export function outputUrlOf(p: string, width?: number): string {
   const norm = p.replace(/\\/g, '/');
   const markers = ['/.bigbotart/outputs/', '/outputs/'];
   for (const m of markers) {
@@ -21,11 +27,17 @@ export function outputUrlOf(p: string): string {
     if (i >= 0) {
       const rel = norm.slice(i + m.length);
       const encoded = rel.split('/').map(encodeURIComponent).join('/');
-      return webMedia() ? apiPath(`/media/output/${encoded}`) : `bba-output://${encoded}`;
+      return webMedia() ? apiPath(`/media/output/${encoded}${thumbQuery(width)}`) : `bba-output://${encoded}`;
     }
   }
   const encoded = encodeURIComponent(basenameOf(p));
-  return webMedia() ? apiPath(`/media/output/${encoded}`) : `bba-output://${encoded}`;
+  return webMedia() ? apiPath(`/media/output/${encoded}${thumbQuery(width)}`) : `bba-output://${encoded}`;
+}
+
+/** 网页端缩略图查询串;桌面端(自定义协议)不支持宽度,一律空 */
+function thumbQuery(width?: number): string {
+  if (!webMedia() || !width || !Number.isFinite(width) || width <= 0) return '';
+  return `?w=${Math.round(width)}`;
 }
 
 /**
@@ -47,22 +59,22 @@ export function formatDurationSec(sec: number | null | undefined): string | null
 }
 
 /** 资产文件名 → 可显示 URL。桌面是 bba-asset://,网页是 /media/asset/。 */
-export function assetUrlOf(localPath: string | undefined | null): string | null {
+export function assetUrlOf(localPath: string | undefined | null, width?: number): string | null {
   if (!localPath) return null;
   const name = localPath.split('/').pop();
   if (!name) return null;
-  return webMedia() ? apiPath(`/media/asset/${encodeURIComponent(name)}`) : `bba-asset://${name}`;
+  return webMedia() ? apiPath(`/media/asset/${encodeURIComponent(name)}${thumbQuery(width)}`) : `bba-asset://${name}`;
 }
 
 /** 缩略图 src(asset localPath → bba-asset:// 或网页 /media/asset/) */
-export function thumbSrc(assetPath: string | undefined): string | null {
-  return assetUrlOf(assetPath);
+export function thumbSrc(assetPath: string | undefined, width?: number): string | null {
+  return assetUrlOf(assetPath, width);
 }
 
 /** 统一本地路径 → 可显示 URL:产物(outputs/)走 bba-output,资产库走 bba-asset */
-export function previewUrlOf(p: string | null | undefined): string | null {
+export function previewUrlOf(p: string | null | undefined, width?: number): string | null {
   if (!p) return null;
-  return p.includes('/outputs/') ? outputUrlOf(p) : thumbSrc(p);
+  return p.includes('/outputs/') ? outputUrlOf(p, width) : thumbSrc(p, width);
 }
 
 /** 视频扩展名白名单(与主进程 assets.ts 的 MIME_BY_EXT 同口径) */

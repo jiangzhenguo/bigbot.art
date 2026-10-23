@@ -123,7 +123,11 @@ function mimeOf(file: string): string {
  * 这里自己解析 `Range: bytes=<start>-<end>`,命中就流式返回 206 + `content-range`
  * (大文件如 126MB 视频绝不整块读进内存),否则回 200 并补上 `accept-ranges: bytes`。
  */
-export function rangeFileResponse(file: string, rangeHeader: string | null): Response {
+export function rangeFileResponse(
+  file: string,
+  rangeHeader: string | null,
+  opts?: { cacheControl?: string },
+): Response {
   const type = mimeOf(file);
   if (!existsSync(file)) return new Response(`not found: ${basename(file)}`, { status: 404 });
   const size = statSync(file).size;
@@ -176,7 +180,9 @@ export function rangeFileResponse(file: string, rangeHeader: string | null): Res
     'content-type': type,
     'content-length': String(length),
     'accept-ranges': 'bytes',
-    'cache-control': 'no-cache',
+    // 默认 no-cache:桌面自定义协议(bba-asset://)走这里,内容可能随时被替换。
+    // 远程服务会显式传更长的缓存时间(文件名带 id/时间戳,内容不变)。
+    'cache-control': opts?.cacheControl ?? 'no-cache',
   };
   if (m) {
     headers['content-range'] = `bytes ${start}-${end}/${size}`;

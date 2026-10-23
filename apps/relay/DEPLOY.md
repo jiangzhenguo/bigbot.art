@@ -124,11 +124,81 @@ location ^~ /bba/ {
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 
-    gzip off;
+    # ⚠️ gzip 一定要开。公网链路上未压缩的 JS 是 1.4MB,压完 318KB。
+    # gzip_proxied any 是关键 —— 默认 off 时代理来的响应根本不压。
+    gzip on;
+    gzip_proxied any;
+    gzip_types text/javascript application/javascript text/css application/json image/svg+xml;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
 }
 ```
 
 然后 `nginx -t && systemctl reload nginx`。
+
+### 5.1 慢的根因:公网链路带宽,不是中继
+
+**先量再改。** 判别方法:在服务器本机 `curl http://127.0.0.1:8443/<大文件>`(只走隧道)与在自己机器上 `curl https://域名/<大文件>`(多一跳公网)对比。
+
+实测一次:1.4MB 的 JS
+
+| 路径 | 耗时 | 带宽 |
+|---|---|---|
+| 服务器本机 → 中继 → Mac → 回来 | 0.61s | 2.3 MB/s |
+| 自己机器 → nginx → 中继 → Mac → 回来 | 4.9s | 0.29 MB/s |
+
+**⇒ 隧道本身很快,慢的是「服务器 → 浏览器」这一跳。** 国内家宽到某台云服务器只有 2~3 Mbps 很常见,ping 12ms 也照样慢(带宽不是延迟)。
+
+**⇒ 别把时间花在调中继上。** 要提速只有三条路:**少传**、**压小**、**别重复传**。
+
+### 5.2 三条提速手段(按收益排序)
+
+**① 压缩。** 上面那段 gzip 就是第一位的:首屏 JS 1.4MB → 344KB,CSS 197KB → 38KB。
+
+**② 缓存。** 两层都要:
+
+- **源站**(Mac 端)已经会发正确的头:`/assets/*` 是 `public, max-age=31536000, immutable`(Vite 产物名带内容 hash),`index.html` 是 `no-cache` + ETag(变了回 304)。
+- **nginx** 侧再加一层兜底(源站是旧版本时也生效):
+
+```nginx
+# 只给 200:404 缓存一年会把「暂时取不到」变成永久取不到
+map $upstream_status $bba_asset_cache_control {
+    200     "public, max-age=31536000, immutable";
+    default "no-store";
+}
+
+location ^~ /bba/assets/ {
+    # 结尾写 /assets/ :把匹配到的 /bba/assets/ 换成 /assets/,
+    # 上游才拿得到 /assets/index-xxx.js(只写 / 会把整段前缀剥光 → 404)
+    proxy_pass http://127.0.0.1:8443/assets/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    client_max_body_size 32m;
+    gzip on;
+    gzip_proxied any;
+    gzip_types text/javascript application/javascript text/css application/json image/svg+xml;
+    gzip_min_length 1024;
+    # add_header 只是「加」,上游那条 no-cache 还在,浏览器会按最严的执行 ⇒ 必须先藏掉
+    proxy_hide_header Cache-Control;
+    add_header Cache-Control $bba_asset_cache_control always;
+}
+```
+
+> `add_header` 不会替换上游同名头,只会再加一条。浏览器遇到 `no-cache` 和 `max-age=31536000` 会按最严的算,所以**必须 `proxy_hide_header Cache-Control`** 把它藏掉。
+
+**③ 缩略图(最大的那一笔)。** 首页一次要显示十几个项目封面。**如果直接发全尺寸原图,实测是 19 张 / 27.6MB —— 在 2~3 Mbps 上就是一分多钟,而且这些大文件会把 HTML/JS/接口全堵在后面(表现为"连登录都慢")。**
+
+现在渲染层会给封面和资产卡请求 `?w=480`,Mac 端服务���用系统自带的 `sips` 按最长边缩放并缓存到 `~/.bigbotart/thumbs/`(原图一改就自动重生成;sips 不可用就回退发原图,不会给不出来)。
+
+⇒ 实测:首页媒体传输 27.6MB → **0.7MB**,冷加载可交互从一分多钟降到 **2.5 秒**,二次打开 **0.36 秒**。
+
+**nginx 侧不用为缩略图做任何事** —— 它就是普通的一个 GET。
+
+### 5.3 别的省事做法
+
+- **开 HTTP/2**:`listen 443 ssl http2;`。慢链路上能省掉每个资源一次 TCP+TLS 握手。
+- **换更近/更快的机器**:瓶颈是最后一跳带宽,换一台离用户近、或运营商线路更好的机器,收益比任何调参都大。
+- **上 CDN**:静态资源(JS/CSS/图)放 CDN 就能绕开这条慢链路。前提是静态资源不从 Mac 来(要么定期同步到源站,要么做成构建产物上传)。
 
 **三个必须照做的点:**
 
@@ -210,5 +280,8 @@ BBA_RELAY_MODE=http BBA_RELAY_PORT=8080 BBA_RELAY_LISTEN=127.0.0.1 \
 | 登录一直 403 | nginx 没保留原 Host(`proxy_set_header Host $host;`) |
 | 登录成功但马上掉线 | cookie 没带 Secure:中继与 nginx 之间是明文 HTTP,Mac 端按 Origin 判断是否 https,浏览器 Origin 必须是 `https://` |
 | 提交大画布 413 | nginx 的 `client_max_body_size` 没调到 32m |
+| **打开要等一分多钟,连登录都慢** | 链路带宽(见 §5.1),不是中继。先看首页是不是在拉全尺寸原图:DevTools 里筛 `/media/`,几十 MB 就是它 |
+| 第二次打开还是慢 | 缓存头没生效。查响应里 `cache-control`:`/assets/*` 要 `immutable`,`/media/*` 要 `max-age`;nginx 侧记得 `proxy_hide_header Cache-Control` |
+| 封面图糊 | 缩略图没生成(非 macOS 没有 `sips`):会回退发原图,看服务端有没有缩略图缓存目录 `~/.bigbotart/thumbs/` |
 | 事件流连上就断 | nginx 没配 `Upgrade`/`Connection` 头与 `map $http_upgrade` |
 | 中继日志反复「隧道断开」 | Mac 端没开中继开关、或配对密钥不对(看 Mac 端日志「配对密钥被拒绝」) |
