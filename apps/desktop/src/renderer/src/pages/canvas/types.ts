@@ -21,6 +21,15 @@ export interface CanvasPageProps {
   onCreateCanvas: (name?: string) => Promise<CanvasSnapshot | null>;
   onDeleteCanvas: (canvasId: string) => Promise<string | null>;
   onRenameCanvas: (canvasId: string, name: string) => Promise<boolean>;
+  /**
+   * 画布「首帧就绪」通知(可选)。
+   *
+   * 为什么需要:App 打开画布时会挂一个全屏「加载中」遮罩(换页那段是同步重活,
+   * 不遮罩用户只看到整页卡死)。遮罩什么时候撤,必须由画布自己说了算 ——
+   * 节点装好并**画出第一帧**才算就绪;否则会闪一下空画布。
+   * 没传这个回调时画布照常工作(App 侧另有超时兜底,不会永远转圈)。
+   */
+  onReady?: () => void;
 }
 
 export type EdgeClass = '' | 'stale' | 'ghost';

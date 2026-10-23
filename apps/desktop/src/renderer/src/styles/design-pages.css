@@ -1755,6 +1755,10 @@ html,body{height:100%;overflow:hidden}
      所以 world 内的控件尺寸写成 calc(44px / var(--vz)):世界坐标里变大,
      乘回缩放后**屏幕尺寸恒定约 44px**。偏移量同理要除(见下面的 right / margin-top)。 */
   .pg-canvas .node-add{
+    /* 盒子 = **命中区**(屏幕恒 44px),可见的圆交给 ::before 画(26px,桌面观感)。
+       为什么拆开:44px 是 iOS HIG 的最小可点尺寸,不是视觉尺寸 —— 早先直接把圆画成
+       44px,一屏几十个实心圆环把画布本身盖住了(iPad 实测反馈「加号太大」),
+       而圆缩回 26px 又会让手指点不中。拆成「看不见的命中区 + 看得见的圆」两头都要。 */
     width:calc(44px / var(--vz));
     height:calc(44px / var(--vz));
     /* 「+」必须仍然挂在卡片**外侧**:原来 26px 时 right:-13px 恰好等于半个自身宽,
@@ -1762,8 +1766,12 @@ html,body{height:100%;overflow:hidden}
        否则它会压到卡片内容上(盖住标题 / 缩略图)。margin-top 同理保持垂直居中。 */
     right:calc(-22px / var(--vz));
     margin-top:calc(-22px / var(--vz));
-    /* 加号字形也跟着放大,否则 44px 的圆里只剩一个 16px 的小加号 */
-    font-size:calc(22px / var(--vz));
+    /* 字形回到桌面观感(16px 屏幕尺寸);圆已经是 26px,不需要再放大字形 */
+    font-size:calc(16px / var(--vz));
+    /* 按钮本体只留命中区:底色/边框/阴影全交给 ::before 的那个圆 */
+    background:transparent;
+    border-color:transparent;
+    box-shadow:none;
     /* 触控没有 hover:显式把 transform 归零。两条都要写 ——
        ① .pg-canvas .node-add:hover 的选择器更具体(多一个伪类),
           只写基础规则压不过它;
@@ -1772,6 +1780,25 @@ html,body{height:100%;overflow:hidden}
     transform:none
   }
   .pg-canvas .node-add:hover{transform:none}
+  /* 看得见的圆(26px 屏幕尺寸):玻璃底 + 描边 + 阴影,和桌面那条基础规则同源 */
+  .pg-canvas .node-add::before{
+    content:'';
+    position:absolute;
+    left:50%;top:50%;
+    width:calc(26px / var(--vz));
+    height:calc(26px / var(--vz));
+    transform:translate(-50%,-50%);
+    border-radius:50%;
+    background:var(--glass-bg-strong);
+    -webkit-backdrop-filter:var(--glass-blur-sm);
+    backdrop-filter:var(--glass-blur-sm);
+    border:1.5px solid var(--border);
+    box-shadow:var(--shadow-node-add);
+  }
+  /* hover 的强调色落到圆上(桌面那条基础规则改的是按钮自己的边框,触控下按钮没有边框) */
+  .pg-canvas .node-add:hover::before{border-color:var(--accent)}
+  /* 虚线圆(ghost 节点):桌面那条规则改的是按钮边框,触控下同样要落到 ::before */
+  .pg-canvas .node.ghost .node-add::before{border-style:dashed}
 
   /* 未选中的节点:「+」只淡化视觉、**不缩尺寸** —— 44px 的热区必须留着
      (手指点不中就没意义),但一屏几十个实心圆环太重、把画布本身盖住了;
@@ -1875,3 +1902,39 @@ html,body{height:100%;overflow:hidden}
    自动回落到既有的 bottom:58px(渐进增强,不需要 @supports)。
    ⚠️ 目前只有画布页渲染 toast(CanvasPage),所以不限定 .pg-canvas 也等价。 */
 .web-shell .toast{bottom:calc(58px + env(safe-area-inset-bottom))}
+
+/* ── 全屏加载遮罩(换页 / 打开画布) ─────────────────────────────────────────
+   为什么要有:换页 = 卸载整张画布(几百个节点 DOM + SVG 连线)+ 挂载新页,
+   这一段是同步的,浏览器在它跑完前没法 paint —— 用户只看到「整页卡死」。
+   慢链路上这段时间被拉长,更像 App 没反应。遮罩的作用是把「卡死」说成「在加载」。
+
+   为什么用 fixed + 高 z-index:遮罩要盖住**当前**页面(换页时旧页还没卸载),
+   所以不能挂在页面容器里;z-index 400 高于所有弹层(.ovl 200 出头 / .ovl-lb 260)。 */
+.app-loading{
+  position:fixed;inset:0;z-index:400;
+  display:grid;place-items:center;
+  background:var(--scrim);
+  -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)
+}
+.app-loading-box{
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  padding:22px 26px;border-radius:var(--radius-lg);
+  background:var(--glass-bg-strong);
+  -webkit-backdrop-filter:var(--glass-blur-sm);backdrop-filter:var(--glass-blur-sm);
+  border:1px solid var(--glass-border);
+  box-shadow:var(--glass-shadow-lg);
+  color:var(--fg)
+}
+.app-loading-spin{
+  width:22px;height:22px;border-radius:50%;
+  border:2px solid var(--border);border-top-color:var(--accent);
+  animation:app-loading-spin .8s linear infinite
+}
+@keyframes app-loading-spin{to{transform:rotate(360deg)}}
+.app-loading-text{font-size:var(--text-sm)}
+.app-loading-hint{font-size:var(--text-xs);color:var(--muted)}
+/* 触控档:遮罩里的文字与转圈给手指留够余量(不用 44px —— 这是纯提示,不可点) */
+@media (pointer: coarse){
+  .app-loading-box{padding:26px 30px;gap:12px}
+  .app-loading-spin{width:26px;height:26px}
+}

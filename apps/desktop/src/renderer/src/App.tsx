@@ -8,6 +8,7 @@ import SettingsPage from './pages/SettingsPage';
 import OnboardingPage from './pages/OnboardingPage';
 import ProjectsPage from './pages/ProjectsPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import { LoadingOverlay } from './components/LoadingOverlay';
 import { I18nProvider, translate, type Lang } from './i18n';
 import { useColorScheme } from './hooks/useColorScheme';
 import type { CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
@@ -25,6 +26,38 @@ const PAGE_LABEL: Record<Page, string> = {
   onboarding: '引导',
   projects: '项目列表',
 };
+
+/** 换页时遮罩上的文案(「在加载什么」要说清楚,不要一个笼统的「加载中」) */
+const PAGE_LOADING_TEXT: Record<Page, string> = {
+  home: '正在回到首页…',
+  canvas: '正在打开画布…',
+  assets: '正在加载资源…',
+  skills: '正在加载技能…',
+  timeline: '正在加载时间线…',
+  settings: '正在加载设置…',
+  onboarding: '正在加载引导…',
+  projects: '正在加载项目…',
+};
+
+/**
+ * 等浏览器把当前这一帧画出来。
+ *
+ * 为什么需要:换页/打开画布是**同步**的重活(卸载几百个节点 DOM + 挂载新页),
+ * 浏览器在它跑完之前没法 paint —— 用户看到的是「整页卡死」。要让人看见
+ * 「加载中」,必须先把挂遮罩的那次渲染**画出去**,再开始干活。
+ *
+ * ⚠️ 兜底:标签页在后台时 rAF 不触发,Promise 会永远悬着 → 页面切换直接卡死。
+ * 所以额外挂一个 100ms 定时器兜底(后台标签页里没人看得见遮罩,早退无害)。
+ */
+function nextPaint(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 100);
+    requestAnimationFrame(() => {
+      clearTimeout(timer);
+      setTimeout(resolve, 0);
+    });
+  });
+}
 
 export interface ProjectItem {
   id: string;
@@ -55,6 +88,12 @@ export default function App() {
     mlxgen: { ready: false, text: '检测中' },
     llm: { ready: false, text: '检测中' },
   });
+  /* 换页/打开画布时的全屏「加载中」遮罩文案(null = 不显示)。
+     慢链路(公网 ~350KB/s)下换页那段同步重活会被拉长,不遮罩就是「App 卡死」的观感。 */
+  const [navLoading, setNavLoading] = useState<string | null>(null);
+  /** 画布页的「就绪」由 CanvasPage 自己报(节点装好并画出第一帧),
+      在它报就绪之前遮罩不撤 —— 否则会闪一下「空画布」。 */
+  const waitCanvasReadyRef = useRef(false);
 
   useEffect(() => {
     loadProjects();
@@ -113,7 +152,10 @@ export default function App() {
   }
 
   const handleNavigate = useCallback(
-    (page: Page) => {
+    async (page: Page) => {
+      // 已经在这一页:直接返回。⚠️ 不加这句会挂上遮罩却等不到「就绪」信号 ——
+      // 画布页不会重新挂载,也就不会报就绪,遮罩会一直转到 30s 兜底才消失。
+      if (page === currentPage) return;
       // 画布必须有项目上下文:未选项目时先去项目列表,避免空白页
       if (page === 'canvas' && !projectId) {
         setCurrentPage('projects');
@@ -121,17 +163,53 @@ export default function App() {
       }
       navStackRef.current.push(currentPage);
       if (navStackRef.current.length > 20) navStackRef.current.shift();
+      // 先把「加载中」画出去,再换页 —— 换页是同步重活(卸载整张画布 + 挂载新页),
+      // 不让浏览器先 paint 一次,用户看到的就是「整页卡死」而不是「在加载」。
+      setNavLoading(PAGE_LOADING_TEXT[page]);
+      await nextPaint();
+      if (page === 'canvas') waitCanvasReadyRef.current = true;
       setCurrentPage(page);
+      // 画布页等 CanvasPage 自己报就绪(节点装好并画出第一帧);
+      // 其余页面换完再等一帧就撤,免得多挡一会儿。
+      if (page !== 'canvas') {
+        await nextPaint();
+        setNavLoading(null);
+      }
     },
     [projectId, currentPage],
   );
 
   /** 返回上一页(资源管理等详情页用);栈空兜底回首页 */
-  const handleBack = useCallback(() => {
+  const handleBack = useCallback(async () => {
     const prev = navStackRef.current.pop();
     const target: Page = !prev ? 'home' : prev === 'canvas' && !projectId ? 'projects' : prev;
+    setNavLoading(PAGE_LOADING_TEXT[target]);
+    await nextPaint();
+    if (target === 'canvas') waitCanvasReadyRef.current = true;
     setCurrentPage(target);
+    if (target !== 'canvas') {
+      await nextPaint();
+      setNavLoading(null);
+    }
   }, [projectId]);
+
+  /** 画布页就绪:CanvasPage 把节点装好、画出第一帧后回调(遮罩这时才撤) */
+  const handleCanvasReady = useCallback(() => {
+    if (!waitCanvasReadyRef.current) return;
+    waitCanvasReadyRef.current = false;
+    setNavLoading(null);
+  }, []);
+
+  /* 遮罩兜底:30s 内没等到就绪信号(出错路径/信号丢失)也要撤掉 ——
+     「一直转圈」比「卡住」更让人以为 App 坏了。 */
+  useEffect(() => {
+    if (!navLoading) return;
+    const timer = setTimeout(() => {
+      waitCanvasReadyRef.current = false;
+      setNavLoading(null);
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [navLoading]);
 
   /** 来源页文案(返回按钮标签);导航栈只在事件里改,渲染期读取最新值即可 */
   const backLabel = translate(lang, PAGE_LABEL[navStackRef.current[navStackRef.current.length - 1] ?? 'home']);
@@ -146,6 +224,8 @@ export default function App() {
   ) => {
     try {
       // 首页「生成」= 总是开一个新项目(新创作空间),不复用当前项目
+      setNavLoading('正在创建项目…');
+      await nextPaint();
       const p = await window.bigbotart.createProject(brief.slice(0, 24) || '新项目');
       await loadProjects();
       setProjectId(p.id);
@@ -184,6 +264,7 @@ export default function App() {
 
       // 先跳转:项目与画布就绪后立刻进画布(规划是秒级 LLM 调用,期间用户已能看到画布);
       // 规划/对话随后经 bba-plan-ready / bba-newchat-ready 事件投递给已挂载的 CanvasPage
+      waitCanvasReadyRef.current = true;
       setCurrentPage('canvas');
 
       const st = await window.bigbotart.agentStart();
@@ -201,27 +282,47 @@ export default function App() {
       window.dispatchEvent(new Event('bba-newchat-ready'));
     } catch (e) {
       console.error('规划失败', e);
+      // 失败路径也要撤遮罩(否则用户对着转圈等一个已经失败的规划)
+      waitCanvasReadyRef.current = false;
+      setNavLoading(null);
       alert('规划失败: ' + (e instanceof Error ? e.message : String(e)));
     }
   };
 
   /** 选中项目(进入画布) */
   const handleSelectProject = async (id: string) => {
-    setProjectId(id);
-    await loadCanvasesForProject(id);
-    setCurrentPage('canvas');
+    // 遮罩先上屏,再拉画布数据 —— 网页端这一步要走公网(慢),
+    // 没有遮罩时用户看到的是「点了项目卡没反应」。
+    setNavLoading(PAGE_LOADING_TEXT.canvas);
+    await nextPaint();
+    try {
+      setProjectId(id);
+      await loadCanvasesForProject(id);
+      waitCanvasReadyRef.current = true;
+      setCurrentPage('canvas');
+      // 遮罩交给 CanvasPage 报就绪后撤(见 handleCanvasReady)
+    } catch (e) {
+      console.error('打开项目失败', e);
+      waitCanvasReadyRef.current = false;
+      setNavLoading(null);
+    }
   };
 
   /** 新建项目 → 进入画布 */
   const handleNewProject = async (name?: string) => {
+    setNavLoading('正在创建项目…');
+    await nextPaint();
     try {
       const p = await window.bigbotart.createProject(name ?? `未命名项目 ${projects.length + 1}`);
       await loadProjects();
       setProjectId(p.id);
       await loadCanvasesForProject(p.id);
+      waitCanvasReadyRef.current = true;
       setCurrentPage('canvas');
     } catch (e) {
       console.error('创建项目失败', e);
+      waitCanvasReadyRef.current = false;
+      setNavLoading(null);
     }
   };
 
@@ -389,6 +490,7 @@ export default function App() {
             onCreateCanvas={handleCreateCanvas}
             onDeleteCanvas={handleDeleteCanvas}
             onRenameCanvas={handleRenameCanvas}
+            onReady={handleCanvasReady}
           />
         </ErrorBoundary>
       )}
@@ -445,6 +547,9 @@ export default function App() {
           />
         </ErrorBoundary>
       )}
+      {/* 全屏加载遮罩:盖住换页/打开画布那段「同步重活」,
+          否则用户看到的是整页卡死(慢链路上尤其明显)。 */}
+      {navLoading ? <LoadingOverlay text={navLoading} /> : null}
     </>
     </I18nProvider>
   );

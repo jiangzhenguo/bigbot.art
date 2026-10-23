@@ -170,9 +170,12 @@ export default function CanvasPage({
   onCreateCanvas,
   onDeleteCanvas,
   onRenameCanvas,
+  onReady,
 }: CanvasPageProps) {
   const stageRef = useRef<HTMLElement | null>(null);
   const worldRef = useRef<HTMLDivElement | null>(null);
+  /** 首帧就绪通知用的 rAF 句柄(卸载/换画布时要撤掉,否则会对已卸载的画布报就绪) */
+  const readyRafRef = useRef<number | null>(null);
   const edgesSvgRef = useRef<SVGSVGElement | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   /** 节点尺寸观测器(连线端口/弹层定位用):注册回调即时 observe,不依赖 nodes.length 重建 —
@@ -2002,6 +2005,32 @@ export default function CanvasPage({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCanvasId, projectId, projectCanvases]);
+
+  /**
+   * 首帧就绪通知:节点装好、并且**真的画出去**之后才报。
+   *
+   * 为什么等两帧:装节点(setNodes)是同步的,但 React 要先提交、再由浏览器 paint;
+   * 少等一帧就可能在节点还没画出来时就报就绪 → App 撤掉「加载中」遮罩 →
+   * 用户看到一瞬间的空画布,再看到节点冒出来(闪一下,比一直转圈更糟)。
+   *
+   * ⚠️ 依赖只跟画布 id 走:onReady 是 App 侧 useCallback 稳定的引用,
+   * 把它放进依赖也不会重复触发;但为稳妥仍用 ref 读取,避免闭包过期。
+   */
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  useEffect(() => {
+    // 没有活动画布 = 还没装载完(列表未就绪),此时报了「就绪」就是假的
+    if (!activeCanvas) return;
+    const id = requestAnimationFrame(() => {
+      const id2 = requestAnimationFrame(() => onReadyRef.current?.());
+      readyRafRef.current = id2;
+    });
+    readyRafRef.current = id;
+    return () => {
+      cancelAnimationFrame(id);
+      if (readyRafRef.current != null) cancelAnimationFrame(readyRafRef.current);
+    };
+  }, [activeCanvas?.id]);
 
   /** 物化 sessionStorage 里的 Agent 规划(从首页跳到画布时;支持新模式分镜表与旧模式 Brief 两种结构)。
    *  首页「生成」先跳转后异步规划:挂载时先消费一次(已就绪的情况),再监听 bba-plan-ready 事件(后就绪的情况) */
