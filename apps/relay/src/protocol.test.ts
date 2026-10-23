@@ -7,6 +7,7 @@ import {
   encodeJson,
   encodeWsChunk,
   keysEqual,
+  safeCloseCode,
   splitPayload,
 } from './protocol.js';
 
@@ -54,5 +55,30 @@ describe('隧道帧', () => {
     expect(keysEqual('same-key-same-key', 'same-key-same-key')).toBe(true);
     expect(keysEqual('same-key-same-key', 'same-key-same-keY')).toBe(false);
     expect(keysEqual('short', 'much-longer-secret')).toBe(false);
+  });
+
+  it('关闭码规整:保留码(1005/1006/1004/1015)一律降为 1000', () => {
+    // ws 的 Sender.close() 遇到保留码直接抛 TypeError。
+    // 1006 是异常断开(隧道被掐断)时最常见的码,必须挡住。
+    expect(safeCloseCode(1006)).toBe(1000);
+    expect(safeCloseCode(1005)).toBe(1000);
+    expect(safeCloseCode(1004)).toBe(1000);
+    expect(safeCloseCode(1015)).toBe(1000);
+    expect(safeCloseCode(999)).toBe(1000);
+    expect(safeCloseCode(5000)).toBe(1000);
+    expect(safeCloseCode('1006')).toBe(1000);
+    expect(safeCloseCode(undefined)).toBe(1000);
+    expect(safeCloseCode(null)).toBe(1000);
+    expect(safeCloseCode(1000.5)).toBe(1000);
+  });
+
+  it('关闭码规整:正常码原样放过', () => {
+    expect(safeCloseCode(1000)).toBe(1000);
+    expect(safeCloseCode(1001)).toBe(1001);
+    expect(safeCloseCode(1003)).toBe(1003);
+    expect(safeCloseCode(1008)).toBe(1008);
+    expect(safeCloseCode(1011)).toBe(1011);
+    expect(safeCloseCode(4000)).toBe(4000);
+    expect(safeCloseCode(4999)).toBe(4999);
   });
 });

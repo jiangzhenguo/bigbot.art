@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { apiPath } from '../../api/base-path';
 import { WAVE_BARS } from './constants';
 
 /** 网页入口把 bigbotartShell 设为 false。未设置(桌面与单测)仍用 bba-asset / bba-output。 */
@@ -20,11 +21,11 @@ export function outputUrlOf(p: string): string {
     if (i >= 0) {
       const rel = norm.slice(i + m.length);
       const encoded = rel.split('/').map(encodeURIComponent).join('/');
-      return webMedia() ? `/media/output/${encoded}` : `bba-output://${encoded}`;
+      return webMedia() ? apiPath(`/media/output/${encoded}`) : `bba-output://${encoded}`;
     }
   }
   const encoded = encodeURIComponent(basenameOf(p));
-  return webMedia() ? `/media/output/${encoded}` : `bba-output://${encoded}`;
+  return webMedia() ? apiPath(`/media/output/${encoded}`) : `bba-output://${encoded}`;
 }
 
 /**
@@ -50,7 +51,7 @@ export function assetUrlOf(localPath: string | undefined | null): string | null 
   if (!localPath) return null;
   const name = localPath.split('/').pop();
   if (!name) return null;
-  return webMedia() ? `/media/asset/${encodeURIComponent(name)}` : `bba-asset://${name}`;
+  return webMedia() ? apiPath(`/media/asset/${encodeURIComponent(name)}`) : `bba-asset://${name}`;
 }
 
 /** 缩略图 src(asset localPath → bba-asset:// 或网页 /media/asset/) */

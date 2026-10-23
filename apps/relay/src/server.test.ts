@@ -172,8 +172,35 @@ describe('中继认证与转发', () => {
     ws.terminate();
   });
 
-  it('新的隧道替换旧连接;非法帧会断开', async () => {
+  it('隧道端回 1006(异常断开)时中继不炸,浏览器按 1000 收场', async () => {
+    // 回归:原先直接把 1006 传给 ws.close(),ws 抛
+    // "First argument must be a valid error code number" —— 隧道一断就崩。
     const relay = await startRelay({ pairingKey: KEY, mode: 'http', listenHost: '127.0.0.1', httpPort: 0 });
+    open.push(relay);
+    const { ws } = await connect(relay.port, KEY);
+    if (!ws) throw new Error('隧道没有连上');
+    const { next } = reader(ws);
+
+    const browser = new WebSocket(`${relay.url.replace('http', 'ws')}/events`);
+    browser.once('error', () => {});
+    const opened = await next();
+    expect(opened.type).toBe(FrameType.wsOpen);
+    ws.send(encodeJson(FrameType.wsReady, opened.streamId, {}));
+    await new Promise((resolve) => browser.once('open', resolve));
+
+    // 隧道端回一个保留码 1006
+    ws.send(encodeJson(FrameType.wsClose, opened.streamId, { code: 1006, reason: 'abnormal' }));
+    const closed = await new Promise<{ code: number; reason: string }>((resolve) => {
+      browser.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+    expect(closed.code).toBe(1000);
+    expect(closed.reason).toBe('abnormal');
+    // 中继还活着,还能继续服务
+    expect(relay.connected()).toBe(true);
+    ws.terminate();
+  });
+
+  it('新的隧道替换旧连接;非法帧会断开', async () => {    const relay = await startRelay({ pairingKey: KEY, mode: 'http', listenHost: '127.0.0.1', httpPort: 0 });
     open.push(relay);
     const first = await connect(relay.port, KEY);
     const second = await connect(relay.port, KEY);

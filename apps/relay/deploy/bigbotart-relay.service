@@ -9,10 +9,19 @@ User=bigbotart
 Group=bigbotart
 EnvironmentFile=/etc/bigbotart-relay.env
 WorkingDirectory=/opt/bigbotart
+# node 的路径按实际安装位置改:
+#   - Debian/Ubuntu 官方源:/usr/bin/node
+#   - NodeSource / 官方二进制:/usr/local/bin/node
+#   - nvm:/root/.nvm/versions/node/v22.x.x/bin/node
 ExecStart=/usr/bin/node /opt/bigbotart/apps/relay/dist/cli.js
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
+# 数据目录与证书要能写;其余系统目录只读
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/bigbotart-relay
 
 [Install]
 WantedBy=multi-user.target

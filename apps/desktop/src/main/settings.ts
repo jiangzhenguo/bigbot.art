@@ -58,6 +58,11 @@ export class SettingsStore {
   }
 
   patch(patch: Partial<AppSettings>): AppSettings {
+    // 远程访问/中继的开关很容易在别处被顺手改掉,而且事后极难追查
+    // (症状是「隧道莫名其妙不连了」)。谁动过、动成什么样,这里留一行痕。
+    if ('remoteAccess' in patch) {
+      console.warn('[settings] remoteAccess 被修改:', JSON.stringify(patch.remoteAccess));
+    }
     this.data = { ...this.data, ...patch };
     // theme 由调用方(IPC)先 normalize;此处兜底非法写入
     if (this.data.theme !== undefined && this.data.theme !== 'system' && this.data.theme !== 'light' && this.data.theme !== 'dark') {

@@ -3,6 +3,7 @@
  * 方法名与 IPC 相同;事件走一条 WebSocket,退订只发生在本地。
  */
 import { API_CATALOG, type BigBotArtApi } from '@bigbotart/shared';
+import { apiPath } from './base-path';
 
 const RETRY_MAX_MS = 15_000;
 
@@ -18,7 +19,7 @@ export function createHttpApi(): BigBotArtApi {
   const connect = () => {
     if (stopped || typeof WebSocket === 'undefined') return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${location.host}/events`);
+    const ws = new WebSocket(`${proto}//${location.host}${apiPath('/events')}`);
     socket = ws;
     ws.onopen = () => {
       retryMs = 1000;
@@ -55,7 +56,7 @@ export function createHttpApi(): BigBotArtApi {
   };
 
   const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
-    const res = await fetch('/rpc', {
+    const res = await fetch(apiPath('/rpc'), {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },

@@ -2,6 +2,7 @@
  * 网页入口的口令页。登录成功后整页刷新,让 WebSocket 带着 cookie 重连。
  */
 import React, { useState } from 'react';
+import { apiPath } from './base-path';
 
 export function RemoteLogin() {
   const [passphrase, setPassphrase] = useState('');
@@ -13,7 +14,7 @@ export function RemoteLogin() {
     setBusy(true);
     setError('');
     try {
-      const res = await fetch('/session', {
+      const res = await fetch(apiPath('/session'), {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },

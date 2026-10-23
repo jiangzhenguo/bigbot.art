@@ -8,7 +8,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server as 
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { BODY_LIMIT, CLIENT_IP_HEADER, FORWARD_REQUEST_HEADERS, FrameType, MAX_PAYLOAD, PROTO_HEADER, TUNNEL_PATH, TUNNEL_SECRET_HEADER, encodeFrame, encodeWsChunk, FrameDecoder, keysEqual, parseJson, splitPayload, type ReqHead, type ResHead, type TunnelFrame, type WsClose, type WsOpen } from './protocol.js';
+import { BODY_LIMIT, CLIENT_IP_HEADER, FORWARD_REQUEST_HEADERS, FrameType, MAX_PAYLOAD, PROTO_HEADER, TUNNEL_PATH, TUNNEL_SECRET_HEADER, encodeFrame, encodeWsChunk, FrameDecoder, keysEqual, parseJson, safeCloseCode, splitPayload, type ReqHead, type ResHead, type TunnelFrame, type WsClose, type WsOpen } from './protocol.js';
 import { FailWindow, PAIRING_MAX_FAILS, redact } from './auth.js';
 import { LETSENCRYPT_PRODUCTION, loadCertFiles, needsRenewal, obtainCertificate, readStoredCert, type CertMaterial } from './acme.js';
 
@@ -307,7 +307,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       if (!stream.socket.destroyed) rejectUpgrade(stream.socket, info.httpStatus ?? 401, '未授权');
       return;
     }
-    stream.pub.close(info.code && info.code >= 1000 ? info.code : 1000, info.reason ?? '');
+    stream.pub.close(safeCloseCode(info.code), info.reason ?? '');
   };
 
   const dispatch = (frame: TunnelFrame) => {

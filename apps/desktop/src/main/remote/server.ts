@@ -117,6 +117,16 @@ function clientIp(req: IncomingMessage): string {
   return addr.replace(/^::ffff:/, '');
 }
 
+/**
+ * 浏览器发来的 Origin 是不是 https。
+ *
+ * 只用来决定 cookie 要不要加 Secure —— 加了更严,不会更松,
+ * 所以即便被伪造,后果也只是「少了 Secure」这一档。
+ */
+function originIsHttps(origin: string | undefined): boolean {
+  return typeof origin === 'string' && origin.toLowerCase().startsWith('https://');
+}
+
 const EMPTY_RELAY: RelayTunnelStatus = { enabled: false, url: '', connected: false, hasPairingKey: false };
 
 async function pipeWebResponse(res: ServerResponse, web: Response): Promise<void> {
@@ -242,7 +252,9 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
 
   function requestClient(req: IncomingMessage): { ip: string; secureCookie: boolean } {
     const trust = trustedTunnel(req);
-    if (trust) return { ip: trust.ip, secureCookie: trust.https };
+    // 公网这一跳是 TLS 时要加 Secure。隧道自身看到的 scheme 取决于反代
+    // 那一段(nginx → 中继 是明文),所以再问一次浏览器发来的 Origin。
+    if (trust) return { ip: trust.ip, secureCookie: trust.https || originIsHttps(req.headers.origin) };
     return { ip: clientIp(req), secureCookie: false };
   }
 
@@ -510,7 +522,9 @@ export function createRemoteServer(deps: RemoteServerDeps): RemoteControl {
       const shown = new Set<string>();
       for (const host of bindHosts) shown.add(`http://${host}:${listenPort}/`);
       if (dns) shown.add(`http://${dns}:${listenPort}/`);
-      if (relayOn && relayUrl) shown.add(`${relayUrl}/`);
+      // 中继地址可能自带公网路径前缀(https://host/bba)。展示给用户的地址
+      // 要带上它,否则用户点开的是根路径,拿不到网页端。
+      if (relayOn && relayUrl) shown.add(`${relayUrl.replace(/\/+$/, '')}/`);
       return [...shown];
     };
     const same =

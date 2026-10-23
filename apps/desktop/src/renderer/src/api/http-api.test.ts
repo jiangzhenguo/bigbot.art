@@ -71,4 +71,19 @@ describe('HTTP BigBotArtApi', () => {
     sock?.onmessage?.({ data: JSON.stringify({ channel: 'render-queue-changed', payload: [{ id: 'j2' }] }) });
     expect(got).toEqual([[{ id: 'j1' }]]);
   });
+
+  it('文档在路径前缀下时,RPC 与 WebSocket 都走同一个前缀', async () => {
+    vi.stubGlobal('location', { protocol: 'https:', host: 'bigbot.art', pathname: '/bba/' });
+    vi.stubGlobal('window', { bigbotartShell: false, location: { pathname: '/bba/' } });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const api = createHttpApi();
+    await api.listProjects();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/bba/rpc');
+    api.onQueueChanged(() => {});
+    expect(FakeSocket.instances[0]?.url).toBe('wss://bigbot.art/bba/events');
+  });
 });

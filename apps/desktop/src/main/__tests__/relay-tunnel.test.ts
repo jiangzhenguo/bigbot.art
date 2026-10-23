@@ -8,7 +8,7 @@ import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { WebSocket } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import type { AppSettings } from '@bigbotart/shared';
 
 const tmpHome = mkdtempSync(join(tmpdir(), 'bba-relay-e2e-'));
@@ -48,8 +48,7 @@ function rawPost(
   port: number,
   headers: Record<string, string>,
   body: string,
-): Promise<{ status: number; setCookie: string; body: string }> {
-  return new Promise((resolve, reject) => {
+): Promise<{ status: number; setCookie: string; body: string }> {  return new Promise((resolve, reject) => {
     const req = httpRequest(
       {
         hostname: '127.0.0.1',
@@ -75,6 +74,36 @@ function rawPost(
   });
 }
 
+/** 探针 WebSocket 服务:只记下握手路径,用来验隧道客户端打的是哪个 URL。 */
+async function startProbeServer(): Promise<{ port: number; seen: string[]; close: () => Promise<void> }> {
+  const seen: string[] = [];
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  wss.on('connection', (sock, req) => {
+    seen.push(req.url ?? '');
+    sock.close();
+  });
+  await new Promise<void>((resolve) => wss.once('listening', resolve));
+  const addr = wss.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  return {
+    port,
+    seen,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const client of wss.clients) client.terminate();
+        wss.close(() => resolve());
+      }),
+  };
+}
+
+async function waitForHandshake(seen: string[]): Promise<void> {
+  const started = Date.now();
+  while (seen.length === 0) {
+    if (Date.now() - started > 3000) throw new Error('隧道没有发起握手');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 describe('中继隧道端到端', () => {
   const stops: Array<() => Promise<void> | void> = [];
 
@@ -82,7 +111,6 @@ describe('中继隧道端到端', () => {
     for (const stop of stops.reverse()) await stop();
     rmSync(tmpHome, { recursive: true, force: true });
   });
-
   it('经隧道登录、调用、收事件、按 Range 读媒体,并且回环不能冒充免登录', async () => {
     const saved = writePairingKey(tmpHome, pairingKey);
     expect(saved.ok).toBe(true);
@@ -334,5 +362,105 @@ describe('中继隧道端到端', () => {
       body: JSON.stringify({ passphrase }),
     });
     expect(locked.status).toBe(429);
+  });
+
+  it('浏览器的 WebSocket 异常断开(1006)时,桌面端不抛未捕获异常', async () => {
+    // 回归:1006 是保留码,ws 的 close(1006) 直接抛 TypeError。
+    // 隧道被掐断时浏览器那侧正是 1006 收场 —— 原先会把桌面主进程打成未捕获异常。
+    const relay = await startRelay({ pairingKey, mode: 'http', listenHost: '127.0.0.1', httpPort: 0, logger });
+    stops.push(() => relay.close());
+    const control = createRemoteServer({
+      hub: new EventHub(),
+      handlers: new Map(),
+      logger,
+      staticDir: join(tmpHome, 'renderer'),
+      dataDir: tmpHome,
+      tunnelSecret,
+      lookupTailscale: async () => ({ ip: null, dns: null, selfLogin: null }),
+      whois: async () => null,
+    });
+    stops.push(() => control.close());
+    await control.apply({
+      renderMode: 'demo',
+      remoteAccess: { enabled: true, relayEnabled: true, relayUrl: relay.url, port: 0 },
+    } as AppSettings);
+    const port = control.status().port;
+    const tunnel = connectTunnel({
+      relayUrl: relay.url,
+      pairingKey,
+      localPort: port,
+      tunnelSecret,
+      logger,
+      onStatus: () => {},
+    });
+    stops.push(() => tunnel.stop());
+    const started = Date.now();
+    while (!relay.connected()) {
+      if (Date.now() - started > 3000) throw new Error('隧道没有连上');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const login = await fetch(`${relay.url}/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: relay.url },
+      body: JSON.stringify({ passphrase }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookieOf(login);
+
+    const browser = new WebSocket(`${relay.url.replace('http', 'ws')}/events`, {
+      headers: { cookie, origin: relay.url },
+    });
+    browser.once('error', () => {});
+    await new Promise<void>((resolve) => {
+      browser.once('open', () => resolve());
+      browser.once('error', () => resolve());
+    });
+    expect(browser.readyState).toBe(WebSocket.OPEN);
+    // 硬断:不送关闭帧,浏览器侧就是 1006
+    browser.terminate();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // 隧道还活着,还能继续服务
+    expect(relay.connected()).toBe(true);
+    const after = await fetch(`${relay.url}/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: relay.url },
+      body: JSON.stringify({ passphrase }),
+    });
+    expect(after.status).toBe(200);
+  });
+
+  it('中继地址带路径前缀时,隧道握手走同一个前缀', async () => {    // 反代(nginx)把 /bba 前缀转给中继时,握手也必须在 /bba 之下。
+    // 只取 host 会把请求打到公网根路径 —— 结果是 404,隧道永远连不上。
+    const probe = await startProbeServer();
+    stops.push(probe.close);
+    const tunnel = connectTunnel({
+      relayUrl: `http://127.0.0.1:${probe.port}/bba`,
+      pairingKey,
+      localPort: 1,
+      tunnelSecret,
+      logger,
+      onStatus: () => {},
+    });
+    stops.push(() => tunnel.stop());
+    await waitForHandshake(probe.seen);
+    expect(probe.seen[0]).toBe('/bba/bba-tunnel');
+  });
+
+  it('中继地址不带前缀时,握手走根路径', async () => {
+    const probe = await startProbeServer();
+    stops.push(probe.close);
+    const tunnel = connectTunnel({
+      relayUrl: `http://127.0.0.1:${probe.port}`,
+      pairingKey,
+      localPort: 1,
+      tunnelSecret,
+      logger,
+      onStatus: () => {},
+    });
+    stops.push(() => tunnel.stop());
+    await waitForHandshake(probe.seen);
+    expect(probe.seen[0]).toBe('/bba-tunnel');
   });
 });

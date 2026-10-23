@@ -151,3 +151,23 @@ export function parseJson<T>(payload: Buffer): T | null {
     return null;
   }
 }
+
+/**
+ * 能**主动发给对端**的 WebSocket 关闭码。
+ *
+ * 1004/1005/1006/1015 是保留码,协议不允许主动发送;
+ * ws 的 Sender.close() 遇到它们会直接抛
+ * "First argument must be a valid error code number"。
+ * 而 1006 恰恰是**异常断开**(连接被掐断、进程被杀)时最常见的码 ——
+ * 隧道一断,浏览器那侧的 WS 就是 1006 收场。原先原样转发,
+ * 结果隧道断线瞬间在桌面端(以及中继端)抛未捕获异常。
+ *
+ * 两边都要过这一道:收到什么码都先规整,再 close。
+ */
+export function safeCloseCode(code: unknown): number {
+  if (typeof code !== 'number' || !Number.isInteger(code)) return 1000;
+  if (code >= 1000 && code <= 1003) return code;
+  if (code >= 1007 && code <= 1014) return code;
+  if (code >= 3000 && code <= 4999) return code;
+  return 1000;
+}

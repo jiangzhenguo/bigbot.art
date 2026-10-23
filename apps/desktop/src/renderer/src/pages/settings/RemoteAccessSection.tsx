@@ -54,7 +54,7 @@ export function RemoteAccessSection() {
           enabled,
           port: port(),
           relayEnabled,
-          relayUrl: relayUrl.trim().replace(/\/$/, ''),
+          relayUrl: relayUrl.trim().replace(/\/+$/, ''),
         },
       });
       setPassphrase(null);
@@ -130,7 +130,7 @@ export function RemoteAccessSection() {
             <input
               data-od-id="settings-relay-url"
               value={relayUrl}
-              placeholder="https://art.example.com"
+              placeholder="https://art.example.com/bba"
               onChange={(e) => setRelayUrl(e.target.value)}
               aria-label={t('中继地址')}
             />
@@ -158,6 +158,9 @@ export function RemoteAccessSection() {
           />
         </div>
         {keyError ? <div className="sub">{keyError}</div> : null}
+        <div className="sub" style={{ marginTop: 6 }}>
+          {t('地址可以带路径前缀(例如 /bba)。反代要把这个前缀转给中继,浏览器才会用同一个前缀取页面与接口。')}
+        </div>
       </div>
       <span
         className={`sw${on ? ' on' : ''}`}

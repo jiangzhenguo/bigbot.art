@@ -18,6 +18,7 @@ import {
   encodeFrame,
   encodeWsChunk,
   parseJson,
+  safeCloseCode,
   splitPayload,
   type ReqHead,
   type WsClose,
@@ -76,7 +77,11 @@ export function connectTunnel(opts: TunnelClientOptions): { stop: () => void } {
     opts.onStatus({ connected: false, error: '配对密钥过短' });
     return { stop() {} };
   }
-  const wsUrl = `${relay.protocol === 'https:' ? 'wss:' : 'ws:'}//${relay.host}${TUNNEL_PATH}`;
+  // 中继地址可能带公网路径前缀(例如 https://bigbot.art/bba)。
+  // 隧道握手走的是同一个前缀 —— 反代按前缀把流量转进来,这里必须原样带上,
+  // 只取 host 会把请求打到公网根路径,结果 404。
+  const relayBase = relay.pathname.replace(/\/+$/, '');
+  const wsUrl = `${relay.protocol === 'https:' ? 'wss:' : 'ws:'}//${relay.host}${relayBase}${TUNNEL_PATH}`;
   const streams = new Map<number, Stream>();
   let stopped = false;
   let attempt = 0;
@@ -287,7 +292,8 @@ export function connectTunnel(opts: TunnelClientOptions): { stop: () => void } {
       if (!stream || stream.kind !== 'ws') return;
       streams.delete(id);
       const info = parseJson<WsClose>(payload);
-      stream.ws.close(info?.code && info.code >= 1000 ? info.code : 1000, info?.reason ?? '');
+      // 码要先规整:异常断开(1006)是保留码,直接 close 会抛 TypeError
+      stream.ws.close(safeCloseCode(info?.code), info?.reason ?? '');
     }
   };
 

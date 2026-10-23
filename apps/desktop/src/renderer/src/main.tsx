@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { createHttpApi } from './api/http-api';
+import { apiPath } from './api/base-path';
 import { RemoteLogin } from './api/RemoteLogin';
 import './styles/design-pages.css';
 import './styles/timeline-design.css';
@@ -30,7 +31,7 @@ if (!window.bigbotart) {
 }
 
 if (window.bigbotartShell === false) {
-  void fetch('/session', { credentials: 'same-origin' })
+  void fetch(apiPath('/session'), { credentials: 'same-origin' })
     .then((res) => (res.ok ? renderApp() : renderLogin()))
     .catch(() => renderLogin());
 } else {
