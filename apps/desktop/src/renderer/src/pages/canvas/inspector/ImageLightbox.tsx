@@ -12,6 +12,7 @@ import {
   zoomLabel,
   type ZoomView,
 } from './lib/image-zoom';
+import { DOUBLE_TAP_MAX_MS, GestureTracker, pinchRatio } from './lib/pinch';
 
 interface ImageLightboxProps {
   src: string;
@@ -51,6 +52,15 @@ interface ViewBox {
  *     (非 ctrlKey 且横向分量为主)仍作平移,便于浏览放大后的图。
  *  另外:图大于视口时按住拖动即可平移(`grab` 光标),触控板双指滑动同样可用。
  *
+ * **触屏(iPad / 手机)另走 Pointer Events**(手势状态机在 `lib/pinch.ts`):
+ *  4. **双指捏合缩放**:两指按下后以「两指中点」为锚点连续缩放,倍率 = 当前两指间距 /
+ *     起始间距,松手后停在新倍率(与滚轮一致,不回弹)。iPad Safari 的捏合既不走
+ *     `wheel`(那条 ctrlKey 是 Mac 触控板专用),也不走 `gesturestart`(那是桌面 Safari
+ *     的旧式手势事件),所以只能靠 pointer 事件自己认。
+ *  5. **触屏双击**:1× ↔ 2×,以双击处为锚点。iOS 在 `touch-action:none` 的元素上不保证
+ *     派发 `dblclick`,故用两次 touch 按下的间隔/位移自己判定(见 `lib/pinch.ts`)。
+ *  6. **单指拖动平移**:图放大后单指拖动即可平移(与桌面鼠标拖动共用同一套 Pointer 逻辑)。
+ *
  * 这是**应用内覆盖层**(`.ovl-lb` 自绘暗底),不用 `requestFullscreen` —— 后者会把整个
  * 文档(含画布)一起全屏,而不是单张图。
  */
@@ -69,13 +79,45 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
   const draggedRef = useRef(false);
   /** 最近一次手势时间:wheel 与 gesturechange 可能同时到达,只认先到的那个 */
   const gestureAtRef = useRef(0);
+  /**
+   * 多指手势状态机(单指平移 / 双指捏合 / 触屏双击判定)。
+   * 用 ref 持有:它是有状态的,放在 state 里每次 setState 都会重建对象、手势基准丢失。
+   */
+  const trackerRef = useRef<GestureTracker | null>(null);
+  if (!trackerRef.current) trackerRef.current = new GestureTracker();
+  const tracker = trackerRef.current;
+  /** 指针捏合进行中:此时忽略 Safari 的 gesture 事件,免得同一次捏合被放大两次 */
+  const pointerPinchRef = useRef(false);
+  /** 上一次指针类型:触屏的「点空白关闭」要延迟(要给双击留窗口),鼠标仍然立即关 */
+  const lastPointerTypeRef = useRef<string>('mouse');
+  /** 本次按压是否落在视口空白处(触屏的关闭判定用;鼠标仍走 click 的 target 判定) */
+  const downOnEmptyRef = useRef(false);
+  /** 触屏「延迟关闭」的定时器:点空白后等一个双击窗口,期间若有第二下则改成双击缩放 */
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 刚判定为触屏双击:第二次点按不再走「点空白关闭」 */
+  const suppressCloseRef = useRef(false);
+  /** 触屏双击的时刻:用来挡掉浏览器可能同时派发的原生 dblclick(否则会放大两次) */
+  const touchDoubleTapAtRef = useRef(0);
 
   /* 换图(切 Take / 换节点)必须回到「适应窗口」,否则沿用上一张的平移量会显示错位 */
   useEffect(() => {
     setView(IDENTITY_VIEW);
     panRef.current = null;
     setPanning(false);
+    tracker.reset();
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
   }, [src]);
+
+  /* 卸载时清掉待关闭的定时器(否则会在组件已卸载之后才触发一次 onClose) */
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    },
+    [],
+  );
 
   /** 量一次视口尺寸 + 图片 contain 后的显示尺寸(锚点/钳制/1:1 都依赖它) */
   const measure = useCallback(() => {
@@ -193,6 +235,8 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     if (!el) return;
     let active = false;
     const onStart = (e: Event): void => {
+      // 指针捏合优先:此时不要再走 Safari 的 gesture 通道(否则同一次捏合会放大两次)
+      if (pointerPinchRef.current) return;
       e.preventDefault();
       active = true;
       gestureAtRef.current = Date.now();
@@ -200,6 +244,8 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     const onChange = (e: Event): void => {
       const ev = e as Event & { scale?: number; clientX?: number; clientY?: number; rotation?: number };
       if (!active || typeof ev.scale !== 'number' || ev.scale <= 0) return;
+      // 指针捏合进行中 → 忽略(触屏设备上 Safari 可能同时派发 gesture 事件)
+      if (pointerPinchRef.current) return;
       e.preventDefault();
       // 双指旋转时 rotation 非 0:本查看器不支持旋转,直接忽略该次手势
       if (ev.rotation) return;
@@ -277,15 +323,124 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
 
   /* 拖拽平移:图大于视口(钳制后仍有余量)时才可用 */
   const pannable = view.zoom > 1.001;
+
+  /** 触屏「点空白关闭」:延迟一个双击窗口,否则双击的第一下就把查看器关了 */
+  const scheduleClose = useCallback(() => {
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      onClose();
+    }, DOUBLE_TAP_MAX_MS);
+  }, [onClose]);
+
+  /** 取消待关闭(新的按压、或判定为双击时调用) */
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  /** 双击:适应 ↔ 2×(以双击处为锚点);鼠标原生 dblclick 与触屏自判定共用这一条 */
+  const toggleZoomAt = useCallback(
+    (clientX: number, clientY: number) => {
+      const b = boxRef.current;
+      const d = dispOf(b);
+      const el = viewportRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const px = clientX - rect.left - b.w / 2;
+      const py = clientY - rect.top - b.h / 2;
+      const v = viewRef.current;
+      if (v.zoom > 1.2) {
+        setView(IDENTITY_VIEW);
+        return;
+      }
+      setView(zoomAtPoint(v, clampZoom(2), px, py, d.dw, d.dh, b.w, b.h));
+    },
+    [dispOf],
+  );
+
+  /**
+   * 指针按下:统一入口(桌面鼠标 / 触屏都走 Pointer Events,项目里没有 Touch Events)。
+   *
+   * 三件事在这里分流:
+   *  1. **第二指落下 → 捏合**:清掉单指平移的基准(否则画面会跳一下),并把
+   *     `draggedRef` 置真(捏合也算「拖动过」,在空白处捏一下松手不能把查看器关了)。
+   *  2. **触屏双击**:自己判定(不依赖 `dblclick`),以双击处为锚点 1× ↔ 2×。
+   *  3. **单指**:维持原有的拖拽平移(桌面鼠标行为一字未改)。
+   */
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    if (!pannable || e.button !== 0) return;
-    e.preventDefault();
-    panRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
-    draggedRef.current = false;
-    setPanning(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
+    // 只认左键 / 主指针:右键与中键不参与平移缩放(桌面行为不变)
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const isTouch = e.pointerType === 'touch';
+    lastPointerTypeRef.current = e.pointerType;
+    downOnEmptyRef.current = e.target === e.currentTarget;
+    // 非触屏(鼠标 / 触控笔)的双击交给浏览器原生 dblclick,别让触屏的标记挡住它
+    if (!isTouch) touchDoubleTapAtRef.current = 0;
+    // 任何一次新的按压都打断「待关闭」:双击的第二下、或中途改做捏合,都不该再关
+    cancelScheduledClose();
+    suppressCloseRef.current = false;
+
+    const res = tracker.down(
+      { id: e.pointerId, x: e.clientX, y: e.clientY, kind: e.pointerType, time: Date.now() },
+      viewRef.current,
+    );
+
+    if (res.mode === 'single') {
+      // 新的一次指针序列:上一次的「拖动过」标记作废
+      draggedRef.current = false;
+      if (pannable) {
+        // 只有放大后才需要平移基准(未放大时 clampPanView 会把偏移归零,平移没有意义)
+        panRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+        if (!isTouch) e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setPanning(true);
+      } else if (isTouch) {
+        // 触屏:即使还没放大也捕获指针,保证手指抬起时一定能收到 pointerup
+        // (触屏的「点空白关闭」与双击判定都靠这一条)
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }
+    }
+
+    if (res.doubleTap) {
+      // 触屏双击(iOS 在 touch-action:none 的元素上不保证派发 dblclick,故自己判定)
+      suppressCloseRef.current = true;
+      touchDoubleTapAtRef.current = Date.now();
+      toggleZoomAt(e.clientX, e.clientY);
+      return;
+    }
+
+    if (res.pinchStarted) {
+      // 第二指落下 → 进入捏合:清掉单指平移的基准(剩下那指若接着平移会跳一下)
+      panRef.current = null;
+      // 捏合也算「拖动过」:在空白处捏一下松手,查看器不能被收尾的那个 click 关掉
+      draggedRef.current = true;
+      pointerPinchRef.current = true;
+      setPanning(true);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
   };
+
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
+    tracker.move({ id: e.pointerId, x: e.clientX, y: e.clientY, kind: e.pointerType, time: Date.now() });
+    if (tracker.mode === 'pinch') {
+      // 捏合:锚点取两指中点(手指按住的那个点在屏幕上不动),
+      // 倍率 = 当前间距 / 起始间距;每帧都从「起始视图」重算,避免增量累积漂移
+      const session = tracker.pinch;
+      const pair = tracker.currentPair();
+      const el = viewportRef.current;
+      if (!session || !pair || session.startDistance <= 0 || !el) return;
+      const b = boxRef.current;
+      const d = dispOf(b);
+      const rect = el.getBoundingClientRect();
+      const ratio = pinchRatio(session.startDistance, pair.distance);
+      const px = pair.mid.x - rect.left - b.w / 2;
+      const py = pair.mid.y - rect.top - b.h / 2;
+      setView(zoomAtPoint(session.startView, session.startZoom * ratio, px, py, d.dw, d.dh, b.w, b.h));
+      return;
+    }
+    if (tracker.mode !== 'single') return;
     const p = panRef.current;
     if (!p || p.id !== e.pointerId) return;
     const b = boxRef.current;
@@ -297,10 +452,27 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
     panRef.current = { id: p.id, x: e.clientX, y: e.clientY };
     setView({ ...v, tx: next.tx, ty: next.ty });
   };
-  const endPan = (): void => {
-    if (!panRef.current) return;
-    panRef.current = null;
-    setPanning(false);
+
+  /**
+   * 指针抬起 / 取消。
+   *
+   * 触屏的「点空白 = 关闭」在这里做(而不是靠 click):要留一个双击窗口,
+   * 否则「双击放大」的第一下就把查看器关掉了。
+   */
+  const endPointer = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const res = tracker.up(e.pointerId);
+    if (res.ended) {
+      panRef.current = null;
+      pointerPinchRef.current = false;
+      setPanning(false);
+    }
+    if (e.pointerType !== 'touch') return;
+    // 点视口空白 = 关闭(与鼠标同义),但延迟一个双击窗口;
+    // 拖过 / 捏过 / 刚双击过 → 不关
+    if (res.wasTap && !res.pinched && !suppressCloseRef.current && downOnEmptyRef.current) {
+      scheduleClose();
+    }
+    suppressCloseRef.current = false;
   };
 
   /**
@@ -309,8 +481,15 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
    * 之后浏览器仍会补一个 click —— 若不拦,拖完图一松手就把查看器关了)。
    * ⚠️ 两条豁免分支都必须 **stopPropagation**:外层 `.ovl-lb` 上的 onClick 也是 onClose,
    * 只 return 不做阻断的话事件继续冒泡,点图片照样会关掉查看器(实测踩中)。
+   *
+   * 触屏另有第三道:触屏的关闭走 `endPointer` 里的**延迟关闭**(要给双击留窗口),
+   * 这里的 click 一律不关 —— 否则双击的第一下就把查看器关了。
    */
   const onViewportClick = (e: React.MouseEvent<HTMLDivElement>): void => {
+    if (lastPointerTypeRef.current === 'touch') {
+      e.stopPropagation();
+      return;
+    }
     if (e.target !== e.currentTarget || draggedRef.current) {
       draggedRef.current = false;
       e.stopPropagation();
@@ -322,17 +501,14 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
   /** 双击:适应 ↔ 2×(以指针为锚点,双击哪里放大哪里) */
   const onDoubleClick = (e: React.MouseEvent<HTMLDivElement>): void => {
     e.stopPropagation();
-    const b = boxRef.current;
-    const d = dispOf(b);
-    const rect = e.currentTarget.getBoundingClientRect();
-    const px = e.clientX - rect.left - b.w / 2;
-    const py = e.clientY - rect.top - b.h / 2;
-    const v = viewRef.current;
-    if (v.zoom > 1.2) {
-      setView(IDENTITY_VIEW);
+    // 触屏双击已经用指针事件判定过了(iOS 不保证派发 dblclick)。
+    // 若浏览器仍然派发了原生 dblclick,这里必须跳过 —— 否则同一次双击会被处理两次
+    // (一次放大到 2×、一次又缩回 1×,用户看到的就是「双击没反应」)
+    if (touchDoubleTapAtRef.current > 0 && Date.now() - touchDoubleTapAtRef.current < 500) {
+      touchDoubleTapAtRef.current = 0;
       return;
     }
-    setView(zoomAtPoint(v, clampZoom(2), px, py, d.dw, d.dh, b.w, b.h));
+    toggleZoomAt(e.clientX, e.clientY);
   };
 
   const atMin = view.zoom <= MIN_ZOOM + 1e-4;
@@ -395,8 +571,8 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
         onDoubleClick={onDoubleClick}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endPan}
-        onPointerCancel={endPan}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
       >
         <img
           ref={imgRef}

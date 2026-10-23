@@ -1191,7 +1191,11 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 /* ── 全屏看图(ImageLightbox):自绘暗底 + 缩放工具条 + 可平移视口
  * 不复用 .ovl —— 它是 grid 居中容器,子元素占不满;这里需要「满屏视口盒 + 浮层控件」。
  * z-index 高于 .ovl:.ovl-lb 可能由 .ovl 内部的图片再打开,必须盖住底层弹层。── */
-.ovl-lb{position:fixed;inset:0;z-index:260;background:var(--scrim-lightbox);overflow:hidden;cursor:zoom-out}
+ /* ⚠️ touch-action:none 必须挂在**覆盖层根**上(不能只挂在 .ovl-lb-viewport):
+   手指落在工具栏 / 暗底边缘上做捏合时,那些区域没有 touch-action:none,
+   浏览器会把它当成页面级捏合缩放 → 整页被放大(而不是放大这张图)。
+   查看器是模态层,层内本来就不该有页面级手势。 */
+.ovl-lb{position:fixed;inset:0;z-index:260;background:var(--scrim-lightbox);overflow:hidden;cursor:zoom-out;touch-action:none}
 .ovl-lb button{font:inherit;cursor:pointer;border:0;background:none;color:inherit;padding:0;text-align:left}
 /* 上下让开关闭钮和底栏,图片在这块区域里居中,而不是按整屏居中后被底栏压住下沿 */
 .ovl-lb-viewport{position:absolute;left:24px;right:24px;top:20px;bottom:78px;display:grid;place-items:center;overflow:hidden;touch-action:none;cursor:zoom-out}
