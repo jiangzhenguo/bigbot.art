@@ -1,6 +1,6 @@
 {
   "name": "bigbotart",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "MIT",
   "description": "BigBotArt — 无限画布的视频/图片生成 Agent(跨端桌面 App,本地优先)",
