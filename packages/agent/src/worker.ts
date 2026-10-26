@@ -11,7 +11,7 @@
  * - cancel: 中止当前 chat(AbortSignal)
  */
 import readline from 'node:readline';
-import type { AgentRequest, AgentResponse, ToolCallRequest, ToolCallResponse } from './protocol.js';
+import type { AgentRequest, AgentResponse, ChatStreamNotification, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { PiChatSession } from './pi-chat.js';
 
@@ -103,7 +103,21 @@ rl.on('line', async (line) => {
       }
       case 'chat': {
         const params = r.params as Parameters<PiChatSession['chat']>[0];
-        const result = await chatSession.chat(params);
+        let streamSeq = 0;
+        const result = await chatSession.chat(params, (event) => {
+          const notification: ChatStreamNotification = {
+            method: 'stream',
+            requestId: r.id,
+            params: {
+              ...event,
+              seq: ++streamSeq,
+              projectId: params.projectId,
+              canvasId: params.canvasId,
+              threadId: params.threadId,
+            },
+          };
+          process.stdout.write(JSON.stringify(notification) + '\n');
+        });
         respond({ id: r.id, result });
         break;
       }

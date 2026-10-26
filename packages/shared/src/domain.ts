@@ -1336,6 +1336,8 @@ export interface AgentChatResponse {
    * 渲染层据此把「发送中」切成「执行中」,而不是继续 await。
    */
   accepted?: boolean;
+  /** 执行体已推送 done/failed;调用方收到该回执时不得再次 settle,避免旧轮终局误伤新一轮 */
+  settledByEvent?: boolean;
   /** assistant 最终回复文本 */
   reply?: string;
   /** 模型思考内容(渲染层折叠展示;不进 recall 记忆) */
@@ -1357,7 +1359,9 @@ export interface AgentEvent {
    * 收到请求即返回 {ok:true, accepted:true},真正的结果经事件推送。
    * 这样长任务(反推提示词等 11 轮 / 5 分钟以上的链路)不再被请求超时误杀成「假失败」。
    */
-  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed' | 'auto-start';
+  kind: 'tool-start' | 'tool-end' | 'thinking' | 'aborted' | 'continuity' | 'done' | 'failed' | 'auto-start' | 'round-start' | 'text-delta' | 'thinking-delta';
+  /** worker 流式通知的稳定 id(requestId:seq);渲染层据此精确去重,不按内容猜重复 token */
+  eventId?: string;
   projectId: string;
   canvasId: string;
   /** 🆕 所属会话;渲染层过滤「事件属于当前展示的会话」,避免切走后旧 done 污染新会话 UI */
@@ -1370,6 +1374,11 @@ export interface AgentEvent {
   issues?: string[];
   /** 自动续跑(auto-start):渲染层据此把面板切入「执行中」并展示说明(如「生成完成 · Agent 自动推进中…」) */
   note?: string;
+  /** 流式模型轮次(round-start)与正文/思考增量(text-delta/thinking-delta) */
+  round?: number;
+  /** 增量所属的 assistant content 块;不同块可交错,渲染层按此序号有序聚合 */
+  contentIndex?: number;
+  delta?: string;
   /** 终局(done):本轮最终结果,字段语义与 AgentChatResponse 一致 */
   final?: AgentChatResponse;
   /** 终局(failed):失败原因(带已完成工具摘要,便于判断画布改动是否已生效) */

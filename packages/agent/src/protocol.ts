@@ -63,6 +63,8 @@ export interface PlanStoryboardResult {
 export interface ChatParams {
   projectId: string;
   canvasId: string;
+  /** 目标会话;流式事件原样带回,避免主进程用「最近上下文」误路由到别的会话 */
+  threadId?: string;
   text: string;
   /** 记忆上下文(主进程组装好发给 worker) */
   context: {
@@ -75,6 +77,23 @@ export interface ChatParams {
   llm?: import('@bigbotart/shared').LlmSource;
 }
 
+/** 一轮 chat 内的模型增量。工具参数不流式执行,仍等完整 assistant 后过现有确认闸。 */
+export type ChatStreamEvent =
+  | { kind: 'round-start'; round: number }
+  | { kind: 'text-delta' | 'thinking-delta'; round: number; contentIndex: number; delta: string };
+
+/** worker → 主进程的流式通知;requestId 对应触发它的 chat RPC,seq 用于界面精确去重。 */
+export interface ChatStreamNotification {
+  method: 'stream';
+  requestId: number;
+  params: ChatStreamEvent & {
+    seq: number;
+    projectId: string;
+    canvasId: string;
+    threadId?: string;
+  };
+}
+
 /** chat 期间 worker → 主进程的工具调用请求(反向 RPC) */
 export interface ToolCallRequest {
   id: number;
@@ -85,6 +104,8 @@ export interface ToolCallRequest {
     /** 会话上下文:避免并发 chat 串写全局 currentToolCtx */
     projectId: string;
     canvasId: string;
+    /** 与 chat 一致的会话路由;工具事件不再依赖主进程的全局「最近上下文」 */
+    threadId?: string;
   };
 }
 

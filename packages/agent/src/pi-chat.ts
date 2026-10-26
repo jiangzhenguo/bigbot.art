@@ -14,7 +14,8 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import type { LlmSource, LlmProtocol, AskOption } from '@bigbotart/shared';
 import { PLAN_APPROVE_LABEL, PLAN_REVISE_LABEL, withOpenCodeGoHeaders } from '@bigbotart/shared';
-import type { ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
+import type { ChatParams, ChatResult, ChatStreamEvent, ToolCallRequest, ToolCallResponse } from './protocol.js';
+import { ThinkTagStreamParser } from './think-stream.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
 import { fetchImageNeedsConfirm, userCorpusFromChat } from './web-gate.js';
@@ -844,7 +845,7 @@ export class PiChatSession {
     this.abort?.abort();
   }
 
-  async chat(params: ChatParams): Promise<ChatResult> {
+  async chat(params: ChatParams, onStream?: (event: ChatStreamEvent) => void): Promise<ChatResult> {
     const ep = this.planner['resolveEndpoint'](params.llm);
     this.abort = new AbortController();
     const signal = this.abort.signal;
@@ -969,13 +970,15 @@ export class PiChatSession {
       // 首轮推理可以长达 30-60 秒(本地 35B 模型),若只在工具调用时才报活,
       // 任务会在真正开始前就被看门狗误杀(实测踩过)。
       this.onRound?.(round);
+      // 新一轮/纠错重试共用一个界面草稿:round-start 让渲染层清空上一段未收尾文本。
+      onStream?.({ kind: 'round-start', round });
       const context: Context = { systemPrompt: params.context.systemPrompt, messages, tools };
       let assistant: AssistantMessage;
       // 轮内心跳:推理期间定时报活(见 onTick 说明)。只包住 LLM 调用这一段 ——
       // 工具执行本身已由主进程的 tool 请求续期,不需要重复计时。
       const tick = this.onTick ? setInterval(() => this.onTick?.(round), LLM_HEARTBEAT_MS) : null;
       try {
-        assistant = await models.complete(models.getModel('bigbotart-llm', ep.modelId)!, context, {
+        const llmOptions = {
           // 输出预算:见 LLM_MAX_TOKENS(2026-09-28 由 12000 调大到 32000)
           maxTokens: LLM_MAX_TOKENS,
           // Kimi k3 等端点只允许 temperature=1:撞上后不再下发该字段(走端点默认)
@@ -984,7 +987,48 @@ export class PiChatSession {
           signal,
           // OpenCode Go 强制 x-opencode-session(缺则 400 MissingSessionID);canvasId 作会话稳定 id
           headers: withOpenCodeGoHeaders(ep.baseUrl, params.canvasId),
-        });
+        };
+        const model = models.getModel('bigbotart-llm', ep.modelId)!;
+        if (onStream && typeof models.stream === 'function') {
+          // pi-ai 的 complete() 本身就是 stream().result();这里改为显式消费同一流,
+          // 把增量送到 UI,同时仍以最终 AssistantMessage 跑工具与所有诚实性闸门。
+          const stream = models.stream(model, context, llmOptions);
+          const textParsers = new Map<number, ThinkTagStreamParser>();
+          const emit = (channel: 'text' | 'thinking', contentIndex: number, delta: string) => {
+            if (delta) onStream({ kind: channel === 'text' ? 'text-delta' : 'thinking-delta', round, contentIndex, delta });
+          };
+          const flushText = (contentIndex: number) => {
+            const parser = textParsers.get(contentIndex);
+            if (!parser) return;
+            for (const part of parser.flush()) emit(part.channel, contentIndex, part.delta);
+            textParsers.delete(contentIndex);
+          };
+          for await (const event of stream) {
+            // abort 后仍把流 drain 到 result(),但不再把缓冲里的旧 token 推回界面。
+            if (signal.aborted) continue;
+            if (event.type === 'text_delta') {
+              let parser = textParsers.get(event.contentIndex);
+              if (!parser) {
+                parser = new ThinkTagStreamParser();
+                textParsers.set(event.contentIndex, parser);
+              }
+              for (const part of parser.push(event.delta)) emit(part.channel, event.contentIndex, part.delta);
+            } else if (event.type === 'thinking_delta') {
+              emit('thinking', event.contentIndex, event.delta);
+            } else if (event.type === 'text_end') {
+              flushText(event.contentIndex);
+            }
+          }
+          assistant = await stream.result();
+          // 流异常/协议降级时不补发 parser 里的半个标签或失败 attempt 残余;
+          // 正常但未闭合的 <think> 仍按 splitThink 口径 flush 到思考区。
+          if (!signal.aborted && assistant.stopReason !== 'error' && !assistant.errorMessage) {
+            for (const contentIndex of [...textParsers.keys()]) flushText(contentIndex);
+          }
+        } else {
+          // 无监听器/旧测试替身的兼容路径;真实 worker 总是走上面的流式分支。
+          assistant = await models.complete(model, context, llmOptions);
+        }
       } catch (e) {
         if (signal.aborted) return { reply: '', toolCalls, aborted: true };
         // 端点拒绝含点号的 function 名(抛异常形态)→ 切换短横线别名重试本轮
@@ -1021,6 +1065,8 @@ export class PiChatSession {
       } finally {
         if (tick) clearInterval(tick);
       }
+      // 取消可能与流完成同时发生:即使 provider 已给 stop,也不能再进入工具处理。
+      if (signal.aborted) return { reply: '', toolCalls, aborted: true };
       if (assistant.stopReason === 'aborted') return { reply: '', toolCalls, aborted: true };
       if (assistant.stopReason === 'error' || assistant.errorMessage) {
         const errMsg = assistant.errorMessage ?? String(assistant.stopReason);
@@ -1335,13 +1381,14 @@ export class PiChatSession {
           const req: ToolCallRequest = {
             id: ++this.toolCallSeq,
             method: 'tool',
-            params: { tool: 'plan.present', args: planArgs, projectId: params.projectId, canvasId: params.canvasId },
+            params: { tool: 'plan.present', args: planArgs, projectId: params.projectId, canvasId: params.canvasId, threadId: params.threadId },
           };
           const res = this.onToolCall
             ? await this.onToolCall(req)
             : { id: req.id, error: { code: 'NO_BRIDGE', message: '工具桥未注入' } };
           const tr = res.result ?? { ok: false, result: res.error?.message ?? '工具调用失败' };
           pushPlanResult(tr.ok, tr.result);
+          if (signal.aborted) return { reply: '', toolCalls, aborted: true };
           if (tr.ok) {
             this.lastAskQuestion = markdown;
             return { reply: markdown, thinking: collectThinking(), toolCalls, ask: planReviewAsk(markdown) };
@@ -1392,6 +1439,7 @@ export class PiChatSession {
       // plan.present 若已把 assistant 写入消息,这里不能再推一次。
       if (!planConsumedAssistant) messages.push(assistant);
       for (const call of calls) {
+        if (signal.aborted) return { reply: '', toolCalls, aborted: true };
         const args = (call.arguments ?? {}) as Record<string, unknown>;
         const req: ToolCallRequest = {
           id: ++this.toolCallSeq,
@@ -1401,6 +1449,7 @@ export class PiChatSession {
             args,
             projectId: params.projectId,
             canvasId: params.canvasId,
+            threadId: params.threadId,
           },
         };
         let res: ToolCallResponse;
@@ -1415,6 +1464,8 @@ export class PiChatSession {
         if (!tr.ok) lastRoundFailures.push({ name: call.name, result: String(tr.result ?? '工具调用失败') });
         // 提交成功 → 进入「收尾期」,后续只读轮询开始计数(见上方轮询抑制闸)
         if (call.name === 'engine.submit' && tr.ok) submitted = true;
+        // 当前工具的结果已经真实产生,保留在 toolCalls 中;但取消后绝不再执行后续调用。
+        if (signal.aborted) return { reply: '', toolCalls, aborted: true };
         // 工具结果文本:结构化 nodeId 必须拼进正文(见 buildToolResultText 注释)。
         const resultText = buildToolResultText(tr.result, tr.nodeId, tr.ok);
         // toolResult 追加进 messages(OpenAI 协议)

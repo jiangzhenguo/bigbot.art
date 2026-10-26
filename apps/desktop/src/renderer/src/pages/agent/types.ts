@@ -68,6 +68,10 @@ export interface ChatMsg {
   error?: { title: string; detail: string; retryText?: string };
   /** loading 占位(发送后到回复前) */
   loading?: boolean;
+  /** 本轮正在流式生成的临时草稿;终局时由权威回复替换,不进入历史记忆 */
+  streaming?: boolean;
+  /** 流式草稿的分块真源(contentIndex → 已收文本);不同块交错时按块号排序,不按到达顺序误拼 */
+  streamSegments?: { text: Record<number, string>; thinking: Record<number, string> };
 }
 
 /** 聊天内联媒体(节点产物 / 附件解析结果;url 为 bba-asset:// 或 bba-output:// 可显示地址) */

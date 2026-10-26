@@ -54,7 +54,7 @@ const TOOL_ACTIVITY_RE = /^已执行\s+\S/;
 export function isCopyableReply(m: ChatMsg): boolean {
   const text = m.text?.trim();
   if (!text) return false;
-  if (m.kind !== 'agent') return false;
+  if (m.kind !== 'agent' || m.streaming) return false;
   if (m.toolRuns || m.ask || m.error || m.check || m.plan || m.skill || m.toolCall) return false;
   if (m.odId === 'agent-reply') return true;
   if (m.odId) return false;
@@ -219,9 +219,10 @@ export function ChatMessageList({
           );
         }
         return (
-          <div className="msg-agent" key={m.id} data-od-id={m.odId}>
+          <div className="msg-agent" key={m.id} data-od-id={m.odId} data-streaming={m.streaming ? 'true' : undefined}>
             {m.thinking ? <ThinkingBlock thinking={m.thinking} /> : null}
             {m.text ? <MarkdownText text={m.text} /> : null}
+            {m.streaming ? <span className="spin sm" aria-label="正在流式生成" style={{ marginLeft: 6 }} /> : null}
             {/* 每轮最终回答常显复制(Markdown 原文);已执行 xxx / 工具卡不进这里 */}
             {isCopyableReply(m) ? (
               <div className="msg-agent-actions">

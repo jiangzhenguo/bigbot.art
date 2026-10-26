@@ -51,6 +51,10 @@ describe('isCopyableReply', () => {
     ).toBe(false);
   });
 
+  it('流式临时草稿 → 不可复制(终局权威回复才开放复制)', () => {
+    expect(isCopyableReply(msg({ id: 7, kind: 'agent', streaming: true, text: '尚未收尾' }))).toBe(false);
+  });
+
   it('用户 / 系统不算 agent-reply(用户气泡另挂复制)', () => {
     expect(isCopyableReply(msg({ id: 5, kind: 'user', text: '生成一个美女' }))).toBe(false);
     expect(isCopyableReply(msg({ id: 6, kind: 'sys', text: '已执行 vision.caption' }))).toBe(false);

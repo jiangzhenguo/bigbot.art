@@ -406,7 +406,7 @@ agent.toolExecutor = async (req) => {
   const ctx = {
     projectId: req.params.projectId || currentToolCtx?.projectId || '',
     canvasId: req.params.canvasId || currentToolCtx?.canvasId || '',
-    threadId: currentToolCtx?.threadId,
+    threadId: req.params.threadId || currentToolCtx?.threadId,
   };
   const argsBrief = JSON.stringify(req.params.args ?? {}).slice(0, 120);
   logger.log('info', `agent.tool → ${req.params.tool}(${argsBrief})`);
@@ -964,6 +964,7 @@ async function executeAgentChat(opts: {
     const result = await agent.chat({
       projectId: opts.projectId,
       canvasId: opts.canvasId,
+      threadId,
       text: textForModel + attNote + selNote,
       context: ctx,
       contextWindow,
@@ -1019,7 +1020,8 @@ async function executeAgentChat(opts: {
     hub.publish('agent-event', {
       kind: 'done', projectId: opts.projectId, canvasId: opts.canvasId, threadId, final,
     } satisfies AgentEvent);
-    return final;
+    // done 已承担终局;IPC 回执只用于调用方取结果,渲染层不得用它再次 settle。
+    return { ...final, settledByEvent: true };
   } catch (e) {
     // 失败也要带上「已完成的工具」摘要:长任务常在收尾阶段超时,而画布改动其实已落盘,
     // 只报一句「无响应」会让用户以为全丢了
@@ -1032,7 +1034,7 @@ async function executeAgentChat(opts: {
     hub.publish('agent-event', {
       kind: 'failed', projectId: opts.projectId, canvasId: opts.canvasId, threadId, error: msg,
     } satisfies AgentEvent);
-    return { ok: false, error: msg };
+    return { ok: false, error: msg, settledByEvent: true };
   }
   } finally { // 占坑覆盖解析端点到对话结束;LLM 不可用的提前 return 也走这里放锁
     inFlightChats.delete(flightKey);

@@ -14,6 +14,7 @@ import type { AgentChatResponse, Asset, ChatThreadListItem, LlmSource } from '@b
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
 import { restoreMsgsFromRecall } from './restore-msgs';
+import { appendStreamingDraft, clearStreamingDraft, rememberAgentEvent, resetStreamingDraft, shouldSettleAgentResponse } from './stream-state';
 import { llmDisplayName } from './llm-display';
 
 /** 错误卡标题:模板类错误(本地模型 Prompt Template 损坏,pi-chat 已附修复指引)/ 不可达 / 其他对话失败 */
@@ -82,6 +83,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   const msgId = useRef(100);
   /** 本轮工具聚合卡(ToolRunCard)的消息 id;一轮对话一张卡,SSE 实时更新,回复到达后对账 */
   const liveToolCardId = useRef<number | null>(null);
+  /** 本轮模型流式草稿的消息 id;round-start 重置,done/failed 时由权威结果替换 */
+  const liveStreamMsgId = useRef<number | null>(null);
   /**
    * 本轮是否已收尾(settleChat 幂等闸)。
    * `done`/`failed` 终局事件在 dev StrictMode 或 effect 重订阅竞态下可能被投递两次,
@@ -190,6 +193,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
 
   /* 切换项目/画布:清空对话区与会话态,真实历史由恢复 effect 填充 */
   useEffect(() => {
+    liveStreamMsgId.current = null;
     setMsgs([]);
     setThreads([]);
     setActiveThreadId(null);
@@ -209,16 +213,21 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   }, [projectId, canvasId]);
 
   const loadThreadMessages = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, opts?: { prepend?: boolean }) => {
       if (!projectId) return;
+      const prepend = opts?.prepend ?? false;
+      if (!prepend) liveStreamMsgId.current = null;
       try {
         const recall = await window.bigbotart.chatThreadMessages(projectId, threadId);
+        // 慢回执不得覆盖已经切走的会话;auto-start 的 prepend 也不得覆盖实时草稿/终局。
+        if (activeThreadIdRef.current !== threadId) return;
         const restored = restoreMsgsFromRecall(recall, () => ++msgId.current);
-        setMsgs(restored);
+        if (prepend) setMsgs((current) => [...restored, ...current]);
+        else setMsgs(restored);
         pinToBottom.current = true;
       } catch (e) {
         console.error('恢复会话消息失败', e);
-        setMsgs([]);
+        if (!prepend) setMsgs([]);
       }
     },
     [projectId],
@@ -254,6 +263,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       toastMsg('请先进入一个项目画布');
       return;
     }
+    liveStreamMsgId.current = null;
     setMsgs([]);
     pinToBottom.current = true;
     void window.bigbotart
@@ -372,8 +382,9 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         inputRef.current.value = '';
         autoGrow(inputRef.current);
       }
-      // 新一轮开始:重置聚合卡指针(SSE tool-start 会建一张新卡)
+      // 新一轮开始:重置聚合卡与流式草稿指针(SSE tool-start / text-delta 会建新卡)
       liveToolCardId.current = null;
+      liveStreamMsgId.current = null;
       settleGuard.current = false; // 新一轮:打开收尾闸(见 settleGuard 声明)
       const myGen = ++roundGen.current;
       // loading 气泡
@@ -402,6 +413,9 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
             setMsgs((m) => m.map((x) => (x.id === loadingId ? { ...x, text: '执行中…' } : x)));
             return;
           }
+          // 主进程已推 done/failed 时只走事件终局;否则旧 Promise 先收尾、旧 done 后到,
+          // 会在新一轮已开始时误清新草稿/loading。只有未推事件的同步失败才用回执收尾。
+          if (!shouldSettleAgentResponse(res)) return;
           settleRef.current(res);
         })
         .catch((e) => {
@@ -411,9 +425,10 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           if (settleGuard.current) return;
           settleGuard.current = true;
           liveToolCardId.current = null;
+          liveStreamMsgId.current = null;
           const detail = e instanceof Error ? e.message : String(e);
           setMsgs((m) => [
-            ...m.filter((x) => x.id !== loadingId),
+            ...clearStreamingDraft(m).filter((x) => x.id !== loadingId),
             { id: ++msgId.current, kind: 'agent', error: { title: errorCardTitle(detail), detail, retryText: v } },
           ]);
           // 请求本身失败(IPC 断开等)是终局,必须解锁;正常路径的解锁在 settleChat 的 done 分支
@@ -447,11 +462,10 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   };
 
   /**
-   * 终局收尾(批次1 任务化):把 AgentChatResponse 落成消息卡片。
-   * 由 agentChat 的 Promise 返回值与 agent-event 的 done 事件共用:
-   *  - accepted 回执(仅 {ok:true,accepted:true})不触发收尾,只把 loading 文案切成执行中
-   *  - 真正结果(带 reply/toolCalls/ask)才收尾
-   * 这样长任务不再依赖请求不超时 —— 结果从事件流回来,UI 全程有工具卡实时反馈。
+   * 终局收尾:把 AgentChatResponse 落成消息卡片。
+   * done/failed 事件是正常执行的唯一终局;agentChat Promise 只处理未推事件的同步失败
+   * (主进程回执 settledByEvent=true 时绝不再走这里,防止旧轮双终局误伤新轮)。
+   * accepted 回执仅切「执行中」,不触发收尾。
    *
    * ⚠️ 幂等保护:`done` 事件在 dev StrictMode(或 effect 重订阅竞态)下可能被投递两次,
    * 若不加闸,第二次会因 liveToolCardId 已被清空而**再补一张卡**(真实事故:识别提示词
@@ -463,6 +477,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       settleGuard.current = true;
       const liveId = liveToolCardId.current;
       liveToolCardId.current = null;
+      liveStreamMsgId.current = null;
       const preempting = preemptingRef.current;
       const noted = interruptNoted.current;
       interruptNoted.current = false;
@@ -476,7 +491,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
             }
           : null;
       setMsgs((m) => {
-        const rest = m.filter((x) => !x.loading);
+        const rest = clearStreamingDraft(m).filter((x) => !x.loading);
         const out: ChatMsg[] = [...rest];
         // 工具调用聚合卡:res.toolCalls 为权威列表——实时卡已存在则原地对账替换(避免与 SSE 行重复),否则补一张
         if (res.toolCalls?.length) {
@@ -620,12 +635,11 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   useEffect(() => {
     const off = window.bigbotart.onAgentEvent((ev) => {
       // 事件去重:dev StrictMode 双挂载 / effect 重订阅竞态下,同一事件可能被投递两次。
-      // 同一毫秒内 kind+toolName+nodeId 完全相同的事件视为重复(事件本身没有 id,
-      // 用「时间片 + 工具名」做轻量指纹;真实事件间隔远大于 1ms,不会误伤)。
-      const sig = `${ev.kind}|${ev.toolName ?? ''}|${ev.nodeId ?? ''}|${Math.floor(Date.now() / 2)}`;
-      if (seenEvents.current.has(sig)) return;
-      seenEvents.current.add(sig);
-      if (seenEvents.current.size > 200) seenEvents.current.clear(); // 防无限增长
+      // 工具/终局沿用旧的轻量指纹;流式增量必须按 requestId:seq 精确去重。
+      // 旧指纹若用于 delta,会把同一 2ms 内的不同 token 全误判成重复。
+      const isStreamEvent = ev.kind === 'round-start' || ev.kind === 'text-delta' || ev.kind === 'thinking-delta';
+      const sig = ev.eventId ?? (isStreamEvent ? null : `${ev.kind}|${ev.toolName ?? ''}|${ev.nodeId ?? ''}|${Math.floor(Date.now() / 2)}`);
+      if (sig && !rememberAgentEvent(seenEvents.current, sig)) return;
       if (ev.projectId && projectId && ev.projectId !== projectId) return;
       if (ev.canvasId && canvasId && ev.canvasId !== canvasId) return;
       // 多会话:事件带 threadId 时只收当前展示会话的(避免切走后旧 done 污染新会话 UI)。
@@ -638,7 +652,18 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       ) {
         return;
       }
-      if (ev.kind === 'tool-start' && ev.toolName) {
+      if (ev.kind === 'round-start') {
+        // 每次 models.stream 调用都会发(包括同 round 的协议/参数纠错重试),因此无条件重置,
+        // 不依赖 round 数字变化;这样被驳回的 attempt 不会拼进下一次输出。
+        const liveId = liveStreamMsgId.current;
+        if (liveId != null) setMsgs((m) => resetStreamingDraft(m, liveId));
+      } else if ((ev.kind === 'text-delta' || ev.kind === 'thinking-delta') && ev.delta) {
+        const liveId = liveStreamMsgId.current ?? ++msgId.current;
+        liveStreamMsgId.current = liveId;
+        const channel = ev.kind === 'text-delta' ? 'text' : 'thinking';
+        const delta = ev.delta;
+        setMsgs((m) => appendStreamingDraft(m, liveId, channel, delta, ev.contentIndex ?? 0));
+      } else if (ev.kind === 'tool-start' && ev.toolName) {
         const row: ToolRun = { name: ev.toolName, args: ev.toolArgs ?? {}, status: 'running' };
         // StrictMode 下 updater 双跑:id 与 ref 在 updater 外一次分配,避免重复建卡
         const liveId = liveToolCardId.current;
@@ -719,11 +744,12 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           roundGen.current += 1;
           settleGuard.current = false;
           liveToolCardId.current = null;
+          liveStreamMsgId.current = null;
           pinToBottom.current = true;
           const sysId = ++msgId.current;
           const loadId = ++msgId.current;
           setMsgs((m) => [
-            ...m.filter((x) => !x.loading),
+            ...clearStreamingDraft(m).filter((x) => !x.loading),
             { id: sysId, kind: 'sys', text: ev.note || '⚙️ 生成完成 · Agent 自动推进任务链…' },
             { id: loadId, kind: 'sys', loading: true, text: '思考中…' },
           ]);
@@ -734,10 +760,13 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         if (ev.threadId && ev.threadId !== activeThreadIdRef.current) {
           setActiveThreadId(ev.threadId);
           activeThreadIdRef.current = ev.threadId;
-          void loadThreadMessages(ev.threadId).then(() => {
+          // 先同步建立 auto round,后续 delta/done 才有正确收尾闸;历史恢复只 prepend,
+          // 不再等待恢复后才 beginAuto(旧顺序会覆盖实时事件并卡死 busy)。
+          setMsgs([]);
+          beginAuto();
+          void loadThreadMessages(ev.threadId, { prepend: true }).then(() => {
             void refreshThreads();
             toastMsg('已切回生成完成的对话继续');
-            beginAuto();
           });
         } else {
           beginAuto();
@@ -765,8 +794,9 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         settleGuard.current = true;
         const detail = ev.error ?? '未知错误';
         liveToolCardId.current = null;
+        liveStreamMsgId.current = null;
         setMsgs((m) => [
-          ...m
+          ...clearStreamingDraft(m)
             .filter((x) => !x.loading)
             .map((x) =>
               x.toolRuns?.some((r) => r.status === 'running')
@@ -931,6 +961,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         toastMsg('当前已是空会话 · 直接输入即可');
         return;
       }
+      liveStreamMsgId.current = null;
       setMsgs([]);
       pinToBottom.current = true;
       await refreshThreads();

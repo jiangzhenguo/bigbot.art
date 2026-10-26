@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, sep } from 'node:path';
 import type { AgentProcessState, LlmSource, AgentEvent } from '@bigbotart/shared';
-import type { AgentRequest, AgentResponse, PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult, ChatParams, ChatResult, ToolCallRequest, ToolCallResponse } from './protocol.js';
+import type { AgentRequest, AgentResponse, PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult, ChatParams, ChatResult, ChatStreamNotification, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { deterministicPlanner, planStoryboardDeterministic } from './plan.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -116,7 +116,17 @@ export class AgentManager {
     const rl = (await import('node:readline')).createInterface({ input: child.stdout!, terminal: false });
     rl.on('line', (line) => {
       try {
-        const msg = JSON.parse(line) as AgentResponse | ToolCallRequest;
+        const msg = JSON.parse(line) as AgentResponse | ToolCallRequest | ChatStreamNotification;
+        // 模型正文/思考增量:按 chat requestId 路由并生成稳定 eventId。
+        // 已超时/已结束的请求不许再把迟到草稿推回界面;在飞请求则用 token 活动续期看门狗。
+        if ('method' in msg && msg.method === 'stream') {
+          const notice = msg as ChatStreamNotification;
+          if (!this.pending.has(notice.requestId)) return;
+          this.bumpAllHeartbeats();
+          const { seq, ...event } = notice.params;
+          this.onEvent?.({ ...event, eventId: `${notice.requestId}:${seq}` });
+          return;
+        }
         // worker 心跳(批次1):每轮循环开始都发,给静默看门狗续期 ——
         // 覆盖「首轮 LLM 推理」这段没有工具活动的空窗期(否则任务会在真正开始前被误杀)
         if ('method' in msg && (msg as { method?: string }).method === 'heartbeat') {
@@ -220,6 +230,8 @@ export class AgentManager {
         kind: 'tool-start',
         projectId: req.params.projectId,
         canvasId: req.params.canvasId,
+        threadId: req.params.threadId,
+        eventId: `tool:${req.id}:start`,
         toolName: req.params.tool,
         toolArgs: req.params.args,
       });
@@ -237,6 +249,8 @@ export class AgentManager {
         kind: 'tool-end',
         projectId: req.params.projectId,
         canvasId: req.params.canvasId,
+        threadId: req.params.threadId,
+        eventId: `tool:${req.id}:end`,
         toolName: req.params.tool,
         toolArgs: req.params.args,
         ok: res.result?.ok,
