@@ -368,7 +368,12 @@ export function parseH3Version(info: string): string | undefined {
 export function h3ChildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const precision = base.BIGBOTART_H3_VAE_PRECISION?.trim();
   if (!precision) return base;
-  return { ...base, H3_VAE_PRECISION: precision };
+  // 逃生口只承认文档化的 f32;其他非空值不透传,避免拼写错误悄悄改变引擎行为。
+  if (precision !== 'f32') {
+    console.warn(`[h3] 忽略非法 BIGBOTART_H3_VAE_PRECISION=${JSON.stringify(precision)}(仅支持 f32)`);
+    return base;
+  }
+  return { ...base, H3_VAE_PRECISION: 'f32' };
 }
 
 function runAndCapture(cmd: string, args: string[], timeoutMs: number, cwd?: string): Promise<string> {

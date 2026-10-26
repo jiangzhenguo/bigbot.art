@@ -18,6 +18,7 @@ import {
   VIDEO_ASPECTS,
   VIDEO_ASPECT_LABEL,
   VIDEO_TIERS,
+  VIDEO_TIER_PRESETS,
   SHOT_SIZES,
   fitImageSizeToGrid,
   classifyAspect,
@@ -241,6 +242,14 @@ describe('⑤ 事故回归:弹层中文档位标签必须能查到尺寸(否则�
         const line = resLine(a, label);
         expect(line, `${label}/${a} 提示行未反映真实尺寸`).toContain(`${s.width}×${s.height}`);
       }
+    }
+  });
+
+  it('resLine 的 ETA 与 shared VIDEO_TIER_PRESETS 完全一致(不再维护第三份表)', () => {
+    for (const tier of VIDEO_TIERS) {
+      const preset = VIDEO_TIER_PRESETS[tier];
+      expect(resLine('16:9', preset.label)).toContain(`预计 ${preset.eta}`);
+      expect(resLine('16:9', tier)).toContain(`预计 ${preset.eta}`);
     }
   });
 });

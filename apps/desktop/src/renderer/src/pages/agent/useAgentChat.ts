@@ -39,6 +39,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   /** 底部固定任务面板：真源是画布记忆，不从聊天工具卡反推。 */
   const [todos, setTodos] = useState<AgentTodoItem[]>([]);
+  /** 读取失败时清空旧清单并显示错误,不把陈旧进度当成当前状态。 */
+  const [todoError, setTodoError] = useState<string | null>(null);
   const todoRefreshSeq = useRef(0);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -211,19 +213,26 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     const seq = ++todoRefreshSeq.current;
     if (!projectId || !canvasId) {
       setTodos([]);
+      setTodoError(null);
       return;
     }
     try {
       const mem = await window.bigbotart.memoryGet(projectId);
       if (seq !== todoRefreshSeq.current) return;
       setTodos([...(mem.canvasMemory[canvasId]?.todos ?? [])]);
+      setTodoError(null);
     } catch (e) {
-      if (seq === todoRefreshSeq.current) console.error('读取画布任务清单失败', e);
+      if (seq === todoRefreshSeq.current) {
+        setTodos([]);
+        setTodoError('任务清单读取失败,请重试');
+        console.error('读取画布任务清单失败', e);
+      }
     }
   }, [projectId, canvasId]);
 
   useEffect(() => {
     setTodos([]);
+    setTodoError(null);
     void refreshTodos();
     return () => {
       todoRefreshSeq.current += 1;
@@ -1042,6 +1051,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   return {
     msgs,
     todos,
+    todoError,
     sending,
     /** 有一轮对话还没收尾(打断之后、worker 停下之前也算) */
     agentBusy,

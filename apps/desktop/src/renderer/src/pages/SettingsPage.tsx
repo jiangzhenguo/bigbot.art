@@ -2373,7 +2373,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                         )}
                       </div>
                       {p.exists ? (
-                        <span className="badge ok">{t('就绪')}</span>
+                        <span className="badge ok">{p.targets?.length ? `${t('就绪')} · ${p.targets.join(' + ')}` : t('就绪')}</span>
                       ) : isStyleLike && st?.buildable ? (
                         building ? (
                           <button className="btn btn-s btn-sm" onClick={() => void window.bigbotart.styleModelCancel()}>

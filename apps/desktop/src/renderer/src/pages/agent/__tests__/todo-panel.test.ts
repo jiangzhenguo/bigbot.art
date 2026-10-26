@@ -18,10 +18,18 @@ const TODO_RUN: ToolRun = {
   result: '任务清单已更新:待办 0,进行中 1,已完成 0。',
 };
 
-function renderView(msgs: ChatMsg[], todos: AgentTodoItem[]): string {
+const FAILED_TODO_RUN: ToolRun = {
+  name: 'todo.write',
+  args: { todos: [{ content: '', status: 'in_progress' }] },
+  status: 'error',
+  result: '任务内容不能为空',
+};
+
+function renderView(msgs: ChatMsg[], todos: AgentTodoItem[], todoError: string | null = null): string {
   const chat = {
     msgs,
     todos,
+    todoError,
     send: () => true,
     askPick: () => {},
     askReset: () => {},
@@ -47,6 +55,12 @@ describe('todo 展示分流', () => {
   it('只过滤 todo.write，保留其他工具行', () => {
     const vision: ToolRun = { name: 'vision.caption', args: { nodeId: 'n1' }, status: 'success' };
     expect(withoutTodoToolRuns([TODO_RUN, vision])).toEqual([vision]);
+  });
+
+  it('成功 todo.write 才摘到固定面板；失败/运行中行与其他工具一样保留', () => {
+    const running: ToolRun = { name: 'todo.write', args: {}, status: 'running' };
+    const vision: ToolRun = { name: 'vision.caption', args: { nodeId: 'n1' }, status: 'success' };
+    expect(withoutTodoToolRuns([TODO_RUN, FAILED_TODO_RUN, running, vision])).toEqual([FAILED_TODO_RUN, running, vision]);
   });
 
   it('识别主进程写入 recall 的任务清单系统摘要', () => {
@@ -92,6 +106,20 @@ describe('AgentChatView · 固定任务进度', () => {
     expect(text).not.toContain('已更新任务清单');
   });
 
+  it('失败 todo.write 的新旧工具记录都可见，不被固定面板吞掉', () => {
+    const html = renderView(
+      [
+        { id: 1, kind: 'agent', toolRuns: [FAILED_TODO_RUN] },
+        { id: 2, kind: 'agent', toolCall: FAILED_TODO_RUN },
+      ],
+      [],
+    );
+    const text = textOf(html);
+    expect(html).toContain('data-od-id="agent-tools"');
+    expect(text).toContain('todo.write');
+    expect(text).toContain('任务内容不能为空');
+  });
+
   it('只有 todo 的旧/新工具记录与摘要全部隐藏；空清单不占底部空间', () => {
     const html = renderView(
       [
@@ -105,5 +133,13 @@ describe('AgentChatView · 固定任务进度', () => {
     expect(html).not.toContain('data-od-id="agent-tools"');
     expect(html).not.toContain('todo.write');
     expect(html).not.toContain('已清空任务清单');
+  });
+
+  it('读取失败时显示错误区,不继续展示旧任务清单', () => {
+    const html = renderView([], [{ content: '陈旧任务', status: 'completed' }], '任务清单读取失败,请重试');
+    expect(html).toContain('data-od-id="agent-todo-error"');
+    expect(html).toContain('role="alert"');
+    expect(textOf(html)).toContain('任务清单读取失败');
+    expect(textOf(html)).not.toContain('陈旧任务');
   });
 });

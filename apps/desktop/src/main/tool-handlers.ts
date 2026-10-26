@@ -55,7 +55,7 @@ import type { SkillStore } from './skills';
 import type { ExportService } from './export';
 import { resolveExportFile } from './export';
 import type { RenderQueue } from './render-queue';
-import type { AccelStore } from './lora';
+import { requiredH3Transformer, type AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
 import { unlinkSync } from 'node:fs';
@@ -1657,11 +1657,13 @@ export class ToolHandlers {
        * 这里补齐,与 index.ts 的 submit-render 同口径、同报错文案。 */
       const accelReq = submitParams.accel as { enabled?: boolean; packId?: string; steps?: number } | undefined;
       if (accelReq?.enabled && !isImage) {
-        const resolved = this.accel?.resolveAccel(accelReq) ?? null;
+        const target = requiredH3Transformer(submitParams, references);
+        const resolved = this.accel?.resolveAccel(accelReq, target) ?? null;
         if (!resolved) {
           return {
             ok: false,
-            result: '模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或先用 canvas.update_node 关闭该节点的 data.accel',
+            result: this.accel?.unavailableReason?.(accelReq, target)
+              ?? '模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或先用 canvas.update_node 关闭该节点的 data.accel',
           };
         }
         submitParams.modelDir = resolved.modelDir;

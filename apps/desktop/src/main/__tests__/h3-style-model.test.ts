@@ -252,7 +252,7 @@ describe('buildLocal · 本地单 LoRA 直接安装', () => {
     const outDir = join(H3_ROOT, 'MiniMax-H3-custom-fl2va');
     rmSync(outDir, { recursive: true, force: true });
     const b = new H3StyleModelBuilder(() => {});
-    const r = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'FL2VA' });
+    const r = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-custom-fl2va', loraPath: lora, target: 'FL2VA' });
     expect(r).toEqual({ ok: true, outDir });
     expect(existsSync(join(outDir, 'FL2VA', 'model_index.json'))).toBe(true);
     expect(readFileSync(join(outDir, 'FL2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-fl2va.safetensors');
@@ -267,7 +267,7 @@ describe('buildLocal · 本地单 LoRA 直接安装', () => {
     const outDir = join(H3_ROOT, 'MiniMax-H3-custom-both');
     rmSync(outDir, { recursive: true, force: true });
     const b = new H3StyleModelBuilder(() => {});
-    const r = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'both' });
+    const r = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-custom-both', loraPath: lora, target: 'both' });
     expect(r.ok).toBe(true);
     expect(readFileSync(join(outDir, 'FL2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-both.safetensors');
     expect(readFileSync(join(outDir, 'Ref2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-both.safetensors');
@@ -282,7 +282,7 @@ describe('buildLocal · 本地单 LoRA 直接安装', () => {
     mkdirSync(outDir, { recursive: true });
     writeFileSync(join(outDir, 'keep.txt'), 'do-not-delete');
     const b = new H3StyleModelBuilder(() => {});
-    const refused = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'FL2VA' });
+    const refused = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-existing', loraPath: lora, target: 'FL2VA' });
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain('未覆盖');
     expect(readFileSync(join(outDir, 'keep.txt'), 'utf-8')).toBe('do-not-delete');
@@ -291,9 +291,68 @@ describe('buildLocal · 本地单 LoRA 直接安装', () => {
     rmSync(badOut, { recursive: true, force: true });
     const badLora = join(H3_ROOT, 'bad.safetensors');
     writeFileSync(badLora, '<html>403</html>');
-    const invalid = await b.buildLocal({ packId: 'local-lora-install', loraPath: badLora, outDir: badOut, target: 'FL2VA' });
+    const invalid = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-invalid-lora', loraPath: badLora, target: 'FL2VA' });
     expect(invalid.ok).toBe(false);
     expect(invalid.error).toContain('不是合法 safetensors');
     expect(existsSync(badOut)).toBe(false);
+  });
+
+  it('输出路径只由名称派生,拒绝目录穿越名称', async () => {
+    makeBaseModel();
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const lora = join(H3_ROOT, 'custom-safe.safetensors');
+    writeFakeSafetensors(lora);
+    const b = new H3StyleModelBuilder(() => {});
+    const r = await b.buildLocal({ packId: 'local-lora-install', name: '../escape', loraPath: lora, target: 'FL2VA' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('名称不能包含路径分隔符');
+    expect(existsSync(join(tmpRoot, 'escape'))).toBe(false);
+  });
+
+  it('融合失败自动清理本次半成品,随后可用同名重试', async () => {
+    makeBaseModel();
+    const lora = join(H3_ROOT, 'custom-retry.safetensors');
+    writeFakeSafetensors(lora);
+    const outDir = join(H3_ROOT, 'MiniMax-H3-retry');
+    rmSync(outDir, { recursive: true, force: true });
+    writeFileSync(SCRIPT, 'raise SystemExit(7)\n');
+    const b = new H3StyleModelBuilder(() => {});
+    const failed = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-retry', loraPath: lora, target: 'FL2VA' });
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toContain('同名重试');
+    expect(existsSync(outDir)).toBe(false);
+
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const retried = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-retry', loraPath: lora, target: 'FL2VA' });
+    expect(retried).toEqual({ ok: true, outDir });
+    expect(existsSync(join(outDir, 'FL2VA', 'transformer', 'merged.marker'))).toBe(true);
+  });
+
+  it('取消后也清理半成品,不阻挡同名重装', async () => {
+    makeBaseModel();
+    const lora = join(H3_ROOT, 'custom-cancel.safetensors');
+    writeFakeSafetensors(lora);
+    const outDir = join(H3_ROOT, 'MiniMax-H3-cancel');
+    rmSync(outDir, { recursive: true, force: true });
+    writeFileSync(SCRIPT, 'import time\ntime.sleep(30)\n');
+    const b = new H3StyleModelBuilder(() => {});
+    const pending = b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-cancel', loraPath: lora, target: 'FL2VA' });
+    let cancelled = false;
+    for (let i = 0; i < 200; i++) {
+      if (b.cancel().ok) {
+        cancelled = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(cancelled).toBe(true);
+    const failed = await pending;
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toContain('同名重试');
+    expect(existsSync(outDir)).toBe(false);
+
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const retried = await b.buildLocal({ packId: 'local-lora-install', name: 'MiniMax-H3-cancel', loraPath: lora, target: 'FL2VA' });
+    expect(retried).toEqual({ ok: true, outDir });
   });
 });

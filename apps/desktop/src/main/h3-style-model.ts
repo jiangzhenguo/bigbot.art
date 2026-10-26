@@ -184,23 +184,23 @@ export class H3StyleModelBuilder {
   }
 
   /**
-   * 本地单 LoRA → 新模型目录。与已知包的「重跑」不同：只写入全新产物目录，
-   * 已存在一律拒绝，绝不删除/覆盖用户已有模型，更不会把失败半成品登记为可用包。
+   * 本地单 LoRA → 新模型目录。输出路径只能由安全名称在 h3Root 内派生,
+   * 调用方不能指定任意目录;失败/取消只清理本次新建的半成品,允许同名重试。
    */
   async buildLocal(input: {
     packId: string;
+    name: string;
     loraPath: string;
-    outDir: string;
     target: H3TransformerTarget | 'both';
   }): Promise<{ ok: boolean; error?: string; outDir?: string }> {
     if (this.building) return { ok: false, error: '已有构建任务进行中' };
     if (!['FL2VA', 'Ref2VA', 'both'].includes(input.target)) return { ok: false, error: '未知 LoRA 作用目标' };
     const loraPath = input.loraPath.trim();
-    const outDir = input.outDir.trim();
+    const outDir = localLoraOutDir(input.name);
+    if (!outDir) return { ok: false, error: '名称不能包含路径分隔符,且不能是 . 或 ..' };
     if (!loraPath || !looksLikeSafetensors(loraPath)) {
       return { ok: false, error: `不是合法 safetensors LoRA(文件不存在、过小或格式错误):${loraPath || '(未选择文件)'}` };
     }
-    if (!outDir) return { ok: false, error: '产物目录为空' };
     if (existsSync(outDir)) return { ok: false, error: `产物目录已存在,未覆盖:${outDir}。请更换名称,或手动处理该目录后重试` };
     const baseDir = baseModelDir();
     const targets = localLoraTargets(input.target);
@@ -211,9 +211,11 @@ export class H3StyleModelBuilder {
 
     this.building = true;
     this.cancelled = false;
+    let createdOutput = false;
     try {
       for (const sub of targets) {
         this.progress(input.packId, 'copy', undefined, `复制基础组件 ${sub}/(clonefile,不含 transformer)`);
+        createdOutput = true;
         mkdirSync(join(outDir, sub), { recursive: true });
         for (const item of readdirSync(join(baseDir, sub))) {
           if (item === 'transformer') continue;
@@ -238,11 +240,21 @@ export class H3StyleModelBuilder {
       this.progress(input.packId, 'done', 100, `融合完成:${outDir}`);
       return { ok: true, outDir };
     } catch (e) {
-      if (this.cancelled) {
-        this.progress(input.packId, 'cancelled', undefined, `已取消(未登记;半成品仅保留供排查:${outDir})`);
-        return { ok: false, error: '已取消,未安装模型包' };
+      // outDir 已由 h3Root+安全名称限定,且开始构建前确认不存在;这里只清理本次新建目录。
+      let cleanupNote = '未创建产物目录';
+      if (createdOutput) {
+        try {
+          rmSync(outDir, { recursive: true, force: true });
+          cleanupNote = '本次半成品已清理,可直接用同名重试';
+        } catch (cleanupError) {
+          cleanupNote = `半成品清理失败,请手动处理:${outDir}(${(cleanupError as Error).message})`;
+        }
       }
-      const msg = `${(e as Error).message}(未登记模型包;半成品目录:${outDir})`;
+      if (this.cancelled) {
+        this.progress(input.packId, 'cancelled', undefined, `已取消(未登记;${cleanupNote})`);
+        return { ok: false, error: `已取消,未安装模型包 · ${cleanupNote}` };
+      }
+      const msg = `${(e as Error).message}(未登记模型包;${cleanupNote})`;
       this.progress(input.packId, 'error', undefined, msg, msg);
       return { ok: false, error: msg };
     } finally {

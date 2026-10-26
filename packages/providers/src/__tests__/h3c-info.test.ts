@@ -67,6 +67,12 @@ describe('h3 子进程环境(BIGBOTART_H3_VAE_PRECISION 透传)', () => {
     expect(h3ChildEnv({ BIGBOTART_H3_VAE_PRECISION: '' }).H3_VAE_PRECISION).toBeUndefined();
     expect(h3ChildEnv({ BIGBOTART_H3_VAE_PRECISION: '   ' }).H3_VAE_PRECISION).toBeUndefined();
   });
+
+  it('仅白名单 f32 透传;bf16/大写/任意非法值均不改变引擎环境', () => {
+    for (const value of ['bf16', 'F32', 'fp32', 'garbage']) {
+      expect(h3ChildEnv({ BIGBOTART_H3_VAE_PRECISION: value }).H3_VAE_PRECISION).toBeUndefined();
+    }
+  });
 });
 
 describe('档位表单一真源(providers ↔ shared)', () => {

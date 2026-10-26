@@ -21,17 +21,19 @@ process.env.BIGBOTART_HOME = tmpHome;
 
 let SettingsStore: typeof import('../settings.js').SettingsStore;
 let AccelStore: typeof import('../lora.js').AccelStore;
+let requiredH3Transformer: typeof import('../lora.js').requiredH3Transformer;
 
-/** 造一个合法包目录(含 FL2VA/) */
+/** 造一个合法包目录(含 FL2VA/transformer) */
 function fakePackDir(name: string): string {
   const dir = join(tmpHome, 'packs', name);
-  mkdirSync(join(dir, 'FL2VA'), { recursive: true });
+  mkdirSync(join(dir, 'FL2VA', 'transformer'), { recursive: true });
   return dir;
 }
 
 beforeAll(async () => {
   SettingsStore = (await import('../settings.js')).SettingsStore;
   AccelStore = (await import('../lora.js')).AccelStore;
+  requiredH3Transformer = (await import('../lora.js')).requiredH3Transformer;
 });
 
 afterAll(() => {
@@ -149,14 +151,56 @@ describe('AccelStore · install 的 kind 与步数校验', () => {
     expect(r.packs?.find((p) => p.name === 'legacy')?.kind).toBe('accel');
   });
 
-  it('Ref2VA 单目标本地融合目录也可登记并显示就绪', () => {
+  it('Ref2VA 单目标本地融合目录也可登记,并明确标记实际变体', () => {
     const { settings, accel } = freshStore();
     settings.patch({ accelPacks: [], accelPreseedV2: true, accelPreseedV3: true });
     const dir = join(tmpHome, 'packs', 'ref2va-only');
-    mkdirSync(join(dir, 'Ref2VA'), { recursive: true });
+    mkdirSync(join(dir, 'Ref2VA', 'transformer'), { recursive: true });
     const r = accel.install({ name: 'ref-only', path: dir, kind: 'style', steps: 20 });
     expect(r.ok).toBe(true);
-    expect(r.packs?.find((p) => p.name === 'ref-only')?.exists).toBe(true);
+    const pack = r.packs?.find((p) => p.name === 'ref-only');
+    expect(pack?.exists).toBe(true);
+    expect(pack?.targets).toEqual(['Ref2VA']);
+  });
+});
+
+describe('AccelStore · transformer 变体兼容', () => {
+  it('提交模式映射:文生/首尾帧要 FL2VA;参考图/视频/音频参考要 Ref2VA', () => {
+    expect(requiredH3Transformer({ mode: 'text2video' })).toBe('FL2VA');
+    expect(requiredH3Transformer({ mode: 'first-last' }, [{ role: 'first-frame' }, { role: 'last-frame' }])).toBe('FL2VA');
+    expect(requiredH3Transformer({ mode: 'ref-image' })).toBe('Ref2VA');
+    expect(requiredH3Transformer({}, [{ role: 'ref-video' }])).toBe('Ref2VA');
+    expect(requiredH3Transformer({}, [{ role: 'ref-audio' }])).toBe('Ref2VA');
+    expect(requiredH3Transformer({ refImages: ['/tmp/a.png'] })).toBe('Ref2VA');
+  });
+
+  it('Ref2VA-only 包可用于参考模式,但 FL2VA 提交在入队前拒绝并指名原因', () => {
+    const { settings, accel } = freshStore();
+    const dir = join(tmpHome, 'packs', 'ref2va-compat');
+    mkdirSync(join(dir, 'Ref2VA', 'transformer'), { recursive: true });
+    settings.patch({
+      accelPacks: [{ id: 'ref', name: '仅参考包', path: dir, steps: 20, kind: 'style' }],
+      accelPreseedV2: true,
+      accelPreseedV3: true,
+    });
+    expect(accel.resolveAccel({ enabled: true, packId: 'ref' }, 'Ref2VA')).toMatchObject({ modelDir: dir });
+    expect(accel.resolveAccel({ enabled: true, packId: 'ref' }, 'FL2VA')).toBeNull();
+    const reason = accel.unavailableReason({ enabled: true, packId: 'ref' }, 'FL2VA');
+    expect(reason).toContain('需要 FL2VA');
+    expect(reason).toContain('Ref2VA');
+    expect(reason).toContain('不兼容');
+  });
+
+  it('只有空变体目录而没有 transformer,不再标记就绪', () => {
+    const { settings, accel } = freshStore();
+    const dir = join(tmpHome, 'packs', 'empty-variant');
+    mkdirSync(join(dir, 'FL2VA'), { recursive: true });
+    settings.patch({
+      accelPacks: [{ id: 'empty', name: 'empty', path: dir, steps: 8 }],
+      accelPreseedV2: true,
+      accelPreseedV3: true,
+    });
+    expect(accel.list()[0]).toMatchObject({ exists: false, targets: [] });
   });
 });
 

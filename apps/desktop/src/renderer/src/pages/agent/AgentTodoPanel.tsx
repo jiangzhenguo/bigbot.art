@@ -36,8 +36,15 @@ function StatusIcon({ status }: { status: AgentTodoStatus }) {
   );
 }
 
-export function AgentTodoPanel({ todos }: { todos: AgentTodoItem[] }) {
+export function AgentTodoPanel({ todos, error }: { todos: AgentTodoItem[]; error?: string | null }) {
   const [expanded, setExpanded] = useState(true);
+  if (error) {
+    return (
+      <section className="agent-todo-panel" data-od-id="agent-todo-error" role="alert" style={{ color: 'var(--warn)' }}>
+        {error}
+      </section>
+    );
+  }
   if (todos.length === 0) return null;
 
   const counts = todoCounts(todos);

@@ -194,7 +194,7 @@ export function ChatMessageList({
         if (m.toolCall) {
           // 旧格式兼容(历史快照里逐条平铺的工具卡)；todo 同样只进固定面板。
           const tc = m.toolCall;
-          if (isTodoToolName(tc.name)) return null;
+          if (isTodoToolName(tc.name) && tc.status === 'success') return null;
           return (
             <div className="msg-agent" key={m.id} data-od-id="agent-tools">
               <div className="tool">

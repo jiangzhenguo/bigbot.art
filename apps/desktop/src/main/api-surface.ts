@@ -25,7 +25,8 @@ import { createRegistry } from '@bigbotart/providers';
 import type { AgentManager } from '@bigbotart/agent';
 import type { ProjectStore } from './store';
 import type { SettingsStore } from './settings';
-import { validSteps, type AccelStore } from './lora';
+import { requiredH3Transformer, validSteps, type AccelStore } from './lora';
+import { isAccelPickSource } from './accel-source';
 import { localLoraOutDir, type H3StyleModelBuilder } from './h3-style-model';
 import {
   OUTPUTS_DIR,
@@ -293,9 +294,10 @@ ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
   // demo 模式走 mock 占位,不解析(避免包缺失在演示路径误报)
   const accelReq = (params.accel ?? undefined) as { enabled?: boolean; packId?: string; steps?: number } | undefined;
   if (accelReq?.enabled && req.slot === 'video' && settings.get().renderMode === 'real') {
-    const resolved = accel.resolveAccel(accelReq);
+    const target = requiredH3Transformer(params, refs);
+    const resolved = accel.resolveAccel(accelReq, target);
     if (!resolved) {
-      throw new Error('模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或在镜头检查器里关闭模型包');
+      throw new Error(accel.unavailableReason(accelReq, target));
     }
     params.modelDir = resolved.modelDir;
     params.steps = resolved.steps;
@@ -807,6 +809,7 @@ ipcMain.handle('relay-set-pairing-key', (_e, key: string) =>
 // ---------- IPC:h3 模型包(加速 / 风格)管理 ----------
 ipcMain.handle('accel-list', () => accel.list());
 ipcMain.handle('accel-pick-source', async (_e, source: 'directory' | 'lora') => {
+  if (!isAccelPickSource(source)) return { ok: false as const, error: '未知模型包来源,仅支持 directory 或 lora' };
   const win = BrowserWindow.getAllWindows()[0];
   const opts = source === 'directory'
     ? {
@@ -837,13 +840,14 @@ ipcMain.handle('accel-install-lora', async (_e, input: LocalLoraInstallInput) =>
   if (!outDir) return { ok: false, error: '名称不能包含路径分隔符,且不能是 . 或 ..' };
   const built = await styleModels.buildLocal({
     packId: LOCAL_LORA_BUILD_ID,
+    name,
     loraPath: String(input.loraPath ?? ''),
-    outDir,
     target: input.target,
   });
-  if (!built.ok) return { ok: false, error: built.error, outDir };
-  const installed = accel.install({ name, path: outDir, kind: input.kind, steps: input.steps });
-  return { ...installed, outDir };
+  if (!built.ok || !built.outDir) return { ok: false, error: built.error ?? '本地 LoRA 融合未返回产物目录', outDir };
+  const resultDir = built.outDir;
+  const installed = accel.install({ name, path: resultDir, kind: input.kind, steps: input.steps });
+  return { ...installed, outDir: resultDir };
 });
 ipcMain.handle('accel-remove', (_e, id: string) => accel.remove(id));
 ipcMain.handle('accel-set-default', (_e, id: string | null) => accel.setDefault(id));

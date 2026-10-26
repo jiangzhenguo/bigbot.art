@@ -16,7 +16,7 @@
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AccelPack, AccelPackKind } from '@bigbotart/shared';
+import type { AccelPack, AccelPackKind, H3TransformerTarget } from '@bigbotart/shared';
 import type { SettingsStore } from './settings';
 
 /** v1 既有预置 id(老库里它们要么存在、要么被用户删过 —— 迁移时一律不再补) */
@@ -74,10 +74,33 @@ export function validSteps(kind: AccelPackKind, v: unknown): v is number {
   return kind === 'style' ? v >= 4 && v <= 50 : v === 4 || v === 8;
 }
 
-/** 包目录合法性:至少含 FL2VA 或 Ref2VA 变体(本地单目标融合包也允许),或单变体 model_index.json。 */
-function packValid(path: string): boolean {
+/** 目录实际包含的 transformer 变体(不再把「只有一个空目录」当成可用)。 */
+export function packTargets(path: string): H3TransformerTarget[] {
+  return (['FL2VA', 'Ref2VA'] as const).filter((target) => existsSync(join(path, target, 'transformer')));
+}
+
+/** 旧版单变体根目录,无法仅凭目录结构判断变体,保留兼容。 */
+function hasLegacyPackLayout(path: string): boolean {
+  return existsSync(join(path, 'model_index.json'));
+}
+
+/** 包目录合法性;传 target 时同时校验当前提交所需变体,旧版根目录布局无法判定则按兼容放行。 */
+function packValid(path: string, target?: H3TransformerTarget): boolean {
   if (!existsSync(path)) return false;
-  return existsSync(join(path, 'FL2VA')) || existsSync(join(path, 'Ref2VA')) || existsSync(join(path, 'model_index.json'));
+  if (hasLegacyPackLayout(path)) return true;
+  const targets = packTargets(path);
+  return target ? targets.includes(target) : targets.length > 0;
+}
+
+/** 当前提交实际需要哪个 transformer:参考图/视频/音频参考走 Ref2VA,其余(含首尾帧)走 FL2VA。 */
+export function requiredH3Transformer(params: Record<string, unknown>, references: Array<{ role?: string }> = []): H3TransformerTarget {
+  const mode = String(params.mode ?? '');
+  const hasFullReference = references.some((r) => r.role === 'ref-image' || r.role === 'ref-video' || r.role === 'ref-audio');
+  const hasRefImages = Array.isArray(params.refImages) && params.refImages.length > 0;
+  if (hasFullReference || hasRefImages || params.refVideo || params.refAudio || mode === 'ref-image' || mode === 'ref-video' || mode === 'ref-audio') {
+    return 'Ref2VA';
+  }
+  return 'FL2VA';
 }
 
 export class AccelStore {
@@ -108,10 +131,17 @@ export class AccelStore {
     }
   }
 
-  /** 列出全部登记(回填 exists 目录校验,设置页「就绪/目录缺失」用) */
+  /** 列出全部登记(回填 exists 与实际 targets;设置页据此展示单变体/双变体,不再笼统标“全模式就绪”) */
   list(): AccelPack[] {
     this.ensureSeeded();
-    return (this.settings.get().accelPacks ?? []).map((p) => ({ ...p, exists: packValid(p.path) }));
+    return (this.settings.get().accelPacks ?? []).map((p) => {
+      const targets = packTargets(p.path);
+      return {
+        ...p,
+        targets: targets.length > 0 ? targets : hasLegacyPackLayout(p.path) ? p.targets : targets,
+        exists: packValid(p.path),
+      };
+    });
   }
 
   /** 安装:校验目录存在且含至少一个 h3 变体后登记;kind 缺省 accel,步数按 kind 校验 */
@@ -123,7 +153,7 @@ export class AccelStore {
     if (!name) return { ok: false, error: '请填模型包名称' };
     if (!path) return { ok: false, error: '请填模型目录路径' };
     if (!existsSync(path)) return { ok: false, error: `目录不存在: ${path}` };
-    if (!packValid(path)) return { ok: false, error: '不是合法模型目录(缺 FL2VA/、Ref2VA/ 或 model_index.json)' };
+    if (!packValid(path)) return { ok: false, error: '不是合法模型目录(缺 FL2VA/Ref2VA transformer 或旧版 model_index.json)' };
     if (input.steps !== undefined && !validSteps(kind, input.steps)) {
       return { ok: false, error: kind === 'style' ? '风格包步数须为 4-50 的整数(推荐 20/30)' : '加速类包步数只支持 4 或 8' };
     }
@@ -135,6 +165,7 @@ export class AccelStore {
       path,
       steps: input.steps ?? (kind === 'style' ? 20 : 8),
       kind,
+      targets: packTargets(path),
       installedAt: new Date().toISOString(),
     };
     this.settings.patch({ accelPacks: [...packs, pack] });
@@ -207,15 +238,36 @@ export class AccelStore {
   /** 解析镜头模型包请求 → 实际落地 { modelDir, steps, kind }(提交前替换 h3.c -d / --steps)。
    *  未开启 / 无可用包 / 包目录缺失 → 返回 null(调用方抛错提示)。
    *  kind 透传给 provider 做 ETA 换算(风格包不打加速折扣)。 */
-  resolveAccel(accel: { enabled?: boolean; packId?: string; steps?: number } | undefined): { modelDir: string; steps: number; kind: AccelPackKind } | null {
+  resolveAccel(
+    accel: { enabled?: boolean; packId?: string; steps?: number } | undefined,
+    target?: H3TransformerTarget,
+  ): { modelDir: string; steps: number; kind: AccelPackKind } | null {
     if (!accel?.enabled) return null;
     const packs = this.settings.get().accelPacks ?? PRESEED;
     const pack = packs.find((p) => p.id === accel.packId)
       ?? packs.find((p) => p.default)
       ?? packs[0];
-    if (!pack || !packValid(pack.path)) return null;
+    if (!pack || !packValid(pack.path, target)) return null;
     const kind = packKind(pack);
     const steps = validSteps(kind, accel.steps) ? (accel.steps as number) : validSteps(kind, pack.steps) ? (pack.steps as number) : kind === 'style' ? 20 : 8;
     return { modelDir: pack.path, steps, kind };
+  }
+
+  /** resolveAccel 返回 null 时的具体原因;模式错配必须指名所需/实际变体,不能笼统说成“目录缺失”。 */
+  unavailableReason(
+    accel: { enabled?: boolean; packId?: string } | undefined,
+    target?: H3TransformerTarget,
+  ): string {
+    const generic = '模型包已启用但不可用(未安装或目录缺失) · 请到设置页「h3 模型包」检查,或关闭该节点的模型包';
+    if (!accel?.enabled) return generic;
+    const packs = this.settings.get().accelPacks ?? PRESEED;
+    const pack = packs.find((p) => p.id === accel.packId) ?? packs.find((p) => p.default) ?? packs[0];
+    if (!pack || !packValid(pack.path)) return generic;
+    if (target && !packValid(pack.path, target)) {
+      const actual = packTargets(pack.path);
+      const actualText = actual.length > 0 ? actual.join(' + ') : '无法判定变体的旧版目录';
+      return `模型包「${pack.name}」与当前生成模式不兼容:本次需要 ${target},该包可用 ${actualText}。请改选兼容包,或关闭模型包`;
+    }
+    return generic;
   }
 }

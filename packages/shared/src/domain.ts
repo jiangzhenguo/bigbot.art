@@ -612,6 +612,8 @@ export interface AccelPack {
   installedAt?: string;
   /** 列表时主进程回填:目录当前是否存在且含至少一个 h3 变体(存在但无变体视为 invalid) */
   exists?: boolean;
+  /** 目录实际可用的 transformer 变体;旧版根目录 model_index.json 无法判定时缺省 */
+  targets?: Array<import('./style-model').H3TransformerTarget>;
 }
 
 /** 视频镜头参数(h3.c) */

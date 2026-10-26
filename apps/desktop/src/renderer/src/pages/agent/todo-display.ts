@@ -12,9 +12,9 @@ export function isTodoToolName(name: string): boolean {
   return name === TODO_TOOL_NAME;
 }
 
-/** 保留其他工具行；若一轮只有 todo.write，调用方应连同空工具卡一起隐藏。 */
+/** 只把已成功写入真源的 todo.write 摘到固定面板；失败/运行中行必须留在工具卡，避免错误不可见。 */
 export function withoutTodoToolRuns(runs: ToolRun[]): ToolRun[] {
-  return runs.filter((run) => !isTodoToolName(run.name));
+  return runs.filter((run) => !(isTodoToolName(run.name) && run.status === 'success'));
 }
 
 /** 主进程写入 recall 的 todo 系统摘要，与工具卡一样不再占据聊天内容。 */

@@ -87,17 +87,6 @@ export const COMPAT: Record<string, string[]> = {
 };
 
 /**
- * 档位 → 预计耗时(纯展示;不参与任何尺寸计算)。
- * 键是中文标签 —— 弹层 chips 直接用中文,这里配套。
- */
-export const ETA: Record<string, string> = {
-  预览: '≈2 分钟',
-  草稿: '≈4 分钟',
-  默认: '≈8 分钟',
-  参考: '≈22 分钟',
-};
-
-/**
  * 尺寸提示行 —— **直接读 `SHOT_SIZES`**,不再维护第二张尺寸表。
  *
  * ⚠️ 事故(2026-10):这里曾有一张独立的 `RES` 中文表,与 `SHOT_SIZES` 并存,
@@ -109,7 +98,7 @@ export function resLine(aspect: string, tier: string): string {
   const key = tierKeyOf(tier);
   const size = SHOT_SIZES[aspect as VideoAspect]?.[key];
   if (!size) return '该组合不在白名单 · 已禁用（capabilities）';
-  const eta = ETA[tier] ?? ETA[key === 'default' ? '默认' : tier] ?? '';
+  const eta = VIDEO_TIER_PRESETS[key].eta;
   return `输出 ${size.width}×${size.height} · 预计 ${eta}（capabilities）`;
 }
 
