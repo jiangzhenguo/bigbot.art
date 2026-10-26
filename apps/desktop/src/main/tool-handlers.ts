@@ -22,6 +22,8 @@ import {
   planStoryboardMaterializeRows,
   keyframeEdgeLabel,
   existingShotByRow,
+  storyboardLinkOf,
+  storyboardLinkFields,
   summarizeMaterializePlans,
   chunkText,
   chunkNav,
@@ -46,7 +48,6 @@ import {
   validateShotSubmitParams,
   type VideoAspect,
   type DerivedRef,
-  type PromptSource,
   type ToolModelBinding,
 } from '@bigbotart/shared';
 import type { ProjectStore } from './store';
@@ -843,11 +844,11 @@ export class ToolHandlers {
       const sd = (sb.data ?? {}) as Record<string, unknown>;
       const tb = parseGfmTable(String(sd.markdown ?? ''));
       if (!tb) return { ok: false, result: '分镜表缺少表格块 · 无法铺节点' };
-      // 已铺行:由下游节点 promptFrom(与渲染层同口径)派生
+      // 已铺行:storyboardRow 优先(边分派清不掉),否则 promptFrom。与渲染层同口径
       const doneRows = new Set<number>();
       for (const n of cur.nodes) {
-        const ps = (n.data as { promptFrom?: PromptSource }).promptFrom;
-        if (ps?.nodeId === nodeId && ps.mode === 'row' && typeof ps.row === 'number') doneRows.add(ps.row);
+        const link = storyboardLinkOf(n.data);
+        if (link?.nodeId === nodeId && typeof link.row === 'number') doneRows.add(link.row);
       }
       const base = String(sd.basePrompt ?? '');
       const aspect = String(a.aspect ?? sd.aspect ?? '16:9');
@@ -875,10 +876,7 @@ export class ToolHandlers {
          追加铺时接在这张表已有镜头的下方,不再按 r*186 跳到很远或叠回原处。
          两张表锚点靠近时,后一张的整块会避开前一张已经占住的区域。 */
       const sbBox = rectOf(this.occupantOf(sb));
-      const prior = cur.nodes.filter((n) => {
-        const ps = (n.data as { promptFrom?: PromptSource }).promptFrom;
-        return ps?.nodeId === nodeId && ps.mode === 'row';
-      });
+      const prior = cur.nodes.filter((n) => storyboardLinkOf(n.data)?.nodeId === nodeId);
       const placed = placeMaterializeRows(
         cur.nodes.map((n) => this.occupantOf(n)),
         this.occupantOf(sb),
@@ -930,7 +928,7 @@ export class ToolHandlers {
             frames: Number(dur.data.frames),
             steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
             ...(defaultAccel ? { accel: defaultAccel } : {}),
-            promptFrom: { nodeId, mode: 'row', row: plan.rowNo } as PromptSource,
+            ...storyboardLinkFields(nodeId, plan.rowNo),
           } as CanvasNode['data'],
           createdAt: now, updatedAt: now,
         });
@@ -962,7 +960,7 @@ export class ToolHandlers {
               // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
               engine: 'mlxgen', prompt: z.text,
               width: size.width, height: size.height, guidance: 1.0, seeds: [42],
-              promptFrom: { nodeId, mode: 'row', row: plan.rowNo } as PromptSource,
+              ...storyboardLinkFields(nodeId, plan.rowNo),
             } as CanvasNode['data'],
             createdAt: now, updatedAt: now,
           });
@@ -2436,8 +2434,8 @@ export class ToolHandlers {
     if (!fresh.length) return;
     const byRow = new Map<number, { shot?: CanvasNode; img?: CanvasNode }>();
     const rowOf = (n: CanvasNode) => {
-      const ps = (n.data as { promptFrom?: { row?: number } } | undefined)?.promptFrom;
-      return typeof ps?.row === 'number' ? ps.row : 0;
+      const row = storyboardLinkOf(n.data)?.row;
+      return typeof row === 'number' ? row : 0;
     };
     for (const n of shots) {
       const row = rowOf(n);

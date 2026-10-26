@@ -8,6 +8,7 @@
  * 卡片高度:优先用快照里的 `height`(渲染层实测回写);没有时按 kind 与媒体宽高比估算。
  * 估算与实测取较大值,避免空卡片先测得很矮、出图后变高再盖住邻居。
  */
+import { storyboardLinkOf } from '@bigbotart/shared';
 
 /** 节点之间留下的空隙(px) */
 export const PLACE_GAP = 24;
@@ -16,9 +17,9 @@ export const PLACE_ORIGIN = { x: 80, y: 80 };
 /** 模型传入的绝对坐标,最多偏离现有内容包围盒这么远 */
 export const PLACE_CLAMP_MARGIN = 800;
 /**
- * 一次落点相对「调用开始时内容左上角」的绝对上限。
- * 反复传入超大 x/y 时,包围盒不能一步步被 800px 余量推着往外长。
- * 内容本身已经比这个上限更宽/更高时,允许停在现有边缘,但不再向外扩。
+ * 一次落点相对「调用开始时内容包围盒」的绝对上限,四个方向一样。
+ * 内容比这个上限更宽/更高时,允许停在现有边缘,但余量不能再把包围盒往外推。
+ * 锚点取对侧边缘:往右长时左边不动,往左漂时右边不动,所以重复传入超大负坐标也不会按 800px 一直走。
  */
 export const PLACE_ABS_CAP = 4000;
 /** 默认锚点对齐的网格 */
@@ -29,6 +30,8 @@ const SPIRAL_RINGS = 12;
 const SPIRAL_STEP = 48;
 /** 内容已经铺得很宽时,下一张改放到包围盒下方,而不是继续向右拉长 */
 const ROW_WRAP = 1400;
+/** 整理时视为同一行的顶边容差。折行后的行距远大于它,同一行顶边则对齐。 */
+const ROW_BAND = 64;
 
 const HEADER = 36;
 const BODY_PAD = 20;
@@ -250,22 +253,28 @@ interface PlaceCap {
 }
 
 /**
- * 本次调用的落点不能走出的范围。以调用开始时的内容左上角为锚,
- * 右/下最多再走 PLACE_ABS_CAP。内容已经更宽时停在现有边缘,避免反复超大坐标把画布越推越远。
+ * 本次调用的落点不能走出的范围。以调用开始时的内容包围盒为参照,四个方向最多再走 PLACE_ABS_CAP。
+ * 内容已经更宽/更高时停在现有边缘,避免反复超大坐标把画布越推越远。
  */
 function limitsOf(existing: Occupant[]): PlaceCap {
   const box = boundsOf(existing.map(rectOf));
-  const ax = box?.minX ?? PLACE_ORIGIN.x;
-  const ay = box?.minY ?? PLACE_ORIGIN.y;
-  const contentRight = box?.maxX ?? ax;
-  const contentBottom = box?.maxY ?? ay;
-  const capRight = ax + PLACE_ABS_CAP;
-  const capBottom = ay + PLACE_ABS_CAP;
+  if (!box) {
+    return {
+      minX: PLACE_ORIGIN.x - PLACE_ABS_CAP,
+      minY: PLACE_ORIGIN.y - PLACE_ABS_CAP,
+      maxX: PLACE_ORIGIN.x + PLACE_ABS_CAP,
+      maxY: PLACE_ORIGIN.y + PLACE_ABS_CAP,
+    };
+  }
+  const capLeft = box.maxX - PLACE_ABS_CAP;
+  const capRight = box.minX + PLACE_ABS_CAP;
+  const capTop = box.maxY - PLACE_ABS_CAP;
+  const capBottom = box.minY + PLACE_ABS_CAP;
   return {
-    minX: Math.min(ax, PLACE_ORIGIN.x) - PLACE_CLAMP_MARGIN,
-    minY: Math.min(ay, PLACE_ORIGIN.y) - PLACE_CLAMP_MARGIN,
-    maxX: contentRight > capRight ? contentRight : capRight,
-    maxY: contentBottom > capBottom ? contentBottom : capBottom,
+    minX: box.minX < capLeft ? box.minX : capLeft,
+    minY: box.minY < capTop ? box.minY : capTop,
+    maxX: box.maxX > capRight ? box.maxX : capRight,
+    maxY: box.maxY > capBottom ? box.maxY : capBottom,
   };
 }
 
@@ -546,6 +555,8 @@ export interface TidyOptions {
   gap?: number;
   /** 用户建的组:成员留在同一块里,从左到右保持原有顺序 */
   groups?: Array<{ members: string[] }>;
+  /** 本次节点列表里没有、但边的 source 仍是分镜表(选中整理时表不在移动集合里) */
+  externalStoryboardIds?: string[];
 }
 
 export interface TidyResult {
@@ -566,12 +577,6 @@ function tidyGap(gap?: number): number {
   return Math.min(80, Math.max(8, Math.round(gap)));
 }
 
-function promptParent(data: unknown): { nodeId: string; row: number } | undefined {
-  const ps = ((data ?? {}) as { promptFrom?: { nodeId?: unknown; mode?: unknown; row?: unknown } }).promptFrom;
-  if (!ps || ps.mode !== 'row' || typeof ps.nodeId !== 'string' || !ps.nodeId) return undefined;
-  return { nodeId: ps.nodeId, row: typeof ps.row === 'number' ? ps.row : 0 };
-}
-
 function contentBBox(nodes: Array<Occupant & { x: number; y: number }>): { x: number; y: number; w: number; h: number } {
   if (nodes.length === 0) return { x: PLACE_ORIGIN.x, y: PLACE_ORIGIN.y, w: 0, h: 0 };
   const rects = nodes.map(rectOf);
@@ -590,10 +595,15 @@ function leafBlock(n: Occupant): FlowBlock {
   };
 }
 
-function rowsBlock(members: Occupant[], gap: number, withStoryboard?: Occupant): FlowBlock {
+function rowsBlock(
+  members: Occupant[],
+  gap: number,
+  rowOf: (n: Occupant) => number,
+  withStoryboard?: Occupant,
+): FlowBlock {
   const sorted = [...members].sort((a, b) => {
-    const ra = promptParent(a.data)?.row ?? 0;
-    const rb = promptParent(b.data)?.row ?? 0;
+    const ra = rowOf(a);
+    const rb = rowOf(b);
     if (ra !== rb) return ra - rb;
     if (a.x !== b.x) return a.x - b.x;
     if (a.kind !== b.kind) return a.kind === 'shot' ? 1 : -1;
@@ -602,7 +612,7 @@ function rowsBlock(members: Occupant[], gap: number, withStoryboard?: Occupant):
   const rowOrder: number[] = [];
   const byRow = new Map<number, Occupant[]>();
   for (const n of sorted) {
-    const row = promptParent(n.data)?.row ?? 0;
+    const row = rowOf(n);
     if (!byRow.has(row)) rowOrder.push(row);
     const list = byRow.get(row) ?? [];
     list.push(n);
@@ -657,8 +667,34 @@ function rowsBlock(members: Occupant[], gap: number, withStoryboard?: Occupant):
   };
 }
 
+function readingOrder<T>(items: T[], yOf: (t: T) => number, xOf: (t: T) => number, idOf: (t: T) => string): T[] {
+  const sorted = [...items].sort(
+    (a, b) => yOf(a) - yOf(b) || xOf(a) - xOf(b) || (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0),
+  );
+  const bands: T[][] = [];
+  for (const item of sorted) {
+    const band = bands[bands.length - 1];
+    if (!band || yOf(item) - yOf(band[0]!) > ROW_BAND) bands.push([item]);
+    else band.push(item);
+  }
+  const out: T[] = [];
+  for (const band of bands) {
+    band.sort((a, b) => xOf(a) - xOf(b) || yOf(a) - yOf(b) || (idOf(a) < idOf(b) ? -1 : 1));
+    out.push(...band);
+  }
+  return out;
+}
+
+function blockKey(block: FlowBlock): string {
+  let min = '';
+  for (const id of block.local.keys()) {
+    if (!min || id < min) min = id;
+  }
+  return min;
+}
+
 function flowBlock(members: Occupant[], gap: number): FlowBlock {
-  const sorted = [...members].sort((a, b) => a.x - b.x || a.y - b.y || (a.id < b.id ? -1 : 1));
+  const sorted = readingOrder(members, (n) => n.y, (n) => n.x, (n) => n.id);
   const local = new Map<string, { x: number; y: number }>();
   let x = 0;
   let y = 0;
@@ -686,7 +722,7 @@ function flowBlock(members: Occupant[], gap: number): FlowBlock {
 }
 
 function packBlocks(blocks: FlowBlock[], gap: number): Map<string, { x: number; y: number }> {
-  const ordered = [...blocks].sort((a, b) => a.sortX - b.sortX || a.sortY - b.sortY);
+  const ordered = readingOrder(blocks, (b) => b.sortY, (b) => b.sortX, blockKey);
   const out = new Map<string, { x: number; y: number }>();
   let x = PLACE_ORIGIN.x;
   let y = PLACE_ORIGIN.y;
@@ -707,30 +743,72 @@ function packBlocks(blocks: FlowBlock[], gap: number): Map<string, { x: number; 
   return out;
 }
 
-function blocksOf(nodes: Occupant[], opts: TidyOptions, gap: number): FlowBlock[] {
+function rowBands(nodes: Occupant[], explicit: Map<string, number>): Map<string, number> {
+  const out = new Map(explicit);
+  const missing = nodes.filter((n) => !out.has(n.id));
+  if (missing.length === 0) return out;
+  if (out.size === 0) {
+    const ordered = readingOrder(missing, (n) => n.y, (n) => n.x, (n) => n.id);
+    let band = 0;
+    let bandY = ordered[0]?.y ?? 0;
+    for (const n of ordered) {
+      if (n.y - bandY > ROW_BAND) {
+        band += 1;
+        bandY = n.y;
+      }
+      out.set(n.id, band);
+    }
+    return out;
+  }
+  let next = Math.max(...out.values()) + 1;
+  const ordered = [...missing].sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : 1));
+  for (const n of ordered) out.set(n.id, next++);
+  return out;
+}
+
+function blocksOf(nodes: Occupant[], opts: TidyOptions, gap: number, edges: TidyEdge[]): FlowBlock[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  const storyboardIds = new Set(opts.externalStoryboardIds ?? []);
+  for (const n of nodes) if (n.kind === 'storyboard') storyboardIds.add(n.id);
+  const edgeParent = new Map<string, string>();
+  for (const e of edges) {
+    if (!storyboardIds.has(e.source) || edgeParent.has(e.target)) continue;
+    edgeParent.set(e.target, e.source);
+  }
+  const parentOf = (n: Occupant): { nodeId: string; row?: number } | undefined => {
+    const link = storyboardLinkOf(n.data);
+    if (link) return link;
+    const via = edgeParent.get(n.id);
+    return via ? { nodeId: via } : undefined;
+  };
   const consumed = new Set<string>();
   const blocks: FlowBlock[] = [];
+  const pushRows = (kids: Occupant[], withStoryboard?: Occupant) => {
+    const explicit = new Map<string, number>();
+    for (const k of kids) {
+      const row = parentOf(k)?.row;
+      if (typeof row === 'number') explicit.set(k.id, row);
+    }
+    const rows = rowBands(kids, explicit);
+    blocks.push(rowsBlock(kids, gap, (n) => rows.get(n.id) ?? 0, withStoryboard));
+    if (withStoryboard) consumed.add(withStoryboard.id);
+    for (const k of kids) consumed.add(k.id);
+  };
   for (const n of nodes) {
     if (n.kind !== 'storyboard' || consumed.has(n.id)) continue;
-    const kids = nodes.filter((k) => promptParent(k.data)?.nodeId === n.id);
-    blocks.push(rowsBlock(kids, gap, n));
-    consumed.add(n.id);
-    for (const k of kids) consumed.add(k.id);
+    const kids = nodes.filter((k) => parentOf(k)?.nodeId === n.id);
+    pushRows(kids, n);
   }
   const orphans = new Map<string, Occupant[]>();
   for (const n of nodes) {
     if (consumed.has(n.id)) continue;
-    const parent = promptParent(n.data)?.nodeId;
+    const parent = parentOf(n)?.nodeId;
     if (!parent || byId.has(parent)) continue;
     const list = orphans.get(parent) ?? [];
     list.push(n);
     orphans.set(parent, list);
   }
-  for (const list of orphans.values()) {
-    blocks.push(rowsBlock(list, gap));
-    for (const n of list) consumed.add(n.id);
-  }
+  for (const list of orphans.values()) pushRows(list);
   for (const group of opts.groups ?? []) {
     const members = group.members.map((id) => byId.get(id)).filter((n): n is Occupant => !!n && !consumed.has(n.id));
     if (members.length < 2) continue;
@@ -743,12 +821,28 @@ function blocksOf(nodes: Occupant[], opts: TidyOptions, gap: number): FlowBlock[
   return blocks;
 }
 
+function separation(a: Rect, b: Rect): number {
+  const dx = Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w), 0);
+  const dy = Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h), 0);
+  return Math.hypot(dx, dy);
+}
+
+/** 选中整理只在原选区附近找空位,远处的离群节点不当锚点。 */
+function resolveNear(fixed: Occupant[], x: number, y: number, w: number, h: number, gap: number): { x: number; y: number } {
+  const anchor: Rect = { x, y, w: Math.max(w, 1), h: Math.max(h, 1) };
+  const local = fixed.filter((n) => separation(rectOf(n), anchor) <= PLACE_ABS_CAP);
+  const spot = resolveRect(local, x, y, w, h, gap);
+  if (Math.hypot(spot.x - x, spot.y - y) > PLACE_ABS_CAP) return { x, y };
+  return spot;
+}
+
 /**
- * 只重排坐标。分镜表和它铺出的镜头留在同一块,用户分组留在同一块,
- * 其余节点按原来的从左到右顺序折行。第二次对结果再整理应得到同一套坐标。
- * scope=selected 时只移动选中节点,未选中的当作障碍物。
+ * 只重排坐标。分镜表和它铺出的镜头留在同一块(看 storyboardId、promptFrom 或来自分镜表的边),
+ * 用户分组留在同一块,其余按「先上后下、行内从左到右」折行。
+ * 这个顺序和折行结果一致,所以对结果再整理不会换位。
+ * scope=selected 时只移动选中节点,落点靠近原来的选区,不贴到远处的离群节点旁边。
  */
-export function tidyNodes(nodes: Occupant[], _edges: TidyEdge[] = [], opts: TidyOptions = {}): TidyResult {
+export function tidyNodes(nodes: Occupant[], edges: TidyEdge[] = [], opts: TidyOptions = {}): TidyResult {
   const gap = tidyGap(opts.gap);
   const scope = opts.scope === 'selected' ? 'selected' : 'all';
   if (scope === 'selected') {
@@ -756,9 +850,13 @@ export function tidyNodes(nodes: Occupant[], _edges: TidyEdge[] = [], opts: Tidy
     const moving = nodes.filter((n) => selected.has(n.id));
     const fixed = nodes.filter((n) => !selected.has(n.id));
     if (moving.length === 0) return { moves: [], bbox: contentBBox(nodes) };
-    const inner = tidyNodes(moving, _edges, { scope: 'all', gap, groups: opts.groups });
-    const anchor = fixed.length ? defaultAnchor(fixed, inner.bbox.w, inner.bbox.h) : { ...PLACE_ORIGIN };
-    const spot = resolveRect(fixed, anchor.x, anchor.y, Math.max(inner.bbox.w, 1), Math.max(inner.bbox.h, 1), gap);
+    const externalStoryboardIds = nodes.filter((n) => n.kind === 'storyboard').map((n) => n.id);
+    const inner = tidyNodes(moving, edges, { scope: 'all', gap, groups: opts.groups, externalStoryboardIds });
+    const sel = boundsOf(moving.map(rectOf));
+    const anchor = sel ? { x: sel.minX, y: sel.minY } : { ...PLACE_ORIGIN };
+    const spot = fixed.length
+      ? resolveNear(fixed, anchor.x, anchor.y, Math.max(inner.bbox.w, 1), Math.max(inner.bbox.h, 1), gap)
+      : anchor;
     const dx = spot.x - inner.bbox.x;
     const dy = spot.y - inner.bbox.y;
     const moves = inner.moves.map((m) => ({ id: m.id, x: m.x + dx, y: m.y + dy }));
@@ -769,7 +867,7 @@ export function tidyNodes(nodes: Occupant[], _edges: TidyEdge[] = [], opts: Tidy
     });
     return { moves, bbox: contentBBox(next) };
   }
-  const placed = packBlocks(blocksOf(nodes, opts, gap), gap);
+  const placed = packBlocks(blocksOf(nodes, opts, gap, edges), gap);
   const moves = nodes.map((n) => {
     const p = placed.get(n.id) ?? { x: n.x, y: n.y };
     return { id: n.id, x: p.x, y: p.y };

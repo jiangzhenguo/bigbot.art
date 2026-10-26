@@ -14,7 +14,7 @@
  *
  * 渲染层 / Agent tool-handlers / 确定性 plan 三处必须同口径调用本模块。
  */
-import { rowCell, rowNeedsImage, type PromptSubject } from './prompt.js';
+import { rowCell, rowNeedsImage, type PromptSource, type PromptSubject } from './prompt.js';
 
 /** 可当参考卡的图片节点 kind(含拼图角色卡) */
 const CARD_KINDS = new Set(['image-gen', 'image-edit', 'asset', 'image-stitch']);
@@ -262,8 +262,46 @@ export function keyframeEdgeLabel(plan: Pick<MaterializeRowPlan, 'keyframeAs'>):
 }
 
 /**
+ * 铺节点时写入下游的归属。`promptFrom` 会被边分派按文档边重写,
+ * `storyboardId` / `storyboardRow` 留下来,整理和已铺行统计仍认得出。
+ */
+export function storyboardLinkFields(nodeId: string, row: number): {
+  promptFrom: PromptSource;
+  storyboardId: string;
+  storyboardRow: number;
+} {
+  return {
+    promptFrom: { nodeId, mode: 'row', row },
+    storyboardId: nodeId,
+    storyboardRow: row,
+  };
+}
+
+/**
+ * 节点属于哪张分镜表的哪一行。
+ * 先看边分派清不掉的 storyboardId / storyboardRow,没有再退回 promptFrom(mode=row)。
+ */
+export function storyboardLinkOf(data: unknown): { nodeId: string; row?: number } | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as {
+    storyboardId?: unknown;
+    storyboardRow?: unknown;
+    promptFrom?: { nodeId?: unknown; mode?: unknown; row?: unknown };
+  };
+  const fromField = typeof d.storyboardId === 'string' && d.storyboardId ? d.storyboardId : undefined;
+  const fieldRow = typeof d.storyboardRow === 'number' && Number.isFinite(d.storyboardRow) ? d.storyboardRow : undefined;
+  const ps = d.promptFrom;
+  const fromPrompt = ps && ps.mode === 'row' && typeof ps.nodeId === 'string' && ps.nodeId ? ps.nodeId : undefined;
+  const promptRow = typeof ps?.row === 'number' && Number.isFinite(ps.row) ? ps.row : undefined;
+  const nodeId = fromField ?? fromPrompt;
+  if (!nodeId) return undefined;
+  const row = fromField ? fieldRow ?? (fromPrompt === nodeId ? promptRow : undefined) : promptRow;
+  return typeof row === 'number' ? { nodeId, row } : { nodeId };
+}
+
+/**
  * 从已铺节点反查「行号 → shot id」(追加铺时用来接续上一镜)。
- * 只认 kind=shot 且 promptFrom 指向该分镜表某行。
+ * 只认 kind=shot,且 storyboardId / promptFrom 指向该分镜表某行。
  */
 export function existingShotByRow(
   nodes: MaterializeNodeLike[],
@@ -272,12 +310,8 @@ export function existingShotByRow(
   const m = new Map<number, string>();
   for (const n of nodes) {
     if (String(n.kind ?? '') !== 'shot') continue;
-    const data =
-      n.data && typeof n.data === 'object' ? (n.data as { promptFrom?: { nodeId?: string; mode?: string; row?: number } }) : {};
-    const pf = data.promptFrom;
-    if (pf?.nodeId === storyboardId && pf.mode === 'row' && typeof pf.row === 'number') {
-      m.set(pf.row, n.id);
-    }
+    const link = storyboardLinkOf(n.data);
+    if (link?.nodeId === storyboardId && typeof link.row === 'number') m.set(link.row, n.id);
   }
   return m;
 }

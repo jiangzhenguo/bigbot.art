@@ -122,4 +122,12 @@ describe('派生数组的语义等价性 — 签名不变 ⇒ 统计结果不变
     expect(stats(shotOnly).imgs).toBe(0);
     expect(stats(withImg).imgs).toBe(1);
   });
+
+  it('只剩 storyboardId、没有 promptFrom 时仍然算已铺', () => {
+    const a = [node('n1', { storyboardId: 'sb1', storyboardRow: 1 }, { kind: 'shot' })];
+    const b = [node('n1', { storyboardId: 'sb1', storyboardRow: 1, prompt: '改了' }, { kind: 'shot' })];
+    expect(sbMaterializedRows('sb1', a)).toEqual([1]);
+    expect(refNodesSignature(b)).toBe(refNodesSignature(a));
+    expect(stats(a).rows).toEqual([1]);
+  });
 });

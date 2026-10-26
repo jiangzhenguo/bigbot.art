@@ -301,6 +301,13 @@ export interface ImageGenParams {
   /** 🆕 提示词来源追溯(文档标记选段 / 分镜表某行) */
   promptFrom?: PromptSource;
   /**
+   * 分镜表铺节点的归属。边分派会按文档边重写 `promptFrom`(分镜表不是 document,行号会被清掉),
+   * 这两个字段留下来,整理和「已铺行」仍能认出这块。
+   */
+  storyboardId?: string;
+  /** 与 promptFrom.row 同口径的表格行号(铺节点时为 1 起) */
+  storyboardRow?: number;
+  /**
    * 🆕 参考图来源(ref-image 入边,多值,渲染层写入;删除边即撤销)。
    * 有参考图时缺省模型走 `image.instruction`(Qwen-Image-2.1 edit-reference),
    * 不是 Klein 的 multi-reference;显式选 flux.2-klein 才走多参考生成。
@@ -656,6 +663,10 @@ export interface ShotParams {
   promptTemplate?: string;
   /** 🆕 提示词来源追溯(分镜表某行 mode=row) */
   promptFrom?: PromptSource;
+  /** 分镜表铺节点的归属,边分派不会清。见 ImageGenParams.storyboardId */
+  storyboardId?: string;
+  /** 与 promptFrom.row 同口径的表格行号 */
+  storyboardRow?: number;
 }
 
 /** 一次生成结果 = Take(保留历史,不覆盖;shotNodeId 字段语义为「节点 id」,shot/image-gen/image-edit/image-crop 通用) */

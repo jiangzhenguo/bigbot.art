@@ -11,6 +11,8 @@ import {
   planStoryboardMaterializeRows,
   keyframeEdgeLabel,
   existingShotByRow,
+  storyboardLinkOf,
+  storyboardLinkFields,
   summarizeMaterializePlans,
   tableToGfm,
   capabilityOf,
@@ -4280,7 +4282,7 @@ export default function CanvasPage({
         toastMsg('分镜表缺少表格块 · 无法铺节点');
         return;
       }
-      /* sbMaterializedRows = promptFrom.row 集合,与 Agent 同口径为 1-based */
+      /* 已铺行:storyboardRow 优先(边分派清不掉 promptFrom),与 Agent 同口径 */
       const done = sbMaterializedRows(sbNode.id, nodesRef.current);
       const plans = planStoryboardMaterializeRows({
         head: tb.head,
@@ -4300,10 +4302,7 @@ export default function CanvasPage({
       }
       const base = String((sbNode.data ?? {}).basePrompt ?? '');
       const size = SB_SIZE[aspect] ?? SB_SIZE['16:9']!;
-      const prior = nodesRef.current.filter((n) => {
-        const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-        return ps?.nodeId === sbNode.id && ps.mode === 'row';
-      });
+      const prior = nodesRef.current.filter((n) => storyboardLinkOf(n.data)?.nodeId === sbNode.id);
       const placedRows = placeMaterializeRows(
         nodesRef.current.map(occupantOfLocal),
         occupantOfLocal(sbNode),
@@ -4370,7 +4369,7 @@ export default function CanvasPage({
             tier,
             seed: 42 + r,
             refs: [],
-            promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
+            ...storyboardLinkFields(sbNode.id, plan.rowNo),
           },
         } as CanvasNode);
         newEdges.push({ from: sbNode.id, to: shotId, cls: '', label: 'prompt' });
@@ -4410,7 +4409,7 @@ export default function CanvasPage({
               height: size.height,
               guidance: 1.0,
               seeds: [42],
-              promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
+              ...storyboardLinkFields(sbNode.id, plan.rowNo),
             },
           } as CanvasNode);
           const port = keyframeEdgeLabel(plan);
@@ -4444,8 +4443,10 @@ export default function CanvasPage({
       const ids = new Set(
         nodesRef.current
           .filter((n) => {
-            const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-            return ps?.nodeId === sbNode.id && ps.mode === 'row';
+            if (storyboardLinkOf(n.data)?.nodeId === sbNode.id) return true;
+            return edgesRef.current.some(
+              (e) => e.from === sbNode.id && e.to === n.id && (!e.label || e.label === 'prompt'),
+            );
           })
           .map((n) => n.id),
       );
@@ -4479,8 +4480,8 @@ export default function CanvasPage({
       const ids = new Set(
         nodesRef.current
           .filter((n) => {
-            const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-            return ps?.nodeId === sbNode.id && ps.mode === 'row';
+            const link = storyboardLinkOf(n.data);
+            return link?.nodeId === sbNode.id && typeof link.row === 'number';
           })
           .map((n) => n.id),
       );
@@ -4491,9 +4492,9 @@ export default function CanvasPage({
       setNodes((ns) =>
         ns.map((n) => {
           if (n.id === sbNode.id) return { ...n, stale: false, data: { ...(n.data ?? {}), lastTable: gfm } };
-          const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-          if (!ps || ps.nodeId !== sbNode.id || ps.mode !== 'row' || typeof ps.row !== 'number') return n;
-          const idx = ps.row - 1;
+          const link = storyboardLinkOf(n.data);
+          if (!link || link.nodeId !== sbNode.id || typeof link.row !== 'number') return n;
+          const idx = link.row - 1;
           const row = tb.rows[idx] ?? [];
           const data = { ...(n.data ?? {}) };
           if (n.kind === 'shot') {
@@ -4515,7 +4516,7 @@ export default function CanvasPage({
             const p = assembleZImagePrompt(row, tb.head, base);
             data.prompt = p.text;
           }
-          data.promptFrom = { nodeId: sbNode.id, mode: 'row', row: ps.row } as PromptSource;
+          Object.assign(data, storyboardLinkFields(sbNode.id, link.row));
           return { ...n, stale: false, data };
         }),
       );

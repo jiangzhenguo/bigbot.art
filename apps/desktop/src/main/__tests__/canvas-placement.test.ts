@@ -234,6 +234,38 @@ describe('绝对上限', () => {
     }
     expect(overlapsAny(nodes)).toBe(false);
   });
+
+  it('负方向反复传入超大坐标也会停住,不会按余量一直往左上漂', () => {
+    const nodes: Occupant[] = [occ({ id: 'seed', x: 80, y: 80, width: 236, height: 220 })];
+    for (let i = 0; i < 20; i++) {
+      const spot = placeNode(nodes, { kind: 'document', width: 236, x: -99999, y: -99999 });
+      expect(spot.x).toBeGreaterThanOrEqual(PLACE_ORIGIN.x - PLACE_ABS_CAP - 1);
+      expect(spot.y).toBeGreaterThanOrEqual(PLACE_ORIGIN.y - PLACE_ABS_CAP - 1);
+      nodes.push(occ({ id: `neg-${i}`, x: spot.x, y: spot.y, width: spot.width, height: spot.height }));
+    }
+    const minX = Math.min(...nodes.map((n) => n.x));
+    const minY = Math.min(...nodes.map((n) => n.y));
+    const edge = placeNode(nodes, { kind: 'document', width: 236, x: -99999, y: -99999 });
+    expect(edge.x).toBeGreaterThanOrEqual(minX - 1);
+    expect(edge.y).toBeGreaterThanOrEqual(minY - 1);
+    expect(edge.x).toBeGreaterThan(-5000);
+    expect(edge.y).toBeGreaterThan(-5000);
+  });
+
+  it('内容已经在上限左侧时,新的负坐标不再越过现有左边缘一个上限', () => {
+    const nodes: Occupant[] = [occ({ id: 'seed', x: -20000, y: -20000, width: 236, height: 220 })];
+    for (let i = 0; i < 20; i++) {
+      const spot = placeNode(nodes, { kind: 'document', width: 236, x: -99999, y: -99999 });
+      expect(spot.x).toBeGreaterThanOrEqual(-20000 - PLACE_ABS_CAP - 1);
+      expect(spot.y).toBeGreaterThanOrEqual(-20000 - PLACE_ABS_CAP - 1);
+      nodes.push(occ({ id: `far-${i}`, x: spot.x, y: spot.y, width: spot.width, height: spot.height }));
+    }
+    const minX = Math.min(...nodes.map((n) => n.x));
+    const minY = Math.min(...nodes.map((n) => n.y));
+    const edge = placeNode(nodes, { kind: 'document', width: 236, x: -99999, y: -99999 });
+    expect(edge.x).toBeGreaterThanOrEqual(minX - 1);
+    expect(edge.y).toBeGreaterThanOrEqual(minY - 1);
+  });
 });
 
 describe('tidyNodes', () => {
@@ -319,6 +351,153 @@ describe('tidyNodes', () => {
       const b = twice.find((n) => n.id === id)!;
       expect(b.x).toBe(a.x);
       expect(b.y).toBe(a.y);
+    }
+  });
+
+  function sig(nodes: Occupant[]): string {
+    return nodes.map((n) => `${n.id}:${n.x},${n.y}`).join('|');
+  }
+
+  it('已经按行排好的 6 个文档再整理四次,坐标不变', () => {
+    const w = 236;
+    const h = 220;
+    const rowY = PLACE_ORIGIN.y;
+    const nextY = rowY + h + PLACE_GAP;
+    const nodes = [
+      ...Array.from({ length: 5 }, (_, i) =>
+        occ({
+          id: `d${i}`,
+          kind: 'document',
+          x: PLACE_ORIGIN.x + i * (w + PLACE_GAP),
+          y: rowY,
+          width: w,
+          height: h,
+        }),
+      ),
+      occ({
+        id: 'd5',
+        kind: 'document',
+        x: PLACE_ORIGIN.x,
+        y: nextY,
+        width: w,
+        height: h,
+      }),
+    ];
+    let next = apply(nodes, tidyNodes(nodes).moves);
+    expect(sig(next)).toBe(sig(nodes));
+    const first = sig(next);
+    for (let i = 0; i < 3; i++) {
+      next = apply(next, tidyNodes(next).moves);
+      expect(sig(next)).toBe(first);
+    }
+    const selIds = next.map((n) => n.id);
+    let selected = next;
+    for (let i = 0; i < 3; i++) {
+      selected = apply(selected, tidyNodes(selected, [], { scope: 'selected', selectedIds: selIds }).moves);
+      expect(sig(selected)).toBe(first);
+    }
+  });
+
+  it('分组和分镜表一起整理四次,坐标不变,镜头留在表旁边', () => {
+    const nodes: Occupant[] = [
+      occ({ id: 'sb', kind: 'storyboard', x: 2400, y: 1800, width: 318, height: 280 }),
+      occ({
+        id: 'img-1',
+        kind: 'image-gen',
+        x: 100,
+        y: 100,
+        width: 232,
+        data: { storyboardId: 'sb', storyboardRow: 1, width: 1024, height: 576 },
+      }),
+      occ({
+        id: 'shot-1',
+        kind: 'shot',
+        x: 900,
+        y: 40,
+        width: 250,
+        data: { storyboardId: 'sb', storyboardRow: 1, width: 1024, height: 576 },
+      }),
+      occ({
+        id: 'img-2',
+        kind: 'image-gen',
+        x: 80,
+        y: 900,
+        width: 232,
+        data: { storyboardId: 'sb', storyboardRow: 2, width: 1024, height: 576 },
+      }),
+      occ({
+        id: 'shot-2',
+        kind: 'shot',
+        x: 1400,
+        y: 1100,
+        width: 250,
+        data: { storyboardId: 'sb', storyboardRow: 2, width: 1024, height: 576 },
+      }),
+      ...Array.from({ length: 4 }, (_, i) =>
+        occ({ id: `g${i}`, kind: 'document', x: 300 + i * 30, y: 2000 + (i % 2) * 40, width: 236, height: 220 }),
+      ),
+    ];
+    const opts = { groups: [{ members: ['g0', 'g1', 'g2', 'g3'] }] };
+    let next = apply(nodes, tidyNodes(nodes, [], opts).moves);
+    const sb = next.find((n) => n.id === 'sb')!;
+    const img1 = next.find((n) => n.id === 'img-1')!;
+    const shot1 = next.find((n) => n.id === 'shot-1')!;
+    const img2 = next.find((n) => n.id === 'img-2')!;
+    expect(img1.x).toBeGreaterThan(sb.x);
+    expect(shot1.x).toBeGreaterThan(img1.x);
+    expect(img1.y).toBe(shot1.y);
+    expect(img2.y).toBeGreaterThan(img1.y);
+    const first = sig(next);
+    for (let i = 0; i < 3; i++) {
+      next = apply(next, tidyNodes(next, [], opts).moves);
+      expect(sig(next)).toBe(first);
+    }
+  });
+
+  it('边分派清掉 promptFrom 之后,分镜表和镜头仍按边留在一块', () => {
+    const nodes: Occupant[] = [
+      occ({ id: 'doc', kind: 'document', x: 80, y: 80, width: 236, height: 220 }),
+      occ({ id: 'sb', kind: 'storyboard', x: 2200, y: 1600, width: 318, height: 280 }),
+      occ({ id: 'img', kind: 'image-gen', x: 120, y: 400, width: 232, data: { width: 1024, height: 576 } }),
+      occ({ id: 'shot', kind: 'shot', x: 480, y: 860, width: 250, data: { width: 1024, height: 576 } }),
+    ];
+    const edges = [
+      { source: 'sb', target: 'img' },
+      { source: 'sb', target: 'shot' },
+    ];
+    let next = apply(nodes, tidyNodes(nodes, edges).moves);
+    const sb = next.find((n) => n.id === 'sb')!;
+    const img = next.find((n) => n.id === 'img')!;
+    const shot = next.find((n) => n.id === 'shot')!;
+    const doc = next.find((n) => n.id === 'doc')!;
+    expect(img.x).toBeGreaterThan(sb.x);
+    expect(shot.x).toBeGreaterThan(sb.x);
+    expect(img.y).toBeLessThan(shot.y);
+    expect(Math.abs(doc.y - sb.y) > 8 || doc.x + 236 < sb.x || doc.x > img.x).toBe(true);
+    const first = sig(next);
+    for (let i = 0; i < 3; i++) {
+      next = apply(next, tidyNodes(next, edges).moves);
+      expect(sig(next)).toBe(first);
+    }
+  });
+
+  it('选中整理落在原选区附近,不贴到远处的离群节点', () => {
+    const nodes: Occupant[] = [
+      occ({ id: 'near', kind: 'document', x: 200, y: 180, width: 236, height: 220 }),
+      occ({ id: 'shot', kind: 'shot', x: 400, y: 300, width: 250, height: 220 }),
+      occ({ id: 'outlier', kind: 'document', x: -3740, y: 2491, width: 236, height: 220 }),
+    ];
+    let next = apply(nodes, tidyNodes(nodes, [], { scope: 'selected', selectedIds: ['shot'] }).moves);
+    const shot = next.find((n) => n.id === 'shot')!;
+    const outlier = next.find((n) => n.id === 'outlier')!;
+    expect(Math.hypot(shot.x - 400, shot.y - 300)).toBeLessThan(800);
+    expect(Math.hypot(shot.x - outlier.x, shot.y - outlier.y)).toBeGreaterThan(2000);
+    expect(outlier.x).toBe(-3740);
+    expect(outlier.y).toBe(2491);
+    const first = sig(next);
+    for (let i = 0; i < 3; i++) {
+      next = apply(next, tidyNodes(next, [], { scope: 'selected', selectedIds: ['shot'] }).moves);
+      expect(sig(next)).toBe(first);
     }
   });
 });
