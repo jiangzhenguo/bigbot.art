@@ -111,7 +111,8 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
 }
 
 /** shared → 本地渲染节点(kind 已对齐,直接透传;不写 ui 状态位,状态由卡片从 data 派生) */
-export function fromSharedNode(cn: { id: string; kind: string; label?: string; position?: { x: number; y: number }; width?: number; data?: unknown; extra?: string }): CanvasNode {
+export function fromSharedNode(cn: { id: string; kind: string; label?: string; position?: { x: number; y: number }; width?: number; height?: number; data?: unknown; extra?: string }): CanvasNode {
+  const hint = typeof cn.height === 'number' && Number.isFinite(cn.height) && cn.height > 0 ? cn.height : undefined;
   return {
     id: cn.id,
     title: cn.label ?? cn.id,
@@ -122,28 +123,42 @@ export function fromSharedNode(cn: { id: string; kind: string; label?: string; p
     data: (cn.data ?? {}) as Record<string, unknown>,
     // 完成提示行(「✓ 产物名」):随快照持久化,重启后仍在(2026-09-29)
     ...(cn.extra ? { extra: cn.extra } : {}),
+    // 卡片高不直接写成 h:h 是本帧测量,写回去会和「快照没有 h」的旧假设打架。
+    // 记在 heightHint 上,保存时若还没重新测到 h,就把这个值写回快照。
+    ...(hint ? { heightHint: hint } : {}),
   };
 }
 
 /** 本地 → shared */
-export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: string; label: string; position: { x: number; y: number }; width?: number; data: unknown; extra?: string; createdAt?: string; updatedAt?: string }> {
-  return ns.map((n) => ({
-    id: n.id,
-    kind: n.kind ?? 'document',
-    label: n.title,
-    position: { x: n.x, y: n.y },
-    width: n.w,
-    data: n.data ?? defaultDataFor(n.kind ?? 'document'),
-    // 完成提示行随快照持久化 —— 它参与 contentKey 比对,若不落盘会造成
-    // 「回推后本地与基线不等 → 每次推送都整体替换」的抖动(2026-09-29 事故)
-    ...(n.extra ? { extra: n.extra } : {}),
-  }));
+export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: string; label: string; position: { x: number; y: number }; width?: number; height?: number; data: unknown; extra?: string; createdAt?: string; updatedAt?: string }> {
+  return ns.map((n) => {
+    // 实测 h 优先;还没测到时用快照带回的 heightHint,避免自动保存把卡片高抹掉
+    const cardH =
+      typeof n.h === 'number' && Number.isFinite(n.h) && n.h > 0
+        ? n.h
+        : typeof n.heightHint === 'number' && Number.isFinite(n.heightHint) && n.heightHint > 0
+          ? n.heightHint
+          : undefined;
+    return {
+      id: n.id,
+      kind: n.kind ?? 'document',
+      label: n.title,
+      position: { x: n.x, y: n.y },
+      width: n.w,
+      ...(cardH ? { height: Math.round(cardH) } : {}),
+      data: n.data ?? defaultDataFor(n.kind ?? 'document'),
+      // 完成提示行随快照持久化 —— 它参与 contentKey 比对,若不落盘会造成
+      // 「回推后本地与基线不等 → 每次推送都整体替换」的抖动(2026-09-29 事故)
+      ...(n.extra ? { extra: n.extra } : {}),
+    };
+  });
 }
 
 /**
  * 归一化「瞬态 UI 标记」用于**内容比对**(保存基线 / 自身回推识别)。
  *
- * UI 瞬态字段(badge / running / progress / ghost / stale / agentOn / h)不进快照,
+ * UI 瞬态字段(badge / running / progress / ghost / stale / agentOn / h / heightHint)不进比对。
+ * 卡片高另走快照字段 height(实测 h 优先,否则 heightHint),不参与 contentKey。
  * 若直接参与比对,会出现两个方向的错判(2026-09 实测):
  *  - 正方向:「生成中文案变了」被当作内容改动 → 每 800ms 写盘一次,主进程写盘广播又把
  *    store 里的旧节点(没有 badge)整体推回来 → **节点上的「生成中」标签被抹掉**
@@ -153,8 +168,8 @@ export function toSharedNodes(ns: CanvasNode[]): Array<{ id: string; kind: strin
  * 归一化 = 剔除上述瞬态键后做 JSON 串,语义仍是「用户内容一致」。
  */
 export function contentKey(nodes: CanvasNode[], edges: Edge[], groups: unknown): string {
-  // ⚠️ 这些是**不进快照**的纯 UI 瞬态字段,必须从比对里剔除(badge/running/progress/ghost/stale/agentOn/h)。
-  // `h` 是 ResizeObserver 的实测高度(纯 UI 测量值):快照还原的节点没有它(见 fromSharedNode),
+  // ⚠️ 这些是**不进快照比对**的纯 UI 瞬态字段,必须从比对里剔除(badge/running/progress/ghost/stale/agentOn/h/heightHint)。
+  // `h` 是 ResizeObserver 的实测高度:快照还原的节点不带 h(见 fromSharedNode,卡片高在 heightHint),
   // 若不剔除,本地已测节点(有 h)与快照节点(无 h)的 contentKey 必然不等 → 每次写盘回推都判
   // 「内容变了」→ setNodes 整批替换 → h 全丢 → 连线端点退回兜底高度 = 跳到节点顶部;
   // 且 DOM 未换/尺寸未变,RO 不再触发,h 永久缺失(2026-10「进画布连线先在中间后跳到上边」事故)。
@@ -162,7 +177,7 @@ export function contentKey(nodes: CanvasNode[], edges: Edge[], groups: unknown):
   // 并**有意参与比对**(抹掉会丢反馈,见 node-mapping.test.ts)。曾因它「参与比对却不进快照」
   // 导致快照回推被判成内容变更、setNodes 整体替换把 resultPath 一并回退(2026-09-29 事故),
   // 修法是让它真正进快照(见 toSharedNodes/fromSharedNode),而非把它列为瞬态。
-  const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn', 'h'] as const;
+  const TRANSIENT = ['badge', 'running', 'progress', 'ghost', 'stale', 'agentOn', 'h', 'heightHint'] as const;
   const norm = nodes.map((n) => {
     const clean: Record<string, unknown> = { ...n };
     for (const k of TRANSIENT) delete clean[k];

@@ -560,6 +560,7 @@ export class MemoryStore {
         '提交顺序:先 engine.submit 分镜静帧(以及角色卡/场景卡),等出图后再 submit 依赖它们的镜头;镜头上游图片未出图会被拒绝。',
         '改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
         '铺节点只创建节点、不触发运行。',
+        '新建节点不要传 x/y:系统会自动避开重叠,并把离谱坐标拉回现有内容附近。只有必须贴着某个节点时才用 canvas.create_node 的 place:{relativeTo, dir:right|below}。canvas.list_nodes 每行带画布坐标和卡片宽高(未实测时为估算),供你了解布局,不要照抄去硬编码坐标。',
         '单镜、图片节点:用户指令明确就直接 engine.submit,不必再确认。',
         '未出片的镜头达到 2 个时:先把节点和连线做完,再 plan.present。markdown 以 # 标题开头,写清要建什么、怎么连、要提交哪些镜头(用标题)。调用后本轮暂停,用户点「按此执行」之后才能 engine.submit 这些镜头;点「修改计划」就改完再交一次。没点头就提交会被拒绝。同一轮里不要一边 plan.present 一边 engine.submit。',
         '多步任务用 todo.write 维护清单:每次交完整列表(整表替换),每项一句短任务,status 为 pending / in_progress / completed,同时只能有一项 in_progress。做完就更新状态。单步任务不要写清单。清单会在之后每一轮重新注入,自动续跑时按未完成项继续。'].join('\n'),

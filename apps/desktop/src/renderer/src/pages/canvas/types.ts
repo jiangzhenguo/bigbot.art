@@ -68,8 +68,14 @@ export interface CanvasNode {
    *  - stage:阶段序号(如「2/3」)
    *  - indet:当前阶段无细分进度 → 进度条走滚动动画 */
   progress?: { pct?: number; text: string; stage?: string; indet?: boolean };
-  /** 解析「+」时用于定位的实测高度(px,未缩放) */
+  /** 解析「+」时用于定位的实测高度(px,未缩放)。不进 contentKey。 */
   h?: number;
+  /**
+   * 快照里带回的卡片高度(主进程估算或上次实测)。
+   * 与 h 分开:h 是本帧 DOM 测量,不进快照比对;heightHint 只为了在重新测量前
+   * 把已落盘的高度原样写回,避免一次自动保存把 height 抹掉。不进 contentKey。
+   */
+  heightHint?: number;
   kind?: NodeKind | 'plain';
   tag?: NodeTag;
   /** 弹层创建的节点的补充描述行 */

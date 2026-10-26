@@ -31,6 +31,11 @@ export interface CanvasNode {
   /** 画布坐标与尺寸 */
   position: { x: number; y: number };
   width?: number;
+  /**
+   * 卡片在画布上的像素高度(不是 data 里的媒体像素)。
+   * 渲染层把 ResizeObserver 实测值写回这里,供主进程避让;
+   * 尚未测量时由放置逻辑写入估算值。旧快照缺省。
+   */
   height?: number;
   /** 用户可见标题 */
   label: string;

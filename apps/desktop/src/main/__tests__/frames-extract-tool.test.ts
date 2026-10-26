@@ -282,8 +282,11 @@ describe.runIf(hasFfmpeg)('frames.extract', () => {
     const snap = (store as unknown as { __snapshot: { nodes: Array<Record<string, unknown>> } }).__snapshot;
     const created = snap.nodes.find((n) => n.id === res.nodeId) as Record<string, unknown>;
     const pos = created.position as { x: number; y: number };
-    // shot-1 在 (100,100)
-    expect(pos.x).toBeGreaterThan(100);
-    expect(pos.y).toBe(100);
+    // shot-1 在 (100,100)。右侧空着时贴在同一行;本文件前面的用例已经把右侧占满,
+    // 避让会贴着内容下沿找空位,仍然在来源附近,不会飞到内容上方或很远的地方。
+    expect(pos.x).toBeGreaterThanOrEqual(100 - 40);
+    expect(pos.y).toBeGreaterThanOrEqual(100);
+    expect(pos.y).toBeLessThan(100 + 1600);
+    expect(Math.hypot(pos.x - 100, pos.y - 100)).toBeLessThan(2000);
   });
 });

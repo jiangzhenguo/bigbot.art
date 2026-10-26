@@ -407,6 +407,7 @@ agent.toolExecutor = async (req) => {
     projectId: req.params.projectId || currentToolCtx?.projectId || '',
     canvasId: req.params.canvasId || currentToolCtx?.canvasId || '',
     threadId: req.params.threadId || currentToolCtx?.threadId,
+    selectedNodeId: currentToolCtx?.selectedNodeId,
   };
   const argsBrief = JSON.stringify(req.params.args ?? {}).slice(0, 120);
   logger.log('info', `agent.tool → ${req.params.tool}(${argsBrief})`);
@@ -499,9 +500,9 @@ queue.onChange = (jobs) => {
 };
 
 /** 当前活跃 chat 的工具上下文(按 chatKey 隔离,避免并发串写) */
-const activeToolCtx = new Map<string, { projectId: string; canvasId: string; threadId?: string }>();
+const activeToolCtx = new Map<string, { projectId: string; canvasId: string; threadId?: string; selectedNodeId?: string }>();
 /** 最近一次 chat 上下文(事件兜底;工具 RPC 已自带 projectId/canvasId) */
-let currentToolCtx: { projectId: string; canvasId: string; threadId?: string } | null = null;
+let currentToolCtx: { projectId: string; canvasId: string; threadId?: string; selectedNodeId?: string } | null = null;
 /**
  * 本会话已成功完成的工具动作(按 project:canvas 归集)。
  * 用途:长任务失败/超时时说明「哪些改动其实已经生效」——旧实现在收尾超时时只回一句
@@ -814,7 +815,7 @@ async function executeAgentChat(opts: {
   });
   inFlightTails.set(flightKey, tailPromise);
   let chatKey: string | undefined;
-  let toolCtx: { projectId: string; canvasId: string; threadId?: string } | undefined;
+  let toolCtx: { projectId: string; canvasId: string; threadId?: string; selectedNodeId?: string } | undefined;
   try {
   let llm: LlmSource | undefined;
   const project = store.getProject(opts.projectId);
@@ -889,7 +890,7 @@ async function executeAgentChat(opts: {
   chatKey = `${opts.projectId}:${opts.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */
   const activityKey = `${opts.projectId}:${opts.canvasId}`;
-  toolCtx = { projectId: opts.projectId, canvasId: opts.canvasId, threadId };
+  toolCtx = { projectId: opts.projectId, canvasId: opts.canvasId, threadId, selectedNodeId: undefined };
   activeToolCtx.set(chatKey, toolCtx);
   currentToolCtx = toolCtx;
 
@@ -902,6 +903,8 @@ async function executeAgentChat(opts: {
     // 多引用合并去重:selectedNodeIds(新)优先,selectedNodeId(旧契约)兜底
     const selIds = [...new Set([...(opts.selectedNodeIds ?? []), ...(opts.selectedNodeId ? [opts.selectedNodeId] : [])])];
     const selNodes = ctxSnap ? selIds.map((id) => ctxSnap.nodes.find((x) => x.id === id)).filter((n): n is CanvasNode => !!n) : [];
+    // 新建节点没给坐标时,放在用户本轮指着的节点右侧
+    if (selNodes[0]) toolCtx.selectedNodeId = selNodes[0].id;
     memory.addRecall(opts.projectId, {
       canvasId: opts.canvasId,
       threadId,

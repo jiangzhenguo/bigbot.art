@@ -106,6 +106,18 @@ describe('contentKey · 瞬态 UI 字段归一化', () => {
     expect(b).toBe(a);
   });
 
+  it('卡片高度经快照往返成 heightHint,不参与内容比对,也不写成 h', () => {
+    const local = { ...base, h: 342, data: { prompt: 'x' } };
+    const shared = toSharedNodes([local as never])[0]!;
+    expect(shared.height).toBe(342);
+    const restored = fromSharedNode(shared as never);
+    expect(restored.h).toBeUndefined();
+    expect(restored.heightHint).toBe(342);
+    // 还没重新测量时,保存必须把 heightHint 写回去,不能抹掉
+    expect(toSharedNodes([restored as never])[0]!.height).toBe(342);
+    expect(contentKey([restored as never], [], [])).toBe(contentKey([local as never], [], []));
+  });
+
   it('快照还原节点经 preserveMeasuredSize 合回已测 h 后,与本地内容相等(端到端回归)', () => {
     // 本地:已被 RO 测量(有 h);快照:无 h
     const local = { ...base, h: 342, data: { prompt: 'x' } };

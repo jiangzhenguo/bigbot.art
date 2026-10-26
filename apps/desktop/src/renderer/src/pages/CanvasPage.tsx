@@ -1971,7 +1971,8 @@ export default function CanvasPage({
     bootRef.current = true;
     hydratedCanvasRef.current = activeCanvas.id;
     userClearedRef.current = false;
-    setKnownVersion(activeCanvas.version ?? 0);
+    knownVersionRef.current = activeCanvas.version ?? 0;
+    setKnownVersion(knownVersionRef.current);
     // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
     // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
     const loaded = activeCanvas.nodes.map((n) => fromSharedNode(n as never));
@@ -2191,7 +2192,8 @@ export default function CanvasPage({
       const pc = await window.bigbotart.loadProjectCanvases(projectId);
       const cur = pc.canvases.find((c) => c.id === activeCanvasId);
       if (!cur) return;
-      setKnownVersion(cur.version ?? 0);
+      knownVersionRef.current = cur.version ?? 0;
+      setKnownVersion(knownVersionRef.current);
       const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
       // 同挂载加载:合并已测高度 h,防连线端点跳节点顶部(见 preserveMeasuredSize)
       const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
@@ -2226,6 +2228,10 @@ export default function CanvasPage({
     // 合并已测高度 h:快照推送整批替换节点时 h 会丢,连线端点跳到节点顶部(2026-10 事故修复)
     const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
     const version = cur.version ?? 0;
+    // 立刻推进版本 ref。节点坐标以这份快照为准(主进程放置的落点在这里整批替换,
+    // 不和本地旧坐标合并)。若版本要等到下次渲染才写入 ref,中间一次 flush 会拿旧 version
+    // 去保存,或在版本已经对齐时把还没换上的旧坐标写回去。
+    knownVersionRef.current = version;
     // 分组:按**自愈后的**节点 id 规整(剔除已删节点/空组/重复归属)
     const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
     /* ⚠️ 比对必须走 contentKey 归一化(2026-09-29 修复):此前用裸 JSON.stringify,
@@ -2244,7 +2250,6 @@ export default function CanvasPage({
     }
     if (sameContent) {
       // 内容没变:只前进 knownVersion(不 setNodes → 不触发 auto-save 再保存 → 避免 version 循环写盘)
-      knownVersionRef.current = version;
       setKnownVersion(version);
       markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
       return selfHeal;

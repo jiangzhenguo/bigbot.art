@@ -76,6 +76,15 @@ import {
 } from './h3-prompt';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
+import {
+  placeBatch,
+  placeNode,
+  rectOf,
+  PLACE_GAP,
+  type BatchCell,
+  type Occupant,
+  type PlaceRequest,
+} from './canvas-placement';
 export { toolDefinitions } from '@bigbotart/shared';
 
 export interface ToolContext {
@@ -83,6 +92,11 @@ export interface ToolContext {
   canvasId: string;
   /** Agent 会话 id(engine.submit 透传到 RenderJob,供自动续跑回到正确会话) */
   threadId?: string;
+  /**
+   * 本轮用户选中/引用的节点。新建节点没给 place / 坐标时,放在它右侧。
+   * 只在用户主动发起的那一轮带上;自动续跑不沿用,避免连着往同一侧堆。
+   */
+  selectedNodeId?: string;
 }
 
 export interface ToolResult {
@@ -109,6 +123,28 @@ function finiteNum(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * canvas.create_node 的 place 参数。
+ * 对象直接用;本地小模型有时会把对象再序列化成字符串,这里同样接住。
+ * 缺 relativeTo 则当作没传(退回自动落点),不因此拒绝创建。
+ */
+function parsePlace(raw: unknown): { relativeTo: string; dir: 'right' | 'below' } | undefined {
+  let v = raw;
+  if (typeof v === 'string' && v.trim()) {
+    try {
+      v = JSON.parse(v) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const o = v as Record<string, unknown>;
+  const relativeTo = String(o.relativeTo ?? '').trim();
+  if (!relativeTo) return undefined;
+  const dir = String(o.dir ?? 'right') === 'below' ? 'below' : 'right';
+  return { relativeTo, dir };
 }
 
 /**
@@ -593,8 +629,13 @@ export class ToolHandlers {
         const capNote = a.caption?.trim() ? ' ·有文案' : '';
         return `${nameNote}${capNote}`;
       };
+      // 画布坐标 + 卡片宽高:模型以前看不到布局,只能瞎填 x/y。高度未实测时用估算。
+      const layoutOf = (n: CanvasNode): string => {
+        const box = rectOf(this.occupantOf(n));
+        return ` @(${Math.round(box.x)},${Math.round(box.y)} 卡片${Math.round(box.w)}×${Math.round(box.h)})`;
+      };
       const lines = cur.nodes
-        .map((n) => `- 「${n.label || n.id}」 [${n.kind}]${sizeOfNode(n)}${accelMark(n)}${assetMark(n)} (id=${n.id})`)
+        .map((n) => `- 「${n.label || n.id}」 [${n.kind}]${sizeOfNode(n)}${layoutOf(n)}${accelMark(n)}${assetMark(n)} (id=${n.id})`)
         .join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
@@ -636,11 +677,12 @@ export class ToolHandlers {
         if (as) assetNote = `\n${formatAssetBrief(as, { captionMax: 800 })}\n`;
         else if (aid) assetNote = `\n资产库中找不到 assetId=${aid}(节点显示「资产未加载」)\n`;
       }
+      const card = rectOf(this.occupantOf(node));
       return {
         ok: true,
         result:
           `节点「${node.label}」 [${node.kind}] (id=${nodeId})\n` +
-          `位置 (${node.position.x}, ${node.position.y})\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}` +
+          `位置 (${node.position.x}, ${node.position.y}) · 卡片约 ${Math.round(card.w)}×${Math.round(card.h)}\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}` +
           assetNote +
           `\ndata:\n${dataTrunc}`,
       };
@@ -793,8 +835,6 @@ export class ToolHandlers {
       const size = SB_SIZE[aspect] ?? SB_SIZE['16:9']!;
       const now = new Date().toISOString();
       const gfm = tableToGfm(tb.head, tb.rows);
-      const anchorX = sb.position.x ?? 60;
-      const anchorY = sb.position.y ?? 80;
       let created = 0;
       let imgs = 0;
       /* 🚀 加速默认(2026-10-09):用户在设置页开了「新建 shot 默认开启加速」时,
@@ -811,6 +851,42 @@ export class ToolHandlers {
         canvasNodes: cur.nodes,
       });
       if (!plans.length) return { ok: true, result: '当前行均已铺出 · 新增行后可追加铺' };
+      /* 整批当一块矩形来放:行距按卡片高(9:16 比 16:9 高),批内用本批序号而不是表行号 r。
+         追加铺时接在这张表已有镜头的下方,不再按 r*186 跳到很远或叠回原处。
+         两张表锚点靠近时,后一张的整块会避开前一张已经占住的区域。 */
+      const sbBox = rectOf(this.occupantOf(sb));
+      const prior = cur.nodes.filter((n) => {
+        const ps = (n.data as { promptFrom?: PromptSource }).promptFrom;
+        return ps?.nodeId === nodeId && ps.mode === 'row';
+      });
+      const cells: BatchCell[] = [];
+      plans.forEach((plan, batchRow) => {
+        const media = { mediaWidth: size.width, mediaHeight: size.height };
+        if (plan.createKeyframe) {
+          cells.push({ key: `img-${plan.rowNo}`, kind: 'image-gen', width: 232, col: 0, row: batchRow, ...media });
+        }
+        cells.push({ key: `shot-${plan.rowNo}`, kind: 'shot', width: 250, col: 1, row: batchRow, ...media });
+      });
+      const priorShots = prior.filter((n) => n.kind === 'shot');
+      const hasNewImage = cells.some((c) => c.col === 0);
+      const originX = !prior.length
+        ? undefined
+        : hasNewImage
+          ? Math.min(...prior.map((n) => n.position.x))
+          : Math.min(...(priorShots.length ? priorShots : prior).map((n) => n.position.x));
+      const placed = placeBatch(
+        cur.nodes.map((n) => this.occupantOf(n)),
+        cells,
+        {
+          anchor: { x: sbBox.x + sbBox.w + PLACE_GAP, y: sbBox.y },
+          continueFrom: prior.length ? prior.map((n) => this.occupantOf(n)) : undefined,
+          originX,
+        },
+      );
+      const at = (key: string) => {
+        const hit = placed.find((p) => p.key === key);
+        return hit ?? { x: sbBox.x + sbBox.w + PLACE_GAP, y: sbBox.y, width: 236, height: 220 };
+      };
       const shotIdByRow = existingShotByRow(cur.nodes, nodeId);
       for (const plan of plans) {
         const r = plan.rowNo - 1;
@@ -828,9 +904,10 @@ export class ToolHandlers {
           { engine: 'h3c', prompt: p.text, seconds: sec || undefined },
           { label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`, prompt: p.text },
         );
+        const shotSpot = at(`shot-${plan.rowNo}`);
         cur.nodes.push({
           id: shotId, kind: 'shot', label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`,
-          position: { x: anchorX + 560, y: anchorY + r * 186 }, width: 250,
+          position: { x: shotSpot.x, y: shotSpot.y }, width: shotSpot.width, height: shotSpot.height,
           data: {
             /* ⚠️ engine 必须与渲染层「+」弹层建 shot 同口径(h3c)。这里曾长期写死 'mock',
                后果是「用分镜表铺节点」得到的永远是 ffmpeg 占位片 —— 2026-10-09「测试1」
@@ -868,9 +945,10 @@ export class ToolHandlers {
           imgs++;
           const imgId = nid('img');
           const z = assembleZImagePrompt(row, tb.head, base);
+          const imgSpot = at(`img-${plan.rowNo}`);
           cur.nodes.push({
             id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(plan.rowNo).padStart(2, '0')}`,
-            position: { x: anchorX + 300, y: anchorY + r * 186 }, width: 232,
+            position: { x: imgSpot.x, y: imgSpot.y }, width: imgSpot.width, height: imgSpot.height,
             data: {
               // 🆕 不写 model(2026-09-29 v1 工具模型):留给提交时缺省解析
               // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
@@ -1065,10 +1143,38 @@ export class ToolHandlers {
 
       const finalLabel = resolvedAssetLabel ?? label;
       const now = new Date().toISOString();
+      const place = parsePlace(a.place);
+      let mediaWidth: number | undefined;
+      let mediaHeight: number | undefined;
+      if (kind === 'asset') {
+        const bound = this.assets.get(String((data as Record<string, unknown>).assetId ?? ''));
+        if (bound?.width && bound?.height) {
+          mediaWidth = bound.width;
+          mediaHeight = bound.height;
+        }
+      } else {
+        mediaWidth = finiteNum((data as Record<string, unknown>).width);
+        mediaHeight = finiteNum((data as Record<string, unknown>).height);
+      }
+      const spot = placeNode(cur.nodes.map((n) => this.occupantOf(n)), {
+        kind,
+        width: finiteNum(a.width) ?? 236,
+        data,
+        mediaWidth,
+        mediaHeight,
+        x: finiteNum(a.x),
+        y: finiteNum(a.y),
+        place,
+        selectedNodeId: ctx.selectedNodeId,
+      });
+      const placeNote = spot.unresolvedRelative
+        ? ` · place.relativeTo「${place?.relativeTo ?? ''}」不在画布上,已改为自动避让`
+        : '';
       const node: CanvasNode = {
         id: nid(kind), kind: kind as CanvasNode['kind'], label: finalLabel,
-        position: { x: Number(a.x ?? 80 + cur.nodes.length * 60), y: Number(a.y ?? 80) },
-        width: Number(a.width ?? 236),
+        position: { x: spot.x, y: spot.y },
+        width: spot.width,
+        height: spot.height,
         data: data as CanvasNode['data'],
         createdAt: now, updatedAt: now,
       };
@@ -1076,7 +1182,7 @@ export class ToolHandlers {
       cur.updatedAt = now;
       cur.version += 1;
       this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已创建节点「${finalLabel}」(${kind})${refsNote}${durationNote}`, nodeId: node.id };
+      return { ok: true, result: `已创建节点「${finalLabel}」(${kind})${refsNote}${durationNote}${placeNote}`, nodeId: node.id };
     },
     'canvas.update_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
@@ -1863,16 +1969,12 @@ export class ToolHandlers {
       if (!assetId) return { ok: false, result: '图片已下载但没有得到资产 id' };
       const label = String(a.label ?? '').trim() || imageLabelFromUrl(url);
       const now = new Date().toISOString();
-      const x = finiteNum(a.x);
-      const y = finiteNum(a.y);
+      const fetched = this.assets.get(assetId);
       const node: CanvasNode = {
         id: nid('asset'),
         kind: 'asset',
         label,
-        position: {
-          x: x ?? 80 + cur.nodes.length * 60,
-          y: y ?? 80,
-        },
+        position: { x: 0, y: 0 },
         width: 236,
         data: {
           assetId,
@@ -1882,7 +1984,15 @@ export class ToolHandlers {
         createdAt: now,
         updatedAt: now,
       };
-      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now);
+      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now, {
+        kind: 'asset',
+        width: 236,
+        x: finiteNum(a.x),
+        y: finiteNum(a.y),
+        mediaWidth: fetched?.width,
+        mediaHeight: fetched?.height,
+        selectedNodeId: ctx.selectedNodeId,
+      });
       if (!appended.ok) {
         return {
           ok: false,
@@ -2064,15 +2174,14 @@ export class ToolHandlers {
       const srcName = srcNode ? srcNode.label || srcNode.id : basenameOf(videoPath);
       const label = String(a.label ?? '').trim() || `${srcName} · ${atLabel}`;
       const now = new Date().toISOString();
+      const hintedX = finiteNum(a.x);
+      const hintedY = finiteNum(a.y);
+      const frameAsset = assetId ? this.assets.get(assetId) : undefined;
       const node: CanvasNode = {
         id: nid('asset'),
         kind: 'asset',
         label,
-        position: {
-          // 默认落在来源节点右侧(无来源则沿用 create_node 的排布规律)
-          x: Number(a.x ?? (srcNode ? srcNode.position.x + 300 : 80 + cur.nodes.length * 60)),
-          y: Number(a.y ?? (srcNode ? srcNode.position.y : 80)),
-        },
+        position: { x: 0, y: 0 },
         width: 236,
         data: {
           assetId,
@@ -2082,7 +2191,17 @@ export class ToolHandlers {
         createdAt: now,
         updatedAt: now,
       };
-      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now);
+      // 没给坐标时贴在来源节点右侧;给了坐标只当提示,仍做避让。无来源节点则走自动锚点。
+      const appended = this.appendNodeWithRetry(ctx.projectId, ctx.canvasId, node, now, {
+        kind: 'asset',
+        width: 236,
+        x: hintedX,
+        y: hintedY,
+        mediaWidth: frameAsset?.width,
+        mediaHeight: frameAsset?.height,
+        place: srcNode && hintedX == null && hintedY == null ? { relativeTo: srcNode.id, dir: 'right' } : undefined,
+        selectedNodeId: ctx.selectedNodeId,
+      });
       if (!appended.ok) {
         return {
           ok: false,
@@ -2290,21 +2409,56 @@ export class ToolHandlers {
   }
 
   /**
+   * 把快照节点收成落点模块的占位。
+   * asset 的媒体宽高在资产库,不在 data.width —— 不读的话竖图会被估成 16:9,右侧节点会盖上去。
+   */
+  private occupantOf(n: CanvasNode): Occupant {
+    const d = (n.data ?? {}) as Record<string, unknown>;
+    let mediaWidth = finiteNum(d.width);
+    let mediaHeight = finiteNum(d.height);
+    if (n.kind === 'asset' && typeof this.assets?.get === 'function') {
+      const asset = this.assets.get(String(d.assetId ?? ''));
+      if (asset?.width && asset?.height) {
+        mediaWidth = asset.width;
+        mediaHeight = asset.height;
+      }
+    }
+    return {
+      id: n.id,
+      kind: n.kind,
+      x: Number(n.position?.x ?? 0),
+      y: Number(n.position?.y ?? 0),
+      width: n.width,
+      height: n.height,
+      data: n.data,
+      mediaWidth,
+      mediaHeight,
+    };
+  }
+
+  /**
    * 把「新建的节点」挂到画布并落盘,带 stale 重试(与 h3.write_prompt 的写回防护同口径)。
    *
    * 用于带长 await(网络下载 / ffmpeg 抽帧)的工具:进入工具时加载的快照在 await 期间
    * 常被渲染层/队列的新保存顶掉版本,持旧快照整体保存会被 saveCanvasSnapshot 的
-   * 版本防护拒绝。改为:落盘前重新加载 → 挂载新节点 → 立即保存;被拒则重载重试。
+   * 版本防护拒绝。改为:落盘前重新加载 → 按**最新**节点避让落点 → 挂载 → 立即保存;被拒则重载重试。
    */
   private appendNodeWithRetry(
     projectId: string,
     canvasId: string,
     node: CanvasNode,
     now: string,
+    place?: PlaceRequest,
   ): { ok: boolean } {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const fresh = this.store.loadProjectCanvases(projectId).canvases.find((c) => c.id === canvasId);
       if (!fresh) return { ok: false };
+      if (place) {
+        const spot = placeNode(fresh.nodes.map((n) => this.occupantOf(n)), place);
+        node.position = { x: spot.x, y: spot.y };
+        node.width = spot.width;
+        node.height = spot.height;
+      }
       fresh.nodes.push(node);
       fresh.updatedAt = now;
       fresh.version = (fresh.version ?? 0) + 1;
