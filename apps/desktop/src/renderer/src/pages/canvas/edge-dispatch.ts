@@ -16,12 +16,31 @@
  * 可直接单测;CanvasPage 通过 nodesReducer 的 derive-from-edges action 消费它。
  */
 import type { PromptSource } from '@bigbotart/shared';
-import { inferPromptSource } from '@bigbotart/shared';
+import { inferPromptSource, storyboardLinkOf } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from './types';
 import { pickShotSpec, IMAGE_KINDS, VIDEO_KINDS } from './connectors';
 import { SHOT_REF_ROLES } from './constants';
 
 type RefEntry = { assetId?: string; path?: string; role: string; auto?: boolean };
+
+/**
+ * 分镜表铺出来的行号。来源是 storyboard、而且 prompt 边还在时返回。
+ * 文档边走 promptFromPatch,这里不插手。storyboardId 本身不在这里删除。
+ */
+function keptStoryboardPrompt(
+  data: unknown,
+  nodeId: string,
+  edges: Edge[],
+  byId: Map<string, CanvasNode>,
+): { nodeId: string; row: number } | undefined {
+  const link = storyboardLinkOf(data);
+  if (!link || typeof link.row !== 'number') return undefined;
+  const src = byId.get(link.nodeId);
+  if (src && src.kind !== 'storyboard') return undefined;
+  const linked = edges.some((e) => e.from === link.nodeId && e.to === nodeId);
+  if (!linked) return undefined;
+  return { nodeId: link.nodeId, row: link.row };
+}
 
 export interface EdgeDerivationResult {
   nextNodes: CanvasNode[];
@@ -491,11 +510,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       if (sorted.length) data.piecesFrom = sorted.map((e2) => ({ nodeId: e2.nodeId }));
       else delete data.piecesFrom;
     }
-    // 提示词端口 prompt:与边同步(运行期「自身 prompt 为空才用文档全文」)
+    // 提示词端口 prompt:文档边按标记重写;分镜表行号写在 storyboardId 上,边还在就留住 promptFrom
     if (['image-gen', 'image-edit', 'shot', 'director'].includes(n.kind ?? '')) {
       const target = promptFromPatch.get(n.id) ?? null;
+      const bag = data as Record<string, unknown>;
+      const kept = keptStoryboardPrompt(bag, n.id, edges, byId);
       if (target) data.promptFrom = target;
-      else delete data.promptFrom;
+      else if (kept) {
+        bag.promptFrom = { nodeId: kept.nodeId, mode: 'row', row: kept.row };
+        bag.storyboardId = kept.nodeId;
+        bag.storyboardRow = kept.row;
+      } else delete data.promptFrom;
     }
     if (JSON.stringify(data) === JSON.stringify(n.data ?? {})) return n;
     dirty = true;

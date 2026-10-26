@@ -11,6 +11,8 @@ import {
   planStoryboardMaterializeRows,
   keyframeEdgeLabel,
   existingShotByRow,
+  storyboardLinkOf,
+  storyboardLinkFields,
   summarizeMaterializePlans,
   tableToGfm,
   capabilityOf,
@@ -50,6 +52,7 @@ import { basenameOf, thumbSrc, previewUrlOf, isVideoPath, isAudioPath } from './
 import { latestTakeResultByNode } from './canvas/inspector/useTakeResult';
 import { computeEdgeDerivations, nodesReducer } from './canvas/edge-dispatch';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
+import { placeMaterializeRows, type Occupant } from '../../../main/canvas-placement';
 import {
   UNMEASURED_NODE_H as SEL_UNMEASURED_H,
   rectFromPoints,
@@ -149,6 +152,46 @@ function upstreamVideoPath(
 
 /** 默认视图(无持久化 viewport 的画布:新画布 / 旧项目文件) */
 const DEFAULT_VIEW = { x: 20, y: 10, z: 0.86 };
+
+/** 渲染层节点 → 落点占位。高度优先用实测 h,否则用快照带回的 heightHint。 */
+function occupantOfLocal(n: CanvasNode): Occupant {
+  const d = (n.data ?? {}) as Record<string, unknown>;
+  const w = Number(d.width);
+  const h = Number(d.height);
+  return {
+    id: n.id,
+    kind: n.kind ?? 'document',
+    x: n.x ?? 0,
+    y: n.y ?? 0,
+    width: n.w,
+    height: typeof n.h === 'number' && n.h > 0 ? n.h : n.heightHint,
+    data: n.data,
+    mediaWidth: Number.isFinite(w) && w > 0 ? w : undefined,
+    mediaHeight: Number.isFinite(h) && h > 0 ? h : undefined,
+  };
+}
+
+function edgeSig(es: Edge[]): string {
+  return es
+    .map((e) => `${e.from}>${e.to}:${e.label ?? ''}`)
+    .sort()
+    .join('|');
+}
+
+/** 节点集合没变,只是坐标变了(整理画布)。内容、尺寸、连线保持原样。 */
+function positionOnlyChange(prev: CanvasNode[], next: CanvasNode[], prevEdges: Edge[], nextEdges: Edge[]): boolean {
+  if (edgeSig(prevEdges) !== edgeSig(nextEdges)) return false;
+  if (prev.length !== next.length) return false;
+  const byId = new Map(prev.map((n) => [n.id, n]));
+  for (const n of next) {
+    const p = byId.get(n.id);
+    if (!p) return false;
+    if ((p.kind ?? '') !== (n.kind ?? '') || p.title !== n.title) return false;
+    if ((p.w ?? 0) !== (n.w ?? 0)) return false;
+    if (JSON.stringify(p.data ?? {}) !== JSON.stringify(n.data ?? {})) return false;
+  }
+  return true;
+}
 
 /** 画布视口合法化:非有限值 / 越界缩放一律回退默认视图(旧项目文件与手改 JSON 都走这里) */
 function normalizeView(raw?: { x?: unknown; y?: unknown; z?: unknown } | null): { x: number; y: number; z: number } {
@@ -682,6 +725,26 @@ export default function CanvasPage({
       viewAnimRef.current = requestAnimationFrame(step);
     },
     [applyViewLive, cancelViewAnim, commitView],
+  );
+
+  /** 把一块世界坐标里的内容放进舞台,缩放钳在和视口合法化相同的 0.4–1.3。 */
+  const fitContent = useCallback(
+    (bbox: { x: number; y: number; w: number; h: number }) => {
+      const stage = stageRef.current;
+      if (!stage || bbox.w <= 0 || bbox.h <= 0) return;
+      const pad = 64;
+      const sw = stage.clientWidth;
+      const sh = stage.clientHeight;
+      if (sw < 80 || sh < 80) return;
+      let z = Math.min((sw - pad * 2) / bbox.w, (sh - pad * 2) / bbox.h, 1);
+      z = Math.min(1.3, Math.max(0.4, z));
+      animateViewTo({
+        x: (sw - bbox.w * z) / 2 - bbox.x * z,
+        y: (sh - bbox.h * z) / 2 - bbox.y * z,
+        z,
+      });
+    },
+    [animateViewTo],
   );
 
   /**
@@ -1928,6 +1991,41 @@ export default function CanvasPage({
     [activeCanvasId, activeCanvas, flushSaveNow, onSwitchCanvas],
   );
 
+  /** 工具栏「整理」:先把未保存的坐标写盘,再让主进程重排并广播。只改坐标,快照回来后可撤销。 */
+  const tidyLayout = useCallback(async () => {
+    if (!projectId || !activeCanvasId) return;
+    const snap = buildActiveSnapshot();
+    if (snap) {
+      const local = contentKey(
+        snap.nodes as unknown as CanvasNode[],
+        snap.edges as unknown as Edge[],
+        snap.groups ?? [],
+      );
+      if (local !== lastSavedRef.current) {
+        lastSavedRef.current = local;
+        lastViewRef.current = snap.viewport ? { ...snap.viewport } : lastViewRef.current;
+        await onSaveCanvas(snap);
+      }
+    }
+    const scope = selectedIds.length > 0 ? 'selected' : 'all';
+    try {
+      const res = await window.bigbotart.tidyCanvas({
+        projectId,
+        canvasId: activeCanvasId,
+        scope,
+        selectedIds: scope === 'selected' ? [...selectedIds] : undefined,
+      });
+      if (!res.ok) {
+        toastMsg(res.error || '整理失败');
+        return;
+      }
+      toastMsg(res.moved ? `已整理 ${res.moved} 个节点 · ⌘Z 可撤销` : '位置已经整齐');
+      if (res.bbox) fitContent(res.bbox);
+    } catch (e) {
+      toastMsg(`整理失败:${(e as Error).message}`);
+    }
+  }, [projectId, activeCanvasId, buildActiveSnapshot, onSaveCanvas, selectedIds, toastMsg, fitContent]);
+
   /** 删除画布:取消待写盘定时器且**不 flush**(flush 会把已删 id 写回并复活) */
   const deleteCanvasSafe = useCallback(
     async (canvasId: string): Promise<string | null> => {
@@ -1971,7 +2069,8 @@ export default function CanvasPage({
     bootRef.current = true;
     hydratedCanvasRef.current = activeCanvas.id;
     userClearedRef.current = false;
-    setKnownVersion(activeCanvas.version ?? 0);
+    knownVersionRef.current = activeCanvas.version ?? 0;
+    setKnownVersion(knownVersionRef.current);
     // 自愈:历史上可能存了重复 id 的节点(两个 pal1 之类)——重号会导致重合、拖拽分不开。
     // 这里自动改 id + 错开坐标 + 修连线;有改写就先落盘,保证旧数据也能恢复。
     const loaded = activeCanvas.nodes.map((n) => fromSharedNode(n as never));
@@ -2191,7 +2290,8 @@ export default function CanvasPage({
       const pc = await window.bigbotart.loadProjectCanvases(projectId);
       const cur = pc.canvases.find((c) => c.id === activeCanvasId);
       if (!cur) return;
-      setKnownVersion(cur.version ?? 0);
+      knownVersionRef.current = cur.version ?? 0;
+      setKnownVersion(knownVersionRef.current);
       const loaded = cur.nodes.map((n) => fromSharedNode(n as never));
       // 同挂载加载:合并已测高度 h,防连线端点跳节点顶部(见 preserveMeasuredSize)
       const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
@@ -2226,6 +2326,10 @@ export default function CanvasPage({
     // 合并已测高度 h:快照推送整批替换节点时 h 会丢,连线端点跳到节点顶部(2026-10 事故修复)
     const selfHeal = dedupeNodeIds(preserveMeasuredSize(loaded, nodesRef.current), toLocalEdges(cur.edges as never[]));
     const version = cur.version ?? 0;
+    // 立刻推进版本 ref。节点坐标以这份快照为准(主进程放置的落点在这里整批替换,
+    // 不和本地旧坐标合并)。若版本要等到下次渲染才写入 ref,中间一次 flush 会拿旧 version
+    // 去保存,或在版本已经对齐时把还没换上的旧坐标写回去。
+    knownVersionRef.current = version;
     // 分组:按**自愈后的**节点 id 规整(剔除已删节点/空组/重复归属)
     const nextGroups = normalizeGroups(cur.groups, selfHeal.nodes.map((n) => n.id));
     /* ⚠️ 比对必须走 contentKey 归一化(2026-09-29 修复):此前用裸 JSON.stringify,
@@ -2244,12 +2348,13 @@ export default function CanvasPage({
     }
     if (sameContent) {
       // 内容没变:只前进 knownVersion(不 setNodes → 不触发 auto-save 再保存 → 避免 version 循环写盘)
-      knownVersionRef.current = version;
       setKnownVersion(version);
       markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
       return selfHeal;
     }
     // 选区:剔除已不存在的节点(Agent 删了节点后本地选区不能残留脏 id)
+    const prevNodes = nodesRef.current;
+    const prevEdges = edgesRef.current;
     setSelectedIds((sel) => {
       const live = new Set(selfHeal.nodes.map((n) => n.id));
       const next = sel.filter((id) => live.has(id));
@@ -2271,8 +2376,17 @@ export default function CanvasPage({
         nextGroups,
       ) === lastSavedRef.current;
     if (!isOwnSave) {
-      historyRef.current.clear();
-      historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges, groups: nextGroups });
+      // 只改了坐标(整理):记一笔可撤销,不要把用户已有的撤销栈清掉。
+      // 增删节点的外部写入仍然换基线,避免撤销回到和 store 对不上的旧结构。
+      if (positionOnlyChange(prevNodes, selfHeal.nodes, prevEdges, selfHeal.edges)) {
+        historyRef.current.commit(
+          { nodes: selfHeal.nodes, edges: selfHeal.edges, groups: nextGroups },
+          '整理画布',
+        );
+      } else {
+        historyRef.current.clear();
+        historyRef.current.reset({ nodes: selfHeal.nodes, edges: selfHeal.edges, groups: nextGroups });
+      }
       setHistVer((v) => v + 1);
     }
     markBaseline(selfHeal.nodes, selfHeal.edges, nextGroups);
@@ -4168,7 +4282,7 @@ export default function CanvasPage({
         toastMsg('分镜表缺少表格块 · 无法铺节点');
         return;
       }
-      /* sbMaterializedRows = promptFrom.row 集合,与 Agent 同口径为 1-based */
+      /* 已铺行:storyboardRow 优先(边分派清不掉 promptFrom),与 Agent 同口径 */
       const done = sbMaterializedRows(sbNode.id, nodesRef.current);
       const plans = planStoryboardMaterializeRows({
         head: tb.head,
@@ -4187,12 +4301,21 @@ export default function CanvasPage({
         return;
       }
       const base = String((sbNode.data ?? {}).basePrompt ?? '');
-      const anchorX = sbNode.x ?? 60;
-      const anchorY = sbNode.y ?? 80;
-      const IMG_X = anchorX + 300;
-      const SHOT_X = anchorX + 560;
-      const ROW_STEP = 186;
       const size = SB_SIZE[aspect] ?? SB_SIZE['16:9']!;
+      const prior = nodesRef.current.filter((n) => storyboardLinkOf(n.data)?.nodeId === sbNode.id);
+      const placedRows = placeMaterializeRows(
+        nodesRef.current.map(occupantOfLocal),
+        occupantOfLocal(sbNode),
+        plans.map((plan, batchRow) => ({
+          row: batchRow,
+          shotKey: `shot-${plan.rowNo}`,
+          imageKey: plan.createKeyframe ? `img-${plan.rowNo}` : undefined,
+          mediaWidth: size.width,
+          mediaHeight: size.height,
+        })),
+        prior.map(occupantOfLocal),
+      );
+      const placedAt = (key: string) => placedRows.find((p) => p.key === key);
       const gfm = tableToGfm(tb.head, tb.rows);
       const created: CanvasNode[] = [];
       const newEdges: Edge[] = [];
@@ -4220,12 +4343,14 @@ export default function CanvasPage({
           { prompt: p.text, seconds: sec || undefined },
           { label: `镜头 ${pad2(plan.rowNo)}`, prompt: p.text },
         );
+        const shotAt = placedAt(`shot-${plan.rowNo}`);
         created.push({
           id: shotId,
           title: `镜头 ${pad2(plan.rowNo)}`,
-          w: 250,
-          x: SHOT_X,
-          y: anchorY + r * ROW_STEP,
+          w: shotAt?.width ?? 250,
+          x: shotAt?.x ?? (sbNode.x ?? 60),
+          y: shotAt?.y ?? (sbNode.y ?? 80),
+          heightHint: shotAt?.height,
           ghost: true,
           kind: 'shot',
           tag: NODE_TYPES.find((t) => t.id === 'shot'),
@@ -4244,7 +4369,7 @@ export default function CanvasPage({
             tier,
             seed: 42 + r,
             refs: [],
-            promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
+            ...storyboardLinkFields(sbNode.id, plan.rowNo),
           },
         } as CanvasNode);
         newEdges.push({ from: sbNode.id, to: shotId, cls: '', label: 'prompt' });
@@ -4263,12 +4388,14 @@ export default function CanvasPage({
           imgs++;
           const imgId = makeNodeId('img');
           const z = assembleZImagePrompt(row, tb.head, base);
+          const imgAt = placedAt(`img-${plan.rowNo}`);
           created.push({
             id: imgId,
             title: `图片生成 · 分镜静帧 ${pad2(plan.rowNo)}`,
-            w: 232,
-            x: IMG_X,
-            y: anchorY + r * ROW_STEP,
+            w: imgAt?.width ?? 232,
+            x: imgAt?.x ?? (sbNode.x ?? 60),
+            y: imgAt?.y ?? (sbNode.y ?? 80),
+            heightHint: imgAt?.height,
             ghost: true,
             kind: 'image-gen',
             tag: NODE_TYPES.find((t) => t.id === 'image'),
@@ -4282,7 +4409,7 @@ export default function CanvasPage({
               height: size.height,
               guidance: 1.0,
               seeds: [42],
-              promptFrom: { nodeId: sbNode.id, mode: 'row', row: plan.rowNo } as PromptSource,
+              ...storyboardLinkFields(sbNode.id, plan.rowNo),
             },
           } as CanvasNode);
           const port = keyframeEdgeLabel(plan);
@@ -4316,8 +4443,10 @@ export default function CanvasPage({
       const ids = new Set(
         nodesRef.current
           .filter((n) => {
-            const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-            return ps?.nodeId === sbNode.id && ps.mode === 'row';
+            if (storyboardLinkOf(n.data)?.nodeId === sbNode.id) return true;
+            return edgesRef.current.some(
+              (e) => e.from === sbNode.id && e.to === n.id && (!e.label || e.label === 'prompt'),
+            );
           })
           .map((n) => n.id),
       );
@@ -4351,8 +4480,8 @@ export default function CanvasPage({
       const ids = new Set(
         nodesRef.current
           .filter((n) => {
-            const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-            return ps?.nodeId === sbNode.id && ps.mode === 'row';
+            const link = storyboardLinkOf(n.data);
+            return link?.nodeId === sbNode.id && typeof link.row === 'number';
           })
           .map((n) => n.id),
       );
@@ -4363,9 +4492,9 @@ export default function CanvasPage({
       setNodes((ns) =>
         ns.map((n) => {
           if (n.id === sbNode.id) return { ...n, stale: false, data: { ...(n.data ?? {}), lastTable: gfm } };
-          const ps = (n.data ?? {}).promptFrom as PromptSource | undefined;
-          if (!ps || ps.nodeId !== sbNode.id || ps.mode !== 'row' || typeof ps.row !== 'number') return n;
-          const idx = ps.row - 1;
+          const link = storyboardLinkOf(n.data);
+          if (!link || link.nodeId !== sbNode.id || typeof link.row !== 'number') return n;
+          const idx = link.row - 1;
           const row = tb.rows[idx] ?? [];
           const data = { ...(n.data ?? {}) };
           if (n.kind === 'shot') {
@@ -4387,7 +4516,7 @@ export default function CanvasPage({
             const p = assembleZImagePrompt(row, tb.head, base);
             data.prompt = p.text;
           }
-          data.promptFrom = { nodeId: sbNode.id, mode: 'row', row: ps.row } as PromptSource;
+          Object.assign(data, storyboardLinkFields(sbNode.id, link.row));
           return { ...n, stale: false, data };
         }),
       );
@@ -4607,6 +4736,7 @@ export default function CanvasPage({
           groupCount={groups.length}
           onGroupSelection={groupSelection}
           onUngroupSelection={ungroupSelection}
+          onTidy={() => void tidyLayout()}
           rerunDone={rerunDone}
           staleCount={staleCount}
           assetCount={assetCount}

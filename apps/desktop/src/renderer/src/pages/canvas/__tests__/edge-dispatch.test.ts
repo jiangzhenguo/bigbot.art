@@ -418,3 +418,36 @@ describe('timeline 成片 → 下游的派发', () => {
     expect(d(nextNodes, 'tl2').shotNodeIds).toEqual(['tl1', 'vu']);
   });
 });
+
+describe('分镜表行号不被 prompt 边清掉', () => {
+  it('分镜表 prompt 边保留 promptFrom,并写上 storyboardId', () => {
+    const nodes = [
+      node('sb', 'storyboard', { markdown: '# 表' }),
+      node('s1', 'shot', { prompt: '甲', promptFrom: { nodeId: 'sb', mode: 'row', row: 1 } }),
+    ];
+    const edges: Edge[] = [{ from: 'sb', to: 's1', cls: '', label: 'prompt' }];
+    const once = computeEdgeDerivations(nodes, edges);
+    const shot = once.nextNodes.find((n) => n.id === 's1')!;
+    expect(shot.data).toMatchObject({
+      promptFrom: { nodeId: 'sb', mode: 'row', row: 1 },
+      storyboardId: 'sb',
+      storyboardRow: 1,
+    });
+    const twice = computeEdgeDerivations(once.nextNodes, edges);
+    expect(twice.changed).toBe(false);
+  });
+
+  it('promptFrom 已被清掉时,storyboardId 能把行号写回来', () => {
+    const nodes = [
+      node('sb', 'storyboard'),
+      node('s1', 'shot', { prompt: '乙', storyboardId: 'sb', storyboardRow: 2 }),
+    ];
+    const edges: Edge[] = [{ from: 'sb', to: 's1', cls: '', label: 'prompt' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    expect((nextNodes.find((n) => n.id === 's1')!.data as { promptFrom?: unknown }).promptFrom).toEqual({
+      nodeId: 'sb',
+      mode: 'row',
+      row: 2,
+    });
+  });
+});

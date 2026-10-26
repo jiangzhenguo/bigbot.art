@@ -53,6 +53,7 @@ export const API_CATALOG = [
   rpc('saveCanvas', 'save-canvas', ['large']),
   rpc('loadProjectCanvases', 'load-project-canvases', ['large']),
   rpc('saveCanvasSnapshot', 'save-canvas-snapshot', ['large']),
+  rpc('tidyCanvas', 'tidy-canvas'),
   rpc('createCanvas', 'create-canvas'),
   rpc('renameCanvas', 'rename-canvas'),
   rpc('deleteCanvas', 'delete-canvas'),

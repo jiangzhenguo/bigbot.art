@@ -69,6 +69,19 @@ describe('工具清单完整性', () => {
     expect(update.description).toContain('h3.write_prompt');
     const create = toolDefinitions().find((t) => t.name === 'canvas.create_node')!;
     expect(create.description).toContain('shot 不要写 prompt');
+    expect(create.description).toContain('通常省略');
+    const createParams = create.parameters as { properties: Record<string, { description?: string; type?: string }> };
+    expect(createParams.properties.x?.description).toContain('通常省略');
+    expect(createParams.properties.y?.description).toContain('通常省略');
+    expect(createParams.properties.place?.type).toBe('object');
+    const list = toolDefinitions().find((t) => t.name === 'canvas.list_nodes')!;
+    expect(list.description).toContain('画布坐标');
+    expect(list.description).toContain('卡片宽高');
+    const tidy = toolDefinitions().find((t) => t.name === 'canvas.tidy')!;
+    expect(tidy.description).toContain('只改坐标');
+    const tidyParams = tidy.parameters as { properties: Record<string, { type?: string }>; required?: string[] };
+    expect(tidyParams.properties.scope?.type).toBe('string');
+    expect(tidyParams.required ?? []).not.toContain('scope');
   });
 
   it('web.search / web.fetch_image 在清单里,且名字不含短横线', () => {

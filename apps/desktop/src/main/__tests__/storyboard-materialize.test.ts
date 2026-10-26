@@ -185,6 +185,9 @@ describe('storyboard.materialize · 智能连线(不再机械每行静帧)', () 
     expect(imgs.length).toBe(1); // 不再 2 个
     const shot1 = shots.find((s) => (s.data.promptFrom as { row?: number })?.row === 1)!;
     const shot2 = shots.find((s) => (s.data.promptFrom as { row?: number })?.row === 2)!;
+    expect(shot1.data.storyboardId).toBe('sb-1');
+    expect(shot1.data.storyboardRow).toBe(1);
+    expect(shot2.data.storyboardRow).toBe(2);
     expect(shot2.data.mode).toBe('first-frame');
     expect(snap.edges.some((e) => e.source === shot1.id && e.target === shot2.id && e.label === 'first-frame')).toBe(
       true,

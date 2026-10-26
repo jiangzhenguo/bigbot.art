@@ -61,6 +61,8 @@ interface ToolbarProps {
   groupCount: number;
   onGroupSelection: () => void;
   onUngroupSelection: () => void;
+  /** 整理节点位置。有选区时只整理选中的,否则整理整张画布 */
+  onTidy: () => void;
   rerunDone: boolean;
   /** 当前受影响的节点数(stale / agentOn) */
   staleCount: number;
@@ -93,6 +95,7 @@ export function Toolbar({
   groupCount,
   onGroupSelection,
   onUngroupSelection,
+  onTidy,
   rerunDone,
   staleCount,
   assetCount,
@@ -199,6 +202,18 @@ export function Toolbar({
         onClick={onUngroupSelection}
       >
         解组
+      </button>
+      <button
+        className="btn btn-g btn-sm"
+        data-od-id="canvas-tidy"
+        title={
+          selectedCount > 0
+            ? `整理选中的 ${selectedCount} 个节点(只改位置,⌘Z 可撤销)`
+            : '整理整张画布:避开重叠,分镜表和它的镜头留在一起(⌘Z 可撤销)'
+        }
+        onClick={onTidy}
+      >
+        整理
       </button>
       <span className="spacer"></span>
       {/* 「分支:v2 实验」入口已隐藏 —— 弹层内是静态占位,点了没反应(见顶部 flag 注释)。
