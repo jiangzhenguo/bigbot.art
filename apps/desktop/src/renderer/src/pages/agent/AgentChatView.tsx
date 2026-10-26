@@ -7,6 +7,7 @@
 import React from 'react';
 import type { AgentChatApi } from './useAgentChat';
 import ChatMessageList from './ChatMessageList';
+import AgentTodoPanel from './AgentTodoPanel';
 import type { ChatMedia } from './types';
 
 export function AgentChatView({
@@ -24,7 +25,7 @@ export function AgentChatView({
   /** 节点 → 产物媒体(工具卡内联显示生成结果) */
   resolveMedia?: (nodeId: string) => ChatMedia | null;
 }) {
-  const { msgs, send, askPick, askReset, chatRef, pinToBottom, model, modelOverridden } = chat;
+  const { msgs, todos, send, askPick, askReset, chatRef, pinToBottom, model, modelOverridden } = chat;
 
   return (
     <>
@@ -60,6 +61,9 @@ export function AgentChatView({
           />
         )}
       </div>
+
+      {/* 固定任务进度：不参与聊天滚动，位于输入区上方 */}
+      <AgentTodoPanel todos={todos} />
     </>
   );
 }

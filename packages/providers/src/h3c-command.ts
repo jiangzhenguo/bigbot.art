@@ -7,7 +7,12 @@
  * - 档位防呆:禁用 layers40+reuse3+token-reduction 组合等
  */
 
-import { validateShotSubmitParams, type QualityTier } from '@bigbotart/shared';
+import {
+  validateShotSubmitParams,
+  SHOT_SIZES,
+  VIDEO_TIER_PRESETS,
+  type QualityTier,
+} from '@bigbotart/shared';
 
 export interface H3CliOptions {
   modelDir: string;
@@ -36,13 +41,52 @@ export interface H3CliOptions {
   extra?: string[];
 }
 
-/** 档位模板说明(供 UI 显示 & 防呆)— 与 H3_USAGE.md §4.3 对齐 */
-export const TIER_PRESETS: Record<QualityTier, { label: string; width: number; height: number; frames: number; steps: number; layers: number; reuse: number; etaMin: number; note: string }> = {
-  preview:  { label: '预览构图', width: 448, height: 448, frames: 22,  steps: 6,  layers: 40, reuse: 2, etaMin: 4,  note: '极速草稿 · ~4 分钟(reuse2,避开防呆组合)' },
-  draft:    { label: '快草稿',   width: 544, height: 544, frames: 56,  steps: 12, layers: 50, reuse: 2, etaMin: 9,  note: '快速出片 · ~7-10 分钟' },
-  default:  { label: '默认质量', width: 544, height: 544, frames: 124, steps: 20, layers: 50, reuse: 1, etaMin: 15, note: '5s 段甜点 · ~14-18 分钟' },
-  reference:{ label: '参考质量', width: 768, height: 768, frames: 124, steps: 30, layers: 50, reuse: 1, etaMin: 30, note: 'high quality · ~30-50 分钟,gold 档' },
-};
+/**
+ * 引擎侧档位表 —— **数值全部来自 shared 的 `VIDEO_TIER_PRESETS`**(全链唯一真源),
+ * 这里只补引擎需要的「1:1 锚点尺寸」(取自 `SHOT_SIZES['1:1']`)。
+ *
+ * ⚠️ 这张表此前在 providers 与渲染层各写一份且**数值分叉过**(弹窗 ETA 与检查器 ETA
+ *    不一致,见 docs/连接器设计.md)。现在 ETA / 步数只有 shared 一处。
+ * ⚠️ **etaMin 的口径 = 本机实测标定(2026-10-25),不是上游文档抄数**:
+ *    h3 把视频 VAE 的 ViT 解码器从 FP32 改成 BF16(MPS 张量核):960×544×124 的解码
+ *    159.45s → 47.33s(3.37x),端到端 409.95s → 316.93s,VAE 峰值显存 9.37 → 4.68 GiB。
+ *    VAE 解码耗时 ∝ 帧数 × 像素数,按各档位折算端到端各省 0.13 / 0.48 / 1.06 / 2.11 分钟
+ *    (预览 / 草稿 / 默认 / 参考)→ 旧值 4/9/15/30 取整为 4/9/14/28。
+ *    推导过程见 `packages/shared/src/prompt.ts` 的 `VIDEO_TIER_PRESETS` 注释。
+ */
+export interface H3TierPreset {
+  label: string;
+  width: number;
+  height: number;
+  frames: number;
+  steps: number;
+  layers: number;
+  reuse: number;
+  etaMin: number;
+  note: string;
+}
+
+export const TIER_PRESETS: Record<QualityTier, H3TierPreset> = buildTierPresets();
+
+function buildTierPresets(): Record<QualityTier, H3TierPreset> {
+  const out = {} as Record<QualityTier, H3TierPreset>;
+  for (const tier of Object.keys(VIDEO_TIER_PRESETS) as QualityTier[]) {
+    const preset = VIDEO_TIER_PRESETS[tier];
+    const size = SHOT_SIZES['1:1'][tier];
+    out[tier] = {
+      label: preset.label,
+      width: size.width,
+      height: size.height,
+      frames: preset.frames,
+      steps: preset.steps,
+      layers: preset.layers,
+      reuse: preset.reuse,
+      etaMin: preset.etaMin,
+      note: preset.note,
+    };
+  }
+  return out;
+}
 
 /** 已知比例集合(h3 合法档;`custom` 不在此列 —— 它走 customWidth/customHeight) */
 export type KnownAspect = '16:9' | '9:16' | '1:1' | '4:3' | '3:4';

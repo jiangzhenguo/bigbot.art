@@ -148,6 +148,16 @@ describe('AccelStore · install 的 kind 与步数校验', () => {
     expect(r.ok).toBe(true);
     expect(r.packs?.find((p) => p.name === 'legacy')?.kind).toBe('accel');
   });
+
+  it('Ref2VA 单目标本地融合目录也可登记并显示就绪', () => {
+    const { settings, accel } = freshStore();
+    settings.patch({ accelPacks: [], accelPreseedV2: true, accelPreseedV3: true });
+    const dir = join(tmpHome, 'packs', 'ref2va-only');
+    mkdirSync(join(dir, 'Ref2VA'), { recursive: true });
+    const r = accel.install({ name: 'ref-only', path: dir, kind: 'style', steps: 20 });
+    expect(r.ok).toBe(true);
+    expect(r.packs?.find((p) => p.name === 'ref-only')?.exists).toBe(true);
+  });
 });
 
 describe('AccelStore · resolveAccel / defaultShotAccel 的 kind 语义', () => {

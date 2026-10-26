@@ -453,6 +453,46 @@ export const SHOT_SIZES: Record<VideoAspect, Record<VideoTier, { width: number; 
   },
 };
 
+/**
+ * 档位预设(steps/layers/reuse/frames + ETA)— **全链唯一真源**。
+ *
+ * 为什么放 shared:这张表此前在**渲染层**(`constants.ts` 的 `SHOT_TIER_PRESETS`)与
+ * **providers**(`h3c-command.ts` 的 `TIER_PRESETS`)各写一份,数值已经分叉过
+ * (弹窗 ETA 与检查器 ETA 不一致,见 docs/连接器设计.md)。档位是「引擎参数 + 界面文案」
+ * 交叉的东西,两边各写一份必然漂 —— 现在只有这一处,改档位改这里即可。
+ *
+ * ⚠️ **eta/etaMin 的口径 = 本机实测标定,不是上游文档抄数**:
+ * 上游 H3_USAGE.md §4.3 给的是「5s 段 ~14-18 分钟 / high quality ~30-50 分钟」。
+ * 2026-10-25 h3 把**视频 VAE 的 ViT 解码器从 FP32 改成 BF16**(MPS 张量核):
+ * 960×544×124 的解码 159.45s → 47.33s(3.37x),端到端 409.95s → 316.93s,
+ * VAE 峰值显存 9.37 → 4.68 GiB(相对误差 0.0048,VPIPE 的阈值是 0.02)。
+ * VAE 解码耗时 ∝ 帧数 × 像素数,按各档位(以 1:1 尺寸为锚)折算,端到端各省:
+ *   预览 448²/22 帧 ≈ 8s · 草稿 544²/56 帧 ≈ 29s · 默认 544²/124 帧 ≈ 64s · 参考 768²/124 帧 ≈ 127s
+ * 即旧值 4/9/15/30 各减 {0.13, 0.48, 1.06, 2.11} 分钟 → 取整 4 / 9 / 14 / 28。
+ * ⚠️ 加速包(步数变少)只压缩**去噪**那部分,权重加载与 VAE 解码是固定成本 ——
+ *    渲染层按 `etaMin × (实际步数 / 档位步数)` 缩放只是粗估,别当承诺。
+ */
+export interface VideoTierPreset {
+  /** 档位名(中文,给人看) */
+  label: string;
+  steps: number;
+  layers: number;
+  reuse: number;
+  frames: number;
+  /** ETA 文案(1:1 尺寸锚) */
+  eta: string;
+  /** ETA 分钟数(1:1 尺寸锚) */
+  etaMin: number;
+  note: string;
+}
+
+export const VIDEO_TIER_PRESETS: Record<VideoTier, VideoTierPreset> = {
+  preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', etaMin: 4, note: '极速草稿(reuse2 防呆安全)' },
+  draft: { label: '草稿', steps: 12, layers: 50, reuse: 2, frames: 56, eta: '≈9 分钟', etaMin: 9, note: '快速出片' },
+  default: { label: '默认', steps: 20, layers: 50, reuse: 1, frames: 124, eta: '≈14 分钟', etaMin: 14, note: '5s 段甜点' },
+  reference: { label: '参考', steps: 30, layers: 50, reuse: 1, frames: 124, eta: '≈28 分钟', etaMin: 28, note: 'high quality · gold 档' },
+};
+
 /** 画幅中文标签(检查器 chips / 提示文案共用) */
 export const VIDEO_ASPECT_LABEL: Record<VideoAspect, string> = {
   '16:9': '16:9 横屏',

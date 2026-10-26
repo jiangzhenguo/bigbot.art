@@ -29,6 +29,8 @@ process.env.BIGBOTART_H3_MODEL = BASE;
 process.env.BIGBOTART_H3_MERGE_PY = SCRIPT;
 
 let H3StyleModelBuilder: typeof import('../h3-style-model.js').H3StyleModelBuilder;
+let localLoraPackDirName: typeof import('../h3-style-model.js').localLoraPackDirName;
+let localLoraOutDir: typeof import('../h3-style-model.js').localLoraOutDir;
 
 /** 造一个合法的 safetensors 假文件(>1MB + 合法 header 头,过 looksLikeSafetensors) */
 function writeFakeSafetensors(path: string): void {
@@ -66,7 +68,10 @@ print('fake merge done', flush=True)
 `;
 
 beforeAll(async () => {
-  H3StyleModelBuilder = (await import('../h3-style-model.js')).H3StyleModelBuilder;
+  const mod = await import('../h3-style-model.js');
+  H3StyleModelBuilder = mod.H3StyleModelBuilder;
+  localLoraPackDirName = mod.localLoraPackDirName;
+  localLoraOutDir = mod.localLoraOutDir;
 });
 
 afterAll(() => {
@@ -225,5 +230,70 @@ describe('styleModelBuild · 双融合包(mystic-turbo):先风格后 turbo,trans
     expect(st.mergedReady).toBe(true);
     expect(st.loras).toHaveLength(4);
     expect(st.loras.filter((l) => l.fileName.startsWith('minimax_h3_turbo')).every((l) => l.exists)).toBe(true);
+  });
+});
+
+describe('buildLocal · 本地单 LoRA 直接安装', () => {
+  it('名称只允许安全目录名，产物固定在 h3 根目录下', () => {
+    expect(localLoraPackDirName('MiniMax-H3-custom.safetensors')).toBe('MiniMax-H3-custom');
+    expect(localLoraPackDirName('我的 加速包')).toBe('我的 加速包');
+    expect(localLoraPackDirName('../escape')).toBeNull();
+    expect(localLoraPackDirName('/tmp/absolute')).toBeNull();
+    expect(localLoraPackDirName('..')).toBeNull();
+    expect(localLoraPackDirName('.safetensors')).toBeNull();
+    expect(localLoraOutDir('MiniMax-H3-custom')).toBe(join(H3_ROOT, 'MiniMax-H3-custom'));
+  });
+
+  it('FL2VA 单目标：只复制并融合该变体，不伪造 Ref2VA', async () => {
+    makeBaseModel();
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const lora = join(H3_ROOT, 'custom-fl2va.safetensors');
+    writeFakeSafetensors(lora);
+    const outDir = join(H3_ROOT, 'MiniMax-H3-custom-fl2va');
+    rmSync(outDir, { recursive: true, force: true });
+    const b = new H3StyleModelBuilder(() => {});
+    const r = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'FL2VA' });
+    expect(r).toEqual({ ok: true, outDir });
+    expect(existsSync(join(outDir, 'FL2VA', 'model_index.json'))).toBe(true);
+    expect(readFileSync(join(outDir, 'FL2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-fl2va.safetensors');
+    expect(existsSync(join(outDir, 'Ref2VA'))).toBe(false);
+  });
+
+  it('both：同一 LoRA 分别融合到两个 transformer', async () => {
+    makeBaseModel();
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const lora = join(H3_ROOT, 'custom-both.safetensors');
+    writeFakeSafetensors(lora);
+    const outDir = join(H3_ROOT, 'MiniMax-H3-custom-both');
+    rmSync(outDir, { recursive: true, force: true });
+    const b = new H3StyleModelBuilder(() => {});
+    const r = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'both' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(join(outDir, 'FL2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-both.safetensors');
+    expect(readFileSync(join(outDir, 'Ref2VA', 'transformer', 'merged.marker'), 'utf-8')).toBe('custom-both.safetensors');
+  });
+
+  it('已有目录拒绝覆盖；非法 LoRA 不创建产物', async () => {
+    makeBaseModel();
+    writeFileSync(SCRIPT, FAKE_SCRIPT);
+    const lora = join(H3_ROOT, 'custom-valid.safetensors');
+    writeFakeSafetensors(lora);
+    const outDir = join(H3_ROOT, 'MiniMax-H3-existing');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, 'keep.txt'), 'do-not-delete');
+    const b = new H3StyleModelBuilder(() => {});
+    const refused = await b.buildLocal({ packId: 'local-lora-install', loraPath: lora, outDir, target: 'FL2VA' });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain('未覆盖');
+    expect(readFileSync(join(outDir, 'keep.txt'), 'utf-8')).toBe('do-not-delete');
+
+    const badOut = join(H3_ROOT, 'MiniMax-H3-invalid-lora');
+    rmSync(badOut, { recursive: true, force: true });
+    const badLora = join(H3_ROOT, 'bad.safetensors');
+    writeFileSync(badLora, '<html>403</html>');
+    const invalid = await b.buildLocal({ packId: 'local-lora-install', loraPath: badLora, outDir: badOut, target: 'FL2VA' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.error).toContain('不是合法 safetensors');
+    expect(existsSync(badOut)).toBe(false);
   });
 });

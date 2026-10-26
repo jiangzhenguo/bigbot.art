@@ -1,6 +1,7 @@
 import {
   VIDEO_ASPECTS,
   VIDEO_TIERS,
+  VIDEO_TIER_PRESETS,
   SHOT_SIZES as SHARED_SHOT_SIZES,
   HIDDEN_NODE_KINDS,
   isHiddenNodeKind,
@@ -153,13 +154,15 @@ export function tierKeyOf(labelOrKey: string): (typeof VIDEO_TIERS)[number] {
   }
   return TIER_LABEL_TO_KEY[labelOrKey] ?? 'default';
 }
-/** 档位预设(F/S/L/R + ETA)— H3_USAGE.md §4.3 四组 preset;etaMin 供加速后按步数比例重算预计时间 */
-export const SHOT_TIER_PRESETS: Record<(typeof SHOT_TIERS)[number], { label: string; steps: number; layers: number; reuse: number; frames: number; eta: string; etaMin: number; note: string }> = {
-  preview: { label: '预览', steps: 6, layers: 40, reuse: 2, frames: 22, eta: '≈4 分钟', etaMin: 4, note: '极速草稿(reuse2 防呆安全)' },
-  draft: { label: '草稿', steps: 12, layers: 50, reuse: 2, frames: 56, eta: '≈9 分钟', etaMin: 9, note: '快速出片' },
-  default: { label: '默认', steps: 20, layers: 50, reuse: 1, frames: 124, eta: '≈15 分钟', etaMin: 15, note: '5s 段甜点' },
-  reference: { label: '参考', steps: 30, layers: 50, reuse: 1, frames: 124, eta: '≈30 分钟', etaMin: 30, note: 'high quality · gold 档' },
-};
+/**
+ * 档位预设(F/S/L/R + ETA)— **直接取 shared 的 `VIDEO_TIER_PRESETS`**(全链唯一真源)。
+ *
+ * ⚠️ 此前这张表在渲染层与 providers 各写一份,数值分叉过(弹窗 ETA 与检查器 ETA
+ *    不一致,见 docs/连接器设计.md)。现在 ETA/步数只有 shared 一处:
+ *    改档位 → 改 `packages/shared/src/prompt.ts` 的 `VIDEO_TIER_PRESETS`。
+ * etaMin 供加速包按步数比例重算预计时间(粗估:少步数只压缩去噪段,权重加载与 VAE 解码是固定成本)。
+ */
+export const SHOT_TIER_PRESETS = VIDEO_TIER_PRESETS;
 
 /** h3.c 帧数对齐:向上进位到 5+17n(与 h3_align_frame_count 一致,H3_USAGE.md §6) */
 export function h3AlignFrames(frames: number): number {

@@ -8,9 +8,11 @@ import type {
   LlmSource,
   LocalModelInfo,
   LocalRuntimeModels,
+  LocalLoraInstallInput,
   RuntimeProbe,
   ThemePref,
 } from '@bigbotart/shared';
+import { LOCAL_LORA_BUILD_ID } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
 import { ToolModelsSection } from './ToolModelsSection';
 import { setAccelDefaultCache } from './canvas/tool-models-store';
@@ -1126,7 +1128,15 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   /* ---- 🧩 h3 模型包(加速 / 风格 / 风格加速)---- */
   const [accelPacks, setAccelPacks] = useState<AccelPack[]>([]);
   const [accelMsg, setAccelMsg] = useState<string | null>(null);
-  const [accelForm, setAccelForm] = useState<{ name: string; path: string; steps: number; kind: 'accel' | 'style' | 'style-accel' }>({ name: '', path: '', steps: 8, kind: 'accel' });
+  const [accelInstalling, setAccelInstalling] = useState(false);
+  const [accelForm, setAccelForm] = useState<{
+    source: 'directory' | 'lora';
+    name: string;
+    path: string;
+    steps: number;
+    kind: 'accel' | 'style' | 'style-accel';
+    target: LocalLoraInstallInput['target'];
+  }>({ source: 'directory', name: '', path: '', steps: 8, kind: 'accel', target: 'FL2VA' });
   /* 风格包(mystic 等)下载+融合构建:状态 / 进行中 / 最新进度消息 */
   const [styleStatus, setStyleStatus] = useState<Record<string, import('@bigbotart/shared').StyleModelStatus>>({});
   const [styleBuilding, setStyleBuilding] = useState<string | null>(null);
@@ -1185,20 +1195,84 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   useEffect(() => {
     refreshAccel();
   }, []);
-  const installAccel = (): void => {
-    if (!accelForm.name.trim() || !accelForm.path.trim()) {
-      setAccelMsg(t('请填名称与目录路径'));
+  const pickAccelSource = (): void => {
+    const api = window.bigbotart;
+    if (typeof api.accelPickSource !== 'function') {
+      setAccelMsg(t('文件选择通道尚未加载,请重启应用后再试'));
       return;
     }
-    void window.bigbotart.accelInstall(accelForm).then((r) => {
-      if (r.ok) {
-        setAccelPacks(r.packs ?? []);
-        setAccelForm({ name: '', path: '', steps: 8, kind: 'accel' });
-        setAccelMsg(t('已安装「{name}」· 登记完成(文件未拷贝)', { name: accelForm.name.trim() }));
-      } else {
-        setAccelMsg(r.error ?? t('安装失败'));
+    void api.accelPickSource(accelForm.source).then((r) => {
+      if (!r.ok) {
+        if (!r.canceled) setAccelMsg(r.error ?? t('选择失败'));
+        return;
       }
-    });
+      setAccelForm((f) => ({ ...f, path: r.path, name: r.name }));
+      setStyleProgress((m) => ({ ...m, [LOCAL_LORA_BUILD_ID]: '' }));
+      setAccelMsg(null);
+    }).catch((e) => setAccelMsg(e instanceof Error ? e.message : String(e)));
+  };
+  const installAccel = (): void => {
+    if (accelInstalling || styleBuilding) return;
+    const form = accelForm;
+    if (!form.path.trim()) {
+      setAccelMsg(t(form.source === 'directory' ? '请先选择模型包目录' : '请先选择 LoRA 文件'));
+      return;
+    }
+    if (!form.name.trim()) {
+      setAccelMsg(t('请填模型包名称'));
+      return;
+    }
+    if (form.source === 'lora' && form.kind === 'style-accel') {
+      setAccelMsg(t('单个 LoRA 只能安装为加速或风格包;风格加速请先安装已双融合的目录'));
+      return;
+    }
+    const api = window.bigbotart;
+    setAccelInstalling(true);
+    setAccelMsg(null);
+    if (form.source === 'directory') {
+      void api.accelInstall({ name: form.name.trim(), path: form.path.trim(), steps: form.steps, kind: form.kind })
+        .then((r) => {
+          if (r.ok) {
+            setAccelPacks(r.packs ?? []);
+            setAccelForm((f) => ({ ...f, name: '', path: '', steps: 8, kind: 'accel', target: 'FL2VA' }));
+            setAccelMsg(t('已安装「{name}」· 目录登记完成(文件未拷贝)', { name: form.name.trim() }));
+          } else {
+            setAccelMsg(r.error ?? t('安装失败'));
+          }
+        })
+        .catch((e) => setAccelMsg(e instanceof Error ? e.message : String(e)))
+        .finally(() => setAccelInstalling(false));
+      return;
+    }
+    if (typeof api.accelInstallLora !== 'function') {
+      setAccelInstalling(false);
+      setAccelMsg(t('LoRA 融合通道尚未加载,请重启应用后再试'));
+      return;
+    }
+    setStyleBuilding(LOCAL_LORA_BUILD_ID);
+    setStyleProgress((m) => ({ ...m, [LOCAL_LORA_BUILD_ID]: t('准备本地 LoRA 融合…') }));
+    void api.accelInstallLora({
+      name: form.name.trim(),
+      loraPath: form.path.trim(),
+      kind: form.kind === 'style' ? 'style' : 'accel',
+      steps: form.steps,
+      target: form.target,
+    })
+      .then((r) => {
+        if (r.ok) {
+          setAccelPacks(r.packs ?? []);
+          setAccelForm((f) => ({ ...f, name: '', path: '', steps: 8, kind: 'accel', target: 'FL2VA' }));
+          setAccelMsg(t('已安装「{name}」· LoRA 融合完成并登记', { name: form.name.trim() }));
+        } else {
+          setAccelMsg(r.error ?? t('LoRA 融合安装失败'));
+        }
+      })
+      .catch((e) => setAccelMsg(e instanceof Error ? e.message : String(e)))
+      .finally(() => {
+        setAccelInstalling(false);
+        setStyleBuilding((id) => id === LOCAL_LORA_BUILD_ID ? null : id);
+        refreshAccel();
+      });
   };
   const removeAccel = (id: string): void => {
     void window.bigbotart.accelRemove(id).then((r) => {
@@ -1257,6 +1331,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   };
 
   const h3 = engineBadge('h3c');
+  const accelInstallBusy = accelInstalling || styleBuilding !== null;
 
   return (
     <div className="pg-settings">
@@ -2330,58 +2405,144 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   );
                 })
               )}
-              {isDesktopShell() ? <div className="srow" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-                <b>{t('安装模型包')}</b>
-                <div className="row g8" style={{ flexWrap: 'wrap' }}>
-                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('类型')}</span>
-                  {(['accel', 'style', 'style-accel'] as const).map((k) => (
-                    <span
-                      key={k}
-                      className={`chip${accelForm.kind === k ? ' on' : ''}`}
-                      onClick={() => setAccelForm((f) => ({ ...f, kind: k, steps: k === 'style' ? 20 : 8 }))}
+              {isDesktopShell() ? (
+                <div className="srow accel-install" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+                  <div>
+                    <b>{t('安装模型包')}</b>
+                    <div className="sub">{t('直接选择本地已构建模型目录，或选择 LoRA 文件融合后安装，无需手动填写路径。')}</div>
+                  </div>
+                  <div className="row g8" style={{ flexWrap: 'wrap' }}>
+                    {(['directory', 'lora'] as const).map((source) => (
+                      <button
+                        type="button"
+                        key={source}
+                        className={`chip${accelForm.source === source ? ' on' : ''}`}
+                        data-od-id={`settings-accel-source-${source}`}
+                        disabled={accelInstallBusy}
+                        onClick={() => {
+                          setAccelForm((f) => ({
+                            source,
+                            name: '',
+                            path: '',
+                            kind: source === 'lora' && f.kind === 'style-accel' ? 'accel' : f.kind,
+                            steps: source === 'lora' && f.kind === 'style-accel' ? 8 : f.kind === 'style' ? 20 : 8,
+                            target: 'FL2VA',
+                          }));
+                          setStyleProgress((m) => ({ ...m, [LOCAL_LORA_BUILD_ID]: '' }));
+                          setAccelMsg(null);
+                        }}
+                      >
+                        {source === 'directory' ? t('已构建模型目录') : t('LoRA 文件')}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="accel-source-picker">
+                    <button
+                      type="button"
+                      className="btn btn-s"
+                      data-od-id="settings-accel-pick"
+                      disabled={accelInstallBusy}
+                      onClick={pickAccelSource}
                     >
-                      {k === 'style' ? t('🎨 风格') : k === 'style-accel' ? t('🎨⚡ 风格加速') : t('⚡ 加速')}
+                      {accelForm.source === 'directory' ? t('选择模型目录…') : t('选择 .safetensors 文件…')}
+                    </button>
+                    <span className="input-w">
+                      <input
+                        aria-label={t('模型包名称')}
+                        placeholder={accelForm.kind === 'style' ? t('名称,如 MiniMax-H3-mystic') : accelForm.kind === 'style-accel' ? t('名称,如 MiniMax-H3-mystic-turbo') : t('名称,如 MiniMax-H3-turbo-T8test')}
+                        value={accelForm.name}
+                        disabled={accelInstallBusy}
+                        onChange={(e) => setAccelForm((f) => ({ ...f, name: e.target.value }))}
+                      />
                     </span>
-                  ))}
-                  <span className="input-w">
-                    <input
-                      placeholder={accelForm.kind === 'style' ? t('名称,如 MiniMax-H3-mystic') : accelForm.kind === 'style-accel' ? t('名称,如 MiniMax-H3-mystic-turbo') : t('名称,如 MiniMax-H3-turbo-T8test')}
-                      value={accelForm.name}
-                      onChange={(e) => setAccelForm((f) => ({ ...f, name: e.target.value }))}
-                    />
-                  </span>
-                  <span className="input-w">
-                    <input
-                      className="mono"
-                      placeholder="/path/to/model-dir"
-                      value={accelForm.path}
-                      onChange={(e) => setAccelForm((f) => ({ ...f, path: e.target.value }))}
-                    />
-                  </span>
-                  <span className="mut" style={{ fontSize: 11, alignSelf: 'center' }}>{t('推荐步数')}</span>
-                  {(accelForm.kind === 'style' ? ([20, 30] as const) : ([4, 8] as const)).map((s) => (
-                    <span
-                      key={s}
-                      className={`chip${accelForm.steps === s ? ' on' : ''}`}
-                      onClick={() => setAccelForm((f) => ({ ...f, steps: s }))}
+                  </div>
+                  {accelForm.path ? (
+                    <div className="accel-selected-path mono" title={accelForm.path} data-od-id="settings-accel-selected-path">
+                      {accelForm.path}
+                    </div>
+                  ) : (
+                    <div className="sub">{accelForm.source === 'directory' ? t('尚未选择目录') : t('尚未选择 LoRA 文件')}</div>
+                  )}
+                  <div className="row g8" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span className="mut" style={{ fontSize: 11 }}>{t('类型')}</span>
+                    {(accelForm.source === 'directory' ? (['accel', 'style', 'style-accel'] as const) : (['accel', 'style'] as const)).map((k) => (
+                      <button
+                        type="button"
+                        key={k}
+                        className={`chip${accelForm.kind === k ? ' on' : ''}`}
+                        disabled={accelInstallBusy}
+                        onClick={() => setAccelForm((f) => ({ ...f, kind: k, steps: k === 'style' ? 20 : 8 }))}
+                      >
+                        {k === 'style' ? t('风格') : k === 'style-accel' ? t('风格加速') : t('加速')}
+                      </button>
+                    ))}
+                    <span className="mut" style={{ fontSize: 11, marginLeft: 4 }}>{t('推荐步数')}</span>
+                    {(accelForm.kind === 'style' ? ([20, 30] as const) : ([4, 8] as const)).map((s) => (
+                      <button
+                        type="button"
+                        key={s}
+                        className={`chip${accelForm.steps === s ? ' on' : ''}`}
+                        disabled={accelInstallBusy}
+                        onClick={() => setAccelForm((f) => ({ ...f, steps: s }))}
+                      >
+                        {t('{n} 步', { n: s })}
+                      </button>
+                    ))}
+                  </div>
+                  {accelForm.source === 'lora' ? (
+                    <div className="accel-lora-target">
+                      <div className="row g8" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span className="mut" style={{ fontSize: 11 }}>{t('作用目标')}</span>
+                        {(['FL2VA', 'Ref2VA', 'both'] as const).map((target) => (
+                          <button
+                            type="button"
+                            key={target}
+                            className={`chip${accelForm.target === target ? ' on' : ''}`}
+                            data-od-id={`settings-accel-target-${target}`}
+                            disabled={accelInstallBusy}
+                            onClick={() => setAccelForm((f) => ({ ...f, target }))}
+                          >
+                            {target === 'both' ? t('两者') : target}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="sub">{t('目标须与 LoRA 训练变体一致；「两者」会把同一文件分别融合到 FL2VA 和 Ref2VA，仅作者明确兼容时使用。')}</div>
+                    </div>
+                  ) : null}
+                  <div className="accel-install-actions">
+                    <button
+                      type="button"
+                      className="btn btn-p btn-sm"
+                      data-od-id="settings-accel-install"
+                      disabled={accelInstallBusy || !accelForm.path}
+                      onClick={installAccel}
                     >
-                      {t('{n} 步', { n: s })}
-                    </span>
-                  ))}
-                  <button className="btn btn-p btn-sm" onClick={installAccel}>
-                    {t('安装')}
-                  </button>
+                      {accelForm.source === 'lora'
+                        ? styleBuilding === LOCAL_LORA_BUILD_ID ? t('融合构建中…') : t('融合并安装')
+                        : accelInstalling ? t('安装中…') : t('安装目录')}
+                    </button>
+                    {styleBuilding === LOCAL_LORA_BUILD_ID ? (
+                      <button type="button" className="btn btn-s btn-sm" onClick={() => void window.bigbotart.styleModelCancel()}>
+                        {t('取消构建')}
+                      </button>
+                    ) : null}
+                  </div>
+                  {styleProgress[LOCAL_LORA_BUILD_ID] ? (
+                    <div className="sub mono" data-od-id="settings-accel-lora-progress" aria-live="polite">
+                      {styleProgress[LOCAL_LORA_BUILD_ID]}
+                    </div>
+                  ) : null}
+                  {accelMsg ? (
+                    <div className="mut" style={{ fontSize: 11 }} role="status">{accelMsg}</div>
+                  ) : (
+                    <div className="mut" style={{ fontSize: 11 }}>
+                      {accelForm.source === 'directory'
+                        ? t('目录须含 FL2VA 或 Ref2VA；登记不拷贝文件，删除只注销不删磁盘。')
+                        : t('h3.c 不能直接挂载 LoRA：将复制基础组件并离线融合为新目录，成功后才登记。融合需较多磁盘空间，可能耗时 20–60 分钟；失败或取消不会安装。')}
+                    </div>
+                  )}
                 </div>
-                {accelMsg ? (
-                  <div className="mut" style={{ fontSize: 11 }}>
-                    {accelMsg}
-                  </div>
-                ) : (
-                  <div className="mut" style={{ fontSize: 11 }}>
-                    {t('目录须存在且含 FL2VA/(模型目录结构);登记不拷贝文件,删除只注销不删磁盘 · h3.c 不接受 --lora,加速/风格都是换 -d 模型目录(手册 §8/§9)')}
-                  </div>
-                )}
-              </div> : null}
+              ) : null}
             </div>
           </div>
         </main>

@@ -90,7 +90,10 @@ export class H3cProvider implements Provider {
       const info = await runAndCapture(this.bin, ['--info', '-d', this.modelDir], 20_000, dirname(this.bin));
       const gpuMatch = /Device:\s*(.+)/.exec(info);
       const memMatch = /physical memory\s+([\d.]+)\s*GiB/.exec(info);
-      st.version = 'h3-metal 0.1.x';
+      // 引擎版本**从 --info 首行真读**(实测 `h3-metal 0.1.0-dev`),不再写死 '0.1.x':
+      // 引擎实现(2026-10-25 起视频 VAE 改 BF16)在变,写死的版本号会让
+      // 「我这次跑的到底是哪个引擎」在设置页/自检页答不出来。
+      st.version = parseH3Version(info) ?? 'h3-metal 0.1.x';
       st.ready = true;
       const gpu = gpuMatch?.[1] ?? '?';
       const mem = memMatch?.[1] ?? '?';
@@ -212,7 +215,11 @@ export class H3cProvider implements Provider {
     //    进度条只能靠时间估算(elapsed/etaSec),会出现「爬到 99% 干等」和「卡死却显示正常」两种假象。
     //    stdout 仍然丢弃(stdout 的 \r 覆盖式输出不消费会背压死锁,H3_USAGE §5.2);
     //    stderr 必须持续消费(既拿真实进度、也保留错误尾部诊断)。
-    const child = spawn(this.bin, args, { cwd: dirname(this.bin), stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(this.bin, args, {
+      cwd: dirname(this.bin),
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: h3ChildEnv(),
+    });
     const tracker = new ProgressTracker();
     this.trackers.set(taskId, tracker);
     let errAcc = '';
@@ -334,6 +341,34 @@ export class H3cProvider implements Provider {
     this.running.delete(handle.providerTaskId);
     this.trackers.delete(handle.providerTaskId);
   }
+}
+
+/**
+ * 从 `h3 --info` 输出里读引擎版本。
+ *
+ * 实测首行形如 `h3-metal 0.1.0-dev`(h3.h 的 H3_VERSION)。
+ * ⚠️ **为什么不能写死**:引擎实现会变(2026-10-25 视频 VAE 解码器改 BF16),
+ * 写死的版本号会让「我跑的到底是哪个引擎」这个问题在设置页/自检页答不出来。
+ * 读不到时返回 undefined(调用方决定兜底文案),**不猜**。
+ */
+export function parseH3Version(info: string): string | undefined {
+  const m = /^h3-metal[ \t]+(\S+)/m.exec(info);
+  return m?.[1] ? `h3-metal ${m[1]}` : undefined;
+}
+
+/**
+ * h3 子进程环境:默认继承父进程;`BIGBOTART_H3_VAE_PRECISION=f32` 时透传
+ * `H3_VAE_PRECISION=f32` 给引擎。
+ *
+ * 背景:h3 2026-10-25 起视频 VAE 的 ViT 解码器默认走 BF16(MPS 张量核,3.37x 提速,
+ * 峰值显存减半)。引擎侧留了 `H3_VAE_PRECISION=f32` 回到旧 FP32 路径的开关 ——
+ * 万一某台机器上 BF16 出画面问题(花屏/色偏),这是一个**不用重编引擎**的回退口。
+ * 本程序不在设置页暴露它(默认值正确,加开关只是增加认知负担),仅用环境变量透传。
+ */
+export function h3ChildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const precision = base.BIGBOTART_H3_VAE_PRECISION?.trim();
+  if (!precision) return base;
+  return { ...base, H3_VAE_PRECISION: precision };
 }
 
 function runAndCapture(cmd: string, args: string[], timeoutMs: number, cwd?: string): Promise<string> {

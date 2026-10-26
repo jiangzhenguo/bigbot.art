@@ -308,8 +308,12 @@ export interface BigBotArtApi {
   // h3 模型包管理 —— h3.c 不接受 --lora;加速包 = 蒸馏模型目录(-d)+ 4/8 步,风格包 = 风格 LoRA 离线融合目录 + 正常步数
   /** 列出已安装的模型包(主进程回填 exists 目录校验;设置页列表用) */
   accelList(): Promise<import('./domain').AccelPack[]>;
-  /** 安装模型包:校验目录存在且含 FL2VA/ 后登记入 settings.accelPacks;kind 缺省 accel */
+  /** 桌面原生选择器：直接选择已构建模型目录或本地 .safetensors LoRA。 */
+  accelPickSource(source: 'directory' | 'lora'): Promise<{ ok: true; path: string; name: string } | { ok: false; canceled?: boolean; error?: string }>;
+  /** 安装模型包:校验目录存在且含至少一个 h3 变体后登记入 settings.accelPacks;kind 缺省 accel */
   accelInstall(input: { name: string; path: string; steps?: number; kind?: import('./domain').AccelPackKind }): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
+  /** 单个本地 LoRA 离线融合为全新模型目录，成功后才登记；长任务可经 styleModelCancel 取消。 */
+  accelInstallLora(input: import('./style-model').LocalLoraInstallInput): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string; outDir?: string }>;
   /** 删除登记(只注销,不删磁盘) */
   accelRemove(id: string): Promise<{ ok: boolean; packs?: import('./domain').AccelPack[]; error?: string }>;
   /** 设默认包(id=null 清除默认);镜头启用模型包未选包时用默认包 */

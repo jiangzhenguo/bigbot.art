@@ -13,32 +13,6 @@ import { AudioPlayer } from '../../canvas/media';
 
 const ARG_TRUNCATE = 240;
 
-function readTodos(args: Record<string, unknown>): Array<{ content: string; status: string }> | null {
-  if (!Array.isArray(args.todos)) return null;
-  const out: Array<{ content: string; status: string }> = [];
-  for (const item of args.todos) {
-    if (!item || typeof item !== 'object') return null;
-    const content = String((item as { content?: unknown }).content ?? '').trim();
-    const status = String((item as { status?: unknown }).status ?? '');
-    if (!content) return null;
-    out.push({ content, status });
-  }
-  return out;
-}
-
-function TodoChecklist({ todos }: { todos: Array<{ content: string; status: string }> }) {
-  return (
-    <ul className="todo-list" data-od-id="agent-todos">
-      {todos.map((t) => (
-        <li key={t.content} data-status={t.status}>
-          <span className="todo-mark">{t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '›' : '○'}</span>
-          <span>{t.content}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 /** 参数一行摘要(收起行时展示):key: value · key: value */
 function argSummary(args: Record<string, unknown>): string {
   return Object.entries(args)
@@ -97,15 +71,12 @@ export function ToolRunCard({
   resolveMedia?: (nodeId: string) => ChatMedia | null;
 }) {
   const errIdxs = runs.map((r, i) => (r.status === 'error' ? i : -1)).filter((i) => i >= 0);
-  const todoIdxs = runs
-    .map((r, i) => (r.name === 'todo.write' && r.status === 'success' ? i : -1))
-    .filter((i) => i >= 0);
   const hasErr = errIdxs.length > 0;
   const okCount = runs.filter((r) => r.status === 'success').length;
   const runCount = runs.filter((r) => r.status === 'running').length;
 
-  const [cExpanded, setCExpanded] = useState(hasErr || todoIdxs.length > 0);
-  const [openRows, setOpenRows] = useState<ReadonlySet<number>>(() => new Set([...errIdxs, ...todoIdxs]));
+  const [cExpanded, setCExpanded] = useState(hasErr);
+  const [openRows, setOpenRows] = useState<ReadonlySet<number>>(() => new Set(errIdxs));
   // 用户手动收起过卡片后,后续新失败不再强制展开(尊重用户选择)
   const userToggled = useRef(false);
 
@@ -167,7 +138,6 @@ export function ToolRunCard({
           // 解析在渲染期进行 —— 提交成功时产物可能还没跑完,队列完成后 nodes/takeResults 更新,
           // 这里随重渲染自动补上媒体(不存快照,永远反映最新产物)。
           const media = r.status === 'success' && r.nodeId && resolveMedia ? resolveMedia(r.nodeId) : null;
-          const todos = r.name === 'todo.write' && r.status === 'success' ? readTodos(r.args) : null;
           return (
             <div className={`tr-row ${cls}${rowOpen ? ' open' : ''}`} key={`${r.name}-${i}`}>
               <button className="tr-rh" type="button" aria-expanded={rowOpen} onClick={() => toggleRow(i)}>
@@ -196,15 +166,13 @@ export function ToolRunCard({
                   </span>
                 ) : null}
               </button>
-              {todos ? <TodoChecklist todos={todos} /> : !rowOpen && Object.keys(r.args).length > 0 ? <div className="tr-arg">{argSummary(r.args)}</div> : null}
+              {!rowOpen && Object.keys(r.args).length > 0 ? <div className="tr-arg">{argSummary(r.args)}</div> : null}
               {rowOpen ? (
                 <div className="tr-detail">
-                  {todos ? null : (
-                    <div className="tr-sec">
-                      <div className="tr-k">参数</div>
-                      <pre className="tr-v">{argsJson(r.args)}</pre>
-                    </div>
-                  )}
+                  <div className="tr-sec">
+                    <div className="tr-k">参数</div>
+                    <pre className="tr-v">{argsJson(r.args)}</pre>
+                  </div>
                   {r.result ? (
                     <div className="tr-sec">
                       <div className="tr-k">{r.status === 'error' ? '错误' : '结果'}</div>

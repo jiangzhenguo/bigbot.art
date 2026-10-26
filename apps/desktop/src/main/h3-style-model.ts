@@ -22,12 +22,29 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import type { StyleLoraSource, StyleModelProgress, StyleModelStatus } from '@bigbotart/shared';
+import { basename, join } from 'node:path';
+import type { H3TransformerTarget, StyleLoraSource, StyleModelProgress, StyleModelStatus } from '@bigbotart/shared';
 
 /** h3 部署根目录(模型/脚本都在这下面;env 可覆盖便于测试) */
 function h3Root(): string {
   return process.env.BIGBOTART_H3_ROOT ?? join(homedir(), 'ai', 'h3');
+}
+
+/** 本地安装名称只能是一个安全的目录名；支持中文/空格，但拒绝路径穿越与绝对路径。 */
+export function localLoraPackDirName(name: string): string | null {
+  const value = name.trim().replace(/\.safetensors$/i, '');
+  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) return null;
+  return value;
+}
+
+/** 本地产物固定落在 h3 部署根目录下；调用方不得传任意输出路径。 */
+export function localLoraOutDir(name: string): string | null {
+  const dirName = localLoraPackDirName(name);
+  return dirName ? join(h3Root(), dirName) : null;
+}
+
+export function localLoraTargets(target: H3TransformerTarget | 'both'): H3TransformerTarget[] {
+  return target === 'both' ? ['FL2VA', 'Ref2VA'] : [target];
 }
 
 /** 基础模型目录(与 h3c.ts / selfcheck.ts 同口径:BIGBOTART_H3_MODEL 覆盖) */
@@ -164,6 +181,74 @@ export class H3StyleModelBuilder {
     if (!scriptReady) missing.push(`融合脚本不存在:${scriptPath}`);
     for (const l of loras) if (!l.exists) missing.push(`LoRA 缺失:${l.fileName}`);
     return { packId, buildable: true, outDir: src.outDir, mergedReady, baseReady, baseDir, scriptReady, scriptPath, loras, missing };
+  }
+
+  /**
+   * 本地单 LoRA → 新模型目录。与已知包的「重跑」不同：只写入全新产物目录，
+   * 已存在一律拒绝，绝不删除/覆盖用户已有模型，更不会把失败半成品登记为可用包。
+   */
+  async buildLocal(input: {
+    packId: string;
+    loraPath: string;
+    outDir: string;
+    target: H3TransformerTarget | 'both';
+  }): Promise<{ ok: boolean; error?: string; outDir?: string }> {
+    if (this.building) return { ok: false, error: '已有构建任务进行中' };
+    if (!['FL2VA', 'Ref2VA', 'both'].includes(input.target)) return { ok: false, error: '未知 LoRA 作用目标' };
+    const loraPath = input.loraPath.trim();
+    const outDir = input.outDir.trim();
+    if (!loraPath || !looksLikeSafetensors(loraPath)) {
+      return { ok: false, error: `不是合法 safetensors LoRA(文件不存在、过小或格式错误):${loraPath || '(未选择文件)'}` };
+    }
+    if (!outDir) return { ok: false, error: '产物目录为空' };
+    if (existsSync(outDir)) return { ok: false, error: `产物目录已存在,未覆盖:${outDir}。请更换名称,或手动处理该目录后重试` };
+    const baseDir = baseModelDir();
+    const targets = localLoraTargets(input.target);
+    const missingBase = targets.filter((sub) => !existsSync(join(baseDir, sub, 'transformer')));
+    if (missingBase.length) return { ok: false, error: `基础模型未就绪:${baseDir}(缺 ${missingBase.join('/')} transformer)` };
+    const scriptPath = mergeScriptPath();
+    if (!existsSync(scriptPath)) return { ok: false, error: `融合脚本不存在:${scriptPath}` };
+
+    this.building = true;
+    this.cancelled = false;
+    try {
+      for (const sub of targets) {
+        this.progress(input.packId, 'copy', undefined, `复制基础组件 ${sub}/(clonefile,不含 transformer)`);
+        mkdirSync(join(outDir, sub), { recursive: true });
+        for (const item of readdirSync(join(baseDir, sub))) {
+          if (item === 'transformer') continue;
+          const dstItem = join(outDir, sub, item);
+          if (existsSync(dstItem)) continue;
+          await this.runStage(input.packId, 'copy', `复制 ${sub}/${item}`, [
+            '/bin/cp',
+            ['-Rc', join(baseDir, sub, item), dstItem],
+          ]);
+        }
+        const stage = sub === 'FL2VA' ? ('merge-FL2VA' as const) : ('merge-Ref2VA' as const);
+        await this.runStage(
+          input.packId,
+          stage,
+          `融合 ${sub} transformer ← ${basename(loraPath)}`,
+          [
+            'python3',
+            [scriptPath, '--lora', loraPath, '--src', join(baseDir, sub, 'transformer'), '--dst', join(outDir, sub, 'transformer'), '--strength', '1.0'],
+          ],
+        );
+      }
+      this.progress(input.packId, 'done', 100, `融合完成:${outDir}`);
+      return { ok: true, outDir };
+    } catch (e) {
+      if (this.cancelled) {
+        this.progress(input.packId, 'cancelled', undefined, `已取消(未登记;半成品仅保留供排查:${outDir})`);
+        return { ok: false, error: '已取消,未安装模型包' };
+      }
+      const msg = `${(e as Error).message}(未登记模型包;半成品目录:${outDir})`;
+      this.progress(input.packId, 'error', undefined, msg, msg);
+      return { ok: false, error: msg };
+    } finally {
+      this.running = null;
+      this.building = false;
+    }
   }
 
   /** 取消进行中的构建(杀当前子进程;半成品目录保留,重跑会先清 transformer 保证幂等) */

@@ -25,8 +25,8 @@ import { createRegistry } from '@bigbotart/providers';
 import type { AgentManager } from '@bigbotart/agent';
 import type { ProjectStore } from './store';
 import type { SettingsStore } from './settings';
-import type { AccelStore } from './lora';
-import type { H3StyleModelBuilder } from './h3-style-model';
+import { validSteps, type AccelStore } from './lora';
+import { localLoraOutDir, type H3StyleModelBuilder } from './h3-style-model';
 import {
   OUTPUTS_DIR,
   collectAssetRefs,
@@ -126,8 +126,10 @@ import type {
   ProjectCover,
   AppSettings,
   RemoteAccessStatus,
+  LocalLoraInstallInput,
 } from '@bigbotart/shared';
 import {
+  LOCAL_LORA_BUILD_ID,
   referenceMediaIssues,
   referenceAnchorConflictIssues,
 } from '@bigbotart/shared';
@@ -804,7 +806,45 @@ ipcMain.handle('relay-set-pairing-key', (_e, key: string) =>
 
 // ---------- IPC:h3 模型包(加速 / 风格)管理 ----------
 ipcMain.handle('accel-list', () => accel.list());
-ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number; kind?: 'accel' | 'style' }) => accel.install(input));
+ipcMain.handle('accel-pick-source', async (_e, source: 'directory' | 'lora') => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const opts = source === 'directory'
+    ? {
+        title: '选择 h3 模型包目录',
+        buttonLabel: '选择目录',
+        properties: ['openDirectory' as const],
+      }
+    : {
+        title: '选择 LoRA 文件',
+        buttonLabel: '选择 LoRA',
+        properties: ['openFile' as const],
+        filters: [{ name: 'LoRA (safetensors)', extensions: ['safetensors'] }],
+      };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  if (r.canceled || r.filePaths.length === 0) return { ok: false as const, canceled: true as const };
+  const selected = r.filePaths[0]!;
+  return { ok: true as const, path: selected, name: basename(selected).replace(/\.safetensors$/i, '') };
+});
+ipcMain.handle('accel-install', (_e, input: { name: string; path: string; steps?: number; kind?: 'accel' | 'style' | 'style-accel' }) => accel.install(input));
+ipcMain.handle('accel-install-lora', async (_e, input: LocalLoraInstallInput) => {
+  const name = String(input.name ?? '').trim();
+  if (!name) return { ok: false, error: '请填模型包名称' };
+  if (input.kind !== 'accel' && input.kind !== 'style') return { ok: false, error: '单 LoRA 安装类型只支持加速或风格' };
+  if (!validSteps(input.kind, input.steps)) {
+    return { ok: false, error: input.kind === 'style' ? '风格包步数须为 4-50 的整数(推荐 20/30)' : '加速包步数只支持 4 或 8' };
+  }
+  const outDir = localLoraOutDir(name);
+  if (!outDir) return { ok: false, error: '名称不能包含路径分隔符,且不能是 . 或 ..' };
+  const built = await styleModels.buildLocal({
+    packId: LOCAL_LORA_BUILD_ID,
+    loraPath: String(input.loraPath ?? ''),
+    outDir,
+    target: input.target,
+  });
+  if (!built.ok) return { ok: false, error: built.error, outDir };
+  const installed = accel.install({ name, path: outDir, kind: input.kind, steps: input.steps });
+  return { ...installed, outDir };
+});
 ipcMain.handle('accel-remove', (_e, id: string) => accel.remove(id));
 ipcMain.handle('accel-set-default', (_e, id: string | null) => accel.setDefault(id));
 ipcMain.handle('accel-set-default-enabled', (_e, enabled: boolean) => accel.setDefaultEnabled(enabled));

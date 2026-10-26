@@ -16,6 +16,21 @@
  * transformer/ 再重跑,保证「重跑 = 干净重来」。
  */
 
+/** 本地 LoRA 融合安装的统一进度 id（与设置页底部安装区共用）。 */
+export const LOCAL_LORA_BUILD_ID = 'local-lora-install';
+
+export type H3TransformerTarget = 'FL2VA' | 'Ref2VA';
+
+/** 单个本地 LoRA 的安装参数；产物目录由主进程按名称安全分配，渲染层不能指定。 */
+export interface LocalLoraInstallInput {
+  name: string;
+  loraPath: string;
+  kind: 'accel' | 'style';
+  steps: number;
+  /** both = 同一文件分别融合到两个 transformer；仅作者明确兼容时使用。 */
+  target: H3TransformerTarget | 'both';
+}
+
 /** 一个 LoRA 下载源(某个 transformer 变体对应一个文件;同一 target 多条 = 按数组顺序先后融合,如先风格后 turbo) */
 export interface StyleLoraSource {
   /** 目标文件名(落盘名,如 MysticXXX_MMH3-V4.safetensors) */

@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import type { AgentChatResponse, Asset, ChatThreadListItem, LlmSource } from '@bigbotart/shared';
+import type { AgentChatResponse, AgentTodoItem, Asset, ChatThreadListItem, LlmSource } from '@bigbotart/shared';
 import type { ChatMsg, ModelOption, ToolRun } from './types';
 import { MODEL_OPTION_FALLBACK } from './constants';
 import { restoreMsgsFromRecall } from './restore-msgs';
@@ -37,6 +37,9 @@ export interface UseAgentChatOptions {
 
 export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, focusNodesRef }: UseAgentChatOptions) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  /** 底部固定任务面板：真源是画布记忆，不从聊天工具卡反推。 */
+  const [todos, setTodos] = useState<AgentTodoItem[]>([]);
+  const todoRefreshSeq = useRef(0);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
@@ -199,6 +202,33 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     setActiveThreadId(null);
     setHistoryOpen(false);
   }, [projectId, canvasId]);
+
+  /**
+   * 固定任务面板读取 CanvasMemory.todos：重启、切历史会话后仍显示当前画布进度。
+   * todo.write 成功时也会调它即时刷新；序号防护避免切画布后的慢回执覆盖新画布。
+   */
+  const refreshTodos = useCallback(async (): Promise<void> => {
+    const seq = ++todoRefreshSeq.current;
+    if (!projectId || !canvasId) {
+      setTodos([]);
+      return;
+    }
+    try {
+      const mem = await window.bigbotart.memoryGet(projectId);
+      if (seq !== todoRefreshSeq.current) return;
+      setTodos([...(mem.canvasMemory[canvasId]?.todos ?? [])]);
+    } catch (e) {
+      if (seq === todoRefreshSeq.current) console.error('读取画布任务清单失败', e);
+    }
+  }, [projectId, canvasId]);
+
+  useEffect(() => {
+    setTodos([]);
+    void refreshTodos();
+    return () => {
+      todoRefreshSeq.current += 1;
+    };
+  }, [refreshTodos]);
 
   const refreshThreads = useCallback(async (): Promise<ChatThreadListItem[]> => {
     if (!projectId || !canvasId) return [];
@@ -541,6 +571,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         }
         return out;
       });
+      // 非实时事件路径的兜底：终局回执里有成功 todo.write 时也刷新固定面板。
+      if (res.toolCalls?.some((tc) => tc.name === 'todo.write' && tc.ok)) void refreshTodos();
       // 有排队的下一条时,可见忙状态先留着,避免按钮闪回「发送」;ref 放行交给 flush
       if (pendingReplace.current) {
         sendingRef.current = false;
@@ -557,7 +589,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       // 执行中发来的下一条:等这次收尾落完再开,避免旧 done 把新一轮收掉
       flushReplaceRef.current();
     },
-    [projectId, onCanvasMutated, refreshThreads, markSending, markAgentBusy],
+    [projectId, onCanvasMutated, refreshThreads, refreshTodos, markSending, markAgentBusy],
   );
 
   /** 终局收尾的稳定引用(事件订阅的 effect 依赖它,避免因函数重建而反复退订) */
@@ -705,6 +737,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         });
         // 工具改了画布:刷新节点
         if (ev.toolName.startsWith('canvas.')) onCanvasMutated();
+        // 任务清单一成功落盘就刷新底部固定面板，不等整轮对话结束。
+        if (tName === 'todo.write' && ev.ok) void refreshTodos();
         // 🆕 技能工具联动:激活/停用/读取 → 独立「技能注入卡」(配置事件)+ 同步 activeSkill
         if (tName.startsWith('skills.')) {
           // 从本轮聚合卡取该工具行的 args(激活/读取需要 skillId;行数据在 toolRuns 里)
@@ -820,7 +854,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     });
     return off;
-  }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, toastMsg, markSending, markAgentBusy]);
+  }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, refreshTodos, toastMsg, markSending, markAgentBusy]);
 
   /** 🆕 手动激活技能(输入区快选 / 技能页共用):调 IPC + 落「技能注入卡」+ 同步 chip */
   const activateSkill = useCallback(
@@ -1007,6 +1041,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
 
   return {
     msgs,
+    todos,
     sending,
     /** 有一轮对话还没收尾(打断之后、worker 停下之前也算) */
     agentBusy,

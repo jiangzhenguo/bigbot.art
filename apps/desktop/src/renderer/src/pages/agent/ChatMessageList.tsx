@@ -18,6 +18,7 @@ import PlanCard from './cards/PlanCard';
 import SkillInjectCard from './cards/SkillInjectCard';
 import MsgCopyBtn from './MsgCopyBtn';
 import { AudioPlayer, previewUrlOf } from '../canvas/media';
+import { isTodoActivityText, isTodoToolName, withoutTodoToolRuns } from './todo-display';
 import type { ChatMedia, ChatMsg } from './types';
 
 type ChatAttachment = { name: string; kind: string; localPath?: string };
@@ -131,6 +132,8 @@ export function ChatMessageList({
           );
         }
         if (m.kind === 'sys') {
+          // todo 的进度与系统摘要都由底部固定面板承接，不再重复占用聊天内容。
+          if (isTodoActivityText(m.text)) return null;
           return (
             <div className="msg-sys" key={m.id}>
               {m.loading ? (
@@ -172,8 +175,11 @@ export function ChatMessageList({
           );
         }
         if (m.toolRuns) {
+          // todo.write 由固定进度面板展示；其他工具仍按原聚合卡留痕。
+          const runs = withoutTodoToolRuns(m.toolRuns);
+          if (runs.length === 0) return null;
           // 工具聚合卡:一轮调用一张卡(设计文档 §3);resolveMedia 让成功行内联显示产物(图片/视频/音频)
-          return <ToolRunCard key={m.id} runs={m.toolRuns} onLocate={onLocate} resolveMedia={resolveMedia} />;
+          return <ToolRunCard key={m.id} runs={runs} onLocate={onLocate} resolveMedia={resolveMedia} />;
         }
         if (m.skill) {
           // 技能注入卡(配置事件;设计稿 trc-skill,与工具卡并列但独立计数)
@@ -186,8 +192,9 @@ export function ChatMessageList({
           return <PlanCard key={m.id} plan={m.plan} />;
         }
         if (m.toolCall) {
-          // 旧格式兼容(历史快照里逐条平铺的工具卡)
+          // 旧格式兼容(历史快照里逐条平铺的工具卡)；todo 同样只进固定面板。
           const tc = m.toolCall;
+          if (isTodoToolName(tc.name)) return null;
           return (
             <div className="msg-agent" key={m.id} data-od-id="agent-tools">
               <div className="tool">

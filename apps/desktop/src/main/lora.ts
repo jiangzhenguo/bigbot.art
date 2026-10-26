@@ -69,15 +69,15 @@ export function packKind(p: Pick<AccelPack, 'kind'>): AccelPackKind {
 }
 
 /** 步数合法性:加速类包(accel / style-accel)4|8;纯风格包 4..50 整数(融合权重需正常步数,推荐 20/30) */
-function validSteps(kind: AccelPackKind, v: unknown): v is number {
+export function validSteps(kind: AccelPackKind, v: unknown): v is number {
   if (typeof v !== 'number' || !Number.isInteger(v)) return false;
   return kind === 'style' ? v >= 4 && v <= 50 : v === 4 || v === 8;
 }
 
-/** 包目录合法性:`h3 -d` 需要目录存在且含 FL2VA/(turbo/mystic 目录结构,见手册 §1.2) */
+/** 包目录合法性:至少含 FL2VA 或 Ref2VA 变体(本地单目标融合包也允许),或单变体 model_index.json。 */
 function packValid(path: string): boolean {
   if (!existsSync(path)) return false;
-  return existsSync(join(path, 'FL2VA')) || existsSync(join(path, 'model_index.json'));
+  return existsSync(join(path, 'FL2VA')) || existsSync(join(path, 'Ref2VA')) || existsSync(join(path, 'model_index.json'));
 }
 
 export class AccelStore {
@@ -114,7 +114,7 @@ export class AccelStore {
     return (this.settings.get().accelPacks ?? []).map((p) => ({ ...p, exists: packValid(p.path) }));
   }
 
-  /** 安装:校验目录存在且合法(含 FL2VA/)后登记;kind 缺省 accel,步数按 kind 校验 */
+  /** 安装:校验目录存在且含至少一个 h3 变体后登记;kind 缺省 accel,步数按 kind 校验 */
   install(input: { name: string; path: string; steps?: number; kind?: AccelPackKind }): { ok: boolean; packs?: AccelPack[]; error?: string } {
     this.ensureSeeded();
     const name = input.name?.trim();
@@ -123,7 +123,7 @@ export class AccelStore {
     if (!name) return { ok: false, error: '请填模型包名称' };
     if (!path) return { ok: false, error: '请填模型目录路径' };
     if (!existsSync(path)) return { ok: false, error: `目录不存在: ${path}` };
-    if (!packValid(path)) return { ok: false, error: '不是合法模型目录(缺 FL2VA/ 或 model_index.json)' };
+    if (!packValid(path)) return { ok: false, error: '不是合法模型目录(缺 FL2VA/、Ref2VA/ 或 model_index.json)' };
     if (input.steps !== undefined && !validSteps(kind, input.steps)) {
       return { ok: false, error: kind === 'style' ? '风格包步数须为 4-50 的整数(推荐 20/30)' : '加速类包步数只支持 4 或 8' };
     }

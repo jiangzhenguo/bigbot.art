@@ -601,7 +601,7 @@ export type AccelPackKind = 'accel' | 'style' | 'style-accel';
 export interface AccelPack {
   id: string;
   name: string;
-  /** 可传给 `h3 -d` 的模型目录(含 FL2VA/) */
+  /** 可传给 `h3 -d` 的模型目录(至少含 FL2VA/ 或 Ref2VA/ 变体) */
   path: string;
   /** 推荐步数档(accel:4|8;style:20|30) */
   steps?: number;
@@ -610,7 +610,7 @@ export interface AccelPack {
   /** 是否默认包(镜头启用模型包未选包时用) */
   default?: boolean;
   installedAt?: string;
-  /** 列表时主进程回填:目录当前是否存在(存在但缺 FL2VA/ 视为 invalid) */
+  /** 列表时主进程回填:目录当前是否存在且含至少一个 h3 变体(存在但无变体视为 invalid) */
   exists?: boolean;
 }
 
