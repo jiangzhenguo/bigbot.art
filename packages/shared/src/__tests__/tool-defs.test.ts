@@ -77,6 +77,11 @@ describe('工具清单完整性', () => {
     const list = toolDefinitions().find((t) => t.name === 'canvas.list_nodes')!;
     expect(list.description).toContain('画布坐标');
     expect(list.description).toContain('卡片宽高');
+    const tidy = toolDefinitions().find((t) => t.name === 'canvas.tidy')!;
+    expect(tidy.description).toContain('只改坐标');
+    const tidyParams = tidy.parameters as { properties: Record<string, { type?: string }>; required?: string[] };
+    expect(tidyParams.properties.scope?.type).toBe('string');
+    expect(tidyParams.required ?? []).not.toContain('scope');
   });
 
   it('web.search / web.fetch_image 在清单里,且名字不含短横线', () => {

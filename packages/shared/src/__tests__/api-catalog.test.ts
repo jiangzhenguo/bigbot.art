@@ -6,9 +6,9 @@ import { API_CATALOG, EVENT_CATALOG, RPC_CATALOG } from '../api-catalog.js';
 
 describe('API 目录', () => {
   it('121 个 RPC + 6 个事件,名字不重复', () => {
-    expect(RPC_CATALOG).toHaveLength(121);
+    expect(RPC_CATALOG).toHaveLength(122);
     expect(EVENT_CATALOG).toHaveLength(6);
-    expect(API_CATALOG).toHaveLength(127);
+    expect(API_CATALOG).toHaveLength(128);
     const names = API_CATALOG.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
   });

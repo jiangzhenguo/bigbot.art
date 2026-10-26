@@ -251,6 +251,48 @@ describe('canvas.create_node 落点', () => {
   });
 });
 
+describe('canvas.tidy', () => {
+  it('重叠和散落的节点整理后不重叠,内容不变,再整理一次坐标不变', async () => {
+    const store = makeStore([
+      { id: 'a', kind: 'document', label: '甲', position: { x: 80, y: 80 }, width: 236, height: 220, data: { markdown: 'keep' } },
+      { id: 'b', kind: 'document', label: '乙', position: { x: 100, y: 100 }, width: 236, height: 220, data: { markdown: 'keep-b' } },
+      { id: 'c', kind: 'document', label: '丙', position: { x: 9000, y: -2000 }, width: 236, height: 220, data: {} },
+    ]);
+    const h = makeHandlers(store);
+    const res = await h.call('canvas.tidy', {}, ctx);
+    expect(res.ok, res.result).toBe(true);
+    const nodes = store.__snapshot.nodes;
+    assertSeparated(nodes);
+    const ys = nodes.map((n) => n.position.y);
+    const xs = nodes.map((n) => n.position.x);
+    expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(4000);
+    expect(Math.max(...xs)).toBeLessThan(4000);
+    expect(nodes.find((n) => n.id === 'a')!.data).toEqual({ markdown: 'keep' });
+    const once = nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }));
+    const again = await h.call('canvas.tidy', {}, ctx);
+    expect(again.ok, again.result).toBe(true);
+    for (const prev of once) {
+      const n = store.__snapshot.nodes.find((x) => x.id === prev.id)!;
+      expect(n.position.x).toBe(prev.x);
+      expect(n.position.y).toBe(prev.y);
+    }
+  });
+
+  it('scope=selected 只移动选中的节点', async () => {
+    const store = makeStore([
+      { id: 'keep', kind: 'document', label: '留', position: { x: 400, y: 360 }, width: 236, height: 220, data: { markdown: 'stay' } },
+      { id: 'move', kind: 'document', label: '动', position: { x: 410, y: 370 }, width: 236, height: 220, data: {} },
+    ]);
+    const h = makeHandlers(store);
+    const res = await h.call('canvas.tidy', { scope: 'selected', selectedIds: ['move'] }, ctx);
+    expect(res.ok, res.result).toBe(true);
+    const keep = store.__snapshot.nodes.find((n) => n.id === 'keep')!;
+    expect(keep.position).toEqual({ x: 400, y: 360 });
+    expect(keep.data).toEqual({ markdown: 'stay' });
+    assertSeparated(store.__snapshot.nodes);
+  });
+});
+
 describe('storyboard.materialize 落点', () => {
   function shotsOf(nodes: Node[]) {
     return nodes.filter((n) => n.kind === 'shot');

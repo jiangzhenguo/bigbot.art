@@ -90,6 +90,17 @@ export interface BigBotArtApi {
     snap: import('./domain').CanvasSnapshot,
     opts?: import('./domain').CanvasSaveOptions,
   ): Promise<{ ok: boolean; stale?: boolean; current?: import('./domain').CanvasSnapshot }>;
+  /**
+   * 整理画布节点坐标(只改 x/y)。主进程落盘并广播快照。
+   * scope=selected 时只移动 selectedIds;缺省 scope=all。
+   */
+  tidyCanvas(input: {
+    projectId: string;
+    canvasId: string;
+    scope?: 'all' | 'selected';
+    selectedIds?: string[];
+    gap?: number;
+  }): Promise<{ ok: boolean; moved?: number; error?: string; bbox?: { x: number; y: number; w: number; h: number } }>;
   /** 画布快照更新推送(主进程任何写盘后广播,含 Agent 工具增量;渲染层据此刷新本地状态保持同步) */
   onCanvasSnapshotUpdated(cb: (snap: import('./domain').CanvasSnapshot) => void): () => void;
   /** 创建一个新画布(空白),返回画布;持久化并设为主画布(若项目无画布) */

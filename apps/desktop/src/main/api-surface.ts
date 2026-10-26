@@ -171,6 +171,13 @@ export interface DesktopIpcDeps {
     threadId?: string;
     auto?: boolean;
   }) => Promise<AgentChatResponse>;
+  tidyCanvas: (input: {
+    projectId: string;
+    canvasId: string;
+    scope?: 'all' | 'selected';
+    selectedIds?: string[];
+    gap?: number;
+  }) => { ok: boolean; moved?: number; error?: string; bbox?: { x: number; y: number; w: number; h: number } };
   compactContext: (msgs: RecallMessage[]) => {
     systemPrompt: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -204,6 +211,7 @@ export function registerDesktopIpc(ctx: DesktopIpcDeps): Map<string, IpcHandler>
     probeSimple,
     executeAgentChat,
     compactContext,
+    tidyCanvas,
   } = ctx;
   const captured = new Map<string, IpcHandler>();
   const originalHandle = ipcMain.handle.bind(ipcMain);
@@ -411,6 +419,7 @@ ipcMain.handle('set-project-llm', (_e, projectId: string, llm: LlmSource | null)
 // 多画布
 ipcMain.handle('load-project-canvases', (_e, projectId: string) => store.loadProjectCanvases(projectId));
 ipcMain.handle('save-canvas-snapshot', (_e, snap, opts) => store.saveCanvasSnapshot(snap, opts));
+ipcMain.handle('tidy-canvas', (_e, input) => tidyCanvas(input));
 ipcMain.handle('create-canvas', (_e, projectId: string, name?: string) => store.createCanvas(projectId, name));
 ipcMain.handle('rename-canvas', (_e, projectId: string, canvasId: string, name: string) => store.renameCanvas(projectId, canvasId, name));
 ipcMain.handle('delete-canvas', (_e, projectId: string, canvasId: string) => store.deleteCanvas(projectId, canvasId));

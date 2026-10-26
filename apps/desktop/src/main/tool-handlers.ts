@@ -77,11 +77,11 @@ import {
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
 import {
-  placeBatch,
+  placeMaterializeRows,
   placeNode,
   rectOf,
   PLACE_GAP,
-  type BatchCell,
+  tidyNodes,
   type Occupant,
   type PlaceRequest,
 } from './canvas-placement';
@@ -639,6 +639,25 @@ export class ToolHandlers {
         .join('\n');
       return { ok: true, result: `当前画布 ${cur.nodes.length} 个节点:\n${lines || '(空)'}` };
     },
+    'canvas.tidy': async (a, ctx) => {
+      const scope = String(a.scope ?? 'all') === 'selected' ? 'selected' : 'all';
+      const listed = Array.isArray(a.selectedIds) ? a.selectedIds.map((id) => String(id)).filter(Boolean) : [];
+      const res = this.tidyCanvas({
+        projectId: ctx.projectId,
+        canvasId: ctx.canvasId,
+        scope,
+        selectedIds: listed.length ? listed : undefined,
+        gap: finiteNum(a.gap),
+        selectedNodeId: ctx.selectedNodeId,
+      });
+      if (!res.ok) return { ok: false, result: res.error ?? '整理失败' };
+      return {
+        ok: true,
+        result: res.moved
+          ? `已整理 ${res.moved} 个节点的位置(只改了坐标,节点内容与连线未动)。`
+          : '位置已经整齐,没有节点需要移动。',
+      };
+    },
     'canvas.get_node': async (a, ctx) => {
       const rawId = String(a.nodeId ?? '');
       const pc = this.store.loadProjectCanvases(ctx.projectId);
@@ -759,6 +778,7 @@ export class ToolHandlers {
       });
       const now = new Date().toISOString();
       const sb = res.storyboard;
+      this.placePlannedStoryboard(cur.nodes, sb, res.images, res.shots);
       cur.nodes.push(sb);
       if (nodeId && cur.nodes.some((n) => n.id === nodeId)) {
         cur.edges.push({ id: nid('edge'), source: nodeId, target: sb.id, label: 'prompt' });
@@ -859,29 +879,17 @@ export class ToolHandlers {
         const ps = (n.data as { promptFrom?: PromptSource }).promptFrom;
         return ps?.nodeId === nodeId && ps.mode === 'row';
       });
-      const cells: BatchCell[] = [];
-      plans.forEach((plan, batchRow) => {
-        const media = { mediaWidth: size.width, mediaHeight: size.height };
-        if (plan.createKeyframe) {
-          cells.push({ key: `img-${plan.rowNo}`, kind: 'image-gen', width: 232, col: 0, row: batchRow, ...media });
-        }
-        cells.push({ key: `shot-${plan.rowNo}`, kind: 'shot', width: 250, col: 1, row: batchRow, ...media });
-      });
-      const priorShots = prior.filter((n) => n.kind === 'shot');
-      const hasNewImage = cells.some((c) => c.col === 0);
-      const originX = !prior.length
-        ? undefined
-        : hasNewImage
-          ? Math.min(...prior.map((n) => n.position.x))
-          : Math.min(...(priorShots.length ? priorShots : prior).map((n) => n.position.x));
-      const placed = placeBatch(
+      const placed = placeMaterializeRows(
         cur.nodes.map((n) => this.occupantOf(n)),
-        cells,
-        {
-          anchor: { x: sbBox.x + sbBox.w + PLACE_GAP, y: sbBox.y },
-          continueFrom: prior.length ? prior.map((n) => this.occupantOf(n)) : undefined,
-          originX,
-        },
+        this.occupantOf(sb),
+        plans.map((plan, batchRow) => ({
+          row: batchRow,
+          shotKey: `shot-${plan.rowNo}`,
+          imageKey: plan.createKeyframe ? `img-${plan.rowNo}` : undefined,
+          mediaWidth: size.width,
+          mediaHeight: size.height,
+        })),
+        prior.map((n) => this.occupantOf(n)),
       );
       const at = (key: string) => {
         const hit = placed.find((p) => p.key === key);
@@ -2406,6 +2414,118 @@ export class ToolHandlers {
     } catch (e) {
       return { ok: false, result: `工具执行异常:${(e as Error).message}` };
     }
+  }
+
+  /**
+   * 规划器给出的分镜表/镜头用固定行距。落到画布前改走与 materialize 相同的整块避让,
+   * 避免 autoMaterialize 叠在已有内容上或按行号把 y 拉得很远。
+   */
+  private placePlannedStoryboard(existing: CanvasNode[], sb: CanvasNode, images: CanvasNode[], shots: CanvasNode[]): void {
+    const occ = existing.map((n) => this.occupantOf(n));
+    const spot = placeNode(occ, {
+      kind: 'storyboard',
+      width: sb.width ?? 318,
+      data: sb.data,
+      x: sb.position?.x,
+      y: sb.position?.y,
+    });
+    sb.position = { x: spot.x, y: spot.y };
+    sb.width = sb.width ?? spot.width;
+    if (!sb.height) sb.height = spot.height;
+    const fresh = [...images, ...shots];
+    if (!fresh.length) return;
+    const byRow = new Map<number, { shot?: CanvasNode; img?: CanvasNode }>();
+    const rowOf = (n: CanvasNode) => {
+      const ps = (n.data as { promptFrom?: { row?: number } } | undefined)?.promptFrom;
+      return typeof ps?.row === 'number' ? ps.row : 0;
+    };
+    for (const n of shots) {
+      const row = rowOf(n);
+      const slot = byRow.get(row) ?? {};
+      slot.shot = n;
+      byRow.set(row, slot);
+    }
+    for (const n of images) {
+      const row = rowOf(n);
+      const slot = byRow.get(row) ?? {};
+      slot.img = n;
+      byRow.set(row, slot);
+    }
+    const rowNos = [...byRow.keys()].sort((a, b) => a - b);
+    const sbOcc = this.occupantOf(sb);
+    const placed = placeMaterializeRows(
+      [...occ, sbOcc],
+      sbOcc,
+      rowNos.map((rowNo, i) => {
+        const slot = byRow.get(rowNo)!;
+        const d = (slot.shot?.data ?? slot.img?.data ?? {}) as { width?: number; height?: number };
+        return {
+          row: i,
+          shotKey: slot.shot?.id ?? `missing-${rowNo}`,
+          imageKey: slot.img?.id,
+          mediaWidth: typeof d.width === 'number' ? d.width : undefined,
+          mediaHeight: typeof d.height === 'number' ? d.height : undefined,
+        };
+      }),
+    );
+    const at = new Map(placed.map((p) => [p.key, p]));
+    for (const n of fresh) {
+      const p = at.get(n.id);
+      if (!p) continue;
+      n.position = { x: p.x, y: p.y };
+      n.width = n.width ?? p.width;
+      if (!n.height) n.height = p.height;
+    }
+  }
+
+  /**
+   * 整理画布坐标。工具和工具栏共用。只写 position,不改 data / 连线 / 分组。
+   */
+  tidyCanvas(input: {
+    projectId: string;
+    canvasId: string;
+    scope?: 'all' | 'selected';
+    selectedIds?: string[];
+    gap?: number;
+    selectedNodeId?: string;
+  }): { ok: boolean; moved?: number; error?: string; bbox?: { x: number; y: number; w: number; h: number } } {
+    const pc = this.store.loadProjectCanvases(input.projectId);
+    const cur = pc.canvases.find((c) => c.id === input.canvasId);
+    if (!cur) return { ok: false, error: '画布不存在' };
+    const scope = input.scope === 'selected' ? 'selected' : 'all';
+    let selectedIds = (input.selectedIds ?? []).map((id) => String(id)).filter(Boolean);
+    if (scope === 'selected' && selectedIds.length === 0 && input.selectedNodeId) {
+      selectedIds = [input.selectedNodeId];
+    }
+    if (scope === 'selected' && selectedIds.length === 0) {
+      return { ok: false, error: 'scope=selected 但没有要整理的节点。请传入 selectedIds,或先在画布上选中节点。' };
+    }
+    const result = tidyNodes(
+      cur.nodes.map((n) => this.occupantOf(n)),
+      cur.edges.map((e) => ({ source: e.source, target: e.target })),
+      {
+        scope,
+        selectedIds,
+        gap: input.gap,
+        groups: (cur.groups ?? []).map((g) => ({ members: g.members })),
+      },
+    );
+    const byId = new Map(result.moves.map((m) => [m.id, m]));
+    let moved = 0;
+    for (const n of cur.nodes) {
+      const m = byId.get(n.id);
+      if (!m) continue;
+      if (n.position?.x === m.x && n.position?.y === m.y) continue;
+      n.position = { x: m.x, y: m.y };
+      moved += 1;
+    }
+    if (moved > 0) {
+      cur.updatedAt = new Date().toISOString();
+      cur.version = (cur.version ?? 0) + 1;
+      const saved = this.store.saveCanvasSnapshot(cur);
+      if (saved && saved.ok === false) return { ok: false, error: '整理结果未能写入画布' };
+    }
+    return { ok: true, moved, bbox: result.bbox };
   }
 
   /**

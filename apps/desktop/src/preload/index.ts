@@ -52,6 +52,7 @@ const api: BigBotArtApi = {
   loadProjectCanvases: (projectId: string) => ipcRenderer.invoke(ch('loadProjectCanvases'), projectId),
   saveCanvasSnapshot: (snapshot: CanvasSnapshot, opts?: CanvasSaveOptions) =>
     ipcRenderer.invoke(ch('saveCanvasSnapshot'), snapshot, opts),
+  tidyCanvas: (input) => ipcRenderer.invoke(ch('tidyCanvas'), input),
   onCanvasSnapshotUpdated: (cb) => {
     const listener = (_e: unknown, snap: unknown) => cb(snap as never);
     ipcRenderer.on(ch('onCanvasSnapshotUpdated'), listener);

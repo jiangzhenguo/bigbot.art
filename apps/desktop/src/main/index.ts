@@ -751,6 +751,7 @@ const ipcHandlers = registerDesktopIpc({
   },
   probeSimple,
   executeAgentChat,
+  tidyCanvas: (input) => tools.tidyCanvas(input),
   compactContext,
 });
 remoteSlot.current = createRemoteServer({

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  PLACE_ABS_CAP,
   PLACE_CLAMP_MARGIN,
   PLACE_GAP,
   PLACE_ORIGIN,
@@ -13,6 +14,7 @@ import {
   placeNode,
   rectOf,
   rectsOverlap,
+  tidyNodes,
   type Occupant,
 } from '../canvas-placement.js';
 
@@ -219,5 +221,104 @@ describe('placeBatch', () => {
     const firstMaxY = Math.max(...first.map((p) => p.y));
     const secondMinY = Math.min(...second.map((p) => p.y));
     expect(Math.abs(secondMinY - firstMaxY)).toBeLessThan(1600);
+  });
+});
+
+describe('绝对上限', () => {
+  it('反复传入超大 x 不会一步步把画布推出上限', () => {
+    const nodes: Occupant[] = [occ({ id: 'seed', x: 80, y: 80, width: 236, height: 220 })];
+    for (let i = 0; i < 12; i++) {
+      const spot = placeNode(nodes, { kind: 'document', width: 236, x: 99999, y: 80 });
+      expect(spot.x + spot.width).toBeLessThanOrEqual(PLACE_ORIGIN.x + PLACE_ABS_CAP + 1);
+      nodes.push(occ({ id: `far-${i}`, x: spot.x, y: spot.y, width: spot.width, height: spot.height }));
+    }
+    expect(overlapsAny(nodes)).toBe(false);
+  });
+});
+
+describe('tidyNodes', () => {
+  function apply(nodes: Occupant[], moves: Array<{ id: string; x: number; y: number }>): Occupant[] {
+    const byId = new Map(moves.map((m) => [m.id, m]));
+    return nodes.map((n) => {
+      const m = byId.get(n.id);
+      return m ? { ...n, x: m.x, y: m.y } : n;
+    });
+  }
+
+  it('重叠和散落的节点整理后不重叠,包围盒有界', () => {
+    const nodes: Occupant[] = [
+      occ({ id: 'a', x: 80, y: 80, width: 236, height: 220 }),
+      occ({ id: 'b', x: 100, y: 90, width: 236, height: 220 }),
+      occ({ id: 'c', x: 9000, y: -4000, width: 236, height: 220 }),
+      occ({
+        id: 'sb',
+        kind: 'storyboard',
+        x: 4000,
+        y: 2000,
+        width: 318,
+        height: 280,
+      }),
+      occ({
+        id: 'shot-2',
+        kind: 'shot',
+        x: 80,
+        y: 2400,
+        width: 250,
+        data: { promptFrom: { nodeId: 'sb', mode: 'row', row: 2 }, width: 1024, height: 576 },
+      }),
+      occ({
+        id: 'shot-1',
+        kind: 'shot',
+        x: 7000,
+        y: 300,
+        width: 250,
+        data: { promptFrom: { nodeId: 'sb', mode: 'row', row: 1 }, width: 1024, height: 576 },
+      }),
+    ];
+    const tidy = tidyNodes(nodes, [
+      { source: 'sb', target: 'shot-1' },
+      { source: 'sb', target: 'shot-2' },
+    ]);
+    const next = apply(nodes, tidy.moves);
+    expect(overlapsAny(next)).toBe(false);
+    expect(tidy.bbox.w).toBeLessThan(PLACE_ABS_CAP);
+    expect(tidy.bbox.h).toBeLessThan(PLACE_ABS_CAP);
+    expect(tidy.bbox.x).toBeGreaterThanOrEqual(PLACE_ORIGIN.x - 1);
+    expect(tidy.bbox.y).toBeGreaterThanOrEqual(PLACE_ORIGIN.y - 1);
+    const sb = next.find((n) => n.id === 'sb')!;
+    const s1 = next.find((n) => n.id === 'shot-1')!;
+    const s2 = next.find((n) => n.id === 'shot-2')!;
+    expect(s1.x).toBeGreaterThan(sb.x);
+    expect(s2.y).toBeGreaterThan(s1.y);
+    const again = tidyNodes(next, []);
+    const twice = apply(next, again.moves);
+    for (const n of twice) {
+      const prev = next.find((p) => p.id === n.id)!;
+      expect(n.x).toBe(prev.x);
+      expect(n.y).toBe(prev.y);
+    }
+  });
+
+  it('selected 只移动选中节点,未选中的坐标不变', () => {
+    const nodes: Occupant[] = [
+      occ({ id: 'keep', x: 400, y: 400, width: 236, height: 220 }),
+      occ({ id: 'move-a', x: 410, y: 410, width: 236, height: 220 }),
+      occ({ id: 'move-b', x: 5000, y: 80, width: 236, height: 220 }),
+    ];
+    const tidy = tidyNodes(nodes, [], { scope: 'selected', selectedIds: ['move-a', 'move-b'] });
+    const next = apply(nodes, tidy.moves);
+    const keep = next.find((n) => n.id === 'keep')!;
+    expect(keep.x).toBe(400);
+    expect(keep.y).toBe(400);
+    expect(tidy.moves.map((m) => m.id).sort()).toEqual(['move-a', 'move-b']);
+    expect(overlapsAny(next)).toBe(false);
+    const again = tidyNodes(next, [], { scope: 'selected', selectedIds: ['move-a', 'move-b'] });
+    const twice = apply(next, again.moves);
+    for (const id of ['move-a', 'move-b', 'keep']) {
+      const a = next.find((n) => n.id === id)!;
+      const b = twice.find((n) => n.id === id)!;
+      expect(b.x).toBe(a.x);
+      expect(b.y).toBe(a.y);
+    }
   });
 });
