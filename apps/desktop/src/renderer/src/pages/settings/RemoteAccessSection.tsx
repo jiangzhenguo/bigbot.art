@@ -4,6 +4,24 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_REMOTE_PORT, type RemoteAccessStatus } from '@bigbotart/shared';
 import { useT } from '../../i18n';
+import MsgCopyBtn from '../agent/MsgCopyBtn';
+
+/** 一次性口令：只读展示 + 显式复制，避免用户手动框选长 Token。 */
+export function RemotePassphraseRow({ passphrase, copyLabel, inputLabel }: { passphrase: string; copyLabel: string; inputLabel: string }) {
+  return (
+    <div className="row g8 remote-passphrase-row" style={{ marginTop: 8, flexWrap: 'nowrap' }}>
+      <input
+        data-od-id="settings-remote-passphrase"
+        readOnly
+        value={passphrase}
+        onFocus={(e) => e.currentTarget.select()}
+        style={{ flex: '1 1 auto', minWidth: 0 }}
+        aria-label={inputLabel}
+      />
+      <MsgCopyBtn text={passphrase} className="btn btn-s btn-sm remote-token-copy" label={copyLabel} />
+    </div>
+  );
+}
 
 export function RemoteAccessSection() {
   const t = useT();
@@ -108,16 +126,7 @@ export function RemoteAccessSection() {
             {t('生成新口令')}
           </button>
         </div>
-        {passphrase ? (
-          <input
-            data-od-id="settings-remote-passphrase"
-            readOnly
-            value={passphrase}
-            onFocus={(e) => e.currentTarget.select()}
-            style={{ marginTop: 8, width: '100%' }}
-            aria-label={t('口令(只显示这一次)')}
-          />
-        ) : null}
+        {passphrase ? <RemotePassphraseRow passphrase={passphrase} copyLabel={t('复制')} inputLabel={t('口令(只显示这一次)')} /> : null}
         <div className="sub" style={{ marginTop: 12 }}>
           <b>{t('自建中继')}</b>
         </div>

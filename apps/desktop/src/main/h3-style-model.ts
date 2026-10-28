@@ -71,7 +71,7 @@ function mergeScriptPath(): string {
     join(h3Root(), 'h3.c', 'tools', 'merge_lora_h3.py'),
     join(h3Root(), 'merge_lora_h3.py'),
   ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
 /** 已知风格包的下载/构建方案登记(未登记的 style 包只能手动构建) */
