@@ -39,6 +39,7 @@ import {
   referenceAnchorConflictIssues,
   capabilityOf,
   resolveImageModel,
+  healModelForRefImages,
   defaultShotAspectForRole,
   SHOT_SIZES,
   normalizeShotDuration,
@@ -440,11 +441,23 @@ export function buildImageSubmitParams(
     node.kind === 'image-upscale' ? 'upscale' : node.kind === 'image-edit' ? String(d.mode ?? 'instruction') : 'generate';
   // 🆕 缺省模型解析(2026-09-29 v1):节点未显式选模型时按能力取「工具模型 > 内置默认」,
   // 与渲染层 runNode 同口径(显式值永远优先)
+  const hasRefs =
+    node.kind === 'image-gen' || node.kind === 'image-edit'
+      ? resolveRefImagePaths(canvas, node, assetPath).length > 0
+      : false;
   if (!String(d.model ?? '').trim()) {
-    const cap = capabilityOf(String(node.kind ?? ''), String(d.mode ?? 'instruction'),
-      resolveRefImagePaths(canvas, node, assetPath).length > 0);
+    const cap = capabilityOf(String(node.kind ?? ''), String(d.mode ?? 'instruction'), hasRefs);
     const m = resolveImageModel(toolModels, cap);
     if (m) params.model = m;
+  }
+  // 带参考图时纠正不兼容模型(Uncensored 等纯文生图粘在节点上 → 入队后才炸、Agent 盲重提)
+  if (node.kind === 'image-gen' || node.kind === 'image-edit') {
+    const healed = healModelForRefImages(String(params.model ?? ''), hasRefs, toolModels);
+    if (healed.model) params.model = healed.model;
+    if (healed.healed) {
+      params.__modelHealedFrom = healed.from;
+      params.__modelHealNote = `带参考图但原模型「${healed.from}」不支持参考编辑,已自动改为「${healed.model}」`;
+    }
   }
   if (node.kind === 'image-edit' || node.kind === 'image-upscale') {
     if (!params.inputPath) {
@@ -1643,10 +1656,24 @@ export class ToolHandlers {
           };
         }
       }
+      let modelHealNote = '';
       if (node.kind === 'image-gen' || node.kind === 'image-edit' || node.kind === 'image-upscale') {
         const built = buildImageSubmitParams(cur, node, (id) => this.assets.get(id)?.localPath, this.getToolModels?.());
         if (!built.ok) return { ok: false, result: built.error };
         submitParams = built.params;
+        /* 粘住的不兼容模型写回纠正值(2026-10-28):否则下次提交仍读到 Uncensored,
+           Agent 盲重提会再次入队后炸。纠正只发生在「有参考图且原模型不支持参考编辑」。 */
+        const healNote = String(submitParams.__modelHealNote ?? '');
+        if (healNote && submitParams.model) {
+          modelHealNote = ` · ${healNote}`;
+          node.data = { ...(node.data as Record<string, unknown>), model: String(submitParams.model) } as CanvasNode['data'];
+          node.updatedAt = new Date().toISOString();
+          cur.updatedAt = node.updatedAt;
+          cur.version += 1;
+          this.store.saveCanvasSnapshot(cur);
+        }
+        delete submitParams.__modelHealNote;
+        delete submitParams.__modelHealedFrom;
       }
       /* 🚀 模型包(加速/风格)解析(2026-10-09 事故修复)。
        *
@@ -1699,7 +1726,11 @@ export class ToolHandlers {
         params: submitParams,
         references,
       });
-      return { ok: true, result: `已提交生成任务(${handle.providerTaskId})${warnNote}${durationHealNote}`, nodeId };
+      return {
+        ok: true,
+        result: `已提交生成任务(${handle.providerTaskId})${warnNote}${durationHealNote}${modelHealNote}`,
+        nodeId,
+      };
     },
     'engine.queue_status': async () => {
       const jobs = this.queue.list();

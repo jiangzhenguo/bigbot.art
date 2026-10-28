@@ -12,7 +12,9 @@
  *
  * 防失控闸(全部宁可漏触发、不可误触发):
  *   ① 只认 source==='agent'(用户在画布手点的生成不唤醒 Agent);
- *   ② 只认 succeeded(失败走既有 Take/日志通道,不自动重试 —— 自动重试是另一种假成功温床);
+ *   ② 认 succeeded **与** failed(2026-10-28):失败也唤醒,把真实 error 交给 Agent 改参/换模型
+ *      再提交 —— **不是**静默同参重试。盲重提才是假成功温床;把错误藏起来让 Agent
+ *      反复 engine.submit 同一坏配置(「静帧 05」Uncensored+参考图)更糟;
  *   ③ 该画布有对话在跑时**不丢通知**:先挂到 deferred,等对话收尾(onChatSettled)再防抖唤醒
  *      (2026-10-13「技能4」:Agent 同轮提交角色卡+场景卡,第一张完成唤醒后第二张被「在飞跳过」
  *      永久丢掉 —— 旧注释「在飞那轮会看到最新画布」不成立,自动轮开始时第二张往往还没好);
@@ -27,11 +29,13 @@ export const AUTO_CONTINUE_MAX_DEFAULT = 5;
 /** 防抖窗口:同画布的连续完成在这个窗口内归并为一次唤醒 */
 export const AUTO_CONTINUE_DEBOUNCE_MS = 2500;
 
-/** 一次「任务完成」通知(触发唤醒时由调用方补 label) */
+/** 一次「任务终态」通知(触发唤醒时由调用方补 label) */
 export interface AutoNotice {
   nodeId: string;
   label?: string;
   resultPath?: string;
+  /** 失败时的错误原文(有值 = 失败通知;与 resultPath 互斥语义) */
+  error?: string;
   /** 提交时的会话(唤醒时切回,避免用户已切到别的历史会话) */
   threadId?: string;
 }
@@ -59,7 +63,9 @@ export function shouldAutoContinue(
   st: AutoGateState,
 ): AutoGateResult {
   if (!st.enabled) return { ok: false, reason: '自动续跑已禁用(BIGBOTART_AGENT_AUTO_CONTINUE=0)' };
-  if (job.status !== 'succeeded') return { ok: false, reason: `任务未成功(${job.status}),失败不自动重试` };
+  if (job.status !== 'succeeded' && job.status !== 'failed') {
+    return { ok: false, reason: `任务未终态(${job.status}),不唤醒` };
+  }
   if (job.source !== 'agent') return { ok: false, reason: '非 Agent 提交的任务(用户手点),不自动推进' };
   if (!job.projectId || !job.canvasId) return { ok: false, reason: '任务缺 projectId/canvasId,无归属上下文' };
   if (st.inFlight) return { ok: false, reason: '该画布有对话进行中,延后到对话收尾后再唤醒' };
@@ -69,13 +75,47 @@ export function shouldAutoContinue(
 
 /**
  * 合成唤醒 Agent 的本轮输入(作为 user 角色消息发给模型;recall 里另以 system 留痕)。
- * 必须说清三件事:①发生了什么(哪些节点出产物了);②该做什么(验收并推进);
- * ③边界(任务链完成就收尾汇报,不要再提交;这是系统唤醒不是用户新消息)。
+ * 成功:①发生了什么 ②验收并推进 ③完成则收尾、勿再盲提。
+ * 失败:①贴出 error ②先改根因(换模型/断参考/补产物)再提交 ③禁止同参重提。
  */
 export function buildAutoContinueText(notices: AutoNotice[]): string {
-  const lines = notices.map(
-    (n) => `- 节点「${n.label || n.nodeId}」(${n.nodeId})已生成完成${n.resultPath ? `,产物:${n.resultPath}` : ''}`,
-  );
+  const fails = notices.filter((n) => !!n.error);
+  const oks = notices.filter((n) => !n.error);
+  const lines: string[] = [];
+  if (oks.length > 0) {
+    lines.push(
+      ...oks.map(
+        (n) =>
+          `- ✓ 节点「${n.label || n.nodeId}」(${n.nodeId})已生成完成${n.resultPath ? `,产物:${n.resultPath}` : ''}`,
+      ),
+    );
+  }
+  if (fails.length > 0) {
+    lines.push(
+      ...fails.map(
+        (n) => `- ✗ 节点「${n.label || n.nodeId}」(${n.nodeId})生成失败:${n.error}`,
+      ),
+    );
+  }
+  if (fails.length > 0 && oks.length === 0) {
+    return [
+      '[系统通知 · 生成失败,需要修复]',
+      '以下由你提交的生成任务失败了(错误原文如下,不要猜测):',
+      ...lines,
+      '请先根据错误改掉根因(常见:带参考图却用了纯文生图模型 → canvas.update_node 把 model 改为 Qwen/Qwen-Image-2.1-Turbo 或 Qwen/Qwen-Image-2.1;上游无产物 → 先跑通上游;参数不合规 → 按文案改),再 engine.submit。',
+      '禁止用同一组参数直接重提;禁止空口说「已修复」而不调工具。',
+      '注意:本轮是系统在失败后自动唤醒你,不是用户发来新消息;需要用户决策时用 ask.user 提问。',
+    ].join('\n');
+  }
+  if (fails.length > 0) {
+    return [
+      '[系统通知 · 部分完成 / 部分失败,自动推进]',
+      '本批任务终态如下:',
+      ...lines,
+      '成功的请验收并推进;失败的先按错误改根因再提交,禁止同参重提。',
+      '注意:本轮是系统自动唤醒,不是用户新消息;需要用户决策时用 ask.user。',
+    ].join('\n');
+  }
   return [
     '[系统通知 · 生成完成,自动推进]',
     '以下由你提交的生成任务已完成,画布已自动刷新:',
@@ -88,6 +128,13 @@ export function buildAutoContinueText(notices: AutoNotice[]): string {
 
 /** recall 留痕文案(role=system;渲染层历史恢复会把它回显为一条说明气泡) */
 export function buildAutoRecallNote(notices: AutoNotice[]): string {
+  const fails = notices.filter((n) => !!n.error);
+  if (fails.length > 0 && fails.length === notices.length) {
+    return `[自动推进] 生成失败:${fails.map((n) => `「${n.label || n.nodeId}」`).join('、')} —— 系统自动唤醒 Agent 修复`;
+  }
+  if (fails.length > 0) {
+    return `[自动推进] 完成 ${notices.length - fails.length} / 失败 ${fails.length} —— 系统自动唤醒 Agent 继续`;
+  }
   return `[自动推进] 生成完成:${notices.map((n) => `「${n.label || n.nodeId}」`).join('、')} —— 系统自动唤醒 Agent 继续任务链`;
 }
 
@@ -144,12 +191,19 @@ export class AutoContinueController {
       roundsUsed: this.rounds.get(key) ?? 0,
       maxRounds: this.maxRounds,
     });
+    const isTerminal =
+      job.source === 'agent' && (job.status === 'succeeded' || job.status === 'failed');
+    const notice: AutoNotice = {
+      nodeId: job.nodeId,
+      resultPath: job.status === 'succeeded' ? job.resultPath : undefined,
+      error: job.status === 'failed' ? job.error || '生成失败(无详细错误)' : undefined,
+      threadId: job.threadId,
+    };
     if (!gate.ok) {
-      /* 对话在飞 + agent 成功:延后而不是丢掉(技能4 双图同提事故)。
-         其它跳过原因(手点/失败/上限/禁用)仍只记日志。 */
+      /* 对话在飞 + agent 终态:延后而不是丢掉(技能4 双图同提事故)。
+         其它跳过原因(手点/非终态/上限/禁用)仍只记日志。 */
       if (
-        job.source === 'agent' &&
-        job.status === 'succeeded' &&
+        isTerminal &&
         job.projectId &&
         job.canvasId &&
         inFlight &&
@@ -157,18 +211,14 @@ export class AutoContinueController {
         this.maxRounds > 0 &&
         (this.rounds.get(key) ?? 0) < this.maxRounds
       ) {
-        this.pushDeferred(key, job.projectId, job.canvasId, {
-          nodeId: job.nodeId,
-          resultPath: job.resultPath,
-          threadId: job.threadId,
-        });
+        this.pushDeferred(key, job.projectId, job.canvasId, notice);
         this.deps.logger?.log(
           'info',
           `[auto-continue] 延后 ${job.id}: ${gate.reason}(对话结束后会补唤醒)`,
         );
         return;
       }
-      if (job.source === 'agent' && job.status === 'succeeded') {
+      if (isTerminal) {
         this.deps.logger?.log('info', `[auto-continue] 跳过 ${job.id}: ${gate.reason}`);
         if (/已达上限/.test(gate.reason) && job.projectId && job.canvasId && !this.capNotified.has(key)) {
           this.capNotified.add(key);
@@ -177,11 +227,7 @@ export class AutoContinueController {
       }
       return;
     }
-    this.scheduleNotice(key, job.projectId!, job.canvasId!, {
-      nodeId: job.nodeId,
-      resultPath: job.resultPath,
-      threadId: job.threadId,
-    });
+    this.scheduleNotice(key, job.projectId!, job.canvasId!, notice);
   }
 
   /**

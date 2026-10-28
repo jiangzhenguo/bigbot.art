@@ -204,6 +204,32 @@ describe('buildImageSubmitParams · 工具模型缺省解析(2026-09-29 v1)', ()
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.params.model).toBe('AbstractFramework/flux.2-klein-9b-8bit');
   });
+
+  it('image-gen 显式 Uncensored + 有 ref-image → 自动改成 instruction 模型(静帧 05 事故)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('ref', 'image-gen', { resultPath: '/o/ref.png' }),
+        node('g', 'image-gen', {
+          prompt: '姿势静帧',
+          model: 'Qwen-Image-2.1-Uncensored-MLX',
+        }),
+      ],
+      edges: [edge('ref', 'g', 'ref-image')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({}), {
+      image: {
+        'image.generate': 'Qwen-Image-2.1-Uncensored-MLX',
+        'image.instruction': 'Qwen/Qwen-Image-2.1-Turbo',
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.params.model).toBe('Qwen/Qwen-Image-2.1-Turbo');
+      expect(r.params.__modelHealedFrom).toBe('Qwen-Image-2.1-Uncensored-MLX');
+      expect(String(r.params.__modelHealNote)).toContain('不支持参考编辑');
+    }
+  });
 });
 
 describe('buildImageSubmitParams(image 类节点提交参数)', () => {

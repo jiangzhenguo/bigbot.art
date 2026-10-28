@@ -50,10 +50,12 @@ describe('shouldAutoContinue 闸门', () => {
   it('succeeded + agent + 归属齐全 → 放行', () => {
     expect(shouldAutoContinue(job({}), GATE_BASE).ok).toBe(true);
   });
-  it('failed 不自动重试(失败走既有 Take/日志通道)', () => {
-    const r = shouldAutoContinue(job({ status: 'failed' }), GATE_BASE);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain('未成功');
+  it('failed + agent → 放行(唤醒 Agent 按错误修复,不是静默同参重试)', () => {
+    expect(shouldAutoContinue(job({ status: 'failed' }), GATE_BASE).ok).toBe(true);
+  });
+  it('cancelled / running 等非终态不唤醒', () => {
+    expect(shouldAutoContinue(job({ status: 'cancelled' }), GATE_BASE).ok).toBe(false);
+    expect(shouldAutoContinue(job({ status: 'running' }), GATE_BASE).ok).toBe(false);
   });
   it('用户手点(source 缺省/user)不唤醒', () => {
     expect(shouldAutoContinue(job({ source: undefined }), GATE_BASE).ok).toBe(false);
@@ -96,6 +98,25 @@ describe('buildAutoContinueText / buildAutoRecallNote', () => {
     const t = buildAutoRecallNote([{ nodeId: 'img-1', label: '角色卡 · 苏青' }]);
     expect(t).toContain('自动推进');
     expect(t).toContain('角色卡 · 苏青');
+  });
+  it('失败唤醒贴出错误并禁止同参重提(静帧 05 事故回归)', () => {
+    const t = buildAutoContinueText([
+      {
+        nodeId: 'img-xff4',
+        label: '图片生成 · 分镜静帧 05',
+        error:
+          '带参考图的生成需要多参考模型(当前 Qwen-Image-2.1-Uncensored-MLX 是纯文生图)',
+      },
+    ]);
+    expect(t).toContain('生成失败');
+    expect(t).toContain('Uncensored');
+    expect(t).toContain('禁止用同一组参数直接重提');
+    expect(t).toContain('Qwen/Qwen-Image-2.1-Turbo');
+    const note = buildAutoRecallNote([
+      { nodeId: 'img-xff4', label: '图片生成 · 分镜静帧 05', error: 'boom' },
+    ]);
+    expect(note).toContain('生成失败');
+    expect(note).toContain('修复');
   });
 });
 
@@ -161,11 +182,15 @@ describe('AutoContinueController', () => {
     expect(logs).toHaveLength(0);
   });
 
-  it('agent 任务失败不触发自动重试', () => {
+  it('agent 任务失败 → 唤醒并带上 error(让 Agent 改根因,不是静默同参重试)', () => {
     const { ctl, triggers } = makeController({});
-    ctl.notifyJobFinished(job({ status: 'failed' }));
+    ctl.notifyJobFinished(job({ status: 'failed', error: '带参考图的生成需要多参考模型', nodeId: 'img-xff4' }));
     vi.advanceTimersByTime(AUTO_CONTINUE_DEBOUNCE_MS * 2);
-    expect(triggers).toHaveLength(0);
+    expect(triggers).toHaveLength(1);
+    const n = triggers[0]!.notices[0] as { nodeId: string; error?: string; resultPath?: string };
+    expect(n.nodeId).toBe('img-xff4');
+    expect(n.error).toContain('多参考模型');
+    expect(n.resultPath).toBeUndefined();
   });
 
   it('触发时刻画布已有对话在飞 → 改延后,对话收尾后补唤醒', () => {
