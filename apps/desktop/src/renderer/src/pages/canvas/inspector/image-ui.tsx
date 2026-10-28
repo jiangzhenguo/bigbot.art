@@ -185,9 +185,10 @@ export interface RefImageItem {
 }
 
 /**
- * 把 image-edit 的 `data.refImageFrom`(ref-image 入边派生态)解析成可渲染的参考图列表。
+ * 把 `data.refImageFrom`(ref-image 入边派生态)解析成可渲染的参考图列表。
+ * image-edit / image-gen 共用同一份派生态与本解析器。
  *
- * ⚠️ 为什么要单独一条链路:ref-image 与 input 是**两个不同端口** ——
+ * ⚠️ 为什么要单独一条链路(image-edit):ref-image 与 input 是**两个不同端口** ——
  * input 是「被编辑的底图」,ref-image 是「参考」,语义互不相干。
  * 早期实现把两者都塞进「输入图」那张卡(ref-image 只作为无底图时的兜底),
  * 结果「连了参考图却在输入图卡里看到它」,用户分不清到底哪张是被编辑对象。
@@ -234,19 +235,25 @@ export function resolveRefImages(args: {
 }
 
 /**
- * 参考图展示区(image-edit 的 `ref-image` 端口专用,只读)。
+ * 参考图展示区(image-edit / image-gen 的 `ref-image` 端口)。
  *
  * 与「输入图」卡**并列但语义独立**:这里展示的每一张都是「参考」,
  * 不参与「被编辑对象」的判定。多图时以网格铺开,每张带序号与来源说明;
  * 拿不到图的那一格显式标出原因(未跑/未加载/节点已删),不留白框。
+ *
+ * 传 `onRemove` 时每格右侧出 × —— 调用方负责删边(与 ShotInspector 同口径:
+ * 只清 data.refs 挡不住下一轮 derive 又加回来,必须 `onRemoveEdge(src, target)`)。
  */
 export function RefImagesCard({
   items,
   caption,
+  onRemove,
 }: {
   items: RefImageItem[];
   /** 右上角说明(如「作为参考 · 非被编辑对象」) */
   caption?: string;
+  /** 点 × 时回调上游节点 id;缺省 = 只读(无删除按钮) */
+  onRemove?: (nodeId: string) => void;
 }) {
   if (items.length === 0) return null;
   return (
@@ -270,6 +277,18 @@ export function RefImagesCard({
               </div>
               <div className={`refnote${it.missing || !it.src ? ' warn' : ''}`}>{it.note}</div>
             </div>
+            {onRemove ? (
+              <button
+                type="button"
+                className="btn btn-xs ref-remove"
+                data-od-id="ref-remove"
+                title="断开连线"
+                aria-label={`断开参考图 ${it.title}`}
+                onClick={() => onRemove(it.nodeId)}
+              >
+                ×
+              </button>
+            ) : null}
           </div>
         ))}
       </div>
