@@ -186,9 +186,9 @@ export function ShotInspector({
   /** 选中包的类型(缺省 accel,与主进程 packKind 同口径) */
   const selKind: 'accel' | 'style' | 'style-accel' =
     selPack?.kind === 'style' ? 'style' : selPack?.kind === 'style-accel' ? 'style-accel' : 'accel';
-  /** 该包的步数档集合:纯风格 20/30(融合权重需正常步数);加速类(含风格加速)4/8 */
-  const packStepsOptions = selKind === 'style' ? ([20, 30] as const) : ([4, 8] as const);
-  const packDefaultSteps = selPack?.steps ?? (selKind === 'style' ? 20 : 8);
+  /** 该包的步数档集合:纯风格 20/30(融合权重需正常步数);加速类(含风格加速)4/6/8 */
+  const packStepsOptions = selKind === 'style' ? ([20, 30] as const) : ([4, 6, 8] as const);
+  const packDefaultSteps = selPack?.steps ?? (selKind === 'style' ? 20 : 6);
   /** 最近一次生成实际用过的提示词(存档在 Take.params 里)——节点 prompt 为空时可用于找回 */
   const takePrompt = (() => {
     for (const t of takes) {
@@ -534,7 +534,7 @@ export function ShotInspector({
                       className={`chip${(accel.packId ?? defaultPackId) === p.id ? ' on' : ''}`}
                       onClick={() => {
                         const kind = p.kind === 'style' ? 'style' : p.kind === 'style-accel' ? 'style-accel' : 'accel';
-                        const opts = kind === 'style' ? [20, 30] : [4, 8];
+                        const opts = kind === 'style' ? [20, 30] : [4, 6, 8];
                         // 切包时步数落到新包档位:旧值不在新档位集合里就重置为该包推荐步数
                         const cur = accel.steps ?? 0;
                         const steps = (opts as number[]).includes(cur) ? cur : (p.steps ?? opts[0]!);
@@ -575,12 +575,12 @@ export function ShotInspector({
                   🎨⚡ 风格加速模型(画风 LoRA + turbo 双融合:画风与提速兼得,与其他模型包互斥)
                   <br />
                   开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '所选模型包'} · --steps {accel.steps ?? packDefaultSteps} · 省 60-80% 时间
-                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
+                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : accel.steps === 6 ? ' · 6 步默认推荐(速度/质量平衡)' : ' · 8 步更慢、细节更稳'}
                 </>
               ) : (
                 <>
                   开启后(真实推理时生效,demo/mock 模式不解析)-d 换 {selPack?.path ?? '默认蒸馏模型包'} · --steps {accel.steps ?? packDefaultSteps} · 省 60-80% 时间
-                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : ' · 8 步质量甜点'}
+                  {accel.steps === 4 ? ' · 4 步边缘细节略糊' : accel.steps === 6 ? ' · 6 步默认推荐(速度/质量平衡)' : ' · 8 步更慢、细节更稳'}
                   · 加速不随接续链规格继承
                 </>
               )}

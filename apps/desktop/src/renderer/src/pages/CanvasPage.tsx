@@ -9,6 +9,8 @@ import {
   rowCell,
   resolveMaterializeSeconds,
   planStoryboardMaterializeRows,
+  checkStoryboardCharacterGate,
+  storyboardCharacterGateMessage,
   keyframeEdgeLabel,
   existingShotByRow,
   storyboardLinkOf,
@@ -4288,6 +4290,7 @@ export default function CanvasPage({
   /* 派生工具 sbMaterializedRows / sbImgCount / sbTableOf / sbDirty / SB_SIZE 见 ./canvas/storyboard.ts */
 
   const pad2 = (n: number) => String(n).padStart(2, '0');
+  const activeSkillId = chat.activeSkill?.skillId;
 
   /** 从分镜表铺节点:每行一个 shot(需配图=是 的行再建 image-gen 并 first-frame 直通) */
   const materializeStoryboard = useCallback(
@@ -4295,6 +4298,22 @@ export default function CanvasPage({
       const tb = sbTableOf(sbNode);
       if (!tb) {
         toastMsg('分镜表缺少表格块 · 无法铺节点');
+        return;
+      }
+      const characterIssues = checkStoryboardCharacterGate({
+        head: tb.head,
+        rows: tb.rows,
+        activeSkillId,
+        canvasNodes: nodesRef.current.map((n) => ({
+          id: n.id,
+          kind: n.kind,
+          label: n.title,
+          title: n.title,
+          data: (n.data ?? {}) as Record<string, unknown>,
+        })),
+      });
+      if (characterIssues.length) {
+        toastMsg(storyboardCharacterGateMessage(characterIssues));
         return;
       }
       /* 已铺行:storyboardRow 优先(边分派清不掉 promptFrom),与 Agent 同口径 */
@@ -4370,7 +4389,9 @@ export default function CanvasPage({
           kind: 'shot',
           tag: NODE_TYPES.find((t) => t.id === 'shot'),
           data: {
-            engine: 'mock', // 骨架期 mock;引导向导就绪后切 h3c
+            // 分镜表铺出的镜头必须走真实 h3，不能沿用骨架期 mock：
+            // renderMode=real 时 mock 只产出 1 秒占位 MP4，用户视角就是「视频没生成」。
+            engine: 'h3c',
             mode: plan.shotMode,
             ...(plan.modeOverride ? { modeOverride: true } : {}),
             prompt: p.text,
@@ -4449,7 +4470,7 @@ export default function CanvasPage({
         `已铺 ${summarizeMaterializePlans(plans)} · ${plans.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`,
       );
     },
-    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelectedIds, toastMsg, commitEdit],
+    [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelectedIds, toastMsg, commitEdit, activeSkillId],
   );
 
   /** 整体撤销铺节点:移除该分镜表铺出的全部节点与对应边 */

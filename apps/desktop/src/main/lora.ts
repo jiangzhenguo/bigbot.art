@@ -3,11 +3,11 @@
  *
  * 背景(h3c-usage skill / docs/MiniMax-H3-加速-LoRA-使用手册.md §7):
  * h3.c CLI 不接受 `--lora` 参数(源码 0 hit);「LoRA」一律离线融合成完整模型目录后换 `-d`:
- *  - **加速包**(kind='accel',缺省)= 蒸馏模型目录(MiniMax-H3-turbo-T8test 等)+ 4/8 步,省 60-80% 时间;
+ *  - **加速包**(kind='accel',缺省)= 蒸馏模型目录(MiniMax-H3-turbo-T8test 等)+ 4/6/8 步,省 60-80% 时间;
  *  - **风格包**(kind='style',2026-10 新增)= 风格 LoRA 离线融合目录(MiniMax-H3-mystic 等,
  *    merge_lora_h3.py 烤入)+ 正常步数(20/30),**不省时间**;
  *  - **风格加速包**(kind='style-accel',2026-10-13 新增)= 风格 LoRA + turbo LoRA 双融合目录
- *    (MiniMax-H3-mystic-turbo)+ 4/8 步,**画风与提速兼得**。
+ *    (MiniMax-H3-mystic-turbo)+ 4/6/8 步,**画风与提速兼得**。
  * 三者互斥:都是换 -d 模型目录,一个镜头同一时刻只能选一个包。
  *
  * 持久化:`~/.bigbotart/settings.json` 的 `accelPacks` 数组(仅登记,不拷贝/删除磁盘)。
@@ -30,7 +30,7 @@ const PRESEED: AccelPack[] = [
     id: 'turbo-t8test',
     name: 'MiniMax-H3-turbo-T8test',
     path: '/Users/jiangzhenguo/ai/h3/MiniMax-H3-turbo-T8test',
-    steps: 8,
+    steps: 6,
     kind: 'accel',
     default: true,
     installedAt: 'preseed',
@@ -39,7 +39,7 @@ const PRESEED: AccelPack[] = [
     id: 'turbo',
     name: 'MiniMax-H3-turbo',
     path: '/Users/jiangzhenguo/ai/h3/MiniMax-H3-turbo',
-    steps: 8,
+    steps: 6,
     kind: 'accel',
     installedAt: 'preseed',
   },
@@ -57,7 +57,7 @@ const PRESEED: AccelPack[] = [
     id: 'mystic-turbo',
     name: 'MiniMax-H3-mystic-turbo',
     path: '/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic-turbo',
-    steps: 8,
+    steps: 6,
     kind: 'style-accel',
     installedAt: 'preseed',
   },
@@ -68,10 +68,10 @@ export function packKind(p: Pick<AccelPack, 'kind'>): AccelPackKind {
   return p.kind === 'style' ? 'style' : p.kind === 'style-accel' ? 'style-accel' : 'accel';
 }
 
-/** 步数合法性:加速类包(accel / style-accel)4|8;纯风格包 4..50 整数(融合权重需正常步数,推荐 20/30) */
+/** 步数合法性:加速类包(accel / style-accel)4|6|8;纯风格包 4..50 整数(融合权重需正常步数,推荐 20/30) */
 export function validSteps(kind: AccelPackKind, v: unknown): v is number {
   if (typeof v !== 'number' || !Number.isInteger(v)) return false;
-  return kind === 'style' ? v >= 4 && v <= 50 : v === 4 || v === 8;
+  return kind === 'style' ? v >= 4 && v <= 50 : v === 4 || v === 6 || v === 8;
 }
 
 /** 目录实际包含的 transformer 变体(不再把「只有一个空目录」当成可用)。 */
@@ -110,7 +110,7 @@ export class AccelStore {
   private ensureSeeded(): void {
     const s = this.settings.get();
     if (s.accelPacks === undefined) {
-      this.settings.patch({ accelPacks: [...PRESEED], accelPreseedV2: true, accelPreseedV3: true });
+      this.settings.patch({ accelPacks: [...PRESEED], accelPreseedV2: true, accelPreseedV3: true, accelPreseedV4: true });
       return;
     }
     /* 波次迁移(每波一次性):把该波新增预置补上;此前波次的条目不补 —— 老用户若删过,复活是意外副作用。 */
@@ -128,6 +128,15 @@ export class AccelStore {
         accelPacks: additions.length > 0 ? [...packs, ...additions] : packs,
         accelPreseedV3: true,
       });
+    }
+    /* v4 步数迁移(2026-10-28):加速类默认由 8 调整为 6。
+     * 只迁移登记包的推荐值;画布节点上已经单独选过的 data.accel.steps 不改写。 */
+    const current = this.settings.get();
+    if (!current.accelPreseedV4) {
+      const migrated = (current.accelPacks ?? []).map((p) =>
+        packKind(p) !== 'style' && p.steps === 8 ? { ...p, steps: 6 } : p,
+      );
+      this.settings.patch({ accelPacks: migrated, accelPreseedV4: true });
     }
   }
 
@@ -155,7 +164,7 @@ export class AccelStore {
     if (!existsSync(path)) return { ok: false, error: `目录不存在: ${path}` };
     if (!packValid(path)) return { ok: false, error: '不是合法模型目录(缺 FL2VA/Ref2VA transformer 或旧版 model_index.json)' };
     if (input.steps !== undefined && !validSteps(kind, input.steps)) {
-      return { ok: false, error: kind === 'style' ? '风格包步数须为 4-50 的整数(推荐 20/30)' : '加速类包步数只支持 4 或 8' };
+      return { ok: false, error: kind === 'style' ? '风格包步数须为 4-50 的整数(推荐 20/30)' : '加速类包步数只支持 4、6 或 8' };
     }
     const packs = this.settings.get().accelPacks ?? [];
     if (packs.some((p) => p.path === path)) return { ok: false, error: '该目录已登记过' };
@@ -163,7 +172,7 @@ export class AccelStore {
       id: `accel-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       name,
       path,
-      steps: input.steps ?? (kind === 'style' ? 20 : 8),
+      steps: input.steps ?? (kind === 'style' ? 20 : 6),
       kind,
       targets: packTargets(path),
       installedAt: new Date().toISOString(),
@@ -232,7 +241,7 @@ export class AccelStore {
     const pack = packs.find((p) => p.default) ?? packs[0];
     if (!pack || !packValid(pack.path)) return null;
     const kind = packKind(pack);
-    return { enabled: true, packId: pack.id, steps: validSteps(kind, pack.steps) ? pack.steps : 8 };
+    return { enabled: true, packId: pack.id, steps: validSteps(kind, pack.steps) ? pack.steps : 6 };
   }
 
   /** 解析镜头模型包请求 → 实际落地 { modelDir, steps, kind }(提交前替换 h3.c -d / --steps)。
@@ -249,7 +258,7 @@ export class AccelStore {
       ?? packs[0];
     if (!pack || !packValid(pack.path, target)) return null;
     const kind = packKind(pack);
-    const steps = validSteps(kind, accel.steps) ? (accel.steps as number) : validSteps(kind, pack.steps) ? (pack.steps as number) : kind === 'style' ? 20 : 8;
+    const steps = validSteps(kind, accel.steps) ? (accel.steps as number) : validSteps(kind, pack.steps) ? (pack.steps as number) : kind === 'style' ? 20 : 6;
     return { modelDir: pack.path, steps, kind };
   }
 

@@ -181,7 +181,7 @@ const api: BigBotArtApi = {
   agentPlan: (brief, opts) => ipcRenderer.invoke(ch('agentPlan'), brief, opts),
   agentPlanStoryboard: (brief, opts) => ipcRenderer.invoke(ch('agentPlanStoryboard'), brief, opts),
   agentChat: (req) => ipcRenderer.invoke(ch('agentChat'), req),
-  agentCancel: (projectId: string) => ipcRenderer.invoke(ch('agentCancel'), projectId),
+  agentCancel: (projectId: string, canvasId?: string) => ipcRenderer.invoke(ch('agentCancel'), projectId, canvasId),
   onAgentEvent: (cb) => {
     const listener = (_e: unknown, ev: unknown) => cb(ev as never);
     ipcRenderer.on(ch('onAgentEvent'), listener);

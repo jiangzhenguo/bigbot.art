@@ -380,8 +380,8 @@ export interface BigBotArtApi {
   }>;
   /** 画布页多轮对话(带工具调用 + 记忆上下文 + AbortSignal 打断) */
   agentChat(req: import('./domain').AgentChatRequest): Promise<import('./domain').AgentChatResponse>;
-  /** 真实打断当前对话(中止 LLM 请求) */
-  agentCancel(projectId: string): Promise<{ ok: boolean }>;
+  /** 立即停止当前对话,并取消该画布的自动续跑队列(canvasId 可选以兼容旧调用) */
+  agentCancel(projectId: string, canvasId?: string): Promise<{ ok: boolean }>;
   /** 订阅 Agent 实时事件(工具调用/校验)——渲染层注册回调,返回退订函数 */
   onAgentEvent(cb: (ev: import('./domain').AgentEvent) => void): () => void;
   /** 读取项目记忆(调试/设置页展示) */
@@ -464,6 +464,7 @@ export * from './project-package.js';
 export * from './style-model.js';
 export * from './shot-duration.js';
 export * from './storyboard-materialize.js';
+export * from './storyboard-character-gate.js';
 export * from './skill-params.js';
 export * from './agent-task.js';
 export * from './opencode-go.js';

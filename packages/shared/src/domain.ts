@@ -602,11 +602,11 @@ export interface ShotAccel {
   enabled?: boolean;
   /** 使用的模型包 id(设置页 accelPacks);缺省 = 默认包 */
   packId?: string;
-  /** 步数:加速包 4(边缘略糊)/ 8(质量甜点,推荐);风格包 20/30(融合权重需正常步数) */
+  /** 步数:加速包 4(边缘略糊)/ 6(默认推荐)/ 8(更慢更细);风格包 20/30(融合权重需正常步数) */
   steps?: number;
 }
 
-/** h3 模型包类型:accel=蒸馏加速包(turbo,4/8 步) / style=风格 LoRA 融合包(mystic 等,正常步数) / style-accel=风格+加速双融合包(mystic-turbo,4/8 步提速且带画风) */
+/** h3 模型包类型:accel=蒸馏加速包(turbo,4/6/8 步) / style=风格 LoRA 融合包(mystic 等,正常步数) / style-accel=风格+加速双融合包(mystic-turbo,4/6/8 步提速且带画风) */
 export type AccelPackKind = 'accel' | 'style' | 'style-accel';
 
 /** h3 模型包(设置页安装/管理;仅登记,不删磁盘)。`kind` 缺省 = 'accel'(兼容存量数据) */
@@ -615,7 +615,7 @@ export interface AccelPack {
   name: string;
   /** 可传给 `h3 -d` 的模型目录(至少含 FL2VA/ 或 Ref2VA/ 变体) */
   path: string;
-  /** 推荐步数档(accel:4|8;style:20|30) */
+  /** 推荐步数档(accel:4|6|8;style:20|30) */
   steps?: number;
   /** 包类型;缺省(老数据无此字段)= 'accel' */
   kind?: AccelPackKind;
@@ -1077,10 +1077,12 @@ export interface AppSettings {
   accelPreseedV2?: boolean;
   /**
    * 预置包 v3 迁移标记(2026-10-13):v3 起 PRESEED 新增 style-accel 双融合包
-   * (MiniMax-H3-mystic-turbo = mystic 画风 + turbo 提速融进同一目录,推荐 8 步)。
+   * (MiniMax-H3-mystic-turbo = mystic 画风 + turbo 提速融进同一目录,推荐 6 步)。
    * 与 v2 同口径:只迁一次,用户删除不复活。
    */
   accelPreseedV3?: boolean;
+  /** 加速类步数 v4 迁移标记(2026-10-28):默认推荐由 8 调整为 6;老库加速包 steps=8 一次性改为 6。 */
+  accelPreseedV4?: boolean;
   /**
    * 🚀 新建 shot 是否默认开启加速 LoRA(设置页「加速 LoRA › 默认开启」)。
    *

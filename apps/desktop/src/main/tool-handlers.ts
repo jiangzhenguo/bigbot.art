@@ -20,6 +20,8 @@ import {
   rowCell,
   SB_SIZE,
   planStoryboardMaterializeRows,
+  checkStoryboardCharacterGate,
+  storyboardCharacterGateMessage,
   keyframeEdgeLabel,
   existingShotByRow,
   storyboardLinkOf,
@@ -60,6 +62,7 @@ import type { RenderQueue } from './render-queue';
 import { requiredH3Transformer, type AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
+import type { TimelineExportCoordinator } from './timeline-auto-export';
 import { unlinkSync } from 'node:fs';
 import { cropImage, extractFrame, extractAudio } from './frames';
 import { downloadImage, imageLabelFromUrl, searchWeb, type WebDeps } from './web-fetch';
@@ -575,6 +578,8 @@ export class ToolHandlers {
   private resolveVisionOverride?: () => Promise<VisionRoute | undefined>;
   /** 镜头提示词的无工具写作调用(主进程注入当前项目的 LLM;测试注入桩) */
   private completeH3Prompt?: CompleteH3Prompt;
+  /** 时间线导出协调器:手动 timeline.export 与自动拼接共用同一份入轨顺序/回写逻辑 */
+  private timelineExporter?: TimelineExportCoordinator;
 
   constructor(
     private store: ProjectStore,
@@ -595,6 +600,8 @@ export class ToolHandlers {
       web?: WebDeps;
       /** h3.write_prompt 的写作调用;未注入时工具明确失败,不自己编提示词 */
       completeH3Prompt?: CompleteH3Prompt;
+      /** 时间线成片导出协调器(timeline.export / 全部入轨镜头就绪后的自动拼接) */
+      timelineExporter?: TimelineExportCoordinator;
     } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
@@ -604,6 +611,7 @@ export class ToolHandlers {
     this.resolveVisionOverride = opts.resolveVisionOverride;
     this.webDeps = opts.web ?? {};
     this.completeH3Prompt = opts.completeH3Prompt;
+    this.timelineExporter = opts.timelineExporter;
   }
 
   private webDeps: WebDeps = {};
@@ -792,31 +800,55 @@ export class ToolHandlers {
       });
       const now = new Date().toISOString();
       const sb = res.storyboard;
-      this.placePlannedStoryboard(cur.nodes, sb, res.images, res.shots);
-      cur.nodes.push(sb);
-      if (nodeId && cur.nodes.some((n) => n.id === nodeId)) {
-        cur.edges.push({ id: nid('edge'), source: nodeId, target: sb.id, label: 'prompt' });
+      const autoMaterialize = a.autoMaterialize === true;
+      const plannedTable = parseGfmTable(String((sb.data as Record<string, unknown>).markdown ?? ''));
+      /* LLM 规划可能耗时数十秒,进入工具时加载的快照早已被渲染层/队列顶版。
+       * 绝不能持旧快照整体保存后不看结果:2026-10-28「剧本生成测试」实测工具返回了新 sb id,
+       * 但保存被版本防护拒绝,画布上根本没有该节点;Agent 随后只能手工改写旧 10 列表,
+       * 新增摄影列看起来就像「没有生效」。规划结果只生成一次,保存时每次重载最新快照。 */
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const cur = this.store.loadProjectCanvases(ctx.projectId).canvases.find((c) => c.id === ctx.canvasId);
+        if (!cur) return { ok: false, result: '画布不存在' };
+        if (autoMaterialize && plannedTable) {
+          const issues = checkStoryboardCharacterGate({
+            head: plannedTable.head,
+            rows: plannedTable.rows,
+            canvasNodes: cur.nodes,
+            activeSkillId: this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId),
+          });
+          if (issues.length) return { ok: false, result: storyboardCharacterGateMessage(issues) };
+        }
+        this.placePlannedStoryboard(cur.nodes, sb, res.images, res.shots);
+        cur.nodes.push(sb);
+        if (nodeId && cur.nodes.some((n) => n.id === nodeId)) {
+          cur.edges.push({ id: nid('edge'), source: nodeId, target: sb.id, label: 'prompt' });
+        }
+        for (const n of [...res.images, ...res.shots]) cur.nodes.push(n);
+        // 方案 A:LLM/规划器产出的边同样强制过校验,非法边丢弃并注明(不给画布留脏)
+        let droppedEdges = 0;
+        const keptEdges: CanvasEdge[] = [];
+        for (const e of res.edges) {
+          const v = validateEdge(cur.nodes, cur.edges.concat(keptEdges), e, {
+            resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind,
+          });
+          if (v.ok) keptEdges.push(e);
+          else droppedEdges++;
+        }
+        for (const e of keptEdges) cur.edges.push(e);
+        cur.updatedAt = now;
+        cur.version = (cur.version ?? 0) + 1;
+        const saved = this.store.saveCanvasSnapshot(cur);
+        if (saved && saved.ok === false) continue;
+        const extra =
+          res.shots.length || res.images.length
+            ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen${droppedEdges ? ` · 已丢弃 ${droppedEdges} 条非法连线(端口/媒体不匹配)` : ''}`
+            : '';
+        return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
       }
-      for (const n of [...res.images, ...res.shots]) cur.nodes.push(n);
-      // 方案 A:LLM/规划器产出的边同样强制过校验,非法边丢弃并注明(不给画布留脏)
-      let droppedEdges = 0;
-      const keptEdges: CanvasEdge[] = [];
-      for (const e of res.edges) {
-        const v = validateEdge(cur.nodes, cur.edges.concat(keptEdges), e, {
-          resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind,
-        });
-        if (v.ok) keptEdges.push(e);
-        else droppedEdges++;
-      }
-      for (const e of keptEdges) cur.edges.push(e);
-      cur.updatedAt = now;
-      cur.version += 1;
-      this.store.saveCanvasSnapshot(cur);
-      const extra =
-        res.shots.length || res.images.length
-          ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen${droppedEdges ? ` · 已丢弃 ${droppedEdges} 条非法连线(端口/媒体不匹配)` : ''}`
-          : '';
-      return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
+      return {
+        ok: false,
+        result: '分镜表已生成,但保存画布连续 3 次被快照版本防护拒绝。未创建节点;请刷新画布后重试,不要重复生成同一份分镜表。',
+      };
     },
     'storyboard.materialize': async (a, ctx) => {
       const rawNodeId = String(a.nodeId ?? '');
@@ -857,6 +889,13 @@ export class ToolHandlers {
       const sd = (sb.data ?? {}) as Record<string, unknown>;
       const tb = parseGfmTable(String(sd.markdown ?? ''));
       if (!tb) return { ok: false, result: '分镜表缺少表格块 · 无法铺节点' };
+      const characterIssues = checkStoryboardCharacterGate({
+        head: tb.head,
+        rows: tb.rows,
+        canvasNodes: cur.nodes,
+        activeSkillId: this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId),
+      });
+      if (characterIssues.length) return { ok: false, result: storyboardCharacterGateMessage(characterIssues) };
       // 已铺行:storyboardRow 优先(边分派清不掉),否则 promptFrom。与渲染层同口径
       const doneRows = new Set<number>();
       for (const n of cur.nodes) {
@@ -1326,7 +1365,7 @@ export class ToolHandlers {
       const mode = classifyH3PromptMode(inbounds);
       const stored = this.skills.get('h3-prompt-writing')?.instructions?.trim();
       const spec = stored || H3_PROMPT_WRITING_SPEC;
-      const activeId = this.memory.getActiveSkillId(ctx.projectId, ctx.canvasId);
+      const activeId = this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId);
       let skillName: string | undefined;
       let skillInstructions: string | undefined;
       if (activeId && activeId !== 'h3-prompt-writing') {
@@ -2325,7 +2364,30 @@ export class ToolHandlers {
     'timeline.export': async (a, ctx) => {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
-      // 收集画布上有产物的 shot 节点
+      const rawNodeId = String(a.nodeId ?? '');
+      if (rawNodeId && this.timelineExporter) {
+        const hit = resolveNodeRefOrError(cur?.nodes ?? [], rawNodeId, '时间线');
+        if (!hit.ok) return { ok: false, result: hit.error };
+        if (hit.node.kind !== 'timeline') {
+          return { ok: false, result: `节点「${hit.node.label || hit.node.id}」是 ${hit.node.kind},不是时间线。` };
+        }
+        try {
+          const res = await this.timelineExporter.exportNode(
+            ctx.projectId,
+            ctx.canvasId,
+            hit.node.id,
+            a.outputName ? String(a.outputName) : undefined,
+          );
+          return {
+            ok: true,
+            result: `已发起导出(${res.taskId})「${hit.node.label || hit.node.id}」· ${res.clipCount} 个片段按入轨顺序合成;完成后成片路径会自动写回时间线`,
+            nodeId: hit.node.id,
+          };
+        } catch (e) {
+          return { ok: false, result: `导出失败:${(e as Error).message}` };
+        }
+      }
+      // 兼容旧调用(未传 nodeId / 未注入协调器):合成画布上全部已生成镜头
       const shots = (cur?.nodes ?? []).filter((n) => n.kind === 'shot');
       const clips = shots
         .map((n) => {

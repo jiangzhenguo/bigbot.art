@@ -5,7 +5,7 @@
  * 角色卡图 2 分钟就出好了,但没有任何机制触发下一轮,多步流程停在原地等用户说「继续」。
  *
  * 本测试锁四件事:
- *  1. 闸门:只认「succeeded + source=agent + 有归属画布」;失败/用户手点/缺归属一律不唤醒
+ *  1. 闸门:只认「succeeded/failed + source=agent + 有归属画布」;非终态/用户手点/缺归属不唤醒
  *  2. 防抖:同画布陆续完成的多个任务归并成一次唤醒(每次唤醒都是真实 LLM 调用)
  *  3. 防失控:连续自动轮上限;在飞对话时延后到收尾再补唤醒(技能4双图同提);用户发消息重置计数并取消待触发/延后
  *  4. 不静默:该跳过/延后却可能被误解为「没触发」的路径,都有日志留痕(红线 R6)
@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AutoContinueController,
   shouldAutoContinue,
+  isAutoContinueNotifiable,
   buildAutoContinueText,
   buildAutoRecallNote,
   AUTO_CONTINUE_DEBOUNCE_MS,
@@ -47,6 +48,12 @@ function job(patch: Partial<RenderJob>): RenderJob {
 const GATE_BASE = { enabled: true, inFlight: false, roundsUsed: 0, maxRounds: 5 };
 
 describe('shouldAutoContinue 闸门', () => {
+  it('队列终态入口:失败任务也必须进入控制器(2026-10-28 提前 return 事故)', () => {
+    expect(isAutoContinueNotifiable(job({ status: 'failed' }))).toBe(true);
+    expect(isAutoContinueNotifiable(job({ status: 'succeeded' }))).toBe(true);
+    expect(isAutoContinueNotifiable(job({ status: 'running' }))).toBe(false);
+    expect(isAutoContinueNotifiable(job({ status: 'failed', canvasId: undefined }))).toBe(false);
+  });
   it('succeeded + agent + 归属齐全 → 放行', () => {
     expect(shouldAutoContinue(job({}), GATE_BASE).ok).toBe(true);
   });

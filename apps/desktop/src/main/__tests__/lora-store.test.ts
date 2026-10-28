@@ -51,7 +51,7 @@ function freshStore(): { settings: InstanceType<typeof SettingsStore>; accel: In
 }
 
 describe('AccelStore · 预置与 v2/v3 迁移', () => {
-  it('新库(accelPacks 未定义)→ seed 四条预置,mystic 风格 20 步 / mystic-turbo 风格加速 8 步,标记迁移完成', () => {
+  it('新库(accelPacks 未定义)→ seed 四条预置,风格 20 步 / 加速类 6 步,标记迁移完成', () => {
     const { settings, accel } = freshStore();
     settings.patch({ accelPacks: undefined, accelPreseedV2: undefined, accelPreseedV3: undefined });
     const packs = accel.list();
@@ -62,11 +62,12 @@ describe('AccelStore · 预置与 v2/v3 迁移', () => {
     expect(mystic.path).toBe('/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic');
     const mt = packs.find((p) => p.id === 'mystic-turbo')!;
     expect(mt.kind).toBe('style-accel');
-    expect(mt.steps).toBe(8);
+    expect(mt.steps).toBe(6);
     expect(mt.path).toBe('/Users/jiangzhenguo/ai/h3/MiniMax-H3-mystic-turbo');
     expect(packs.find((p) => p.id === 'turbo-t8test')?.default).toBe(true);
     expect(settings.get().accelPreseedV2).toBe(true);
     expect(settings.get().accelPreseedV3).toBe(true);
+    expect(settings.get().accelPreseedV4).toBe(true);
   });
 
   it('老库迁移:追加新预置;被用户删过的 v1 包(turbo)不复活', () => {
@@ -123,24 +124,45 @@ describe('AccelStore · install 的 kind 与步数校验', () => {
     expect(bad.error).toContain('4-50');
   });
 
-  it('加速包:只认 4|8,20 步拒绝(防把风格包参数塞进加速包)', () => {
+  it('加速包:只认 4|6|8,20 步拒绝(防把风格包参数塞进加速包)', () => {
     const { settings, accel } = freshStore();
     settings.patch({ accelPacks: [], accelPreseedV2: true, accelPreseedV3: true });
     const bad = accel.install({ name: 'turbo-x', path: fakePackDir('t1'), kind: 'accel', steps: 20 });
     expect(bad.ok).toBe(false);
-    expect(bad.error).toContain('4 或 8');
+    expect(bad.error).toContain('4、6 或 8');
     const ok = accel.install({ name: 'turbo-x', path: fakePackDir('t1'), kind: 'accel', steps: 4 });
     expect(ok.ok).toBe(true);
+    const six = accel.install({ name: 'turbo-six', path: fakePackDir('t6'), kind: 'accel', steps: 6 });
+    expect(six.ok).toBe(true);
+    expect(six.packs?.find((p) => p.name === 'turbo-six')?.steps).toBe(6);
   });
 
-  it('风格加速包:4|8 合法(turbo 语义);20 步拒绝', () => {
+  it('风格加速包:4|6|8 合法(turbo 语义);20 步拒绝', () => {
     const { settings, accel } = freshStore();
     settings.patch({ accelPacks: [], accelPreseedV2: true, accelPreseedV3: true });
     const bad = accel.install({ name: 'sa-bad', path: fakePackDir('sa1'), kind: 'style-accel', steps: 20 });
     expect(bad.ok).toBe(false);
-    const ok = accel.install({ name: 'sa-ok', path: fakePackDir('sa1'), kind: 'style-accel', steps: 8 });
+    const ok = accel.install({ name: 'sa-ok', path: fakePackDir('sa1'), kind: 'style-accel', steps: 6 });
     expect(ok.ok).toBe(true);
     expect(ok.packs?.find((p) => p.name === 'sa-ok')?.kind).toBe('style-accel');
+  });
+
+  it('v4 迁移:存量加速包 8 步一次性改为 6 步,之后不反复改写', () => {
+    const { settings, accel } = freshStore();
+    const path = fakePackDir('v4');
+    settings.patch({
+      accelPacks: [{ id: 'custom', name: '自定义加速', path, steps: 8, kind: 'accel' }],
+      accelPreseedV2: true,
+      accelPreseedV3: true,
+      accelPreseedV4: undefined,
+    });
+    accel.list();
+    expect(accel.list().find((p) => p.id === 'custom')?.steps).toBe(6);
+    expect(settings.get().accelPreseedV4).toBe(true);
+    // 迁移只跑一次:用户之后手工选回 8 不会被再次改写。
+    settings.patch({ accelPacks: [{ id: 'custom', name: '自定义加速', path, steps: 8, kind: 'accel' }] });
+    accel.list();
+    expect(accel.list().find((p) => p.id === 'custom')?.steps).toBe(8);
   });
 
   it('kind 缺省 = accel(兼容存量调用方)', () => {

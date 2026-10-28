@@ -17,6 +17,8 @@ import { assembleH3Prompt, assembleZImagePrompt, buildSubjectLabels, buildRetent
 
 const HEAD = ['镜号', '画面描述', '对白/旁白', '景别', '运镜', '时长(s)', '需配图'];
 const ROW = ['1', '机翼上两人对峙', '无', '远景', '航拍侧移', '5', '是'];
+const DEFAULT_QUANTIFIED_LIGHT =
+  '主光从主体右前方 45°、略高于视线照入，左后侧形成阴影；主体与背景保留明暗层次';
 
 describe('buildSubjectLabels — 标签段组装', () => {
   it('角色 → identity lock,场景 → scene lock', () => {
@@ -213,7 +215,9 @@ describe('assembleH3Prompt — Ref2VA 镜(带参考素材)', () => {
     const { text } = assembleH3Prompt(ROW, HEAD, '写实电影感', [{ name: '苏青', kind: 'character' }]);
     // 官方分段结构里正文以 [Shot 1] 起头(不再是自造的 Scene: 前缀)
     expect(text).toContain('[Shot 1] 机翼上两人对峙');
-    expect(text).toContain('Camera: 远景 · 航拍侧移');
+    expect(text).toContain('Shot Size: 远景');
+    expect(text).toContain('Movement: 航拍侧移');
+    expect(text).not.toContain('Camera:');
     expect(text).toContain('Look: 写实电影感');
     expect(text).toContain('Action: 无对白');
   });
@@ -265,9 +269,17 @@ describe('assembleH3Prompt — 回归:原有五段结构不变', () => {
     expect(text).not.toContain('水声与风声');
   });
 
-  it('basePrompt 缺省兜底不变', () => {
+  it('basePrompt 缺省时只补量化光照，不再补空泛风格词', () => {
     const { text } = assembleH3Prompt(ROW, HEAD);
-    expect(text).toContain('Look: 电影感，自然光影，写实');
+    expect(text).toContain(`Look: ${DEFAULT_QUANTIFIED_LIGHT}`);
+    expect(text).not.toContain('电影感，自然光影，写实');
+  });
+
+  it('basePrompt 是风格词唯一来源，裁剪空白后原样生效', () => {
+    const style = '黑白铅笔线稿，平涂色块';
+    const { text } = assembleH3Prompt(ROW, HEAD, `  ${style}  `);
+    expect(text).toContain(`Look: ${style}`);
+    expect(text).not.toContain(DEFAULT_QUANTIFIED_LIGHT);
   });
 });
 
@@ -280,5 +292,18 @@ describe('assembleZImagePrompt — 场景/光影跟本行走', () => {
     expect(text).not.toContain('秋日河谷');
     expect(text).not.toContain('黄昏侧光');
     expect(text).toMatch(/光影：/);
+  });
+
+  it('basePrompt 缺省时使用量化光照，不再写旧形容词堆', () => {
+    const { text } = assembleZImagePrompt(ROW, HEAD);
+    expect(text).toContain(`风格：${DEFAULT_QUANTIFIED_LIGHT}`);
+    expect(text).not.toContain('电影感，自然光影，写实');
+  });
+
+  it('basePrompt 原样进入风格段，不被默认光照覆盖', () => {
+    const style = '黑白铅笔线稿，不上色';
+    const { text } = assembleZImagePrompt(ROW, HEAD, `  ${style}  `);
+    expect(text).toContain(`风格：${style}`);
+    expect(text).not.toContain(DEFAULT_QUANTIFIED_LIGHT);
   });
 });

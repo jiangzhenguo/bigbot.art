@@ -21,6 +21,7 @@ import {
   type RenderStatus,
 } from '@bigbotart/shared';
 import { buildH3Args, validateParams, TIER_PRESETS } from './h3c-command.js';
+import { normalizeH3ReferenceImages } from './reference-images.js';
 import {
   ProgressTracker,
   splitProgressChunks,
@@ -132,7 +133,7 @@ export class H3cProvider implements Provider {
     const refs = req.references ?? [];
     const first = refs.find((r) => r.role === 'first-frame');
     const last = refs.find((r) => r.role === 'last-frame');
-    const refImgs = refs.filter((r) => r.role === 'ref-image').map((r) => r.localPath);
+    const rawRefImgs = refs.filter((r) => r.role === 'ref-image').map((r) => r.localPath);
     const refVideo = refs.find((r) => r.role === 'ref-video')?.localPath;
     const refAudio = refs.find((r) => r.role === 'ref-audio')?.localPath;
 
@@ -160,6 +161,17 @@ export class H3cProvider implements Provider {
     // 🚀 加速 LoRA:主进程 submit-render 已把 accel 解析为 params.modelDir / steps;
     // 这里兼容任何直接调用方带 modelDir 覆盖(未带则用构造时的默认模型)
     const modelDir = String(p.modelDir ?? '') || this.modelDir;
+    // Ref2VA:引擎会 STRETCH 参考图到视频画布。先等比补齐到目标画幅,
+    // 防止竖版角色卡被压扁后再参与生成(2026-10-28「故事脚本测试」实测)。
+    const refImgs = await normalizeH3ReferenceImages(rawRefImgs, {
+      targetWidth: Number(p.width ?? 768),
+      targetHeight: Number(p.height ?? 768),
+      outDir: join(this.outDir, 'reference'),
+      strict: !this.dryRun,
+    });
+    for (let i = 0; i < refImgs.length; i += 1) {
+      if (refImgs[i] !== rawRefImgs[i]) this.onLog?.(`[h3] 参考图已等比补齐:${rawRefImgs[i]} → ${refImgs[i]}`);
+    }
     const args = buildH3Args({
       modelDir,
       prompt: String(p.prompt ?? ''),
@@ -193,7 +205,7 @@ export class H3cProvider implements Provider {
     const areaFactor = Math.max(0.5, (Number(p.width ?? 544) * Number(p.height ?? 544)) / (544 * 544));
     const accel = (p.accel ?? undefined) as { enabled?: boolean; steps?: number; kind?: string } | undefined;
     const accelOn = accel?.enabled === true && !!modelDir && accel?.kind !== 'style';
-    const accelFactor = accelOn ? (accel?.steps === 4 ? 0.2 : 0.35) : 1;
+    const accelFactor = accelOn ? (accel?.steps === 4 ? 0.2 : accel?.steps === 6 ? 0.27 : 0.35) : 1;
     const etaSec = Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor) * accelFactor);
     this.progress.set(taskId, { startedAt: Date.now(), etaSec });
     if (this.dryRun) {

@@ -72,7 +72,7 @@ function makeStore() {
 }
 
 /** 造一个只实现 defaultShotAccel 的 AccelStore stub(真实选包逻辑另有单测) */
-function makeAccel(cfg: { enabled: true; packId: string; steps: 4 | 8 } | null) {
+function makeAccel(cfg: { enabled: true; packId: string; steps: 4 | 6 | 8 } | null) {
   return { defaultShotAccel: () => cfg } as unknown as import('../lora.js').AccelStore;
 }
 

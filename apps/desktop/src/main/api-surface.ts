@@ -960,8 +960,10 @@ ipcMain.handle('agent-chat', async (_e, req: AgentChatRequest): Promise<AgentCha
   });
 });
 
-ipcMain.handle('agent-cancel', async (_e, projectId: string) => {
-  void projectId;
+ipcMain.handle('agent-cancel', async (_e, projectId: string, canvasId?: string) => {
+  // 停止不仅是杀当前 worker:还要清掉该画布待触发/延后的自动续跑,
+  // 否则 executeAgentChat finally 的 onChatSettled 会立刻把 Agent 再唤醒。
+  if (canvasId) autoContinue.resetOnUserMessage(projectId, canvasId);
   return agent.cancel();
 });
 

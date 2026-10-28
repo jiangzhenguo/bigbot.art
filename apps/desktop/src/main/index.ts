@@ -40,11 +40,13 @@ import {
 } from './assets';
 import { SkillStore } from './skills';
 import { ExportService } from './export';
+import { TimelineExportCoordinator } from './timeline-auto-export';
 import { RenderQueue } from './render-queue';
 import {
   AutoContinueController,
   buildAutoContinueText,
   buildAutoRecallNote,
+  isAutoContinueNotifiable,
 } from './auto-continue';
 import { waitUntilFlightFree } from './flight-turn';
 import { MemoryStore } from './memory';
@@ -269,6 +271,8 @@ const registry = createRegistry({
 
 const settings = new SettingsStore({ onWarn: (m) => logger.log('warn', m) });
 const accel = new AccelStore(settings);
+// 启动即跑设置迁移(2026-10-28:加速类默认 6 步)。不能等用户先打开镜头检查器触发 list()。
+accel.list();
 /** 风格模型包(mystic 等)下载 + 融合构建;进度推送到渲染层设置页 */
 const styleModels = new H3StyleModelBuilder((ev) => {
   hub.publish('style-model-progress', ev);
@@ -289,10 +293,13 @@ if (migration.ran) {
 }
 
 const store = new ProjectStore();
+/** 时间线自动拼接协调器(在 exportSvc 之后实例化;画布保存回调里使用,故先声明) */
+let timelineExporter: TimelineExportCoordinator | undefined;
 /** 任何画布快照写盘(Agent 工具增量 / 渲染层整体保存)都广播给渲染层,
  *  画布页订阅后刷新本地状态 —— Agent 改的画布实时可见,并且渲染层保存不再带旧版本覆盖。 */
 store.onCanvasSaved = (snap) => {
   hub.publish('canvas-snapshot-updated', snap);
+  timelineExporter?.onCanvasSaved(snap);
 };
 const assets = new AssetStore();
 const skills = new SkillStore();
@@ -322,10 +329,12 @@ const exportSvc = new ExportService(takes, (pid, nid) => {
   return undefined;
 });
 const queue = new RenderQueue(registry, settings, logger);
+timelineExporter = new TimelineExportCoordinator(store, exportSvc, logger);
 const memory = new MemoryStore();
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
   accel,
   takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
+  timelineExporter,
   // 🆕 工具模型(v1):图片节点缺省模型 + 看图通道,实时从 SettingsStore 读(改设置即生效,免重启)
   getToolModels: () => settings.get().toolModels,
   completeH3Prompt: async (projectId, messages) => {
@@ -474,20 +483,24 @@ queue.onJobFinish = async (job) => {
         `(提交方漏传 projectId/canvasId;产物=${job.resultPath ?? '无'}${job.error ? ` err=${job.error}` : ''})`,
     );
   }
-  if (job.status !== 'succeeded' || !job.projectId || !job.canvasId) return;
-  const ctx = { projectId: job.projectId, canvasId: job.canvasId };
-  void tools.call('continuity.check', {}, ctx).then((res) => {
-    const issues = res.result && res.result.includes('建议') ? [res.result] : [];
-    hub.publish('agent-event', {
-      kind: 'continuity',
-      projectId: job.projectId ?? '',
-      canvasId: job.canvasId ?? '',
-      issues,
-      result: res.result,
-    } satisfies AgentEvent);
-  });
-  /* 自动续跑(2026-10-10):Agent 提交的任务成功后唤醒 Agent 推进任务链。
-     闸门/防抖/上限全在 controller 内;不 await —— 归档与 notify 时序不受 LLM 轮次影响。 */
+  if (!isAutoContinueNotifiable(job) || !job.projectId || !job.canvasId) return;
+  if (job.status === 'succeeded') {
+    const ctx = { projectId: job.projectId, canvasId: job.canvasId };
+    void tools.call('continuity.check', {}, ctx).then((res) => {
+      const issues = res.result && res.result.includes('建议') ? [res.result] : [];
+      hub.publish('agent-event', {
+        kind: 'continuity',
+        projectId: job.projectId ?? '',
+        canvasId: job.canvasId ?? '',
+        issues,
+        result: res.result,
+      } satisfies AgentEvent);
+    });
+  }
+  /* 自动续跑(2026-10-10):Agent 提交的任务终态后唤醒 Agent 推进任务链。
+     2026-10-28 修复:此前 `status !== succeeded` 提前 return,失败通知根本到不了 controller,
+     与 shouldAutoContinue「失败也唤醒」的声明相反 —— 失败只能等用户手点「继续」。
+     成功/失败都进入闸门;失败文案会把真实 error 交给 Agent 改根因,不是同参盲重试。 */
   autoContinue.notifyJobFinished(job);
 };
 
@@ -1143,6 +1156,8 @@ app.whenReady().then(async () => {
   // 尽早挂 stderr 管道保护:dev 下 `pnpm dev | head/tee`、终端关闭都会断开管道,
   // 渲染层 console 又高频转发到 stderr,不挡会以 Uncaught Exception 崩掉整个 App
   installStderrGuard();
+  // 启动补收口:上次运行已经齐备但没导出的时间线,这次启动自动拼接成片(不依赖 Agent 再被唤醒)
+  void timelineExporter?.scanAll();
   // macOS Dock 图标(dev 下默认是 Electron 图标,这里换成项目图标)
   const dockIcon = join(__dirname, '../../resources/icon.png');
   if (existsSync(dockIcon)) {

@@ -372,7 +372,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         if (!replacingRef.current) {
           replacingRef.current = true;
           setReplacing(true);
-          void window.bigbotart.agentCancel(pid);
+          void window.bigbotart.agentCancel(pid, cid);
         }
         setChatInput('');
         if (inputRef.current) {
@@ -608,7 +608,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
   /** 真实打断:中止 worker 内 LLM 请求。忙状态留到收尾事件,避免立刻再发和旧 done 撞车。 */
   const interrupt = useCallback(() => {
     if (!projectId || !agentBusyRef.current) return;
-    void window.bigbotart.agentCancel(projectId);
+    void window.bigbotart.agentCancel(projectId, canvasId);
     if (interruptNoted.current) return;
     interruptNoted.current = true;
     const noteId = ++msgId.current;
@@ -616,7 +616,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       ...m.filter((x) => !x.loading),
       { id: noteId, kind: 'sys', text: '已打断 · 可直接在画布修改,Agent 将基于当前画布增量重规划' },
     ]);
-  }, [projectId]);
+  }, [projectId, canvasId]);
 
   /** ask 确认卡点选:①把选择写回消息数据(ask.picked,记录——重进页面/恢复历史后仍回显);②以选项文案继续对话 */
   const askPick = useCallback(

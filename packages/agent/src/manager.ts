@@ -70,7 +70,7 @@ export class AgentManager {
    * 在飞请求表。`bump` 是静默看门狗的续期钩子(有 worker 活动时重置计时),
    * 见 request() 的说明 —— 长任务靠它避免被「总时长」误杀。
    */
-  private pending = new Map<number, { resolve: (v: AgentResponse) => void; bump?: () => void }>();
+  private pending = new Map<number, { resolve: (v: AgentResponse) => void; bump?: () => void; method: AgentRequest['method'] }>();
   private reqSeq = 0;
   private startedAt?: string;
   private inline: boolean;
@@ -115,6 +115,8 @@ export class AgentManager {
     this.startedAt = new Date().toISOString();
     const rl = (await import('node:readline')).createInterface({ input: child.stdout!, terminal: false });
     rl.on('line', (line) => {
+      // 取消/重启后,旧 worker 的迟到行不得流入新一轮任务。
+      if (this.child !== child) return;
       try {
         const msg = JSON.parse(line) as AgentResponse | ToolCallRequest | ChatStreamNotification;
         // 模型正文/思考增量:按 chat requestId 路由并生成稳定 eventId。
@@ -138,7 +140,7 @@ export class AgentManager {
           console.error('[agent-mgr] 收到 worker 工具请求:', (msg as ToolCallRequest).params?.tool);
           // 有工具活动 = worker 活着 → 给当前在跑的 chat 请求续期(静默看门狗,见 request)
           this.bumpAllHeartbeats();
-          void this.handleToolCall(msg as ToolCallRequest);
+          void this.handleToolCall(msg as ToolCallRequest, child);
           return;
         }
         const p = this.pending.get((msg as AgentResponse).id);
@@ -151,6 +153,8 @@ export class AgentManager {
       }
     });
     child.on('exit', () => {
+      // 只处理「当前 worker」的退出。旧 worker 迟到的 exit 不得清掉新 worker 的在飞请求。
+      if (this.child !== child) return;
       this.child = undefined;
       for (const [, p] of this.pending) p.resolve({ id: -1, error: { code: 'EXITED', message: 'worker 退出' } });
       this.pending.clear();
@@ -159,10 +163,11 @@ export class AgentManager {
   }
 
   async stop(): Promise<{ ok: boolean }> {
-    if (this.child) {
-      this.child.kill('SIGTERM');
-      this.child = undefined;
-    }
+    const child = this.child;
+    this.child = undefined;
+    for (const [id, p] of this.pending) p.resolve({ id, error: { code: 'STOPPED', message: 'worker 已停止' } });
+    this.pending.clear();
+    child?.kill('SIGTERM');
     return { ok: true };
   }
 
@@ -221,8 +226,8 @@ export class AgentManager {
   }
 
   /** worker 工具调用 → 主进程工具桥执行 → 结果回写 worker stdin */
-  private async handleToolCall(req: ToolCallRequest): Promise<void> {
-    if (!this.child || this.child.killed) return;
+  private async handleToolCall(req: ToolCallRequest, source: ChildProcess): Promise<void> {
+    if (this.child !== source || source.killed) return;
     let res: ToolCallResponse;
     if (this.toolExecutor) {
       // 事件推送:工具开始
@@ -244,7 +249,8 @@ export class AgentManager {
            这里转成 worker 可见的失败结果,让模型能据此调整或如实汇报。 */
         res = { id: req.id, result: { ok: false, result: `工具执行异常:${(e as Error).message}` } };
       }
-      // 事件推送:工具结束
+      // 事件推送:工具结束(取消后旧工具即使晚完成,也不再向 UI/新 worker 投递)
+      if (this.child !== source || source.killed) return;
       this.onEvent?.({
         kind: 'tool-end',
         projectId: req.params.projectId,
@@ -261,7 +267,8 @@ export class AgentManager {
       res = { id: req.id, error: { code: 'NO_EXECUTOR', message: '工具执行器未注入' } };
     }
     try {
-      this.child.stdin!.write(JSON.stringify(res) + '\n');
+      if (this.child !== source || source.killed) return;
+      source.stdin!.write(JSON.stringify(res) + '\n');
     } catch (e) {
       // 回写失败(管道断裂 / worker 已退):记录但不抛,避免未捕获的 rejection
       console.error('[agent-mgr] 工具结果回写失败:', (e as Error).message);
@@ -279,12 +286,32 @@ export class AgentManager {
     return res.result!;
   }
 
-  /** 真实打断:中止 worker 内当前 chat(AbortSignal) */
+  /**
+   * 立即停止当前 Agent 任务。
+   *
+   * 旧实现只给 worker 发 cancel:chat Promise 仍挂起,流式循环还会 drain,
+   * 等待中的工具 RPC 也不会返回,所以 UI 已提示「已打断」但 Agent 仍继续跑。
+   * 现在先在主进程结算全部在飞请求,再终止旧 worker;下一次 chat/start 自动重建。
+   * 已经提交到 RenderQueue 的生成任务不属于 Agent worker,不在此取消。
+   */
   async cancel(): Promise<{ ok: boolean }> {
     if (this.inline) return { ok: true };
-    if (!this.child || this.child.killed) return { ok: false };
-    this.child.stdin!.write(JSON.stringify({ id: ++this.reqSeq, method: 'cancel', params: {} }) + '\n');
-    return { ok: true };
+    const child = this.child;
+    let settled = 0;
+    for (const [id, p] of this.pending) {
+      this.pending.delete(id);
+      settled += 1;
+      if (p.method === 'chat') {
+        p.resolve({ id, result: { reply: '', toolCalls: [], aborted: true } });
+      } else {
+        p.resolve({ id, error: { code: 'CANCELLED', message: '任务已被用户停止' } });
+      }
+    }
+    if (child) {
+      this.child = undefined;
+      child.kill('SIGTERM');
+    }
+    return { ok: !!child || settled > 0 };
   }
 
   /**
@@ -315,7 +342,7 @@ export class AgentManager {
         }, timeoutMs);
       };
       // 心跳续期:worker 每次发出工具请求都算「还活着」
-      this.pending.set(id, { resolve: resolve as (v: AgentResponse) => void, bump: arm });
+      this.pending.set(id, { resolve: resolve as (v: AgentResponse) => void, bump: arm, method });
       this.child!.stdin!.write(JSON.stringify(msg) + '\n');
       arm();
     });

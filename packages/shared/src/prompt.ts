@@ -4,8 +4,11 @@
  */
 import { parseGfmTable, tableToGfm } from './table.js';
 
-/** 分镜表默认列(第 0 版固定,columnMap 放开后列可改) */
-export const STORYBOARD_HEAD = [
+/**
+ * 分镜表核心列(旧版 10 列,顺序与下标保持兼容)。
+ * 新列只能追加在尾部:老画布仍按表头名读取,缺列时 rowCell 返回空串。
+ */
+export const STORYBOARD_CORE_HEAD = [
   '镜号',
   '画面描述',
   '对白/旁白',
@@ -18,14 +21,38 @@ export const STORYBOARD_HEAD = [
   '角色',
 ] as const;
 
+/**
+ * 摄影 / 声音 / 调度扩展列(2026-10-28,分镜改造第 2 步)。
+ * 全部可选;「节拍」只供规划与审阅,不直接注入生成提示词(避免把抽象叙事术语当画面指令)。
+ */
+export const STORYBOARD_EXTENDED_HEAD = [
+  '焦段',
+  '水平角度',
+  '机位高度',
+  '构图',
+  '视线',
+  '焦点',
+  '稳定性',
+  '光位',
+  '声景',
+  '配乐',
+  '站位(blocking)',
+  '节拍',
+] as const;
+
+/** 新建分镜表的完整默认列(核心 10 + 扩展 12)。 */
+export const STORYBOARD_HEAD = [...STORYBOARD_CORE_HEAD, ...STORYBOARD_EXTENDED_HEAD] as const;
+
 /** 新分镜表节点的默认 markdown(表头 + 一行占位) */
 export function defaultStoryboardMarkdown(): string {
+  const defaults: Record<string, string> = { 镜号: '1', '时长(s)': '5', 需配图: '是', 衔接: '硬切' };
+  const row = STORYBOARD_HEAD.map((name) => defaults[name] ?? '');
   return [
     '# 新分镜',
     '',
-    '说明:一行 = 一个分镜;可在检查器表格视图编辑,或点「从分镜表生成节点」铺出镜头。「角色」列写本镜出场的角色卡/场景卡名(逗号分隔)。',
+    '说明:一行 = 一个分镜;可在检查器表格视图编辑,或点「从分镜表生成节点」铺出镜头。「角色」列写本镜出场的角色卡/场景卡名(逗号分隔)。摄影、声音与站位扩展列均可选填。',
     '',
-    tableToGfm([...STORYBOARD_HEAD], [['1', '', '', '', '', '5', '是', '', '硬切', '']]),
+    tableToGfm([...STORYBOARD_HEAD], [row]),
   ].join('\n');
 }
 
@@ -270,6 +297,47 @@ export function buildRetentionAnalysis(subjects?: PromptSubject[], shotLabels?: 
   return `retention_analysis:\n${lines.join('\n')}`;
 }
 
+/**
+ * 未提供 basePrompt 时的中性量化光照。
+ * 风格词只能由 basePrompt(技能风格锁)提供；禁止重新加入「电影感 / 写实」等空泛兜底。
+ */
+const DEFAULT_QUANTIFIED_LIGHT =
+  '主光从主体右前方 45°、略高于视线照入，左后侧形成阴影；主体与背景保留明暗层次';
+
+/**
+ * 把过去挤在 `Camera: 景别 · 运镜` 里的信息拆成独立摄影指令。
+ * 扩展列为空就不输出对应行:旧 10 列表不会得到一堆「未指定」。
+ */
+function buildCameraLines(row: string[] | undefined, head: string[]): string[] {
+  const lines = [`Shot Size: ${rowCell(row, head, '景别')}`];
+  const optional: Array<[label: string, column: string]> = [
+    ['Horizontal Angle', '水平角度'],
+    ['Height', '机位高度'],
+    ['Lens Intent', '焦段'],
+  ];
+  for (const [label, column] of optional) {
+    const value = rowCell(row, head, column).trim();
+    if (value) lines.push(`${label}: ${value}`);
+  }
+  lines.push(`Movement: ${rowCell(row, head, '运镜') || '固定'}`);
+  for (const [label, column] of [
+    ['Composition', '构图'],
+    ['Eyeline', '视线'],
+    ['Focus', '焦点'],
+    ['Stability', '稳定性'],
+  ] as Array<[string, string]>) {
+    const value = rowCell(row, head, column).trim();
+    if (value) lines.push(`${label}: ${value}`);
+  }
+  return lines;
+}
+
+/** 可选生成指令行;空值不占位。 */
+function optionalPromptLine(label: string, value: string): string[] {
+  const v = value.trim();
+  return v ? [`${label}: ${v}`] : [];
+}
+
 /** H3 五段式组装(shot 节点;「提示词(可选)」列有值则显式使用)
  *
  * @param subjects 参考素材(Ref2VA 镜传入;按连线顺序 → 生成 `<Subject n>` 标签段)。
@@ -285,7 +353,7 @@ export function assembleH3Prompt(
 ): { explicit: boolean; text: string } {
   const p = rowCell(row, head, '提示词(可选)').trim();
   if (p) return { explicit: true, text: p };
-  const look = (basePrompt ?? '').trim() || '电影感，自然光影，写实';
+  const look = (basePrompt ?? '').trim() || DEFAULT_QUANTIFIED_LIGHT;
   const dial = rowCell(row, head, '对白/旁白').trim();
   const hasDial = !!dial && dial !== '无' && dial !== '—';
   const action = hasDial
@@ -294,8 +362,11 @@ export function assembleH3Prompt(
       : `对白「${dial}」`
     : '无对白 · 以肢体动作推进';
   const scene = rowCell(row, head, '画面描述');
-  const size = rowCell(row, head, '景别');
-  const move = rowCell(row, head, '运镜') || '固定';
+  const blocking = rowCell(row, head, '站位(blocking)');
+  const lighting = rowCell(row, head, '光位');
+  const soundscapeDetail = rowCell(row, head, '声景').trim() || '环境音';
+  const music = rowCell(row, head, '配乐').trim();
+  const cameraLines = buildCameraLines(row, head);
   /* Ref2VA(带参考素材)走 h3 官方的**分段结构**;否则沿用原来的五段式。
    *
    * 为什么分叉:官方 Ref2VA 骨架用 `overall_soundscape:` / `non_diegetic_music:` 这类
@@ -305,22 +376,27 @@ export function assembleH3Prompt(
   const labels = buildSubjectLabels(subjects);
   if (!labels) {
     const body = [
-      `Scene: ${scene}（${size}落位）`,
+      `Scene: ${scene}`,
+      ...optionalPromptLine('Blocking', blocking),
       `Action: ${action}`,
-      `Camera: ${size} · ${move}`,
+      ...cameraLines,
       `Look: ${look}`,
-      `Audio: ${hasDial ? '口型同步 · 环境音' : '环境音'}`,
+      ...optionalPromptLine('Lighting', lighting),
+      `Audio: ${hasDial ? `口型同步 · ${soundscapeDetail}` : soundscapeDetail}`,
+      ...optionalPromptLine('Music', music),
     ].join('\n');
     return { explicit: false, text: body };
   }
   const retention = buildRetentionAnalysis(subjects);
   const detailed = [
     `[Shot 1] ${scene}`,
-    `Camera: ${size} · ${move}`,
+    ...optionalPromptLine('Blocking', blocking),
+    ...cameraLines,
     `Action: ${action}`,
     `Look: ${look}`,
+    ...optionalPromptLine('Lighting', lighting),
   ].join('\n');
-  const soundscape = hasDial ? '口型同步的人声 · 环境音' : '环境音';
+  const soundscape = hasDial ? `口型同步的人声 · ${soundscapeDetail}` : soundscapeDetail;
   return {
     explicit: false,
     text: [
@@ -328,7 +404,7 @@ export function assembleH3Prompt(
       retention,
       `detailed_description:\n${detailed}`,
       `overall_soundscape: ${soundscape}`,
-      'non_diegetic_music: N/A',
+      `non_diegetic_music: ${music || 'N/A'}`,
     ].join('\n\n'),
   };
 }
@@ -362,15 +438,26 @@ export function assembleZImagePrompt(
 ): { explicit: boolean; text: string } {
   const p = rowCell(row, head, '提示词(可选)').trim();
   if (p) return { explicit: true, text: p };
-  const look = (basePrompt ?? '').trim() || '电影感，自然光影，写实';
+  const look = (basePrompt ?? '').trim() || DEFAULT_QUANTIFIED_LIGHT;
   const { scene, light } = deriveStillSceneAndLight(row, head, basePrompt);
+  const blocking = rowCell(row, head, '站位(blocking)').trim();
+  const lighting = rowCell(row, head, '光位').trim();
+  const composition = [
+    rowCell(row, head, '景别'),
+    ...(['焦段', '水平角度', '机位高度', '构图', '视线', '焦点'] as const).map((column) => {
+      const value = rowCell(row, head, column).trim();
+      return value ? `${column}:${value}` : '';
+    }),
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return {
     explicit: false,
     text: [
       `主体：${rowCell(row, head, '画面描述')}`,
-      `场景：${scene}`,
-      `构图：${rowCell(row, head, '景别')}`,
-      `光影：${light}`,
+      `场景：${scene}${blocking ? ` · 站位:${blocking}` : ''}`,
+      `构图：${composition}`,
+      `光影：${light}${lighting ? ` · ${lighting}` : ''}`,
       `风格：${look}`,
       '约束：无文字，不变形，主体身份措辞锁定',
     ].join('\n'),

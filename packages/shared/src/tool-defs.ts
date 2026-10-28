@@ -56,7 +56,7 @@ export function toolDefinitions(): ToolDef[] {
     { name: 'skills.deactivate', description: '停用当前画布激活的技能(清除 activeSkillId,不再注入指令)', parameters: O({}) },
     { name: 'skills.apply', description: '应用 Skill 到新项目(克隆节点换新 id 实体化);activate=true 时同时在新项目主画布上激活该技能(铺结构 + 载入操作指令)', parameters: O({ skillId: S('Skill id'), projectName: S('新项目名'), activate: { type: 'boolean', description: '可选:true=应用后同时在新项目主画布激活该技能(默认 false)' } }, ['skillId']) },
     { name: 'skills.save', description: '把当前画布保存为 Skill 模板;instructions 可选:把「当前对话强调的操作要求」沉淀为技能指令段(对话自动加载),inject=summary 时上下文只放摘要、用 skills.read 取全文', parameters: O({ name: S('Skill 名称'), instructions: S('可选:Agent 操作指令段(Markdown 操作手册/提示词模板,支持 {占位} 参数)'), inject: S('可选:full=全量注入(默认)/ summary=上下文只放摘要,按需 skills.read') }, ['name']) },
-    { name: 'timeline.export', description: '导出时间线(合成当前画布已生成的镜头)', parameters: O({ outputName: S('输出文件名') }) },
+    { name: 'timeline.export', description: '导出时间线(合成已生成的镜头)。传 nodeId 时按该时间线的入轨顺序拼接,并把成片路径写回时间线;缺省导出当前画布全部已生成镜头', parameters: O({ nodeId: S('可选:时间线节点 id/标题;传了就按该时间线入轨顺序导出并回写成片'), outputName: S('输出文件名') }) },
     { name: 'memory.update_core', description: '更新核心记忆(projectGoal/styleGuide/constraints/userPreferences)', parameters: O({ section: S('记忆段名'), content: S('内容') }, ['section', 'content']) },
     { name: 'memory.remember', description: '把事实记入项目长期记忆', parameters: O({ text: S('要记住的内容'), tags: { type: 'array', items: { type: 'string' } } }, ['text']) },
     { name: 'memory.recall_search', description: '检索项目记忆', parameters: O({ query: S('检索词') }, ['query']) },

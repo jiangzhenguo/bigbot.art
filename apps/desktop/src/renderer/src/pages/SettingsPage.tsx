@@ -2471,13 +2471,13 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                         key={k}
                         className={`chip${accelForm.kind === k ? ' on' : ''}`}
                         disabled={accelInstallBusy}
-                        onClick={() => setAccelForm((f) => ({ ...f, kind: k, steps: k === 'style' ? 20 : 8 }))}
+                        onClick={() => setAccelForm((f) => ({ ...f, kind: k, steps: k === 'style' ? 20 : 6 }))}
                       >
                         {k === 'style' ? t('风格') : k === 'style-accel' ? t('风格加速') : t('加速')}
                       </button>
                     ))}
                     <span className="mut" style={{ fontSize: 11, marginLeft: 4 }}>{t('推荐步数')}</span>
-                    {(accelForm.kind === 'style' ? ([20, 30] as const) : ([4, 8] as const)).map((s) => (
+                    {(accelForm.kind === 'style' ? ([20, 30] as const) : ([4, 6, 8] as const)).map((s) => (
                       <button
                         type="button"
                         key={s}

@@ -217,18 +217,18 @@ export function planStoryboardDeterministic(params: PlanStoryboardParams): PlanS
   const count = Math.max(1, Math.min(4, lines.length >= 6 ? 4 : lines.length >= 3 ? 3 : 2));
   const segments = splitIntoShots(lines, count);
   const head = [...STORYBOARD_HEAD] as string[];
-  const rows = segments.map((seg, i) => [
-    String(i + 1),
-    seg || `场景片段 ${i + 1}`,
-    '',
-    '中景',
-    '固定',
-    String(4 + (i % 3)),
-    '是',
-    '',
-    i === 0 ? '硬切' : '接尾帧',
-    '',
-  ]);
+  const rows = segments.map((seg, i) => {
+    const cells: Record<string, string> = {
+      镜号: String(i + 1),
+      画面描述: seg || `场景片段 ${i + 1}`,
+      景别: '中景',
+      运镜: '固定',
+      '时长(s)': String(4 + (i % 3)),
+      需配图: '是',
+      衔接: i === 0 ? '硬切' : '接尾帧',
+    };
+    return head.map((name) => cells[name] ?? '');
+  });
   const gfm = tableToGfm(head, rows);
   const noun = projectName ? `《${projectName}》` : '新分镜';
   const md = storyboardMarkdown(

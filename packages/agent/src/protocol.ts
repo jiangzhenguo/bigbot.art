@@ -57,6 +57,15 @@ export interface PlanStoryboardResult {
   /** 连线(storyboard→* / image-gen→shot first-frame) */
   edges: import('@bigbotart/shared').CanvasEdge[];
   report: string;
+  /**
+   * 走了确定性模板兜底时的原因(2026-10-28「剧本生成测试」事故)。
+   *
+   * 为什么要有这个字段:LLM 分镜规划失败时**静默**回退到确定性模板,而模板产出的
+   * report 与成功路径**一字不差**(「已生成分镜表:4 行」)—— 用户以为拿到了 LLM 拆的镜,
+   * 实际是模板按句子数硬切的 4 行,于是「效果和描述对不上」却查不出原因。
+   * 有值 = 这次是兜底,上层必须把原因透出给用户,不能冒充成功。
+   */
+  fallbackReason?: string;
 }
 
 /** chat 请求:多轮对话 + 工具调用 */

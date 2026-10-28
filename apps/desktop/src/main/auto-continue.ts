@@ -63,14 +63,26 @@ export function shouldAutoContinue(
   st: AutoGateState,
 ): AutoGateResult {
   if (!st.enabled) return { ok: false, reason: '自动续跑已禁用(BIGBOTART_AGENT_AUTO_CONTINUE=0)' };
-  if (job.status !== 'succeeded' && job.status !== 'failed') {
-    return { ok: false, reason: `任务未终态(${job.status}),不唤醒` };
+  if (!isAutoContinueNotifiable(job)) {
+    return { ok: false, reason: `任务未终态或无归属(${job.status}),不唤醒` };
   }
   if (job.source !== 'agent') return { ok: false, reason: '非 Agent 提交的任务(用户手点),不自动推进' };
   if (!job.projectId || !job.canvasId) return { ok: false, reason: '任务缺 projectId/canvasId,无归属上下文' };
   if (st.inFlight) return { ok: false, reason: '该画布有对话进行中,延后到对话收尾后再唤醒' };
   if (st.roundsUsed >= st.maxRounds) return { ok: false, reason: `连续自动推进已达上限 ${st.maxRounds} 轮` };
   return { ok: true };
+}
+
+/**
+ * 队列终态是否应该进入自动续跑控制器。
+ * 2026-10-28 修复:index 的 onJobFinish 曾先按 `status !== succeeded` 提前 return,
+ * 失败任务永远到不了控制器 —— 与「失败也唤醒,把真实 error 交给 Agent 改根因」相反。
+ */
+export function isAutoContinueNotifiable(
+  job: Pick<RenderJob, 'status' | 'projectId' | 'canvasId'>,
+): boolean {
+  if (job.status !== 'succeeded' && job.status !== 'failed') return false;
+  return !!job.projectId && !!job.canvasId;
 }
 
 /**
