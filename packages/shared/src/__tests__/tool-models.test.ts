@@ -10,6 +10,7 @@ import {
   defaultGenerateSteps,
   normalizeModelId,
   resolveImageModel,
+  healModelForRefImages,
   supportsCapability,
   type ImageCapability,
 } from '../tool-models.js';
@@ -126,6 +127,32 @@ describe('supportsCapability:按实测矩阵判定', () => {
       expect(supportsCapability(f, 'image.outpaint'), f).toBe(false);
       expect(supportsCapability(f, 'image.multiReference'), f).toBe(false);
     }
+  });
+});
+
+describe('healModelForRefImages:带参考图纠正不兼容模型(2026-10-28 静帧 05)', () => {
+  it('无参考图 → 不改', () => {
+    const r = healModelForRefImages('Qwen-Image-2.1-Uncensored-MLX', false);
+    expect(r.healed).toBe(false);
+    expect(r.model).toBe('Qwen-Image-2.1-Uncensored-MLX');
+  });
+  it('有参考图 + Uncensored → 换成 instruction 缺省', () => {
+    const r = healModelForRefImages('Qwen-Image-2.1-Uncensored-MLX', true, {
+      image: { 'image.instruction': 'Qwen/Qwen-Image-2.1-Turbo' },
+    });
+    expect(r.healed).toBe(true);
+    expect(r.from).toBe('Qwen-Image-2.1-Uncensored-MLX');
+    expect(r.model).toBe('Qwen/Qwen-Image-2.1-Turbo');
+  });
+  it('有参考图 + Turbo/Klein → 不改', () => {
+    expect(healModelForRefImages('Qwen/Qwen-Image-2.1-Turbo', true).healed).toBe(false);
+    expect(healModelForRefImages('AbstractFramework/flux.2-klein-9b-8bit', true).healed).toBe(false);
+  });
+  it('有参考图 + 空模型 → 填 instruction 缺省但不标 healed(与 resolve 同路径)', () => {
+    const r = healModelForRefImages('', true);
+    // 空 → 换成默认 2.1,算 healed(from='(空)')
+    expect(r.healed).toBe(true);
+    expect(r.model).toBe('Qwen/Qwen-Image-2.1');
   });
 });
 

@@ -150,6 +150,36 @@ export function resolveImageModel(
 }
 
 /**
+ * 带参考图时纠正不兼容模型(2026-10-28「静帧 05」事故)。
+ *
+ * 背景:设置页 `image.generate` 常绑 Uncensored(纯文生图、无 vision tower)。
+ * image-gen 节点若被显式写下该模型(或曾按无参考图解析后粘住),再连上 ref-image
+ * 仍会原样提交 → provider 入队后才拒「纯文生图不能带参考图」。Agent 只看到
+ * 「已提交」,失败后不会改模型、只会重复 engine.submit → 白烧队列。
+ *
+ * 规则:有参考图时,模型必须支持 `image.instruction`(2.1 edit)或
+ * `image.multiReference`(Klein);否则换成 instruction 缺省(工具模型 > 内置 2.1)。
+ * 调用方应把纠正后的 model 写回节点,清掉粘住的坏值。
+ */
+export function healModelForRefImages(
+  model: string | undefined,
+  hasRefImages: boolean,
+  toolModels?: ToolModelBinding,
+): { model: string | undefined; healed: boolean; from?: string } {
+  const cur = String(model ?? '').trim();
+  if (!hasRefImages) return { model: cur || undefined, healed: false };
+  if (
+    cur &&
+    (supportsCapability(cur, 'image.instruction') || supportsCapability(cur, 'image.multiReference'))
+  ) {
+    return { model: cur, healed: false };
+  }
+  const next = resolveImageModel(toolModels, 'image.instruction');
+  if (!next || next === cur) return { model: cur || next, healed: false };
+  return { model: next, healed: true, from: cur || '(空)' };
+}
+
+/**
  * 文生图的缺省采样步数(按模型;2026-10-14「Turbo 默认步数应为 8」修复)。
  *
  * 背景:节点创建时曾把 `steps: 24` 写死进 data(审计 §4.1.1 同款错误)——

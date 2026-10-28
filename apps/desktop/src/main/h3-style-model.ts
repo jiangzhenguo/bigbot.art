@@ -10,9 +10,10 @@
  *   ② 复制基础模型的非 transformer 组件(APFS `cp -c` clonefile,几乎不占新空间);
  *   ③ 对 FL2VA / Ref2VA 两个 transformer 各跑一次融合(strength 1.0 烤死)。
  *
- * ⚠️ 幂等性红线:merge 脚本是「copy + 就地 patch」,对**已融合**目录重跑会把 delta
- * 再叠加一次(双重 LoRA ⇒ 画面过饱和/崩坏)。故每次 merge 前一律 `rm -rf` 产物侧的
- * transformer/ 再重跑 —— 重跑 = 干净重来。⚠️ 删除目标严格限定在产物目录内。
+ * ⚠️ 幂等性:仓库版 merge 脚本把每个已烤入的 LoRA(sha256)记在产物侧的
+ * `.lora_manifest.json` 里,同一个 LoRA 再烤一次会被直接拒绝(delta 叠加两遍
+ * ⇒ 画面过饱和/崩坏)。本管线仍在每次构建前 `rm -rf` 产物侧 transformer/ ——
+ * 那是最干净的重来方式,同时把 manifest 一起清掉。⚠️ 删除目标严格限定在产物目录内。
  *
  * 数据源(mystic v4):
  *  - FL2VA LoRA:HF lynaNSFW/mysticxxx_MM_H3(无需登录);
@@ -52,9 +53,25 @@ function baseModelDir(): string {
   return process.env.BIGBOTART_H3_MODEL ?? join(h3Root(), 'MiniMax-H3');
 }
 
-/** 融合脚本(merge_lora_h3.py;env 可覆盖) */
+/**
+ * 融合脚本(h3.c 仓库内的版本优先,旧路径兜底;env 可覆盖)。
+ *
+ * 仓库版 `h3.c/tools/merge_lora_h3.py` 多了三件与本管线直接相关的事:
+ *  ① **正确叠加**:目标目录已有分片时,delta 叠在**当前产物**上而不是 base 上 ——
+ *     双融合包(风格 + turbo)的第二步因此不会把风格 LoRA 抹掉;
+ *  ② **manifest**:`<产物>/transformer/.lora_manifest.json` 记录每个已烤入的 LoRA(sha256),
+ *     同一个 LoRA 再烤一次会被直接拒绝,而不是把 delta 叠加两遍(画面过饱和/崩坏);
+ *  ③ **缺目标报错**:LoRA 键名对不上时直接失败,不再产出「看起来融合了其实没有」的目录。
+ * 旧路径的脚本没有 ①,双融合会静默丢风格 LoRA —— 所以优先用仓库版。
+ */
 function mergeScriptPath(): string {
-  return process.env.BIGBOTART_H3_MERGE_PY ?? join(h3Root(), 'merge_lora_h3.py');
+  const override = process.env.BIGBOTART_H3_MERGE_PY;
+  if (override) return override;
+  const candidates = [
+    join(h3Root(), 'h3.c', 'tools', 'merge_lora_h3.py'),
+    join(h3Root(), 'merge_lora_h3.py'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
 /** 已知风格包的下载/构建方案登记(未登记的 style 包只能手动构建) */
@@ -329,9 +346,10 @@ export class H3StyleModelBuilder {
       }
 
       /* ③ 融合两个 transformer。
-       * ⚠️ 幂等红线:每个 transformer **只删一次**产物侧目录,然后按登记的 LoRA 顺序逐次 merge
-       * (单 LoRA 包 = 一次;双融合包 = 先风格后 turbo 两次 —— 顺序删除会把第一次的成果清掉,
-       *  不删直接重跑则等于把整串 LoRA 再叠加一遍)。 */
+       * 每个 transformer **只删一次**产物侧目录,然后按登记的 LoRA 顺序逐次 merge
+       * (单 LoRA 包 = 一次;双融合包 = 先风格后 turbo 两次 —— 顺序删除会把第一次的成果清掉)。
+       * 第二次 merge 作用在同一目录上,脚本会把 delta 叠在**已融合的产物**上,
+       * 所以结果是 base + 风格 + turbo(而不是把风格冲掉)。 */
       for (const sub of ['FL2VA', 'Ref2VA'] as const) {
         const subLoras = src.loras.filter((l) => l.target === sub);
         if (subLoras.length === 0) throw new Error(`构建方案缺 ${sub} 的 LoRA 源`);

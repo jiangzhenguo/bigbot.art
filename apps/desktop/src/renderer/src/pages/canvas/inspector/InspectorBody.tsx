@@ -215,6 +215,9 @@ export function InspectorBody({
           toastMsg={toastMsg}
           onSelectTake={selectImageTake}
           onSaved={onRefreshAssets}
+          nodes={nodes ?? []}
+          assetCache={assetCache}
+          onRemoveEdge={onRemoveEdge}
         />
       );
     }
@@ -232,6 +235,7 @@ export function InspectorBody({
           toastMsg={toastMsg}
           onSelectTake={selectImageTake}
           onSaved={onRefreshAssets}
+          onRemoveEdge={onRemoveEdge}
         />
       );
     }

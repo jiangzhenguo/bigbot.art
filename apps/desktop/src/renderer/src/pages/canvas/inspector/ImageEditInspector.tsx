@@ -34,6 +34,8 @@ export interface ImageEditInspectorProps {
   onSelectTake?: (t: { id: string; attempt: number; status: string; resultPath?: string }) => void;
   /** 入库后刷新画布侧资产清单 */
   onSaved?: () => void;
+  /** 断开一条 ref-image 入边(参考图卡 ×) */
+  onRemoveEdge?: (sourceId: string, targetId: string) => void;
 }
 
 const MODE_META: Array<{ key: string; label: string; mono: string }> = [
@@ -380,7 +382,7 @@ export function inspectorCardVisibility(args: {
 }
 
 export function ImageEditInspector(p: ImageEditInspectorProps) {
-  const { node, setData, jobs, projectId, nodes, assetCache, assetsList = [], runNode, toastMsg, onSelectTake, onSaved } = p;
+  const { node, setData, jobs, projectId, nodes, assetCache, assetsList = [], runNode, toastMsg, onSelectTake, onSaved, onRemoveEdge } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const mode = String(d.mode ?? 'instruction');
   // 未显式选模型时显示缺省解析结果(按当前 mode 对应的能力;2026-09-29 v1)
@@ -589,8 +591,21 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
       {/* 参考图:独立展示区(ref-image 端口专用)。
           与「输入图」并列但语义独立 —— 输入图是**被编辑对象**,这里每张都是**参考**,
           混在一张卡里会让人分不清哪张会被改(2026-10 用户要求拆开)。
-          ⚠️ 仅**多于一张**时渲染:单张没有「多张关联」可看(见上方显隐条件注释) */}
-      {showRefImages ? <RefImagesCard items={refImages} /> : null}
+          ⚠️ 仅**多于一张**时渲染:单张没有「多张关联」可看(见上方显隐条件注释)
+          × 走 onRemoveEdge 真删边(与镜头检查器同口径,只清 data 挡不住 derive) */}
+      {showRefImages ? (
+        <RefImagesCard
+          items={refImages}
+          onRemove={
+            onRemoveEdge
+              ? (sourceId) => {
+                  onRemoveEdge(sourceId, node.id);
+                  toastMsg('已断开参考图连线');
+                }
+              : undefined
+          }
+        />
+      ) : null}
 
       {upstreamStale ? (
         <div className="stale-banner" data-od-id="stale-banner">

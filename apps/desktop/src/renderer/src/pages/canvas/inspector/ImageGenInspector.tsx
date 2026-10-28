@@ -1,6 +1,7 @@
 /**
  * ImageGenInspector — 图片生成节点检查器(对齐设计稿 ①/②/③/⑧/⑨)
  * 提示词 + 负向提示词 + 模型下拉 + 画幅预设 + 采样滑块 + seed chips + 生成行动 + 产物预览
+ * + ref-image 入边展示(与 image-edit 同卡 · × 删边)
  */
 import React, { useEffect, useState } from 'react';
 import type { RenderJob } from '@bigbotart/shared';
@@ -13,7 +14,7 @@ import { ModelCombo, matchModel } from './ModelCombo';
 import { capabilityOf, resolveImageModel, defaultGenerateSteps } from '@bigbotart/shared';
 import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
-import { AspectPresets, SeedEditor, StepsGuidanceField, ActionBar } from './image-ui';
+import { AspectPresets, SeedEditor, StepsGuidanceField, ActionBar, RefImagesCard, resolveRefImages } from './image-ui';
 import { previewUrlOf } from '../media';
 import { SaveToLibraryButton } from './SaveToLibraryButton';
 
@@ -27,17 +28,38 @@ export interface ImageGenInspectorProps {
   onSelectTake?: (t: { id: string; attempt: number; status: string; resultPath?: string }) => void;
   /** 入库后刷新画布侧资产清单 */
   onSaved?: () => void;
+  /** 画布节点(解析 ref-image 上游缩略图) */
+  nodes?: CanvasNode[];
+  assetCache?: Record<string, string>;
+  /** 断开一条 ref-image 入边(× 删除) */
+  onRemoveEdge?: (sourceId: string, targetId: string) => void;
 }
 
 export function ImageGenInspector(p: ImageGenInspectorProps) {
-  const { node, setData, jobs, projectId, runNode, toastMsg, onSelectTake, onSaved } = p;
+  const {
+    node,
+    setData,
+    jobs,
+    projectId,
+    runNode,
+    toastMsg,
+    onSelectTake,
+    onSaved,
+    nodes = [],
+    assetCache = {},
+    onRemoveEdge,
+  } = p;
   const d = (node.data ?? {}) as Record<string, unknown>;
   // 未显式选模型时显示缺省解析结果(设置页工具模型 > 内置默认;2026-09-29 v1)
   // ⚠️ 必须用订阅式 useToolModels(2026-10-14):getToolModelsSync 冷启动时缓存未加载,
   //    会显示内置默认 z-image 而非设置页配置的模型(实际提交是对的,显示在说谎)。
   const toolModels = useToolModels();
   // 有 ref-image 入边时缺省走参考编辑(image.instruction → 2.1),不是 Klein multi-reference
-  const hasRefImages = Array.isArray(d.refImageFrom) && (d.refImageFrom as unknown[]).length > 0;
+  const refImageFrom = Array.isArray(d.refImageFrom)
+    ? (d.refImageFrom as Array<{ nodeId?: string }>)
+    : undefined;
+  const refImages = resolveRefImages({ refImageFrom, nodes, assetCache });
+  const hasRefImages = refImages.length > 0;
   const model =
     String(d.model ?? '').trim() ||
     (resolveImageModel(toolModels, capabilityOf('image-gen', undefined, hasRefImages)) ?? '');
@@ -67,6 +89,13 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
     if (!repo) { toastMsg(`当前为自定义模型 ${model},请到设置页下载`); return; }
     void window.bigbotart.mlxgenDownload(repo).then((r) => toastMsg(r.ok ? `已开始下载 ${repo} · 完成后点重新生成` : `下载启动失败:${r.error ?? ''}`));
   };
+
+  const removeRefEdge = (sourceId: string) => {
+    if (!onRemoveEdge) return;
+    onRemoveEdge(sourceId, node.id);
+    toastMsg('已断开参考图连线');
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <GenStatePanel
@@ -92,6 +121,15 @@ export function ImageGenInspector(p: ImageGenInspectorProps) {
             />
           </div>
         </div>
+      ) : null}
+
+      {/* 有 ref-image 入边就展示(含单张);× 走 onRemoveEdge 真删边 */}
+      {hasRefImages ? (
+        <RefImagesCard
+          items={refImages}
+          caption="连入的参考图 · 提交时按顺序注入"
+          onRemove={onRemoveEdge ? removeRefEdge : undefined}
+        />
       ) : null}
 
       <div style={running ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>

@@ -1644,6 +1644,7 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-canvas .insp .reftitle{font-size:11.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pg-canvas .insp .refnote{font-size:9.5px;color:var(--muted);font-family:var(--font-mono);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pg-canvas .insp .refnote.warn{color:var(--warn)}
+.pg-canvas .insp .refcell .ref-remove{flex:none;margin-left:auto;align-self:flex-start}
 
 /* 行动条(主行动):运行按钮加宽居中 + 最大宽度,与面板底部「仅重跑该节点」视觉成组 */
 .pg-canvas .insp .action-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;border-top:1px solid var(--border-soft);padding:10px 0 2px;margin-top:2px}

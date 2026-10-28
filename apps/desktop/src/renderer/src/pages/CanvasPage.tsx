@@ -17,6 +17,7 @@ import {
   tableToGfm,
   capabilityOf,
   resolveImageModel,
+  healModelForRefImages,
   fitImageSizeToGrid,
   classifyAspect,
   normalizeShotDuration,
@@ -4046,10 +4047,24 @@ export default function CanvasPage({
          若只看 data.model,「只有 ref-image」的 2.1 编辑会被误拦成「没有输入图」。 */
       const toolModels = isImage ? await ensureToolModels() : undefined;
       const hasRefImages = references.some((r) => (r as { role?: string }).role === 'ref-image');
-      const resolvedModel = isImage
+      let resolvedModel = isImage
         ? String(d.model ?? '').trim() ||
           resolveImageModel(toolModels, capabilityOf(String(n.kind ?? ''), String(d.mode ?? 'instruction'), hasRefImages))
         : undefined;
+      /* 带参考图时纠正不兼容模型(与 Agent buildImageSubmitParams 同口径,2026-10-28):
+         设置页文生图默认 Uncensored 若粘在节点上,连了 ref-image 仍会入队后才炸。 */
+      if (isImage && (n.kind === 'image-gen' || n.kind === 'image-edit')) {
+        const healed = healModelForRefImages(resolvedModel, hasRefImages, toolModels);
+        if (healed.healed && healed.model) {
+          resolvedModel = healed.model;
+          setNodes((ns) =>
+            ns.map((x) =>
+              x.id === nodeId ? { ...x, data: { ...(x.data ?? {}), model: healed.model } } : x,
+            ),
+          );
+          toastMsg(`已自动改模型:「${healed.from}」不支持参考图 → ${healed.model}`);
+        }
+      }
 
       if (n.kind === 'image-edit' && !inputPath) {
         /* 2026-09-29:Qwen-Image-2.1 的 qwen21.edit 允许「只有参考图、无底图」
