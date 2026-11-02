@@ -229,6 +229,10 @@ const LEGACY_BUILTIN_FINGERPRINTS = new Set<string>([
   'fnv1a-837b6798-22777',
   // music-video-subtitle:初版(7829 字,只在文案谈 Master Audio、未强制 ref-audio 连线)
   'fnv1a-16230625-7829',
+  // music-video-subtitle:2026-11-02 之前(9081 字)。硬规矩要求每镜连 ref-audio,
+  // 正文却写首帧/末帧接续 —— 与引擎「音轨参考与帧锚定互斥」冲突;
+  // 且只让参考卡「在 prompt 中引用」、没要求 ref-image 连线 —— 会出现只有 ref-audio 的非法组合。
+  'fnv1a-1ee6cb65-9081',
   // handdrawn-live-video:2026-10-13 之前(3486 字)。只写「可先做 image-gen 首帧」,
   // 没锁 mode=ref-image,Agent 把环境图连成 first-frame、角色卡连成 ref-image。
   'fnv1a-b7db5dd6-3486',
