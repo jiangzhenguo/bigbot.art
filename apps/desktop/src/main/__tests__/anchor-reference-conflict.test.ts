@@ -118,7 +118,7 @@ describe('canvas.connect · 首帧与参考图互斥', () => {
     expect(snapshot.edges).toHaveLength(1);
   });
 
-  it('first-frame 与 ref-audio 可以共存', async () => {
+  it('first-frame 与 ref-audio 不能共存 ⇒ 拒绝(h3 侧 --ref-audio 也计入 reference 数量)', async () => {
     const audio = {
       id: 'aud',
       kind: 'asset',
@@ -129,8 +129,9 @@ describe('canvas.connect · 首帧与参考图互斥', () => {
     const { h, snapshot } = harness([img('env', '环境底图'), audio, shotNode()]);
     expect((await h.call('canvas.connect', { from: 'env', to: 'shot', label: 'first-frame' }, ctx)).ok).toBe(true);
     const audioEdge = await h.call('canvas.connect', { from: 'aud', to: 'shot', label: 'ref-audio' }, ctx);
-    expect(audioEdge.ok).toBe(true);
-    expect(snapshot.edges).toHaveLength(2);
+    expect(audioEdge.ok).toBe(false);
+    expect(audioEdge.result).toContain('互斥');
+    expect(snapshot.edges).toHaveLength(1);
   });
 });
 

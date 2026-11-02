@@ -11,7 +11,7 @@ import {
   deriveAudioRefSource,
   validateRefsForSubmit,
   referenceMediaIssues,
-  referenceAnchorConflictIssues,
+  referenceCombinationIssues,
   anchorReferenceConnectIssue,
   type EdgeNodeMin,
   type EdgeMin,
@@ -346,18 +346,49 @@ describe('D · 提交前防呆', () => {
     expect(res.errors[0]?.code).toBe('anchor-reference-conflict');
   });
 
-  it('first-frame + ref-audio 不互斥', () => {
+  it('first-frame + ref-audio ⇒ 拒绝(h3 侧 --ref-audio 也计入 reference 数量)', () => {
     const audio = assetNode('a', 'audio');
     const nodes = [imageNode('env'), audio, shotNode('s')];
-    expect(validateEdge(nodes, [edge('env', 's', 'first-frame')], edge('a', 's', 'ref-audio')).ok).toBe(true);
+    const res = validateEdge(nodes, [edge('env', 's', 'first-frame')], edge('a', 's', 'ref-audio'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]?.code).toBe('anchor-reference-conflict');
+    expect(res.errors[0]?.message).toContain('ref-audio');
   });
 
-  it('referenceAnchorConflictIssues:首帧与参考图同时存在 ⇒ error', () => {
-    const issues = referenceAnchorConflictIssues([{ role: 'first-frame' }, { role: 'ref-image' }]);
+  it('已有 ref-audio 再连 first-frame ⇒ 拒绝', () => {
+    const audio = assetNode('a', 'audio');
+    const nodes = [imageNode('env'), audio, shotNode('s')];
+    const res = validateEdge(nodes, [edge('a', 's', 'ref-audio')], edge('env', 's', 'first-frame'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]?.code).toBe('anchor-reference-conflict');
+  });
+
+  it('referenceCombinationIssues:首帧与参考图同时存在 ⇒ error', () => {
+    const issues = referenceCombinationIssues([{ role: 'first-frame' }, { role: 'ref-image' }]);
     expect(issues).toHaveLength(1);
     expect(issues[0]?.message).toContain('互斥');
-    expect(referenceAnchorConflictIssues([{ role: 'ref-image' }, { role: 'ref-image' }])).toEqual([]);
+    expect(referenceCombinationIssues([{ role: 'ref-image' }, { role: 'ref-image' }])).toEqual([]);
     expect(anchorReferenceConnectIssue([], 's', 'ref-image')).toBeNull();
+  });
+
+  it('referenceCombinationIssues:首帧与音频参考同时存在 ⇒ error', () => {
+    const issues = referenceCombinationIssues([{ role: 'first-frame' }, { role: 'ref-audio' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('互斥');
+  });
+
+  it('referenceCombinationIssues:只有 ref-audio、没有视觉参考 ⇒ error(纯音频引用在 h3 里不成立)', () => {
+    const issues = referenceCombinationIssues([{ role: 'ref-audio' }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain('reference audio requires an image or video reference');
+  });
+
+  it('referenceCombinationIssues:ref-audio + ref-image ⇒ 合法', () => {
+    expect(referenceCombinationIssues([{ role: 'ref-audio' }, { role: 'ref-image' }])).toEqual([]);
+  });
+
+  it('referenceCombinationIssues:ref-audio + ref-video ⇒ 合法', () => {
+    expect(referenceCombinationIssues([{ role: 'ref-audio' }, { role: 'ref-video' }])).toEqual([]);
   });
 });
 
@@ -725,5 +756,70 @@ describe('timeline 作为视频产物源(成片 → 下游)', () => {
   it('B · deriveAudioRefSource:timeline 成片的音轨可作 audio-ref 来源', () => {
     const ar = { id: 'ar', kind: 'audio-ref', data: {} };
     expect(deriveAudioRefSource([tlNode('t'), ar], [edge('t', 'ar', 'input-audio')], 'ar')).toBe('/out/t.mp4');
+  });
+});
+
+/**
+ * 音频参考节点(audio-ref)→ 镜头 ref-audio —— 派发补齐(2026-11)
+ *
+ * 事故面:`audio-ref` 节点能连到 shot 的 `ref-audio` 端口
+ * (CONNECTOR_MAP['audio-ref'].shot = 'ref-audio';音乐闸 skill-gates 也认这个来源),
+ * 但两条参考派发链路都不处理 `audio-ref` 作为**来源** ——
+ * 于是「连线上画着、音乐闸放行、音频却根本没进 h3 命令」。
+ *
+ * 修法:`audio-ref` 节点通过 data.assetId 绑定一条**音频资产**,
+ * 派发时产出 `{ assetId, role:'ref-audio', auto:true }` —— 与 asset 分支**同构**
+ * (是资产 id 引用,不是路径)。
+ *
+ * 本组锁死:
+ *  1. audio-ref → shot[ref-audio] 能派发出 {assetId, role, auto:true};
+ *  2. asset(audio) → shot[ref-audio] 的既有行为**不变**(对照组);
+ *  3. 节点还没绑定资产(assetId 为空)⇒ 不产出空引用;
+ *  4. ref-audio 是单值端口:手动绑定优先 / × 停用时不注入(让位规则);
+ *  5. 媒体门禁(NODE_OUTPUT_MEDIA['audio-ref']='audio' + PORT_REQUIRED_MEDIA['ref-audio']='audio')
+ *     已能让这条边通过 validateEdge —— 本次**不改**媒体判定,只锁住它不回归。
+ */
+describe('audio-ref 节点 → shot 的 ref-audio 派发(补齐)', () => {
+  const audioRefNode = (id: string, data: Record<string, unknown> = {}): EdgeNodeMin => ({
+    id,
+    kind: 'audio-ref',
+    data,
+  });
+
+  it('B · audio-ref → shot ref-audio 推导出 {assetId, role:ref-audio, auto:true}(与 asset 分支同构)', () => {
+    const nodes = [audioRefNode('ar', { assetId: 'asset-audio-1' }), shotNode('s')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'ref-audio')], 's');
+    expect(refs).toEqual([{ assetId: 'asset-audio-1', role: 'ref-audio', auto: true }]);
+  });
+
+  it('对照组:asset(audio) → shot ref-audio 行为不变(仍是 assetId 引用)', () => {
+    const nodes = [assetNode('au', 'audio'), shotNode('s')];
+    const refs = deriveShotRefsFromEdges(nodes, [edge('au', 's', 'ref-audio')], 's');
+    expect(refs).toEqual([{ assetId: 'asset-au', role: 'ref-audio', auto: true }]);
+  });
+
+  it('节点还没绑定资产(data.assetId 为空)⇒ 不产出空引用(与 asset 分支同纪律)', () => {
+    const nodes = [audioRefNode('ar', {}), shotNode('s')];
+    expect(deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'ref-audio')], 's')).toEqual([]);
+  });
+
+  it('ref-audio 是单值端口:手动绑定优先 / × 停用时不注入(让位规则与 asset 分支一致)', () => {
+    const nodes = [audioRefNode('ar', { assetId: 'asset-audio-1' }), shotNode('s')];
+    const existing = [{ assetId: 'asset-manual', role: 'ref-audio', auto: false }];
+    expect(deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'ref-audio')], 's', existing)).toEqual(existing);
+    expect(deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'ref-audio')], 's', [], ['ref-audio'])).toEqual([]);
+  });
+
+  it('媒体门禁已就位:audio-ref → shot[ref-audio] 这条边本来就合法(本次未改媒体判定)', () => {
+    // NODE_OUTPUT_MEDIA['audio-ref']='audio' + PORT_REQUIRED_MEDIA['ref-audio']='audio'
+    // ⇒ portPayloadMedia 判成 audio,allowedPortLabels 给出 ref-audio
+    const nodes = [audioRefNode('ar', { assetId: 'asset-audio-1' }), shotNode('s')];
+    expect(allowedPortLabels(audioRefNode('ar'), 'shot')).toEqual(['ref-audio']);
+    expect(validateEdge(nodes, [], edge('ar', 's', 'ref-audio')).ok).toBe(true);
+  });
+
+  it('只有 ref-audio 端口会派发(其它 label 不产出)', () => {
+    const nodes = [audioRefNode('ar', { assetId: 'asset-audio-1' }), shotNode('s')];
+    expect(deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'audio-track')], 's')).toEqual([]);
   });
 });

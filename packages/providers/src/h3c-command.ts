@@ -9,6 +9,7 @@
 
 import {
   validateShotSubmitParams,
+  referenceCombinationIssues,
   SHOT_SIZES,
   VIDEO_TIER_PRESETS,
   type QualityTier,
@@ -274,7 +275,10 @@ export function validateParams(
   // width/height 可选(H3CliOptions 里是必填,Pick 会继承必填 ⇒ 老用例只传 steps/frames 会编译失败;
   // 运行时本就以 `width != null` 判生效,类型口径对齐成 Partial)
   opts: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse' | 'frames' | 'seconds' | 'refVideo' | 'refVideoSilent'> &
-    Pick<Partial<H3CliOptions>, 'width' | 'height' | 'secondPass' | 'secondPassCanvas' | 'renderWidth' | 'renderHeight'>,
+    Pick<
+      Partial<H3CliOptions>,
+      'width' | 'height' | 'secondPass' | 'secondPassCanvas' | 'renderWidth' | 'renderHeight' | 'firstFrame' | 'lastFrame' | 'refImages' | 'refAudio'
+    >,
 ): string[] {
   const issues = validateTier(opts);
 
@@ -346,6 +350,21 @@ export function validateParams(
         `(当前 width=${String(opts.renderWidth)}, height=${String(opts.renderHeight)}):` +
         `只给一边或给 0/非整数时 h3 不会使用该画布,第一遍仍按输出画布跑,画布二采只会白花一遍时间。`,
     );
+  }
+
+  // ⑧ 参考组合(h3 引擎硬校验,规则说明见 shared.referenceCombinationIssues):
+  //    ① --ref-image/--ref-video/--ref-audio 与 --first-frame/--last-frame 互斥;
+  //    ② --ref-audio 不能单独存在(必须搭配 --ref-image 或 --ref-video)。
+  //    这里用**同一份 shared 规则**(角色口径 ↔ CLI 口径的映射在本地做),避免两处各写一套。
+  //    ⚠️ 只在给了参考相关字段时才判(老用例只传 steps/frames,不受影响)。
+  const refRoles: Array<{ role?: string }> = [];
+  if (opts.firstFrame) refRoles.push({ role: 'first-frame' });
+  if (opts.lastFrame) refRoles.push({ role: 'last-frame' });
+  if (opts.refImages?.length) refRoles.push({ role: 'ref-image' });
+  if (opts.refVideo) refRoles.push({ role: 'ref-video' });
+  if (opts.refAudio) refRoles.push({ role: 'ref-audio' });
+  if (refRoles.length > 0) {
+    issues.push(...referenceCombinationIssues(refRoles).map((i) => i.message));
   }
 
   return issues;

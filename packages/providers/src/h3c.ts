@@ -24,6 +24,7 @@ import {
   secondPassEtaFactor,
   secondPassTailSteps,
   describeSecondPass,
+  referenceCombinationIssues,
   SECOND_PASS_CANVAS_MIN_TAIL_STEPS,
 } from '@bigbotart/shared';
 import { buildH3Args, validateParams, TIER_PRESETS } from './h3c-command.js';
@@ -155,7 +156,8 @@ export class H3cProvider implements Provider {
         { mode: 'first-frame', label: '首帧控制', refs: ['first-frame'] },
         { mode: 'last-frame', label: '尾帧控制', refs: ['last-frame'] },
         { mode: 'first-last', label: '首尾帧 (FL2VA)', refs: ['first-frame', 'last-frame'] },
-        { mode: 'ref-image', label: '参考图 (Ref2VA)', refs: ['ref-image'] },
+        { mode: 'ref-image', label: '参考图 (Ref2VA)', refs: ['ref-image', 'ref-audio'] },
+        { mode: 'ref-video', label: '参考视频 (Ref2VA)', refs: ['ref-video', 'ref-audio'] },
       ],
       tiers: ['preview', 'draft', 'default', 'reference'],
       models: ['MiniMax-H3 (BF16 144GB, local)'],
@@ -172,6 +174,15 @@ export class H3cProvider implements Provider {
     const rawRefImgs = refs.filter((r) => r.role === 'ref-image').map((r) => r.localPath);
     const refVideo = refs.find((r) => r.role === 'ref-video')?.localPath;
     const refAudio = refs.find((r) => r.role === 'ref-audio')?.localPath;
+    /* 参考组合守卫(与画布层同一份规则,shared.referenceCombinationIssues):
+       ①references(--ref-image/--ref-video/--ref-audio)不能与 frame anchors(--first-frame/--last-frame)共存;
+       ②--ref-audio 不能单独存在(纯音频引用不计入引擎的 visual 计数)。
+       这两条在引擎里是硬校验(h3.c:618 / h3.c:659),违反后 h3 会 exit 1 并只抛一句英文。
+       provider 是**最后一道闸** —— 上层画布校验若有遗漏,这里仍能拦住,不让用户白等几分钟。 */
+    const comboIssues = referenceCombinationIssues(refs as Array<{ role?: string }>);
+    if (comboIssues.length > 0) {
+      throw new Error(`h3c 参考组合不合法:${comboIssues.map((i) => i.message).join('; ')}`);
+    }
     // 输出画布(shot 节点落盘前已按 32 倍数规整,这里仍按 provider 的兜底默认取值)
     const width = Number(p.width ?? 768);
     const height = Number(p.height ?? 768);
@@ -213,6 +224,12 @@ export class H3cProvider implements Provider {
       height,
       refVideo,
       refVideoSilent: p.refVideoSilent === true,
+      // 参考组合守卫需要知道「有没有帧锚定 / 有没有音轨参考」——
+      // 只传 refVideo 时它看不出 --first-frame 与 --ref-audio 的互斥关系。
+      firstFrame: first?.localPath,
+      lastFrame: last?.localPath,
+      refImages: rawRefImgs,
+      refAudio,
     });
     if (issues.length > 0) {
       throw new Error(`h3c 参数防呆: ${issues.join('; ')}`);

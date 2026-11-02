@@ -368,6 +368,17 @@ export function deriveShotRefsFromEdges(
         : lbl === 'ref-video' ? 'ref-video'
         : undefined;
       if (role && assetId) derived.push({ assetId, role, auto: true });
+    } else if (src.kind === 'audio-ref') {
+      // 音频参考节点 → 镜头:节点绑定的**音频资产**作声音参考(ref-audio · 带声直出)。
+      // 与 asset 分支同构 —— 产出的是**资产 id 引用**(不是路径):
+      // audio-ref 节点的 data.assetId 指向资产库里的一条音频资产
+      // (由「视频 → 音频参考」抽音轨后自动绑定,或由检查器手选)。
+      // ⚠️ assetId 为空(节点刚建、还没绑定任何资产)⇒ 不产出 —— 与 asset 分支同一纪律:
+      //   不写空引用,提交期按「缺参考」兜底,而不是塞一条指向不存在资产的条目。
+      if (lbl === 'ref-audio') {
+        const assetId = String(sd.assetId ?? '');
+        if (assetId) derived.push({ assetId, role: 'ref-audio', auto: true });
+      }
     } else if (src.kind === 'shot') {
       // 镜头接续:上游尾帧 → 下游首帧(tailFramePath 就绪后注入;未就绪留待提交期兜底)
       if (lbl === 'first-frame') {
@@ -575,11 +586,26 @@ export function referenceMediaIssues(
 }
 
 const FRAME_ANCHOR_LABELS = new Set(['first-frame', 'last-frame']);
-const FULL_REFERENCE_LABELS = new Set(['ref-image', 'ref-video']);
+/**
+ * 「全参考」端口 —— h3 侧计进 reference 数量的那些。
+ *
+ * ⚠️ `ref-audio` 也在内,这是本模块曾经写错的一处:h3.c 的 --ref-audio 会让
+ * `reference_count` 自增(main.c:512-518 → append_reference),而引擎的互斥判定
+ * 是 `reference_count && (first_frame || last_frame)`(h3.c:618),**不看端口种类**。
+ * 所以 ref-audio 与首/尾帧锚定同样互斥,不是「可以共存」。
+ * 实测(2026-11-02):`h3 --first-frame X --ref-audio Y` ⇒
+ *   `full references cannot be combined with frame anchors`(exit 1)。
+ */
+const FULL_REFERENCE_LABELS = new Set(['ref-image', 'ref-video', 'ref-audio']);
+/** 视觉参考端口 —— h3 侧计入 `visual` 数量的那些(h3.c:622-652)。 */
+const VISUAL_REFERENCE_LABELS = new Set(['ref-image', 'ref-video']);
 
 /**
- * 连线前互斥:shot 已有首/尾帧时拒绝再连参考图/参考视频,反之亦然。
- * ref-audio 不参与(它和帧锚定可以共存)。
+ * 连线前互斥:shot 已有首/尾帧时拒绝再连参考图/参考视频/音频参考,反之亦然。
+ *
+ * 依据(h3.c:618):`if (params->reference_count && (params->first_frame || params->last_frame))`
+ * → `full references cannot be combined with frame anchors`。
+ * --ref-audio 同样让 reference_count 自增,所以它与帧锚定互斥。
  */
 export function anchorReferenceConnectIssue(
   edges: EdgeMin[],
@@ -590,56 +616,108 @@ export function anchorReferenceConnectIssue(
   const anchor = inbound.find((e) => FRAME_ANCHOR_LABELS.has(String(e.label ?? '')));
   const reference = inbound.find((e) => FULL_REFERENCE_LABELS.has(String(e.label ?? '')));
   if (FULL_REFERENCE_LABELS.has(newLabel) && anchor) {
+    // 音频参考与图像/视频参考的修法不同:音频参考**不能**用 ref-image 顶替,
+    // 它只能整体撤掉;图像/视频参考则可以改成 ref-image 与帧锚定并存不了、但可改回纯首帧。
+    const isAudio = newLabel === 'ref-audio';
+    const how =
+      isAudio
+        ? `音频参考只能整体撤掉,没有等价替代:` +
+          `请 canvas.disconnect 去掉「${anchor.source} → ${targetId}[${anchor.label}]」(该镜改为纯首帧/尾帧生成,不带声音参考),` +
+          `或把这条 ref-audio 边删掉改用「参考视频」承载声音(--ref-video 会连源片内嵌音轨一起注入)。`
+        : `关联生成请 canvas.disconnect 去掉「${anchor.source} → ${targetId}[${anchor.label}]」,再把环境图、角色卡、手部参考全部以 label="ref-image" 连上;` +
+          `若只要首帧生成,则不要连 ${newLabel}。`;
     return {
       code: 'anchor-reference-conflict',
       severity: 'error',
       message:
-        `参考图/参考视频(${newLabel})与已有的首/尾帧锚定(${anchor.label},来自 ${anchor.source})互斥,h3 不能同时提交` +
-        `(full references cannot be combined with frame anchors)。` +
-        `关联生成请 canvas.disconnect 去掉「${anchor.source} → ${targetId}[${anchor.label}]」,再把环境图、角色卡、手部参考全部以 label="ref-image" 连上;` +
-        `若只要首帧生成,则不要连 ${newLabel}。`,
+        `${newLabel === 'ref-audio' ? '音频参考' : '参考图/参考视频'}(${newLabel})与已有的首/尾帧锚定(${anchor.label},来自 ${anchor.source})互斥,h3 不能同时提交` +
+        `(full references cannot be combined with frame anchors)。${how}`,
     };
   }
   if (FRAME_ANCHOR_LABELS.has(newLabel) && reference) {
+    const isAudioRef = reference.label === 'ref-audio';
+    const how = isAudioRef
+      ? `该镜已连音频参考(${reference.source} → ${targetId}[ref-audio]),音轨参考在 h3 里算「全参考」,不能与首/尾帧锚定共存。` +
+        `两个修法任选:①保留首帧 → canvas.disconnect 去掉「${reference.source} → ${targetId}[ref-audio]」;` +
+        `②保留声音 → 把首帧这条边改成 label="ref-image"(关联生成),让参考图与音频参考并存。`
+      : `关联生成请继续用 ref-image,不要改连 ${newLabel};` +
+        `若确实要首帧模式,请先 canvas.disconnect 去掉全部 ref-image/ref-video 边(含「${reference.source} → ${targetId}[${reference.label}]」)。`;
     return {
       code: 'anchor-reference-conflict',
       severity: 'error',
       message:
         `首/尾帧锚定(${newLabel})与已有的参考(${reference.label},来自 ${reference.source})互斥,h3 不能同时提交` +
-        `(full references cannot be combined with frame anchors)。` +
-        `关联生成请继续用 ref-image,不要改连 ${newLabel};` +
-        `若确实要首帧模式,请先 canvas.disconnect 去掉全部 ref-image/ref-video 边(含「${reference.source} → ${targetId}[${reference.label}]」)。`,
+        `(full references cannot be combined with frame anchors)。${how}`,
     };
   }
   return null;
 }
 
 /**
- * h3.c 的 Ref2VA/FL2VA 互斥规则(提交前兜底)。
+ * h3.c 的参考组合规则(提交前兜底)—— 两条独立约束,都来自引擎硬校验。
  *
- * h3.c 硬性校验(`h3.c:591`):
+ * ① 互斥(`h3.c:618`):
  *     if (params->reference_count && (params->first_frame || params->last_frame))
  *         h3_set_error(ctx, "full references cannot be combined with frame anchors");
- * 即 `--ref-image` / `--ref-video`(references)**不能**与 `--first-frame` / `--last-frame`(frame anchors)共存。
+ *    `reference_count` 对 `--ref-image` / `--ref-video` / `--ref-audio` **一视同仁**
+ *    (三者都走 append_reference 自增计数,main.c:512-518),所以**音频参考同样与帧锚定互斥**。
+ *    ⚠️ 本模块此前只判 ref-image/ref-video,漏了 ref-audio —— 于是
+ *    「first-frame + ref-audio」能一路提交到引擎,再由 h3 exit 1 报一句英文。
  *
- * 为什么要在提交前拦:这条规则一旦违反,h3 是**入队后**才 exit 1 的,错误信息只有一句英文,
+ * ② 音频必须配视觉参考(`h3.c:659`):
+ *     if (params->reference_count && !params->visual)
+ *         h3_set_error(ctx, "reference audio requires an image or video reference");
+ *    `visual` 只统计 H3_REFERENCE_IMAGE / H3_REFERENCE_VIDEO(h3.c:629-652),
+ *    **纯音频引用不算 visual** ⇒ 只连 ref-audio、不连任何图/视频参考是非法的。
+ *    实测(2026-11-02):`h3 --ref-audio Y` ⇒ `reference audio requires an image or video reference`。
+ *
+ * 为什么要在提交前拦:这两条违反后,h3 都是**入队后**才 exit 1 的,错误信息只有一句英文,
  * 画布上看不出问题(用户只连了两条边,是渲染层的「镜头接续兜底」偷偷多注入了 first-frame)。
  * 2026-09 真实事故:mode=ref-video 的镜头被自动抽上游尾帧当首帧 → h3 拒绝。
  * 这里提前拒绝并**指明原因与修法**,不让错误跑到引擎里才暴露。
  */
-export function referenceAnchorConflictIssues(
+export function referenceCombinationIssues(
   refs: Array<{ role?: string }>,
 ): EdgeViolation[] {
-  const hasReference = refs.some((r) => r.role === 'ref-image' || r.role === 'ref-video');
-  const anchor = refs.find((r) => r.role === 'first-frame' || r.role === 'last-frame');
-  if (!hasReference || !anchor) return [];
-  return [
-    {
+  const out: EdgeViolation[] = [];
+  const has = (role: string) => refs.some((r) => r.role === role);
+  // ① 帧锚定 vs 全参考(含音频参考)—— 复用与连接层同一套标签集,避免两处各写一份
+  const anchor = refs.find((r) => (r.role ? FRAME_ANCHOR_LABELS.has(r.role) : false));
+  const fullRef = refs.find((r) => (r.role ? FULL_REFERENCE_LABELS.has(r.role) : false));
+  if (anchor && fullRef) {
+    const isAudio = fullRef.role === 'ref-audio';
+    out.push({
       code: 'media-mismatch',
       severity: 'error',
       message:
-        `参考图/参考视频(--ref-image/--ref-video)与首/尾帧锁定(--first-frame/--last-frame)在 h3 中互斥,不能同时提交` +
-        `(当前同时存在 ${anchor.role})。请二选一:要么去掉首/尾帧锚定(参考类模式不需要它),要么去掉参考图/参考视频。`,
-    },
-  ];
+        `参考类输入(--ref-image/--ref-video/--ref-audio)与首/尾帧锁定(--first-frame/--last-frame)在 h3 中互斥,不能同时提交` +
+        `(当前同时存在 ${anchor.role} 与 ${fullRef.role};引擎报 full references cannot be combined with frame anchors)。` +
+        (isAudio
+          ? `音频参考在 h3 里也算「全参考」,没有等价替代。两个修法任选:①保留首帧 → 去掉 ${fullRef.role} 参考;` +
+            `②保留声音 → 把首帧这条边改成 label="ref-image"(关联生成),让参考图与音频参考并存。`
+          : `请二选一:要么去掉首/尾帧锚定(参考类模式不需要它),要么去掉 ${fullRef.role}。`),
+    });
+  }
+  // ② 音频参考必须搭配视觉参考(纯音频引用在 h3 里不成立)
+  //    ⚠️ 与引擎同序:引擎先判锚定互斥(h3.c:618)再判 visual(h3.c:659)。
+  //    锚定冲突已命中时不再叠加本条 —— 两条修法是同一件事(去掉一侧),
+  //    叠着报只会让用户以为要改两处。
+  if (!anchor && has('ref-audio') && !refs.some((r) => (r.role ? VISUAL_REFERENCE_LABELS.has(r.role) : false))) {
+    out.push({
+      code: 'media-mismatch',
+      severity: 'error',
+      message:
+        `音频参考(--ref-audio)必须与至少一个视觉参考(--ref-image 参考图 或 --ref-video 参考视频)同时存在,不能单独使用` +
+        `(引擎报 reference audio requires an image or video reference;纯音频引用不计入 h3 的 visual 计数)。` +
+        `请给该镜头补一条参考图(ref-image,连角色卡/场景卡/文字包装卡)或参考视频(ref-video)边;` +
+        `若确实只要声音不要画面,那它不适用于本引擎,请改用独立的配音/音频处理链路。`,
+    });
+  }
+  return out;
 }
+
+/**
+ * @deprecated 旧名别名 —— 请改用 {@link referenceCombinationIssues}。
+ * 保留导出是为了不打断外部调用方,语义已完全等同于新函数。
+ */
+export const referenceAnchorConflictIssues = referenceCombinationIssues;

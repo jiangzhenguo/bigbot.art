@@ -337,3 +337,46 @@ describe('validateParams · E:二采脏值(直接调用方的最后一道闸)', 
     expect(validateParams({ ...base, secondPass: 0.9999 })).toEqual([]);
   });
 });
+
+/**
+ * ⑧ 参考组合(h3 引擎两条硬校验)—— 2026-11-02。
+ *
+ * 引擎事实(源码 + 实测,h3 二进制):
+ *   ① --ref-image/--ref-video/--ref-audio 与 --first-frame/--last-frame 互斥
+ *      (h3.c:618;--ref-audio 同样让 reference_count 自增,main.c:512-518)
+ *      ⇒ `h3 --first-frame X --ref-audio Y` 实测报
+ *        "full references cannot be combined with frame anchors"(exit 1)
+ *   ② --ref-audio 不能单独存在(h3.c:659;纯音频引用不计入 visual)
+ *      ⇒ `h3 --ref-audio Y` 实测报
+ *        "reference audio requires an image or video reference"(exit 1)
+ *
+ * 这两条在引擎里是**入队后**才 exit 1 的硬错误,所以必须在提交前拦。
+ */
+describe('validateParams · ⑧ 参考组合(h3 引擎硬校验)', () => {
+  it('⑧ 首帧/尾帧 与 音频参考同时给出 → 拒绝并引用引擎原话', () => {
+    for (const patch of [{ firstFrame: '/f.png' }, { lastFrame: '/l.png' }]) {
+      const msg = validateParams({ ...base, ...patch, refAudio: '/a.wav' }).join(' ');
+      expect(msg).toContain('互斥');
+      expect(msg).toContain('full references cannot be combined with frame anchors');
+    }
+  });
+
+  it('⑧ 只有音频参考、没有视觉参考 → 拒绝并引用引擎原话', () => {
+    const msg = validateParams({ ...base, refAudio: '/a.wav' }).join(' ');
+    expect(msg).toContain('reference audio requires an image or video reference');
+  });
+
+  it('⑧ 音频参考 + 参考图 / 参考视频 → 合法(engine 侧实测通过校验)', () => {
+    expect(validateParams({ ...base, refAudio: '/a.wav', refImages: ['/r.png'] })).toEqual([]);
+    expect(validateParams({ ...base, refAudio: '/a.wav', refVideo: '/v.mp4' })).toEqual([]);
+  });
+
+  it('⑧ 首帧 与 参考图 互斥(既有规则,回归护栏)', () => {
+    const msg = validateParams({ ...base, firstFrame: '/f.png', refImages: ['/r.png'] }).join(' ');
+    expect(msg).toContain('互斥');
+  });
+
+  it('⑧ 不给任何参考字段的老调用方不受影响(向后兼容)', () => {
+    expect(validateParams({ steps: 30, layers: 50, reuse: 1, frames: 124 })).toEqual([]);
+  });
+});

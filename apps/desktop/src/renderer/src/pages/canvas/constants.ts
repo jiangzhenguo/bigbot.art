@@ -225,7 +225,19 @@ export const SHOT_MODE_LABEL: Record<string, string> = {
   'ref-image': '关联',
   'ref-video': '参考视频',
 };
-/** 参考角色(按 mode 可用的)+ 需要的媒体类型 */
+/**
+ * 参考角色(按 mode 可用的)+ 需要的媒体类型。
+ *
+ * ⚠️ ref-audio **不出现在帧锚定模式**(first-frame / last-frame / first-last)里,这不是漏写:
+ * h3 的 `--ref-audio` 会让 `reference_count` 自增(main.c:512-518),而引擎的互斥判定是
+ * `reference_count && (first_frame || last_frame)`(h3.c:618)—— **不看端口种类**。
+ * 所以首/尾帧模式下给「音频参考」= 提交必被引擎拒绝(引擎报 full references cannot be
+ * combined with frame anchors)。实测 2026-11-02:`--first-frame X --ref-audio Y` exit 1。
+ *
+ * 要「同一张脸 + 同一个声音」的正确连法是 ref-image 模式:参考图 + 音频参考并存,
+ * 引擎合法(h3.c:659 只要求音频参考搭配**图或视频**,首帧不算)。
+ * 连接层与提交层另有硬拦(shared.referenceCombinationIssues),这里只是不让 UI 提供非法组合。
+ */
 export const SHOT_REF_ROLES: Record<string, Array<{ role: string; label: string; media: 'image' | 'audio' | 'video'; multiple?: boolean }>> = {
   text2video: [
     { role: 'ref-video', label: '参考视频', media: 'video' },
@@ -233,16 +245,13 @@ export const SHOT_REF_ROLES: Record<string, Array<{ role: string; label: string;
   ],
   'first-frame': [
     { role: 'first-frame', label: '首帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
   ],
   'last-frame': [
     { role: 'last-frame', label: '尾帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
   ],
   'first-last': [
     { role: 'first-frame', label: '首帧', media: 'image' },
     { role: 'last-frame', label: '尾帧', media: 'image' },
-    { role: 'ref-audio', label: '音频参考', media: 'audio' },
   ],
   'ref-image': [
     { role: 'ref-image', label: '参考图(1-9 张)', media: 'image', multiple: true },
