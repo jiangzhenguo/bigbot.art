@@ -140,6 +140,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
             : undefined;
           const assetId = String(s.assetId ?? '');
           if (role && assetId && !autoBlocked(role)) arr.push({ assetId, role, auto: true });
+        } else if (src.kind === 'audio-ref') {
+          // 音频参考节点 → 镜头:节点绑定的**音频资产**作声音参考(ref-audio · 带声直出)。
+          // 与上面的 asset 分支完全同构 —— 产出 { assetId, role, auto:true }(资产 id 引用,不是路径):
+          // audio-ref 节点的 data.assetId 指向资产库里的音频资产
+          // (视频抽音轨后自动绑定,或检查器手选)。
+          // ⚠️ assetId 为空(节点刚建、还没绑定资产)⇒ 不产出,与 asset 分支同一纪律。
+          // ⚠️ 让位规则同样生效:用户手绑的 ref-audio 优先、× 停用后不自动注入。
+          if (e.label === 'ref-audio' && !autoBlocked('ref-audio')) {
+            const assetId = String(s.assetId ?? '');
+            if (assetId) arr.push({ assetId, role: 'ref-audio', auto: true });
+          }
         } else if (fromShot) {
           // 镜头接续:上游尾帧 → 下游首帧
           if (frameOk && !autoBlocked('first-frame')) {
