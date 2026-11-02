@@ -40,6 +40,11 @@ const MANUAL_MODELS: Array<{ name: string; desc: string; how: string }> = [
     how: '在 LM Studio 内下载(本应用不代下)',
   },
   {
+    name: 'Qwen-Image-2.1-Turbo-Heretic',
+    desc: '图片 · 文生图/图生图/参考编辑 · 采样表锁 8 步',
+    how: '按 mlx-gen docs/qwen-image-21.md 转换 text encoder 并本地组装,完成后自动识别',
+  },
+  {
     name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)',
     desc: '图片 · 文生图/图生图 · ~22GB',
     how: 'mlx-gen 本地转换构建(tools/build_qwen21_uncensored_package.sh),构建后自动识别',

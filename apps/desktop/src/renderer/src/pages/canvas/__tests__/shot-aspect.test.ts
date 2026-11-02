@@ -21,8 +21,10 @@ import {
   VIDEO_TIER_PRESETS,
   SHOT_SIZES,
   fitImageSizeToGrid,
+  fitImageSizeToTier,
   classifyAspect,
   defaultShotAspectForRole,
+  resolveShotSpecForRole,
 } from '@bigbotart/shared';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -89,7 +91,7 @@ describe('③ 连接角色只定比例:首帧沿用图片比例,参考图默认 
     const a = defaultShotAspectForRole('first-frame', { width: 1920, height: 1080 });
     expect(a).toBe('16:9');
     // 关键:返回值只能是比例,像素由档位查表
-    const size = SHOT_SIZES[a!].preview;
+    const size = SHOT_SIZES['16:9'].preview;
     expect(size).toEqual({ width: 864, height: 480 }); // 不是 1920×1080
   });
 
@@ -106,8 +108,8 @@ describe('③ 连接角色只定比例:首帧沿用图片比例,参考图默认 
     expect(defaultShotAspectForRole('first-frame', { width: 0, height: 0 })).toBeNull();
   });
 
-  it('首帧 + 无法归类的图片比例(如 3:2)→ null(不猜)', () => {
-    expect(defaultShotAspectForRole('first-frame', { width: 1500, height: 1000 })).toBeNull();
+  it('首帧 + 非预设图片比例(如 3:2)→ custom(不得回退弹层默认 16:9)', () => {
+    expect(defaultShotAspectForRole('first-frame', { width: 1500, height: 1000 })).toBe('custom');
   });
 
   it('参考图 → 4:3,且与上游尺寸无关', () => {
@@ -118,6 +120,61 @@ describe('③ 连接角色只定比例:首帧沿用图片比例,参考图默认 
   it('其余角色不干预', () => {
     for (const r of [undefined, '', 'text2video', 'ref-video', 'audio-ref', 'last-frame']) {
       expect(defaultShotAspectForRole(r as string), `${r} 不应干预`).toBeNull();
+    }
+  });
+});
+
+describe('③b 「+」创建首帧 shot 的完整落盘规格', () => {
+  it('3:2 横图 → custom 672×448，四个尺寸字段一致且不回退 16:9', () => {
+    const spec = resolveShotSpecForRole('first-frame', '16:9', 'default', { width: 1500, height: 1000 });
+    expect(spec).toEqual({
+      aspect: 'custom',
+      width: 672,
+      height: 448,
+      customWidth: 672,
+      customHeight: 448,
+    });
+    expect(isLegal(spec.width, spec.height)).toBe(true);
+  });
+
+  it('2:3 竖图 → custom 448×672，保持竖屏方向与图片比例', () => {
+    const spec = resolveShotSpecForRole('first-frame', '16:9', 'default', { width: 1000, height: 1500 });
+    expect(spec).toEqual({ aspect: 'custom', width: 448, height: 672, customWidth: 448, customHeight: 672 });
+    expect(spec.width / spec.height).toBeCloseTo(2 / 3, 10);
+  });
+
+  it('4K 首帧仍受默认档约束，不把原图像素直接当视频尺寸', () => {
+    const spec = resolveShotSpecForRole('first-frame', '16:9', 'default', { width: 6000, height: 4000 });
+    expect(spec).toMatchObject({ aspect: 'custom', width: 672, height: 448 });
+    expect(isLegal(spec.width, spec.height)).toBe(true);
+  });
+
+  it('预设比例仍走原档位表，缺上游尺寸时仍用弹层所选', () => {
+    expect(resolveShotSpecForRole('first-frame', '16:9', 'default', { width: 1920, height: 1080 })).toEqual({
+      aspect: '16:9',
+      width: 864,
+      height: 480,
+    });
+    expect(resolveShotSpecForRole('first-frame', '9:16', 'default')).toEqual({
+      aspect: '9:16',
+      width: 576,
+      height: 1024,
+    });
+  });
+});
+
+describe('fitImageSizeToTier', () => {
+  it('各档 custom 尺寸均为合法 32 网格，且不超同档横/竖边界', () => {
+    for (const tier of VIDEO_TIERS) {
+      const base = SHOT_SIZES['16:9'][tier];
+      for (const [w, h] of [[1500, 1000], [1000, 1500], [1250, 1000], [800, 1000]] as const) {
+        const size = fitImageSizeToTier(w, h, tier);
+        expect(isLegal(size.width, size.height), `${w}×${h}/${tier} 非法`).toBe(true);
+        const maxWidth = w >= h ? base.width : base.height;
+        const maxHeight = w >= h ? base.height : base.width;
+        expect(size.width).toBeLessThanOrEqual(maxWidth);
+        expect(size.height).toBeLessThanOrEqual(maxHeight);
+      }
     }
   });
 });

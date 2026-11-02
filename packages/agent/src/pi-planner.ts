@@ -15,7 +15,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { randomUUID } from 'node:crypto';
 import type { CanvasEdge, CanvasNode, LlmProtocol, LlmSource } from '@bigbotart/shared';
-import { STORYBOARD_HEAD, tableToGfm, storyboardMarkdown, withOpenCodeGoHeaders } from '@bigbotart/shared';
+import { STORYBOARD_HEAD, tableToGfm, storyboardMarkdown, verifyGfmTableRoundTrip, withOpenCodeGoHeaders } from '@bigbotart/shared';
 import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 import { planDeterministic, planStoryboardDeterministic, buildStoryboardMaterialized } from './plan.js';
 
@@ -62,6 +62,8 @@ export interface LlmStoryboardOutput {
     衔接?: '硬切' | '接尾帧';
     /** 本镜出场的角色卡/场景卡名,逗号分隔;空镜留空 */
     角色?: string;
+    /** 段号:同段的多行 = 一次生成里的多个切(Σ≤15 秒);留空 = 一行一镜一提交 */
+    段?: string;
     /** 以下扩展字段均可选;留空时表格与提示词都不占位 */
     焦段?: string;
     水平角度?: string;
@@ -93,16 +95,18 @@ const SYSTEM_PROMPT = `你是 BigBotArt 的视频导演 Agent。把用户的创�
 export const STORYBOARD_SYSTEM_PROMPT = `你是 BigBotArt 的分镜导演 Agent。把用户的创作需求拆成一张分镜表(表格的一行 = 一个分镜 = 一个 shot 节点)。
 
 规则:
-1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 衔接: "硬切"|"接尾帧", 角色?: string, 提示词?: string, 焦段?: string, 水平角度?: string, 机位高度?: string, 构图?: string, 视线?: string, 焦点?: string, 稳定性?: string, 光位?: string, 声景?: string, 配乐?: string, 站位?: string, 节拍?: string}], "report": string(写给人类的一句话)}
+1. 输出 JSON(不要 markdown 代码块):{"title": string(分镜表名), "intro": string(拆镜思路), "basePrompt": string(全局质感段——质感词只出现于此,不逐行漂移), "rows": [{画面描述: string, 对白?: string, 景别?: string, 运镜?: string, 时长?: number, 需配图?: boolean, 衔接: "硬切"|"接尾帧", 角色?: string, 段?: string, 提示词?: string, 焦段?: string, 水平角度?: string, 机位高度?: string, 构图?: string, 视线?: string, 焦点?: string, 稳定性?: string, 光位?: string, 声景?: string, 配乐?: string, 站位?: string, 节拍?: string}], "report": string(写给人类的一句话)}
 2. 每个镜头默认 2-6 秒;短剧 3-8 行。单段硬上限 15 秒。一行只写一个连续动作,不要把进门、换衣服、换姿势塞进同一行。
 3. ⚠️ **单镜长片不要拆行**:需求写「单镜 / 只铺1个shot / 一条 Ns 视频 / 按 0-3、3-6…区间组织提示词」时,**只输出 1 行**,「时长」填总秒数(如 15),五个时间区间全部写进该行「画面描述」。区间是提示词结构,不是多个分镜行 —— 拆成多行会导致时长列变短片、文案仍写总时长(真实事故)。
 4. 涉及人物时在「画面描述」显式锁定身份:同一人物全程长相/服装一致、面部不变形。
 5. 「衔接」每行必填,只能是「硬切」或「接尾帧」。第 1 行一定是硬切。**硬切**只用于换场景、换人出场、换服装/体位、或时间跳开。**同一地点、同一批角色、动作顺着往下**(对峙→特写→反应→交锋)写接尾帧 —— 不要只因为换了景别/机位就硬切。
 6. 「角色」列写本镜出场的角色卡/场景卡短名(与画布标题对应,逗号分隔)。空镜/无人景只写场景卡名或留空,禁止把未出场的角色填进去。同一人物跨 2 镜及以上出现时,每镜都必须给稳定角色名,**即使画布上还没有角色卡也不能留空或写「无角色卡」**;后续会先建卡再铺节点,重复角色缺卡会被一致性门拒绝。
 7. 「需配图」:只有这一镜需要单独构图静帧时为 true(角色卡/场景卡已够用则 false)。接尾帧行一律 false。
+7b. 「段」:**同一段 = 一次生成里的多个切**(省一次提交、跨切点更连贯)。同一场景里**动作顺着往下**的连续切可以合并成一段,段内各切「衔接」写「硬切」——段内不需要接尾帧(那是跨段首切才用的)。**一段合计不超过 15 秒**(h3 单次生成上限),段内第一切的镜头写全程持续时间;段不是必填,不确定就留空(留空 = 一行一镜一提交)。单镜长片(如一条 15 秒连续镜头)不要填段,填了会把「按区间组织的提示词」拆成多切。
 8. 「提示词」留空:铺节点时由组装器按画面描述/景别/运镜 + basePrompt 生成 H3 五段式(视频)/ Z-Image 六段式(图)。
-9. 摄影决策尽量写进扩展字段,不要只在「画面描述」里堆形容词:焦段写「广/标准/长 + 景深意图」;水平角度写「正面/斜侧/正侧/后斜侧/背面」;机位高度写「地平/低仰/平视/高俯/顶视」;构图写「三分法/中心/对角线/对称/负空间/前景遮挡」;稳定性写「稳定/微晃/手持」。视线与焦点可不同。运镜一镜只选一个,可在「运镜」里附一句运动理由。
-10. 「光位」写具体光源方向与冷暖;「声景」写具体环境声/动作声,不复述台词;「配乐」写配器与速度,没有就留空;「站位」写人物在画面左右、朝向与距离;「节拍」写本镜叙事职责。信息不足时扩展字段可留空,禁止编造器材型号,禁止写「电影感、8K、大师级」这类空泛词。`;
+9. 摄影决策尽量写进扩展字段,不要只在「画面描述」里堆形容词:焦段写「广/标准/长 + 景深意图」;水平角度写「正面/斜侧/正侧/后斜侧/背面」;机位高度写「地平/低仰/平视/高俯/顶视」;构图写「三分法/中心/对角线/对称/负空间/前景遮挡」;稳定性写「稳定/微晃/手持」。视线与焦点可不同。运镜一镜只选一个,可在「运镜」里附一句运动理由。**构图字段采用整组模式:要么每镜都完整填写焦段/水平角度/机位高度/构图/视线/焦点/稳定性,要么整组留空走简表;禁止只填个别镜或个别列。**
+10. 「光位」写具体光源方向与冷暖;「声景」写具体环境声/动作声,不复述台词;「配乐」写配器与速度,没有就留空;「站位」写人物在画面左右、朝向与距离;「节拍」写本镜叙事职责。这些信息不足时可单独留空,禁止编造器材型号,禁止写「电影感、8K、大师级」这类空泛词。
+11. 用户明确成片总时长时,各行「时长」合计必须在目标 ±15% 内。真正硬切时,前后镜的景别/水平角度/人物关系至少改变一项;三项都不变就合并或改一项,不要制造无意义切点(接尾帧不受此限)。`;
 
 /**
  * 分镜规划的输出预算(token)。
@@ -359,6 +363,7 @@ export class PiPlanner {
         '提示词(可选)': String(r.提示词 ?? ''),
         衔接: r.衔接 === '硬切' || (r.衔接 !== '接尾帧' && i === 0) ? '硬切' : '接尾帧',
         角色: String(r.角色 ?? ''),
+        段: String(r.段 ?? ''),
         焦段: String(r.焦段 ?? ''),
         水平角度: String(r.水平角度 ?? ''),
         机位高度: String(r.机位高度 ?? ''),
@@ -377,13 +382,19 @@ export class PiPlanner {
     const gfm = tableToGfm(head, rows);
     const title = out.title || '新分镜 · 分镜表';
     const basePrompt = out.basePrompt ?? params.basePrompt ?? '';
+    const markdown = storyboardMarkdown(title, out.intro || '', head, rows);
+    /* 写出即回读:LLM 单元格常带换行,序列化一旦退回多行会解析成 0 行,
+     * 下游 materialize 随后假报「均已铺出」,模型只能手工建几十个节点烧满轮次。
+     * 这里是规划层的第一道自检,主进程入口还会再拦一次 0 行。 */
+    const roundTripIssue = verifyGfmTableRoundTrip(markdown, rows.length, head.length);
+    if (roundTripIssue) throw new Error(roundTripIssue);
     const storyboard: CanvasNode = {
       id: nid('sb'),
       kind: 'storyboard',
       position: { x: 420, y: 80 },
       label: title,
       data: {
-        markdown: storyboardMarkdown(title, out.intro || '', head, rows),
+        markdown,
         basePrompt,
         lastTable: gfm,
         aspect: '16:9',

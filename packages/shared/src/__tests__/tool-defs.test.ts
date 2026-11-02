@@ -11,14 +11,22 @@ describe('document.read 工具定义', () => {
     expect(names).toContain('document.read');
   });
 
-  it('schema:nodeId 必填,chunk/size 可选数字', () => {
+  it('schema:nodeId 必填,chunk/size/startLine/endLine 可选数字', () => {
     const t = toolDefinitions().find((x) => x.name === 'document.read')!;
     const p = t.parameters as { properties: Record<string, unknown>; required?: string[] };
     expect(p.required).toContain('nodeId');
     expect((p.properties.nodeId as { type: string }).type).toBe('string');
     expect((p.properties.chunk as { type: string }).type).toBe('number');
     expect((p.properties.size as { type: string }).type).toBe('number');
+    expect((p.properties.startLine as { type: string }).type).toBe('number');
+    expect((p.properties.endLine as { type: string }).type).toBe('number');
     expect(t.description).toContain('分段');
+  });
+
+  it('description 同时说明行范围读取与 chunk 两种方式', () => {
+    const t = toolDefinitions().find((x) => x.name === 'document.read')!;
+    expect(t.description).toContain('startLine');
+    expect(t.description).toContain('endLine');
   });
 
   it('描述提示先读 chunk=0 看结构(与实现一致)', () => {
@@ -29,7 +37,7 @@ describe('document.read 工具定义', () => {
 
 describe('工具清单完整性', () => {
   it('关键既有工具仍在(未被覆盖/删除)', () => {
-    for (const n of ['canvas.list_nodes', 'canvas.get_node', 'canvas.connect', 'storyboard.plan', 'engine.submit', 'assets.import', 'memory.remember', 'continuity.check', 'ask.user', 'todo.write', 'plan.present']) {
+    for (const n of ['canvas.list_nodes', 'canvas.get_node', 'canvas.connect', 'canvas.connect_many', 'storyboard.plan', 'engine.submit', 'assets.import', 'memory.remember', 'continuity.check', 'ask.user', 'todo.write', 'plan.present', 'h3.write_prompts']) {
       expect(names).toContain(n);
     }
   });

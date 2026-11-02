@@ -48,6 +48,15 @@ describe('SkillStore 内置技能种子', () => {
     expect(existsSync(SKILLS_FILE)).toBe(true);
   });
 
+  it('h3-prompt-writing 写明参考图不锁身体位置,旧版指纹可升级', () => {
+    const store = new M.SkillStore();
+    const ins = store.get('h3-prompt-writing')?.instructions ?? '';
+    expect(ins).toContain('参考图锁外观,不锁身体位置');
+    expect(ins).toContain('do not copy the pose');
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-94509bdd-41882')).toBe(true);
+    expect(M.fingerprintText(ins)).not.toBe('fnv1a-94509bdd-41882');
+  });
+
   it('已有库再次构造 → 合并不存在的内置 id,用户技能原样保留', () => {
     // 模拟老版本库:只剩一个用户技能 + 一个仍在服役的内置技能(其余内置被"官方扩容"新增)
     writeFileSync(

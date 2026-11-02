@@ -86,6 +86,27 @@ export function describeInboundRefs(inbounds: InboundPort[]): string {
   return lines.join('\n');
 }
 
+/** 站立/三视图角色卡的标题特征。只看连线标题,不看像素。 */
+const CARD_LIKE_REF_RE = /角色卡|三视图|拆分/;
+/** 全身站立卡表达不了的身体位置。站着走、对视、特写不在此列。 */
+const OFF_CARD_POSE_RE = /躺|仰卧|趴|跪|后入|骑乘|跨坐|抽插/;
+
+/**
+ * Ref2VA 连着角色卡、简述又要另一种姿势时,给外层 Agent 的明确警告。
+ * 不拦写回:模式由连线决定,写手仍按当前模式落词;外层看到这句就不得提交,
+ * 必须改成同尺寸静帧 + first-frame 后再写。姿势一致或参考不是角色卡时返回 null。
+ */
+export function standingCardPoseWarning(mode: H3PromptMode, refsText: string, brief: string): string | null {
+  if (mode !== 'Ref2VA') return null;
+  if (!CARD_LIKE_REF_RE.test(refsText) || !OFF_CARD_POSE_RE.test(brief)) return null;
+  return (
+    '⚠️ 姿势和卡不一致:参考图是角色卡(站立全身或三视图),这一镜要的身体位置和卡不同。' +
+    'Ref2VA 按原比例单独编码参考图,--ref-image-size 的 match/max 只改参考图像素,不把人铺进成片画布。' +
+    '提示词里写「只锁身份、不要抄姿势」改不了位置,常见结果是头和骨盆断开、或多出一张脸。' +
+    '禁止接着 engine.submit。先出一张与镜头同宽高的静帧,用角色正面 ref-image 做参考生图(不要纯文生图,否则锁不住人),姿势在静帧里摆对后再断开 shot 上的 ref-image,改用 first-frame 连到这个镜头,再 h3.write_prompt。'
+  );
+}
+
 /**
  * update_node 是否在改 shot 的 prompt。
  * 调用方应先把顶层 prompt 并进 patch。非 shot、或这次没碰 prompt 键 → 放行。

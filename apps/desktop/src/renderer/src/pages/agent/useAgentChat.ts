@@ -272,7 +272,8 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     [projectId],
   );
 
-  /* 消息流自动贴底:用户在底部附近时,新消息(回复/工具行/loading)到达即滚到底;往上翻查历史则不打扰 */
+  /* 消息流唯一自动贴底入口:用户在底部附近时,新消息(回复/工具行/loading)到达即滚到底;
+   * 往上翻查历史则不打扰。SSE/收尾/自动续跑只更新 msgs,不得另行强制修改 scrollTop。 */
   useEffect(() => {
     const el = chatRef.current;
     if (!el || !pinToBottom.current) return;
@@ -323,7 +324,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
     const loadingId = ++msgId.current;
     markSending(true);
     setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '正在压缩对话…' }]);
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     window.bigbotart
       .memoryCompact(projectId, canvasId)
       .then((res) => {
@@ -342,7 +342,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           }
           return [...rest, { id: doneId, kind: 'agent', error: { title: '压缩失败', detail: res.error ?? '未知错误' } }];
         });
-        if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
       })
       .catch((e) => {
         const errId = ++msgId.current;
@@ -431,7 +430,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
       markAgentBusy(true);
       markSending(true);
       setMsgs((m) => [...m, { id: loadingId, kind: 'sys', loading: true, text: '思考中…' }]);
-      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
 
       window.bigbotart
         .agentChat({
@@ -594,7 +592,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         onCanvasMutated();
       });
       void refreshThreads();
-      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
       // 执行中发来的下一条:等这次收尾落完再开,避免旧 done 把新一轮收掉
       flushReplaceRef.current();
     },
@@ -788,7 +785,7 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           settleGuard.current = false;
           liveToolCardId.current = null;
           liveStreamMsgId.current = null;
-          pinToBottom.current = true;
+          // 保留用户当前滚动位置:仍在底部时由 msgs effect 跟随,上滑阅读时不打断。
           const sysId = ++msgId.current;
           const loadId = ++msgId.current;
           setMsgs((m) => [
@@ -798,7 +795,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           ]);
           markAgentBusy(true);
           markSending(true);
-          if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
         };
         if (ev.threadId && ev.threadId !== activeThreadIdRef.current) {
           setActiveThreadId(ev.threadId);
@@ -860,7 +856,6 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
         });
         flushReplaceRef.current();
       }
-      if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
     });
     return off;
   }, [projectId, canvasId, onCanvasMutated, loadThreadMessages, refreshThreads, refreshTodos, toastMsg, markSending, markAgentBusy]);

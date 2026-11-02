@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -95,6 +95,29 @@ describe('mlxgenDownload 去重', () => {
     expect(r.error).toContain('无应用内下载通道');
     expect(r.error).toContain('build_qwen21_uncensored_package.sh');
     expect(h.children.length).toBe(before); // 没有起任何下载进程
+  });
+
+  it('Turbo Heretic 出现在模型清单,下载入口给转换组装指引而不是直接拉原始社区包', () => {
+    expect(M.mlxgenModelInfo().some((m) => m.repoId === 'Qwen-Image-2.1-Turbo-Heretic')).toBe(true);
+    const before = h.children.length;
+    const r = M.mlxgenDownload('Qwen-Image-2.1-Turbo-Heretic');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('无应用内下载通道');
+    expect(r.error).toContain('convert_heretic_text_encoder.py');
+    expect(h.children.length).toBe(before);
+  });
+});
+
+describe('下载中的删除保护', () => {
+  it('模型仍在下载时拒绝删除，不与下载进程并发写同一目录', async () => {
+    M.mlxgenDownload(REPO_ZIMAGE);
+    growBlobs(REPO_ZIMAGE);
+
+    const result = await M.mlxgenDelete(REPO_ZIMAGE);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('请先取消下载');
+    expect(existsSync(repoDir(REPO_ZIMAGE))).toBe(true);
   });
 });
 

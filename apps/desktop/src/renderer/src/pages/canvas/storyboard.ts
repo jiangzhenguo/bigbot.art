@@ -2,15 +2,61 @@
  * 分镜表(storyboard)纯工具 — CanvasPage 与 StoryboardInspector 共用
  * 铺节点/撤销/重新同步的派生逻辑集中在这里,避免两处漂移。
  */
-import { parseGfmTable, tableToGfm, SB_SIZE, storyboardLinkOf } from '@bigbotart/shared';
+import { parseGfmTable, tableToGfm, SB_SIZE, storyboardLinkOf, storyboardLinkFields } from '@bigbotart/shared';
+import type { MaterializeRowPlan, MaterializeSegmentPlan } from '@bigbotart/shared';
+
+/** 写进 shot.data.segment 的段信息(与主进程同结构) */
+export type MaterializeSegmentMeta = Pick<MaterializeSegmentPlan, 'seconds' | 'cuts'> & { rows: number[] };
 import type { CanvasNode } from './types';
 
-/** 该分镜表已铺出的行号(去重升序)——storyboardRow 优先,否则 promptFrom */
+/**
+ * 分镜表铺出的 shot data 构造器(纯函数)。
+ *
+ * engine 必须是 h3c:2026-10-28 事故里这条路径写死 mock,真实模式只产出 1 秒占位 MP4。
+ * 抽成纯函数供单测直接断言,CanvasPage 只负责 id/位置/连线。
+ */
+export function materializedShotData(input: {
+  prompt: string;
+  plan: Pick<MaterializeRowPlan, 'rowNo' | 'shotMode' | 'modeOverride'>;
+  width: number;
+  height: number;
+  seconds: number;
+  frames: number;
+  tier: string;
+  seed: number;
+  storyboardId: string;
+  /** 段内多切:该节点覆盖的全部表行(含首行);单切不传 */
+  rows?: number[];
+  /** 段信息:一次生成里有几个切、各自多长(多切才写进节点) */
+  segment?: MaterializeSegmentMeta;
+}): Record<string, unknown> {
+  return {
+    engine: 'h3c',
+    mode: input.plan.shotMode,
+    ...(input.plan.modeOverride ? { modeOverride: true } : {}),
+    prompt: input.prompt,
+    width: input.width,
+    height: input.height,
+    seconds: input.seconds,
+    frames: input.frames,
+    steps: 30,
+    layers: 50,
+    reuse: 1,
+    tier: input.tier,
+    seed: input.seed,
+    refs: [],
+    ...(input.segment ? { segment: input.segment } : {}),
+    ...storyboardLinkFields(input.storyboardId, input.plan.rowNo, input.rows),
+  };
+}
+
+/** 该分镜表已铺出的行号(去重升序)——storyboardRow 优先,否则 promptFrom;段内多切展开 rows */
 export function sbMaterializedRows(sbId: string, ns: CanvasNode[]): number[] {
   const rows = new Set<number>();
   for (const n of ns) {
     const link = storyboardLinkOf(n.data);
-    if (link?.nodeId === sbId && typeof link.row === 'number') rows.add(link.row);
+    if (link?.nodeId !== sbId) continue;
+    for (const row of link.rows ?? (typeof link.row === 'number' ? [link.row] : [])) rows.add(row);
   }
   return [...rows].sort((a, b) => a - b);
 }

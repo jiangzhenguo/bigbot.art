@@ -34,6 +34,10 @@ Ref2VA 重写输出按顺序包含六段:`subject_definitions`、`summary`、`re
 
 标签规则、保留度分析(retention analysis)与完整示例见**附录 B**。画布上参考素材与节点的对应关系,可用 canvas.get_node / assets.get 核实后再写 `subject_definitions`。
 
+### 参考图锁外观,不锁身体位置
+
+角色卡若是全身站立或三视图,而这一镜的姿势与卡不同(躺、仰卧、趴、跪、后入、骑乘、跨坐等):不要把「只锁身份、不要抄姿势 / do not copy the pose / identity lock only」写进 `subject_definitions` 或 `retention_analysis`。引擎按原比例单独编码参考图,`--ref-image-size` 的 `match`(默认,缩到与成片同面积)和 `max`(短边最多 2048)都只改参考图自己的像素,不把这张图铺进成片画布。文字否定改不了人在画面里的位置,常见结果是头和骨盆断开、或多出一张脸。这种镜头应改成 I2VA:先有一张与成片同宽高、姿势已经正确的静帧作为首帧。静帧本身用参考生图锁人(角色正面 ref-image 连到 image-gen,不要纯文生图),视频提示词写明开场构图跟首帧走,头和身体保持首帧里的连接。外层 Agent 收到「姿势和卡不一致」时必须先改连线再重写,不要在 Ref2VA 上提交。
+
 ## 输出规则
 
 - 重写后的 prompt 各段一律用**英文**撰写;台词、歌词、画面中可见文字**保留原语言**(如中文台词原样保留在 `<d>[Chinese] ...</d>` 内)。

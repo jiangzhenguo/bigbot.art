@@ -11,7 +11,8 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { I18nProvider, translate, type Lang } from './i18n';
 import { useColorScheme } from './hooks/useColorScheme';
-import type { CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
+import type { Asset, CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
+import { addAssetToActiveCanvas } from './pages/assets/useInCanvas';
 
 export type Page = 'home' | 'canvas' | 'assets' | 'skills' | 'timeline' | 'settings' | 'onboarding' | 'projects';
 
@@ -177,6 +178,20 @@ export default function App() {
       }
     },
     [projectId, currentPage],
+  );
+
+  /** 资源管理「在画布使用」:先把真实资源节点存进活动画布,成功后再跳页。 */
+  const handleUseInCanvas = useCallback(
+    async (asset: Asset) => {
+      if (!projectId) {
+        await handleNavigate('projects');
+        return;
+      }
+      const result = await addAssetToActiveCanvas(window.bigbotart, projectId, asset);
+      setProjectCanvases(result.projectCanvases);
+      await handleNavigate('canvas');
+    },
+    [projectId, handleNavigate],
   );
 
   /** 返回上一页(资源管理等详情页用);栈空兜底回首页 */
@@ -497,7 +512,7 @@ export default function App() {
       {currentPage === 'assets' && (
         <ErrorBoundary name="资产">
           <AssetsPage
-            onNavigate={handleNavigate}
+            onUseInCanvas={handleUseInCanvas}
             onBack={handleBack}
             backLabel={backLabel}
             projectId={projectId}

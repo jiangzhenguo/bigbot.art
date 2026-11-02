@@ -12,6 +12,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { DebugLogger } from './logger';
@@ -41,6 +42,8 @@ const KNOWN_MODELS: Array<{
   /** LM Studio 模型库下的相对目录(扁平 MLX-VL checkpoint;调用期用 lmStudioModelsRoot() 拼绝对路径) */
   lmstudioDir?: string;
   manualOnly?: boolean;
+  /** manualOnly 条目在误入下载通道时给出的可执行构建指引 */
+  manualBuildHint?: string;
 }> = [
   { id: 'z-image-turbo', name: 'Z-Image-Turbo', repoId: 'AbstractFramework/z-image-turbo-8bit' },
   // Qwen-Image-2.1 MLX 8bit（JoyFusionAI 自建导出，24GB / 本地 22GB）：
@@ -64,6 +67,21 @@ const KNOWN_MODELS: Array<{
     msRepoId: 'Qwen/Qwen-Image-2.1-Turbo',
     localDir: 'Qwen-Image-2.1-Turbo',
   },
+  // Qwen-Image-2.1-Turbo-Heretic(2026-10 接入):Heretic text encoder 需经
+  // mlx-gen tools/convert_heretic_text_encoder.py 转换,再与官方 Turbo DiT、VAE、processor
+  // 本地组装;沿用 Turbo sample_sigmas,锁 8 步。新版转换保留 vision tower 并规范化 config,
+  // 同时支持文生图 / latent 图生图 / qwen21.edit 参考编辑。原始社区 prepared package 不能直接加载,
+  // 不提供应用内下载,避免「下载成功但输出噪声」的假通道。
+  {
+    id: 'qwen-image-2.1-turbo-heretic',
+    name: 'Qwen-Image-2.1-Turbo-Heretic',
+    repoId: 'Qwen-Image-2.1-Turbo-Heretic',
+    localDir: 'Qwen-Image-2.1-Turbo-Heretic',
+    manualOnly: true,
+    manualBuildHint:
+      '按 mlx-gen docs/qwen-image-21.md 的 Third-party prepared packages 小节,' +
+      '用 tools/convert_heretic_text_encoder.py 转换并组装本地包',
+  },
   // Qwen-Image-2.1 Uncensored(2026-10 接入):社区 8bit 转换包,纯文生图/图生图
   // (text_encoder 无 vision tower,做不了参考编辑)。repoId 即本地目录名 ——
   // 没有 HF 下载通道(源是单文件 GGUF,需 mlx-gen tools/build_qwen21_uncensored_package.sh
@@ -74,6 +92,9 @@ const KNOWN_MODELS: Array<{
     repoId: 'Qwen-Image-2.1-Uncensored-MLX',
     localDir: 'Qwen-Image-2.1-Uncensored-MLX',
     manualOnly: true,
+    manualBuildHint:
+      '在 mlx-gen 仓库运行 tools/build_qwen21_uncensored_package.sh 从社区 GGUF 本地转换构建' +
+      '(源 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 需另行下载)',
   },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', msRepoId: 'mlx-community/Qwen-Image-Edit-8bit' },
   // 多参考生成/多参考编辑/outpaint(image-gen 带 ref-image 连线必需)。
@@ -338,6 +359,50 @@ const jobs = new Map<string, DownloadJob>();
 /** repoId → 进行中的 jobId(同模型同时只允许一个下载进程,防连点互等 hf_hub 锁) */
 const activeByRepo = new Map<string, string>();
 
+/** 同一模型的删除操作串行化，避免重复 IPC 并发递归删除同一目录。 */
+const deletingByRepo = new Set<string>();
+
+/**
+ * 删除一个已知模型的全部本地副本（HF 缓存、~/ai/models 直用目录、LM Studio 目录）。
+ * 只接受 KNOWN_MODELS 中的 repoId，路径全部由主进程清单推导，不接收渲染进程传入的文件路径。
+ * 下载进行中拒绝删除，避免下载进程在删除后继续写入，留下半个缓存。
+ */
+export async function mlxgenDelete(repoId: string, logger?: DebugLogger): Promise<{ ok: boolean; error?: string }> {
+  const known = KNOWN_MODELS.find((m) => m.repoId === repoId);
+  if (!known) return { ok: false, error: `不在图片模型清单内: ${repoId}` };
+  const activeId = activeByRepo.get(repoId);
+  if (activeId) {
+    const running = jobs.get(activeId)?.status === 'running';
+    return {
+      ok: false,
+      error: running ? '该模型正在下载，请先取消下载，再删除模型' : '下载任务正在停止，请稍候再删除模型',
+    };
+  }
+  if (deletingByRepo.has(repoId)) return { ok: false, error: '该模型正在删除，请稍候' };
+
+  deletingByRepo.add(repoId);
+  const targets = [cacheDirFor(repoId)];
+  if (known.localDir) targets.push(join(localModelsRoot(), known.localDir));
+  if (known.lmstudioDir) targets.push(join(lmStudioModelsRoot(), known.lmstudioDir));
+  const errors: string[] = [];
+  try {
+    for (const target of new Set(targets)) {
+      try {
+        await rm(target, { recursive: true, force: true });
+        logger?.log('info', `mlxgen 模型已删除 ${known.id}: ${target}`);
+      } catch (e) {
+        const message = (e as Error).message;
+        errors.push(`${target}: ${message}`);
+        logger?.log('error', `mlxgen 模型删除失败 ${known.id} ${target}: ${message}`);
+      }
+    }
+    if (errors.length) return { ok: false, error: `部分模型文件删除失败，请重试：${errors.join('；')}` };
+    return { ok: true };
+  } finally {
+    deletingByRepo.delete(repoId);
+  }
+}
+
 /** 当前进行中的下载任务清单(设置页进入时恢复轮询;按 KNOWN_MODELS id 回填) */
 export function mlxgenDownloadActive(): MlxActiveDownload[] {
   const out: MlxActiveDownload[] = [];
@@ -377,16 +442,16 @@ export function mlxgenDownload(
 ): { ok: boolean; jobId?: string; error?: string } {
   const known = KNOWN_MODELS.find((m) => m.repoId === repoId);
   if (!known) return { ok: false, error: `不在图片模型清单内: ${repoId}` };
-  // manualOnly 模型没有下载通道(如 Uncensored 本地转换包):不假装能下,直接给构建指引
+  // manualOnly 模型没有下载通道(本地转换/组装包):不假装能下,直接给该模型的构建指引
   if (known.manualOnly) {
     return {
       ok: false,
       error:
-        `${known.name} 无应用内下载通道:需在 mlx-gen 仓库运行 ` +
-        'tools/build_qwen21_uncensored_package.sh 从社区 GGUF 本地转换构建' +
-        '(源 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 需另行下载)',
+        `${known.name} 无应用内下载通道:` +
+        (known.manualBuildHint ?? '请在 mlx-gen 仓库按对应模型文档本地构建'),
     };
   }
+  if (deletingByRepo.has(repoId)) return { ok: false, error: '该模型正在删除，请稍候再下载' };
   const activeId = activeByRepo.get(repoId);
   const active = activeId ? jobs.get(activeId) : undefined;
   if (active?.status === 'running') {

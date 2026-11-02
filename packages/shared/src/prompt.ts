@@ -24,6 +24,7 @@ export const STORYBOARD_CORE_HEAD = [
 /**
  * 摄影 / 声音 / 调度扩展列(2026-10-28,分镜改造第 2 步)。
  * 全部可选;「节拍」只供规划与审阅,不直接注入生成提示词(避免把抽象叙事术语当画面指令)。
+ * 「段」(第 4 步)是**生产分组**列:同段多行 = 一次生成里的多个切,不改提示词语义,只决定铺几个 shot。
  */
 export const STORYBOARD_EXTENDED_HEAD = [
   '焦段',
@@ -38,9 +39,10 @@ export const STORYBOARD_EXTENDED_HEAD = [
   '配乐',
   '站位(blocking)',
   '节拍',
+  '段',
 ] as const;
 
-/** 新建分镜表的完整默认列(核心 10 + 扩展 12)。 */
+/** 新建分镜表的完整默认列(核心 10 + 扩展 13)。 */
 export const STORYBOARD_HEAD = [...STORYBOARD_CORE_HEAD, ...STORYBOARD_EXTENDED_HEAD] as const;
 
 /** 新分镜表节点的默认 markdown(表头 + 一行占位) */
@@ -409,6 +411,125 @@ export function assembleH3Prompt(
   };
 }
 
+/** 段内一个切(数组顺序即切点顺序,首切从 0.00 秒起) */
+export interface H3SegmentCut {
+  row?: string[];
+  /** 该切时长(秒)。用于累加**后面**切点的时刻,首切不占时刻 */
+  seconds: number;
+}
+
+/**
+ * H3 官方切点时刻写法 `mm:ss.mmm`(如 3 秒 → `00:03.000`)。
+ *
+ * 为什么必须精确到毫秒:官方 Ref2VA/I2VA 多镜骨架用 `At 00:03.000, the camera cuts to …`
+ * 这类**累计时刻**标记切点,秒数与提示词对不上时模型会把切点放错位置(节奏当场散掉)。
+ */
+export function formatCutTime(seconds: number): string {
+  const totalMs = Math.max(0, Math.round((Number.isFinite(seconds) ? seconds : 0) * 1000));
+  const mm = Math.floor(totalMs / 60000);
+  const ss = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+/** 把某一切拆成「画面/动作/摄影/光影」行(不含 [Shot k] 前缀,由调用方拼) */
+function cutBodyLines(
+  row: string[] | undefined,
+  head: string[],
+  look: string,
+  withAudio: boolean,
+): string[] {
+  const dial = rowCell(row, head, '对白/旁白').trim();
+  const hasDial = !!dial && dial !== '无' && dial !== '—';
+  const action = hasDial
+    ? /[「『]/.test(dial)
+      ? dial
+      : `对白「${dial}」`
+    : '无对白 · 以肢体动作推进';
+  const soundscapeDetail = rowCell(row, head, '声景').trim() || '环境音';
+  return [
+    ...optionalPromptLine('Blocking', rowCell(row, head, '站位(blocking)')),
+    ...buildCameraLines(row, head),
+    `Action: ${action}`,
+    `Look: ${look}`,
+    ...optionalPromptLine('Lighting', rowCell(row, head, '光位')),
+    ...(withAudio ? [`Audio: ${hasDial ? `口型同步 · ${soundscapeDetail}` : soundscapeDetail}`] : []),
+  ];
+}
+
+/**
+ * 段提示词组装(一次生成内含多个切)。
+ *
+ * 为什么需要「段」(调研改造第 4 步):
+ * h3 支持**一次生成内多镜**——官方骨架按 `[Shot k]` 逐镜成段,切镜用累计时刻
+ * `At 00:0X.XXX,` 标记。旧管线一行一镜一提交,于是「一段 12 秒 3 个切」被迫拆成
+ * 3 次独立生成再硬拼:跨切点的一致性靠图片硬凑、节奏被切点外的黑帧吃掉。
+ *
+ * 单切时**逐字委托** `assembleH3Prompt`,保证存量提示词零漂移;只有 ≥2 切才走本函数。
+ * 返回的 `explicit` 表示「每一切都写了显式提示词」(作者原文,不由模板改写)。
+ */
+export function assembleH3SegmentPrompt(
+  cuts: H3SegmentCut[],
+  head: string[],
+  basePrompt?: string,
+  subjects?: PromptSubject[],
+): { explicit: boolean; text: string } {
+  if (!cuts.length) return { explicit: false, text: '' };
+  if (cuts.length === 1) return assembleH3Prompt(cuts[0]!.row, head, basePrompt, subjects);
+  const look = (basePrompt ?? '').trim() || DEFAULT_QUANTIFIED_LIGHT;
+  const labels = buildSubjectLabels(subjects);
+  const shotLabels = cuts.map((_, i) => `[Shot ${i + 1}]`);
+
+  /* 切点时刻:第 k 切(k≥2)从前面所有切时长之和开始。首切不写时刻(从 0.00 起)。 */
+  let elapsed = 0;
+  const blocks: string[] = [];
+  cuts.forEach((cut, i) => {
+    const k = i + 1;
+    const explicitText = rowCell(cut.row, head, '提示词(可选)').trim();
+    const prefix = `[Shot ${k}]${k >= 2 ? ` At ${formatCutTime(elapsed)},` : ''}`;
+    if (explicitText) {
+      blocks.push(`${prefix} ${explicitText}`);
+    } else {
+      const scene = rowCell(cut.row, head, '画面描述');
+      /* Ref2VA 的 detailed_description 逐镜以画面开头(与单镜 `<Picture 1>` 锚定同构);
+         无参考素材的五段式则显式带 `Scene:` 字段名。 */
+      const first = labels ? `${prefix} ${scene}` : `${prefix} Scene: ${scene}`;
+      const body = cutBodyLines(cut.row, head, look, !labels);
+      blocks.push([first, ...body].join('\n'));
+    }
+    elapsed += Math.max(0, Number(cut.seconds) || 0);
+  });
+  const detailed = blocks.join('\n\n');
+
+  if (!labels) {
+    /* 无参考素材:声音归段一次(配乐是段级的),对白仍逐切写在各自 Action 行里 */
+    const music = cuts.map((c) => rowCell(c.row, head, '配乐').trim()).find(Boolean) || '';
+    return {
+      explicit: cuts.every((c) => !!rowCell(c.row, head, '提示词(可选)').trim()),
+      text: [...blocks, ...optionalPromptLine('Music', music)].join('\n\n'),
+    };
+  }
+  const retention = buildRetentionAnalysis(subjects, shotLabels);
+  const soundscape = Array.from(
+    new Set(
+      cuts
+        .map((c) => rowCell(c.row, head, '声景').trim())
+        .filter(Boolean),
+    ),
+  ).join(' / ') || '环境音';
+  const music = cuts.map((c) => rowCell(c.row, head, '配乐').trim()).find(Boolean) || 'N/A';
+  return {
+    explicit: cuts.every((c) => !!rowCell(c.row, head, '提示词(可选)').trim()),
+    text: [
+      `subject_definitions:\n${labels}`,
+      retention,
+      `detailed_description:\n${detailed}`,
+      `overall_soundscape: ${soundscape}`,
+      `non_diegetic_music: ${music}`,
+    ].join('\n\n'),
+  };
+}
+
 /**
  * 从 basePrompt / 画面描述抽出场景与光影短句(静帧六段式用)。
  * 禁止再写死「秋日河谷」「黄昏侧光」——那是旧模板事故。
@@ -658,7 +779,8 @@ export function fitImageSizeToGrid(
  * 用户选的档位形同虚设。正确语义是:
  *   - **档位(预览/草稿/默认/参考)= 用户显式选的分辨率**,任何情况下不被图片顶掉;
  *   - **连接角色只影响比例**。
- * 故本函数只返回 aspect,像素值一律由调用方查 `SHOT_SIZES[aspect][tier]`。
+ * 故预设比例的像素值由调用方查 `SHOT_SIZES[aspect][tier]`；非预设首帧比例
+ * 返回 `custom`，由 `fitImageSizeToTier` 在所选档位的尺寸预算内贴合，不得回退 16:9。
  *
  * 规则:
  *  - **首帧**(`first-frame` / `first-last`,上游给的是静帧)⇒ 比例**沿用上游图片**
@@ -669,20 +791,89 @@ export function fitImageSizeToGrid(
 export function defaultShotAspectForRole(
   role: 'first-frame' | 'ref-image' | string | undefined,
   upstream?: { width?: number; height?: number },
-): VideoAspect | null {
+): VideoAspect | 'custom' | null {
   if (role === 'first-frame') {
     const w = Number(upstream?.width ?? 0);
     const h = Number(upstream?.height ?? 0);
     if (w > 0 && h > 0) {
-      // 用贴合后的尺寸归类,避免 1080×1920 这类非 32 倍数图片被归到 custom
+      // 用贴合后的尺寸归类,避免 1080×1920 这类非 32 倍数图片被误归到 custom
       const fit = fitImageSizeToGrid(w, h);
-      const a = classifyAspect(fit.width, fit.height);
-      return a === 'custom' ? null : a;
+      // 非预设比例也是用户图片的真实比例,必须保留为 custom;返回 null 会让调用方回退默认 16:9。
+      return classifyAspect(fit.width, fit.height);
     }
     return null;
   }
   if (role === 'ref-image') return '4:3';
   return null;
+}
+
+/**
+ * 非预设首帧比例在所选档位下的合法尺寸。
+ *
+ * 预设比例直接查 `SHOT_SIZES`；`custom` 没有表项，因此在同档 16:9 的横/竖边界内
+ * 搜索 32 网格：先最小化比例误差，同误差时取面积更大者。这样既能保住 3:2、5:4
+ * 等真实图片比例，又不会让 4K 首帧把预览/默认档顶成 4K 视频。
+ */
+export function fitImageSizeToTier(
+  width: number,
+  height: number,
+  tier: VideoTier,
+): { width: number; height: number } {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return { ...SHOT_SIZES['1:1'][tier] };
+  }
+
+  const ratio = w / h;
+  const base = SHOT_SIZES['16:9'][tier];
+  const maxWidth = w >= h ? base.width : base.height;
+  const maxHeight = w >= h ? base.height : base.width;
+  const maxArea = 768 * 1344;
+  const snap32 = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+
+  let best: { width: number; height: number } | null = null;
+  let bestErr = Infinity;
+  let bestArea = -1;
+  for (let hh = Math.floor(maxHeight / 32) * 32; hh >= 32; hh -= 32) {
+    const ww = snap32(hh * ratio);
+    if (ww > maxWidth || ww * hh > maxArea) continue;
+    const err = Math.abs(ww / hh - ratio) / ratio;
+    const area = ww * hh;
+    if (err < bestErr - 1e-12 || (Math.abs(err - bestErr) <= 1e-12 && area > bestArea)) {
+      best = { width: ww, height: hh };
+      bestErr = err;
+      bestArea = area;
+    }
+  }
+
+  // 极端宽高比在档位边界内可能没有对应网格；退回该边界内最接近的合法尺寸。
+  return best ?? (w >= h ? { width: maxWidth, height: 32 } : { width: 32, height: maxHeight });
+}
+
+/** 「+」/Agent 创建 shot 时实际落盘的画面规格；custom 四字段必须一起写，供检查器后续编辑使用。 */
+export function resolveShotSpecForRole(
+  role: string | undefined,
+  selectedAspect: VideoAspect,
+  tier: VideoTier,
+  upstream?: { width?: number; height?: number },
+): {
+  aspect: VideoAspect | 'custom';
+  width: number;
+  height: number;
+  customWidth?: number;
+  customHeight?: number;
+} {
+  const aspect = defaultShotAspectForRole(role, upstream) ?? selectedAspect;
+  const size = aspect === 'custom'
+    ? fitImageSizeToTier(Number(upstream?.width), Number(upstream?.height), tier)
+    : SHOT_SIZES[aspect][tier];
+  return {
+    aspect,
+    width: size.width,
+    height: size.height,
+    ...(aspect === 'custom' ? { customWidth: size.width, customHeight: size.height } : {}),
+  };
 }
 
 /**

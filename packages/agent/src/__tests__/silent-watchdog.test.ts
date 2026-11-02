@@ -18,8 +18,16 @@
  *   故:①默认阈值 180s → 600s;②pi-chat 补**轮内心跳**把最长无信号间隔压到 15 秒级。
  */
 import { describe, it, expect } from 'vitest';
-import { WORKER_ENTRY } from '../manager.js';
-import { PiChatSession } from '../pi-chat.js';
+import {
+  DEFAULT_SILENT_TIMEOUT_MS,
+  WORKER_ENTRY,
+  resolveSilentTimeoutMs,
+} from '../manager.js';
+import {
+  DEFAULT_HEARTBEAT_MS,
+  PiChatSession,
+  resolveHeartbeatMs,
+} from '../pi-chat.js';
 
 describe('manager — 静默看门狗(批次1)', () => {
   it('worker 入口仍可解析(改动未破坏模块加载)', () => {
@@ -27,27 +35,21 @@ describe('manager — 静默看门狗(批次1)', () => {
     expect(WORKER_ENTRY.endsWith('worker.js')).toBe(true);
   });
 
-  it('静默超时默认 10 分钟(必须 > 单轮真实推理耗时,实测单轮 78s)', async () => {
-    // 常量在模块加载时求值:未设 env 时应为 600_000(2026-09 由 180_000 调大)
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('../manager.ts', import.meta.url), 'utf-8'),
-    );
-    const m = /BIGBOTART_AGENT_SILENT_TIMEOUT_MS\s*\?\?\s*([\d_]+)/.exec(src);
-    expect(m, '未找到 SILENT_TIMEOUT_MS 默认值定义').toBeTruthy();
-    const defaultMs = Number(m![1]!.replace(/_/g, ''));
-    // 单轮实测 78 秒;阈值至少要给它一个量级的余量,否则多步任务会被误杀
+  it('静默超时默认 10 分钟(必须 > 单轮真实推理耗时,实测单轮 78s)', () => {
+    const defaultMs = resolveSilentTimeoutMs({});
+    expect(DEFAULT_SILENT_TIMEOUT_MS).toBe(600_000);
     expect(defaultMs).toBeGreaterThanOrEqual(600_000);
+    expect(resolveSilentTimeoutMs({ BIGBOTART_AGENT_SILENT_TIMEOUT_MS: '900000' })).toBe(900_000);
+    expect(resolveSilentTimeoutMs({ BIGBOTART_AGENT_SILENT_TIMEOUT_MS: 'bad' })).toBe(DEFAULT_SILENT_TIMEOUT_MS);
   });
 
-  it('轮内心跳间隔存在且远小于看门狗阈值(把最长无信号间隔压到秒级)', async () => {
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('../pi-chat.ts', import.meta.url), 'utf-8'),
-    );
-    const m = /BIGBOTART_AGENT_HEARTBEAT_MS\s*\?\?\s*([\d_]+)/.exec(src);
-    expect(m, '未找到 LLM_HEARTBEAT_MS 默认值定义').toBeTruthy();
-    const beatMs = Number(m![1]!.replace(/_/g, ''));
+  it('轮内心跳间隔存在且远小于看门狗阈值(把最长无信号间隔压到秒级)', () => {
+    const beatMs = resolveHeartbeatMs({});
+    expect(DEFAULT_HEARTBEAT_MS).toBe(15_000);
     expect(beatMs).toBeGreaterThan(0);
-    expect(beatMs).toBeLessThanOrEqual(30_000); // 秒级,不依赖长阈值
+    expect(beatMs).toBeLessThanOrEqual(30_000);
+    expect(resolveHeartbeatMs({ BIGBOTART_AGENT_HEARTBEAT_MS: '5000' })).toBe(5_000);
+    expect(resolveHeartbeatMs({ BIGBOTART_AGENT_HEARTBEAT_MS: '0' })).toBe(DEFAULT_HEARTBEAT_MS);
   });
 
   it('PiChatSession 暴露 onTick 钩子(轮内心跳的注入点)', () => {

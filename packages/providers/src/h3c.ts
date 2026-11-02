@@ -19,6 +19,12 @@ import {
   type RenderRequest,
   type RenderJobHandle,
   type RenderStatus,
+  type SecondPassPlan,
+  planSecondPass,
+  secondPassEtaFactor,
+  secondPassTailSteps,
+  describeSecondPass,
+  SECOND_PASS_CANVAS_MIN_TAIL_STEPS,
 } from '@bigbotart/shared';
 import { buildH3Args, validateParams, TIER_PRESETS } from './h3c-command.js';
 import { normalizeH3ReferenceImages } from './reference-images.js';
@@ -36,6 +42,36 @@ export const H3C_DEFAULTS = {
   modelDir: process.env.BIGBOTART_H3_MODEL ?? '/Users/jiangzhenguo/ai/h3/MiniMax-H3',
   outputDir: process.env.BIGBOTART_H3_OUTPUTS ?? join(DATA_DIR, 'outputs'),
 };
+
+/**
+ * 粗估 ETA(秒)—— 只用于「准备中」阶段的诚实提示,不参与进度条(进度条读 h3 的真实阶段行)。
+ *
+ * 口径 = 档位 etaMin × 分辨率系数 × 加速包系数 × 二采系数:
+ *  - 分辨率系数:544²≈1x、576²≈1.7x、704²≈3.3x(面积开根);
+ *  - 加速包(蒸馏):4 步 ≈×0.2、6 步 ≈×0.27、8 步 ≈×0.35(手册 §3.1 实测);
+ *    ⚠️ 风格包(kind='style',mystic 等)换的是画风不是速度 —— ETA **不打折**,
+ *       否则用户会以为「选了风格包还变快了」,实际步数没变、耗时与基础模型相同;
+ *  - 二采:同画布精修 +18%、画布二采 +50%(shared `secondPassEtaFactor`,与引擎实测一致)。
+ *    ETA 不跟着涨,用户就会在「估算说 14 分钟」的任务跑到 20 分钟时以为卡死
+ *    (时间估算误导用户是 2026-09「爬到 99% 干等」的同一类问题)。
+ *
+ * 独立成纯函数是为了可测:ETA 藏在 submit 的闭包里就只能靠读私有 Map 才能断言。
+ */
+export function estimateH3EtaSec(input: {
+  tier: string;
+  width: number;
+  height: number;
+  accel?: { enabled?: boolean; steps?: number; kind?: string };
+  /** 二采计划(shared planSecondPass 的结果);undefined = 不开二采 */
+  secondPass?: SecondPassPlan;
+}): number {
+  const baseEtaMin = TIER_PRESETS[input.tier as keyof typeof TIER_PRESETS]?.etaMin ?? 15;
+  const areaFactor = Math.max(0.5, (input.width * input.height) / (544 * 544));
+  const accelOn = input.accel?.enabled === true && input.accel?.kind !== 'style';
+  const accelFactor = accelOn ? (input.accel?.steps === 4 ? 0.2 : input.accel?.steps === 6 ? 0.27 : 0.35) : 1;
+  const secondPassFactor = input.secondPass ? secondPassEtaFactor(input.secondPass) : 1;
+  return Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor) * accelFactor * secondPassFactor);
+}
 
 interface H3cProviderOptions {
   binaryPath?: string;
@@ -136,6 +172,32 @@ export class H3cProvider implements Provider {
     const rawRefImgs = refs.filter((r) => r.role === 'ref-image').map((r) => r.localPath);
     const refVideo = refs.find((r) => r.role === 'ref-video')?.localPath;
     const refAudio = refs.find((r) => r.role === 'ref-audio')?.localPath;
+    // 输出画布(shot 节点落盘前已按 32 倍数规整,这里仍按 provider 的兜底默认取值)
+    const width = Number(p.width ?? 768);
+    const height = Number(p.height ?? 768);
+
+    // 二采(second pass):解析**全部**在 shared 的 planSecondPass(比例夹取 / 第一遍 render
+    // 画布 / 同比例 32 倍数画布 / 不可行时降级)。这里只把结果落到 CLI —— 检查器显示、
+    // 提交前校验、命令构造必须同源,各写一套必然分叉(档位表在 providers 与渲染层
+    // 各写过一份、数值分叉过,见 docs/连接器设计.md,教训就在眼前)。
+    const secondPassPlan = planSecondPass({ width, height, secondPass: p.secondPass });
+    const secondPassSummary = describeSecondPass(secondPassPlan);
+    if (secondPassSummary) {
+      // 降级/夹取必须让用户看见:画布二采被降级成同画布精修、或 F 被夹过,
+      // 都要在产品里说得出口(否则「我明明选了 Hires,怎么没变大」无从解释)。
+      this.onLog?.(`[h3] ${secondPassSummary}${secondPassPlan.note ? `(${secondPassPlan.note})` : ''}`);
+      // 尾部步数 = steps × F:加速包把步数压到 4/6/8 时,画布二采可能只重跑 1~3 步,
+      // 画面几乎不动(接近「多付一遍 setup」)。引擎不会报错,所以必须在日志里说出来 ——
+      // 这是本项目最忌讳的「配置看着生效、实际等于没做」形态。
+      const tail = secondPassTailSteps(Number(p.steps ?? 30), secondPassPlan);
+      if (secondPassPlan.mode === 'canvas' && tail > 0 && tail < SECOND_PASS_CANVAS_MIN_TAIL_STEPS) {
+        this.onLog?.(
+          `[h3] ⚠️ 画布二采只重跑 ${tail} 步(步数 ${Number(p.steps ?? 30)} × ${Math.round(
+            secondPassPlan.fraction * 100,
+          )}%),建议 ≥ ${SECOND_PASS_CANVAS_MIN_TAIL_STEPS} 步:提高重跑比例或关闭模型包`,
+        );
+      }
+    }
 
     // 参数组合防呆(validateParams 统一入口):
     //  ① layers≤40+reuse≥3 → 拒绝
@@ -147,8 +209,8 @@ export class H3cProvider implements Provider {
       reuse: Number(p.reuse ?? 1),
       frames: Number(p.frames ?? 124),
       seconds: Number(p.seconds ?? 0) > 0 ? Number(p.seconds) : undefined,
-      width: Number(p.width ?? 768),
-      height: Number(p.height ?? 768),
+      width,
+      height,
       refVideo,
       refVideoSilent: p.refVideoSilent === true,
     });
@@ -164,8 +226,8 @@ export class H3cProvider implements Provider {
     // Ref2VA:引擎会 STRETCH 参考图到视频画布。先等比补齐到目标画幅,
     // 防止竖版角色卡被压扁后再参与生成(2026-10-28「故事脚本测试」实测)。
     const refImgs = await normalizeH3ReferenceImages(rawRefImgs, {
-      targetWidth: Number(p.width ?? 768),
-      targetHeight: Number(p.height ?? 768),
+      targetWidth: width,
+      targetHeight: height,
       outDir: join(this.outDir, 'reference'),
       strict: !this.dryRun,
     });
@@ -176,8 +238,8 @@ export class H3cProvider implements Provider {
       modelDir,
       prompt: String(p.prompt ?? ''),
       outputPath: outPath,
-      width: Number(p.width ?? 768),
-      height: Number(p.height ?? 768),
+      width,
+      height,
       seconds: seconds > 0 ? seconds : undefined,
       frames: Number(p.frames ?? 124),
       steps: Number(p.steps ?? 30),
@@ -191,22 +253,25 @@ export class H3cProvider implements Provider {
       // 参考视频音轨:节点 data.refVideoSilent 为 true 时改走 --ref-silent-video
       refVideoSilent: p.refVideoSilent === true,
       refAudio,
+      // 二采三组参数:planSecondPass 保证「画布必配 F」「render 画布成对」,
+      // 因此这里可以直接透传(未开启时全是 undefined,构建器一个 flag 都不输出)
+      secondPass: secondPassPlan.enabled ? secondPassPlan.fraction : undefined,
+      secondPassCanvas: secondPassPlan.canvas,
+      renderWidth: secondPassPlan.render?.width,
+      renderHeight: secondPassPlan.render?.height,
       ssdStreaming: p.ssdStreaming === true,
     });
 
     const taskId = `h3c-${Date.now()}`;
     this.outPaths.set(taskId, outPath);
-    // 粗估 ETA:按档位 etaMin + 分辨率系数(544²≈1x,576²≈1.7x,704²≈3.3x);
-    // 加速模型包(蒸馏)省时:4 步 ≈×0.2,8 步 ≈×0.35(手册 §3.1 实测);
-    // ⚠️ 风格包(kind='style',mystic 等)换的是画风不是速度 —— ETA 不打折,
-    //    否则用户会以为「选了风格包还变快了」,实际步数没变、耗时与基础模型相同。
-    const tier = String(p.tier ?? 'default') as keyof typeof TIER_PRESETS;
-    const baseEtaMin = TIER_PRESETS[tier]?.etaMin ?? 15;
-    const areaFactor = Math.max(0.5, (Number(p.width ?? 544) * Number(p.height ?? 544)) / (544 * 544));
     const accel = (p.accel ?? undefined) as { enabled?: boolean; steps?: number; kind?: string } | undefined;
-    const accelOn = accel?.enabled === true && !!modelDir && accel?.kind !== 'style';
-    const accelFactor = accelOn ? (accel?.steps === 4 ? 0.2 : accel?.steps === 6 ? 0.27 : 0.35) : 1;
-    const etaSec = Math.round(baseEtaMin * 60 * Math.sqrt(areaFactor) * accelFactor);
+    const etaSec = estimateH3EtaSec({
+      tier: String(p.tier ?? 'default'),
+      width,
+      height,
+      accel,
+      secondPass: secondPassPlan,
+    });
     this.progress.set(taskId, { startedAt: Date.now(), etaSec });
     if (this.dryRun) {
       // 骨架期:不真实推理,写可播放占位 MP4(异步 spawn,不阻塞主进程),便于 UI 预览闭环

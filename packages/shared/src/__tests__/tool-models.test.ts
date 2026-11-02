@@ -76,6 +76,15 @@ describe('normalizeModelId:同一模型三种写法等价(缺陷 A 根因锁定)
     for (const f of forms) expect(normalizeModelId(f), f).toBe('Qwen/Qwen-Image-2.1-Turbo');
   });
 
+  it('Turbo Heretic:短别名 / 本地目录路径 → 独立的本地组装包 id', () => {
+    const forms = [
+      'Qwen-Image-2.1-Turbo-Heretic',
+      'qwen-image-2.1-turbo-heretic',
+      '/Users/x/ai/models/Qwen-Image-2.1-Turbo-Heretic',
+    ];
+    for (const f of forms) expect(normalizeModelId(f), f).toBe('Qwen-Image-2.1-Turbo-Heretic');
+  });
+
   it('自定义 repoId 原样返回(用户自行负责);空串安全', () => {
     expect(normalizeModelId('someone/custom')).toBe('someone/custom');
     expect(normalizeModelId('')).toBe('');
@@ -128,6 +137,17 @@ describe('supportsCapability:按实测矩阵判定', () => {
       expect(supportsCapability(f, 'image.multiReference'), f).toBe(false);
     }
   });
+
+  it('Turbo Heretic:文生图/图生图/参考编辑 ✓;多参考/inpaint/outpaint ✗', () => {
+    for (const f of ['Qwen-Image-2.1-Turbo-Heretic', 'qwen-image-2.1-turbo-heretic', '/m/Qwen-Image-2.1-Turbo-Heretic']) {
+      expect(supportsCapability(f, 'image.generate'), f).toBe(true);
+      expect(supportsCapability(f, 'image.img2img'), f).toBe(true);
+      expect(supportsCapability(f, 'image.instruction'), f).toBe(true);
+      expect(supportsCapability(f, 'image.inpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.outpaint'), f).toBe(false);
+      expect(supportsCapability(f, 'image.multiReference'), f).toBe(false);
+    }
+  });
 });
 
 describe('healModelForRefImages:带参考图纠正不兼容模型(2026-10-28 静帧 05)', () => {
@@ -147,6 +167,13 @@ describe('healModelForRefImages:带参考图纠正不兼容模型(2026-10-28 静
   it('有参考图 + Turbo/Klein → 不改', () => {
     expect(healModelForRefImages('Qwen/Qwen-Image-2.1-Turbo', true).healed).toBe(false);
     expect(healModelForRefImages('AbstractFramework/flux.2-klein-9b-8bit', true).healed).toBe(false);
+  });
+  it('有参考图 + Turbo Heretic → 不改(新版转换包保留 vision tower)', () => {
+    const r = healModelForRefImages('Qwen-Image-2.1-Turbo-Heretic', true, {
+      image: { 'image.instruction': 'Qwen/Qwen-Image-2.1-Turbo' },
+    });
+    expect(r.healed).toBe(false);
+    expect(r.model).toBe('Qwen-Image-2.1-Turbo-Heretic');
   });
   it('有参考图 + 空模型 → 填 instruction 缺省但不标 healed(与 resolve 同路径)', () => {
     const r = healModelForRefImages('', true);
@@ -201,6 +228,8 @@ describe('defaultGenerateSteps:缺省步数按模型(2026-10-14 Turbo=8 修复)'
     expect(defaultGenerateSteps('qwen-image-2.1-turbo')).toBe(8);
     // 本地目录路径也要命中(provider 传的就是目录名)
     expect(defaultGenerateSteps('/Users/x/ai/models/Qwen-Image-2.1-Turbo')).toBe(8);
+    expect(defaultGenerateSteps('Qwen-Image-2.1-Turbo-Heretic')).toBe(8);
+    expect(defaultGenerateSteps('/Users/x/ai/models/Qwen-Image-2.1-Turbo-Heretic')).toBe(8);
   });
 
   it('Qwen-Image-2.1 其余(bf16 / Uncensored)→ 40(官方推荐)', () => {

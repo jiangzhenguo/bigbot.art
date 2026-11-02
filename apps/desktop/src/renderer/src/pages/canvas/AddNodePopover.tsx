@@ -9,7 +9,12 @@
 import React, { useEffect, useState } from 'react';
 import type { Edge, CanvasNode } from './types';
 import { NODE_TYPES, SHOT_SIZES, tierKeyOf, resLine } from './constants';
-import { VIDEO_ASPECTS, fitImageSizeToGrid, classifyAspect } from '@bigbotart/shared';
+import {
+  VIDEO_ASPECTS,
+  VIDEO_TIER_PRESETS,
+  resolveShotSpecForRole,
+  type VideoAspect,
+} from '@bigbotart/shared';
 import { resolvePortOptions, hasConnector, PORT_LABEL } from './connectors';
 
 interface AddNodePopoverProps {
@@ -68,24 +73,25 @@ export function AddNodePopover({
   const chosenPort = portOpts[Math.min(portIdx, portOpts.length - 1)] ?? null;
 
   /*
-   * 提示行用的比例必须与**实际落盘的比例**一致:
-   * 首帧角色下比例由上游图片决定(见 CanvasPage.createFromPop),若这里仍用弹层本地
-   * `aspect`,就会出现「提示写 16:9、节点实际是 4:3」的又一次显示/实际不符。
-   * 归类用与创建侧同一对纯函数(fitImageSizeToGrid + classifyAspect),口径必然一致;
-   * 上游拿不到尺寸时退回弹层所选 —— 创建侧同样退回,两边仍然一致。
+   * 提示行与创建侧共用 `resolveShotSpecForRole`:预设比例查档位表，非预设首帧
+   * 显示 custom 的真实贴合尺寸；绝不把 3:2 / 5:4 静默显示或创建成默认 16:9。
    */
-  const upstreamAspect = ((): string | null => {
+  const upstreamSize = ((): { width: number; height: number } | null => {
     if (!src) return null;
     const sd = (src.data ?? {}) as Record<string, unknown>;
     const w = Number(sd.width ?? 0);
     const h = Number(sd.height ?? 0);
-    if (w <= 0 || h <= 0) return null;
-    const fit = fitImageSizeToGrid(w, h);
-    const a = classifyAspect(fit.width, fit.height);
-    return a === 'custom' ? null : a;
+    return w > 0 && h > 0 ? { width: w, height: h } : null;
   })();
-  const effectiveAspect = chosenPort?.port === 'first-frame' && upstreamAspect ? upstreamAspect : aspect;
-  const resHint = resLine(effectiveAspect, tier);
+  const firstFrameSpec = chosenPort?.port === 'first-frame' && upstreamSize
+    ? resolveShotSpecForRole('first-frame', aspect as VideoAspect, tierKeyOf(tier), upstreamSize)
+    : null;
+  const effectiveAspect = firstFrameSpec?.aspect ?? aspect;
+  const resHint = chosenPort?.port === 'first-frame' && !upstreamSize
+    ? '首帧图片尺寸将在创建时读取'
+    : firstFrameSpec?.aspect === 'custom'
+      ? `输出 ${firstFrameSpec.width}×${firstFrameSpec.height} · 预计 ${VIDEO_TIER_PRESETS[tierKeyOf(tier)].eta}（capabilities）`
+      : resLine(effectiveAspect, tier);
   const tip = sel
     ? `自动连线：${srcLabel} → ${NODE_TYPES.find((t) => t.id === sel)?.name ?? ''}${chosenPort ? ` · 落 ${chosenPort.port} 端口` : ''}`
     : '选中后自动连线并继承绑定';
@@ -251,7 +257,9 @@ export function AddNodePopover({
             <div className="ap-prow">
               <span className="lbl">档位</span>
               {['预览', '草稿', '默认', '参考'].map((t) => {
-                const ok = !!SHOT_SIZES[effectiveAspect as keyof typeof SHOT_SIZES]?.[tierKeyOf(t)];
+                const ok = effectiveAspect === 'custom'
+                  ? !!firstFrameSpec
+                  : !!SHOT_SIZES[effectiveAspect as keyof typeof SHOT_SIZES]?.[tierKeyOf(t)];
                 return (
                   <span
                     key={t}

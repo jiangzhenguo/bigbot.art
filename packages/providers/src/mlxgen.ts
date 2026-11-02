@@ -19,6 +19,7 @@ import {
   type RenderJobHandle,
   type RenderStatus,
   defaultGenerateSteps,
+  defaultEditSteps,
 } from '@bigbotart/shared';
 
 const execFileP = promisify(execFile);
@@ -95,6 +96,7 @@ export class MlXGenProvider implements Provider {
         'qwen-image (Qwen Image, 文生图)',
         'Qwen/Qwen-Image-2.1 (Qwen-Image-2.1 全量 bf16, 文生图/图生图/参考编辑(1-10 张), ~33GB)',
         'Qwen/Qwen-Image-2.1-Turbo (Qwen-Image-2.1 Turbo 8步蒸馏, 文生图/图生图/参考编辑, 步数被采样表锁定为8)',
+        'Qwen-Image-2.1-Turbo-Heretic (Qwen-Image-2.1 Turbo Heretic 本地组装包, 文生图/图生图/参考编辑, 采样表锁8步)',
         'Qwen-Image-2.1-Uncensored-MLX (Qwen-Image-2.1 Uncensored 8bit 本地包, 文生图/图生图, ~22GB)',
         'mlx-community/Qwen-Image-Edit-8bit (Qwen Image Edit 8bit, 指令编辑/mask, ~37.5GB)',
         'AbstractFramework/flux.2-klein-9b-8bit (多参考编辑/outpaint, ~18GB)',
@@ -133,6 +135,8 @@ export class MlXGenProvider implements Provider {
     // (requires_sigma_shift=true),与 Turbo 的固定 sample_sigmas 采样表冲突
     'Qwen/Qwen-Image-2.1-Turbo': 'qwen-image-2.1-turbo',
     'Qwen-Image-2.1-Turbo': 'qwen-image-2.1-turbo',
+    // Heretic 本地组装包复用 Turbo 的 DiT 与 sample_sigmas,必须走 Turbo 配置(锁 8 步)。
+    'Qwen-Image-2.1-Turbo-Heretic': 'qwen-image-2.1-turbo',
   };
 
   /**
@@ -161,6 +165,8 @@ export class MlXGenProvider implements Provider {
     'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
     'qwen-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
     'qwen-image-21-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+    // Heretic 是独立的本地组装包,不能归一化到官方 Turbo(两者 text encoder 不同)。
+    'qwen-image-2.1-turbo-heretic': 'Qwen-Image-2.1-Turbo-Heretic',
   };
 
   /**
@@ -174,9 +180,9 @@ export class MlXGenProvider implements Provider {
    */
   /** 该 repo(或本地目录名)是否是可用的 2.1 全量 checkpoint(带 vision tower) */
   private static isQwen21EditModel(model: string): boolean {
-    // ⚠️ Uncensored 本地包(Qwen-Image-2.1-Uncensored-MLX)绝不能被判为可编辑:
-    // 它的 text_encoder 是纯语言塔(0 个 visual.* 张量),qwen21.edit 编码参考图必炸。
-    // 显式排除置前(改名/加正则时必须保持,单测锁:mlxgen.test.ts「Uncensored」组)。
+    // ⚠️ Uncensored 本地包绝不能被判为可编辑:转换后的 text_encoder 是纯语言塔
+    // (0 个 visual.* 张量),qwen21.edit 编码参考图必炸,显式排除置前。
+    // Heretic 不再排除:2026-11 新版转换保留 model.visual.*,verify --route edit 已通过。
     if (/uncensored/i.test(model)) return false;
     const base = model.split('/').pop() ?? model;
     // Turbo(2026-10):全量 checkpoint 带 vision tower(750 张量含 351 个 visual.*),
@@ -212,6 +218,8 @@ export class MlXGenProvider implements Provider {
     // Qwen-Image-2.1-Turbo(2026-10):本机 4bit 全量目录(13GB,带 vision tower + sample_sigmas)
     'Qwen/Qwen-Image-2.1-Turbo': 'Qwen-Image-2.1-Turbo',
     'Qwen-Image-2.1-Turbo': 'Qwen-Image-2.1-Turbo',
+    // Heretic:转换后的 text encoder + 官方 Turbo DiT/VAE/processor 的本地组装目录。
+    'Qwen-Image-2.1-Turbo-Heretic': 'Qwen-Image-2.1-Turbo-Heretic',
     // FLUX.2 Klein 9B:官方 AbstractFramework 仓库在 HF 上是 gated,国内直连常不通;
     // 实际来源是 ModelScope 的 mlx-community/flux2-klein-9b-8bit(与之同源),
     // 下到本地模型根后即以散装目录直用,免下载、免 HF 授权。
@@ -319,6 +327,16 @@ export class MlXGenProvider implements Provider {
           '请先在 mlx-gen 仓库运行 tools/build_qwen21_uncensored_package.sh 构建' +
           '(源模型 abenzerps/Qwen-Image-2.1-Uncensored-GGUF 需另行下载);' +
           '或把节点模型改为 Qwen/Qwen-Image-2.1(bf16 全量,可应用内下载)',
+      );
+    }
+    // Heretic 原始社区 prepared package 与本引擎 key 布局不兼容,不能直接下载使用;
+    // 只接受按引擎文档转换并组装好的本地目录,缺失时在提交前给出明确指引。
+    if (!localDir && repoModel === 'Qwen-Image-2.1-Turbo-Heretic') {
+      throw new Error(
+        'Qwen-Image-2.1-Turbo-Heretic 是本地转换组装包,当前机器未找到 ' +
+          '~/ai/models/Qwen-Image-2.1-Turbo-Heretic:请按 mlx-gen docs/qwen-image-21.md 的 ' +
+          'Third-party prepared packages 小节,用 tools/convert_heretic_text_encoder.py ' +
+          '转换 text encoder 并组装;或把节点模型改为 Qwen/Qwen-Image-2.1-Turbo',
       );
     }
     const model = localDir ?? repoModel;
@@ -483,15 +501,9 @@ export class MlXGenProvider implements Provider {
         if (p.outputResolution != null && Number.isFinite(Number(p.outputResolution))) {
           cmd.push('--output-resolution', String(Number(p.outputResolution)));
         }
-        // 步骤:检查器未设置时兜底 30,与检查器 DEFAULT_EDIT_STEPS 同口径(A 方案)。
-        // ⚠️ 根因记录(2026-09-29「不改 step 直接就是 40 步」):此处原为无条件 `?? 40`,
-        // 而检查器只把 4 显示在滑块上、并不写回 data → **界面显示 4、实跑 40**,
-        // 且没有任何地方能让用户看出来(2.1 上 40 步约 4 分钟,6 步版仅 54-92 秒)。
-        // 现在两端统一 30:检查器负责写回 data,这里的兜底只作**安全网**
-        // (历史节点 / Agent 直传 data 未带 steps 时),不再是一套隐藏默认值。
-        // Turbo 例外:采样表内置、引擎锁 8 步(忽略 --steps),兜底给 8 让日志说真话
-        const isTurboEdit = /qwen.*2\.1.*turbo/i.test(repoModel);
-        cmd.push('--steps', String(Number(p.steps ?? (isTurboEdit ? 8 : 30))));
+        // 步骤:检查器未设置时走 shared defaultEditSteps(唯一来源;Turbo=8,其余=30)。
+        // 检查器负责写回 data,这里的兜底只作安全网(历史节点 / Agent 直传未带 steps)。
+        cmd.push('--steps', String(Number(p.steps ?? defaultEditSteps(repoModel))));
         if (p.negativePrompt) cmd.push('--negative-prompt', String(p.negativePrompt));
         if (seeds.length > 0) {
           cmd.push('--seed');

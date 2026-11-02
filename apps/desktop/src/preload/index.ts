@@ -27,6 +27,7 @@ const api: BigBotArtApi = {
   mlxgenDownloadStatus: (jobId: string) => ipcRenderer.invoke(ch('mlxgenDownloadStatus'), jobId),
   mlxgenDownloadActive: () => ipcRenderer.invoke(ch('mlxgenDownloadActive')),
   mlxgenDownloadCancel: (jobId: string) => ipcRenderer.invoke(ch('mlxgenDownloadCancel'), jobId),
+  mlxgenDelete: (repoId: string) => ipcRenderer.invoke(ch('mlxgenDelete'), repoId),
   savePngAsset: (input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }) =>
     ipcRenderer.invoke(ch('savePngAsset'), input),
   checkProviders: () => ipcRenderer.invoke(ch('checkProviders')),

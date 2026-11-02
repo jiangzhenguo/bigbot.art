@@ -13,6 +13,8 @@ const QWEN21 = 'Qwen/Qwen-Image-2.1';
 const QWEN_EDIT = 'mlx-community/Qwen-Image-Edit-8bit';
 const ZIMAGE = 'AbstractFramework/z-image-turbo-8bit';
 const KLEIN = 'AbstractFramework/flux.2-klein-9b-8bit';
+const TURBO = 'Qwen/Qwen-Image-2.1-Turbo';
+const HERETIC = 'Qwen-Image-2.1-Turbo-Heretic';
 
 describe('缺陷 B:2.1 在 instruction 模式不被自动切走', () => {
   it('2.1 → instruction:不切(缺陷修复前会被切到 Qwen Image Edit)', () => {
@@ -40,6 +42,20 @@ describe('2.1 在不支持的模式上仍应被切换(实测无该能力)', () =
 
   it('2.1 → img2img:不切(缺陷 A 已修,2.1 的 qwen21.latent 可用)', () => {
     expect(modeSwitchDecision(QWEN21, 'img2img')).toBeNull();
+  });
+});
+
+describe('Turbo / Heretic 的模式能力', () => {
+  it('instruction / img2img 都不自动切走', () => {
+    for (const model of [TURBO, HERETIC, 'qwen-image-2.1-turbo-heretic']) {
+      expect(modeSwitchDecision(model, 'instruction'), model).toBeNull();
+      expect(modeSwitchDecision(model, 'img2img'), model).toBeNull();
+    }
+  });
+
+  it('Heretic 仍无 inpaint / outpaint 能力,切到 Qwen Image Edit', () => {
+    expect(modeSwitchDecision(HERETIC, 'inpaint')).toEqual({ recommend: QWEN_EDIT });
+    expect(modeSwitchDecision(HERETIC, 'outpaint')).toEqual({ recommend: QWEN_EDIT });
   });
 });
 

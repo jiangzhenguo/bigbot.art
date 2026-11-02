@@ -5,7 +5,7 @@
  * - 全部在临时目录构造,绝不触碰真实 ~/.cache/huggingface
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +14,7 @@ const REPO_DIR = 'models--AbstractFramework--z-image-turbo-8bit';
 
 let hfHome = '';
 let lmStudioHome = '';
+let localHome = '';
 let M: typeof import('../mlxgen-models.js');
 
 const repoCache = (): string => join(hfHome, 'hub', REPO_DIR);
@@ -52,15 +53,64 @@ function makeComplete(): void {
 beforeAll(async () => {
   hfHome = mkdtempSync(join(tmpdir(), 'bbart-mlxdl-test-'));
   lmStudioHome = mkdtempSync(join(tmpdir(), 'bbart-lmstudio-test-'));
+  localHome = mkdtempSync(join(tmpdir(), 'bbart-local-models-test-'));
   process.env.HF_HOME = hfHome;
   process.env.BIGBOTART_LMSTUDIO_MODELS = lmStudioHome;
+  process.env.BIGBOTART_MODELS_DIR = localHome;
   M = await import('../mlxgen-models.js');
 });
 
 afterAll(() => {
   rmSync(hfHome, { recursive: true, force: true });
   rmSync(lmStudioHome, { recursive: true, force: true });
+  rmSync(localHome, { recursive: true, force: true });
   delete process.env.BIGBOTART_LMSTUDIO_MODELS;
+  delete process.env.BIGBOTART_MODELS_DIR;
+});
+
+
+describe('mlxgenDelete 本地模型删除', () => {
+  const LOCAL_REPO = 'Qwen/Qwen-Image-2.1';
+  const localDir = (): string => join(localHome, 'Qwen-Image-2.1-bf16');
+  const localCache = (): string => join(hfHome, 'hub', 'models--Qwen--Qwen-Image-2.1');
+
+  it('拒绝未知 repoId，不把传入字符串当文件路径删除', async () => {
+    const result = await M.mlxgenDelete('/tmp/not-an-allowlisted-model');
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('不在图片模型清单内');
+  });
+
+  it('同时删除 HF 缓存和本地直用副本，列表不再显示已就绪，且不动相邻目录', async () => {
+    const cache = localCache();
+    mkdirSync(join(cache, 'blobs'), { recursive: true });
+    mkdirSync(join(cache, 'snapshots', 'abc123'), { recursive: true });
+    writeFileSync(join(cache, 'blobs', 'deadbeef'), 'weights');
+    symlinkSync(join('..', '..', 'blobs', 'deadbeef'), join(cache, 'snapshots', 'abc123', 'model.safetensors'));
+    mkdirSync(join(localDir(), 'transformer'), { recursive: true });
+    writeFileSync(join(localDir(), 'transformer', 'model.safetensors'), 'weights');
+    const sibling = join(localHome, 'do-not-delete.txt');
+    writeFileSync(sibling, 'keep');
+    expect(M.mlxgenModelInfo().find((m) => m.repoId === LOCAL_REPO)?.downloaded).toBe(true);
+
+    const result = await M.mlxgenDelete(LOCAL_REPO);
+
+    expect(result).toEqual({ ok: true });
+    expect(existsSync(cache)).toBe(false);
+    expect(existsSync(localDir())).toBe(false);
+    expect(existsSync(sibling)).toBe(true);
+    expect(M.mlxgenModelInfo().find((m) => m.repoId === LOCAL_REPO)?.downloaded).toBe(false);
+  });
+
+  it('也删除设置页识别到的 LM Studio 本地副本', async () => {
+    makeCaptionCheckpoint();
+    expect(captionModel().downloaded).toBe(true);
+
+    const result = await M.mlxgenDelete(CAPTION_REPO);
+
+    expect(result).toEqual({ ok: true });
+    expect(existsSync(captionDir())).toBe(false);
+    expect(captionModel().downloaded).toBe(false);
+  });
 });
 
 describe('看图反推行:LM Studio 扁平 MLX-VL checkpoint 就绪判定', () => {

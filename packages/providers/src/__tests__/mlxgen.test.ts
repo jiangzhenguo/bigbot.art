@@ -1093,6 +1093,103 @@ describe('submit · Qwen-Image-2.1-Turbo(8 步蒸馏)', () => {
   });
 });
 
+/**
+ * Qwen-Image-2.1-Turbo-Heretic(2026-10 接入):本地转换组装包。
+ * 复用官方 Turbo DiT 与 sample_sigmas(锁 8 步);新版转换同时保留语言塔与 vision tower,
+ * 引擎 verify --route edit 全组件通过后,文生图/latent 图生图/qwen21.edit 参考编辑均可用。
+ */
+describe('submit · Qwen-Image-2.1-Turbo-Heretic(本地组装包)', () => {
+  const HERETIC = 'Qwen-Image-2.1-Turbo-Heretic';
+  const root = join(tmpdir(), `bbart-mlxheretic-${process.pid}`);
+
+  beforeAll(() => {
+    process.env.BIGBOTART_MODELS_DIR = root;
+    mkdirSync(join(root, HERETIC, 'transformer'), { recursive: true });
+    writeFileSync(join(root, HERETIC, 'transformer', '0.safetensors'), 'w');
+  });
+  afterAll(() => {
+    delete process.env.BIGBOTART_MODELS_DIR;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const refs = (paths: string[]) =>
+    paths.map((p) => ({
+      asset: { id: `ref:${p}`, kind: 'image' as const, name: p, localPath: p, tags: [], createdAt: '' },
+      role: 'ref-image' as const,
+      localPath: p,
+    }));
+
+  it('capabilities 清单含 Heretic 参考编辑能力', async () => {
+    const p = makeProvider();
+    const caps = await p.capabilities();
+    const row = caps.models?.find((m) => m.includes(HERETIC));
+    expect(row).toBeTruthy();
+    expect(row).toContain('文生图/图生图/参考编辑');
+  });
+
+  it('generate:本地目录 + Turbo base-model + 默认 8 步', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: '雪山日出', model: HERETIC }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, HERETIC));
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1-turbo');
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('8');
+  });
+
+  it('短别名归一化到独立 Heretic 包,不归一化到官方 Turbo', async () => {
+    const p = makeProvider();
+    await p.submit(req('generate', { prompt: 'x', model: 'qwen-image-2.1-turbo-heretic' }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--model') + 1]).toBe(join(root, HERETIC));
+    expect(cmd[cmd.indexOf('--base-model') + 1]).toBe('qwen-image-2.1-turbo');
+  });
+
+  it('本地包缺失 → 提交前给转换组装指引,不直接下载不兼容的原始社区包', async () => {
+    const prev = process.env.BIGBOTART_MODELS_DIR;
+    process.env.BIGBOTART_MODELS_DIR = join(tmpdir(), `bbart-mlxheretic-none-${process.pid}`);
+    try {
+      const p = makeProvider();
+      await expect(p.submit(req('generate', { prompt: 'x', model: HERETIC }))).rejects.toThrow(
+        'convert_heretic_text_encoder.py',
+      );
+    } finally {
+      process.env.BIGBOTART_MODELS_DIR = prev;
+    }
+  });
+
+  it('instruction + 输入图 → qwen21.edit(repoId 与本地路径形式都放行,默认 8 步)', async () => {
+    const p = makeProvider();
+    await p.submit(req('instruction', { prompt: '换背景', inputPath: '/in/base.png', model: HERETIC }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    expect(cmd).toContain('--image-paths');
+    expect(cmd).not.toContain('--image-strength');
+    expect(cmd[cmd.indexOf('--steps') + 1]).toBe('8');
+
+    await p.submit(req('instruction', { prompt: '换背景', inputPath: '/in/base.png', model: join(root, HERETIC) }));
+    expect(lastCmd(p)[lastCmd(p).indexOf('--i2i-mode') + 1]).toBe('edit');
+  });
+
+  it('generate + ref-image → qwen21.edit(--i2i-mode edit + --image-paths)', async () => {
+    const p = makeProvider();
+    await p.submit({
+      ...req('generate', { model: HERETIC, prompt: '角色展示图' }),
+      references: refs(['/lib/r1.png', '/lib/r2.png']),
+    });
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('edit');
+    expect(cmd).toContain('--image-paths');
+  });
+
+  it('img2img(latent)放行:--i2i-mode latent + --image-strength', async () => {
+    const p = makeProvider();
+    await p.submit(req('img2img', { prompt: '重绘', inputPath: '/in/base.png', model: HERETIC }));
+    const cmd = lastCmd(p);
+    expect(cmd[cmd.indexOf('--i2i-mode') + 1]).toBe('latent');
+    expect(cmd).toContain('--image-strength');
+  });
+});
+
 describe('spawn 失败', () => {
   it('找不到 mlxgen 时记为失败,不变成未捕获异常', async () => {
     const p = new MlXGenProvider({ dryRun: false, bin: '/no/such/mlxgen-bin', outputDir: '/tmp/bba-mlxgen-missing' });

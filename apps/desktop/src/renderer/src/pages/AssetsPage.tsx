@@ -21,18 +21,7 @@ import { usePrompt } from '../components/usePrompt';
 import PageTopBar from '../components/PageTopBar';
 import { useT } from '../i18n';
 
-export type AssetsPageTarget =
-  | 'home'
-  | 'canvas'
-  | 'assets'
-  | 'skills'
-  | 'timeline'
-  | 'settings'
-  | 'onboarding'
-  | 'projects';
-
 interface AssetsPageProps {
-  onNavigate: (page: AssetsPageTarget) => void;
   /** 返回上一页(App 导航栈出栈,回到来源页) */
   onBack: () => void;
   /** 返回按钮文案(来源页名,如「画布」「首页」) */
@@ -40,11 +29,13 @@ interface AssetsPageProps {
   /** 进入时的项目上下文(画布入口);null = 直接打开总资源库 */
   projectId: string | null;
   projectName: string;
+  /** 把选中资源持久化为活动画布上的 asset 节点;成功后才由 App 跳转画布 */
+  onUseInCanvas: (asset: Asset) => Promise<void>;
 }
 
 const KIND_LABEL: Record<string, string> = { image: '图片', video: '视频', audio: '音频', document: '文档' };
 
-export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, projectName }: AssetsPageProps) {
+export default function AssetsPage({ onBack, backLabel, projectId, projectName, onUseInCanvas }: AssetsPageProps) {
   const t = useT();
   /* ── 数据 ── */
   const [allAssets, setAllAssets] = useState<Asset[]>([]);
@@ -555,8 +546,10 @@ export default function AssetsPage({ onNavigate, onBack, backLabel, projectId, p
               onUpdate={updateSel}
               onDelete={() => void handleDelete()}
               onUseInCanvas={() => {
-                toast(t('已打开画布 · 可在资产节点「更换资产…」中选择该资源'));
-                onNavigate('canvas');
+                if (!selAsset) return;
+                void onUseInCanvas(selAsset).catch((e) => {
+                  toast(t('添加到画布失败:{msg}', { msg: (e as Error).message }));
+                });
               }}
             />
           </aside>

@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, AssetCategory, NodeKind, Take, DebugLogEntry, PromptSource, TimelineData } from '@bigbotart/shared';
+import type { CanvasSnapshot, ProjectCanvases, RenderJob, Asset, AssetCategory, NodeKind, Take, DebugLogEntry, PromptSource, TimelineData, PromptSubject } from '@bigbotart/shared';
 import {
   parseGfmTable,
   resolvePromptFromSource,
   assembleH3Prompt,
+  assembleH3SegmentPrompt,
   assembleZImagePrompt,
   rowSeconds,
   rowCell,
@@ -11,18 +12,23 @@ import {
   planStoryboardMaterializeRows,
   checkStoryboardCharacterGate,
   storyboardCharacterGateMessage,
+  checkStoryboardSchema,
+  storyboardSchemaGateMessage,
+  storyboardTableShapeIssue,
   keyframeEdgeLabel,
   existingShotByRow,
   storyboardLinkOf,
   storyboardLinkFields,
-  summarizeMaterializePlans,
+  summarizeMaterializeSegments,
+  groupMaterializeSegments,
+  blockedSegmentMessage,
   tableToGfm,
   capabilityOf,
   resolveImageModel,
   healModelForRefImages,
-  fitImageSizeToGrid,
-  classifyAspect,
+  resolveShotSpecForRole,
   normalizeShotDuration,
+  parseTotalDurationHint,
   validateShotSubmitParams,
 } from '@bigbotart/shared';
 import type { VideoAspect } from '@bigbotart/shared';
@@ -50,10 +56,11 @@ import {
 import { resolvePort, resolvePortOptions, guardEdge, type PortResolution } from './canvas/connectors';
 import { ensureToolModels, fetchAccelDefaultShotConfig } from './canvas/tool-models-store';
 import { CASCADE_KINDS, allDownstreamGenIds, pickCascadeTargets, shouldKickCascade } from './canvas/cascade';
-import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE } from './canvas/storyboard';
+import { sbMaterializedRows, sbImgCount, sbTableOf, sbDirty, SB_SIZE, materializedShotData } from './canvas/storyboard';
 import { basenameOf, thumbSrc, previewUrlOf, isVideoPath, isAudioPath } from './canvas/media';
 import { latestTakeResultByNode } from './canvas/inspector/useTakeResult';
 import { computeEdgeDerivations, nodesReducer } from './canvas/edge-dispatch';
+import { resolveUpstreamImageSize } from './canvas/upstream-image-size';
 import { HistoryStack, type HistoryContent } from './canvas/canvas-history';
 import { placeMaterializeRows, type Occupant } from '../../../main/canvas-placement';
 import {
@@ -2965,50 +2972,32 @@ export default function CanvasPage({
        * 于是「显示 9:16 预览档」而「实际 16:9 默认档」,用户看到的与跑的不是一回事。
        *
        * ⚠️ **分辨率一律由「档位」决定**(2026-10 修正):
-       * 弹层的「档位」(预览/草稿/默认/参考)是用户显式选的分辨率档,
-       * 它**始终**从 `SHOT_SIZES[比例][档位]` 取像素值 —— 任何"沿用上游图片分辨率"的
-       * 做法都是错的:那会让 4K 参考图把 5 秒预览档顶成 4K 出片,耗时与显存完全失控。
+       * 弹层的「档位」(预览/草稿/默认/参考)是用户显式选的分辨率档。
+       * 预设比例从 `SHOT_SIZES[比例][档位]` 取值；非预设首帧在同档边界内贴合 32 网格。
+       * 任何"沿用上游图片原始分辨率"的做法都是错的:那会让 4K 参考图把 5 秒预览档
+       * 顶成 4K 出片,耗时与显存完全失控。
        *
-       * 连接角色只影响**比例**(aspect),不影响档位分辨率:
+       * 连接角色只影响**比例**(aspect),不影响档位预算:
        *  - **首帧**(first-frame / first-last):比例沿用上游图片(首帧即视频第一帧,
-       *    比例不一致会被拉伸/裁切),但**像素数仍按所选档位**取该比例下的合法档;
+       *    比例不一致会被拉伸/裁切),包括 3:2 / 5:4 等 custom 比例;
        *  - **参考图**(ref-image / Ref2VA):比例默认 4:3(参考图素材多为该比例,不锚定几何);
        *  - 其余(text2video 等):用弹层选的比例。
-       * 三条路径最终都落到 `SHOT_SIZES` 的同一格,保证与检查器/引擎同表。
+       * 统一经 `resolveShotSpecForRole` 落盘,保证弹层/检查器/引擎看到同一份尺寸。
        */
-      let specAspect: string = aspect;
-      if (t.kind === 'shot') {
-        // 上游尺寸:asset 节点取资产元数据宽高,其余图片节点取 data.width/height
-        const upstreamSize = (() => {
-          const sd = (src.data ?? {}) as Record<string, unknown>;
-          if (src.kind === 'asset') {
-            const aid = String(sd.assetId ?? '');
-            const a = aid ? assetsList.find((x) => x.id === aid) : undefined;
-            if (a?.width && a?.height) return { width: a.width, height: a.height };
-          }
-          const w = Number(sd.width ?? 0);
-          const h = Number(sd.height ?? 0);
-          return w > 0 && h > 0 ? { width: w, height: h } : undefined;
-        })();
-        // 连接角色 → 只决定 aspect(不碰分辨率)
-        const roleAspect = (() => {
-          if (port === 'first-frame') {
-            // 首帧:按上游图片比例归类到已知档;拿不到上游就保持弹层所选
-            const up = upstreamSize;
-            if (!up) return undefined;
-            const fit = fitImageSizeToGrid(up.width!, up.height!);
-            return classifyAspect(fit.width, fit.height);
-          }
-          if (port === 'ref-image') return '4:3';
-          return undefined;
-        })();
-        if (roleAspect && roleAspect !== 'custom') specAspect = roleAspect;
-      }
-      // 分辨率:统一按「比例 × 档位」取档位值(用户显式选的档位永远优先于任何图片尺寸)
-      // ⚠️ 档位必须经 tierKeyOf 归一:弹层传的是中文标签「默认」,而 SHOT_SIZES 的键是
-      // 英文 'default' —— 直接查会得 undefined 并**静默**退回旧硬编码尺寸(2026-10 事故)
       const specTier = tierKeyOf(tier);
-      const specSize = t.kind === 'shot' ? SHOT_SIZES[specAspect as VideoAspect]?.[specTier] : undefined;
+      let shotSpec: ReturnType<typeof resolveShotSpecForRole> | undefined;
+      if (t.kind === 'shot') {
+        // 优先读节点/资产元数据；图片编辑等节点缺尺寸时，探测真实产物，避免 1:1 回退 16:9。
+        const upstreamSize = await resolveUpstreamImageSize(src, assetsList, async (path) => {
+          return await window.bigbotart.probeMedia(path, 'image');
+        });
+        /* 预设比例查档位表；3:2 / 5:4 等非预设首帧比例保留为 custom，并在同档
+           尺寸预算内贴合 32 网格。宽高与 customWidth/customHeight 必须一次写全，
+           否则检查器后续切档位时会用缺省 544×544 把真实比例覆盖掉。 */
+        shotSpec = resolveShotSpecForRole(port, aspect as VideoAspect, specTier, upstreamSize);
+      }
+      const specAspect: string = shotSpec?.aspect ?? aspect;
+      const specSize = shotSpec;
 
       const meta =
         typeId === 'shot'
@@ -3019,8 +3008,7 @@ export default function CanvasPage({
         t.kind === 'shot'
           ? {
               ...initData,
-              aspect: specAspect,
-              ...(specSize ? { width: specSize.width, height: specSize.height } : {}),
+              ...shotSpec,
               tier: specTier,
             }
           : initData;
@@ -4166,6 +4154,12 @@ export default function CanvasPage({
             refVideoSilent: shotData.refVideoSilent === true,
             // 🚀 加速 LoRA:传给主进程,提交时解析为 modelDir(-d)+ steps
             accel: shotData.accel,
+            /* 🪄 二采(second pass):整对象透传,解释权归 shared 的 planSecondPass / provider。
+               ⚠️ 本对象是**显式白名单**,不在其中的 data 字段到不了 provider ——
+               漏加 = 检查器控件看起来生效、也能写盘,但命令行里根本没有这个参数
+               (仓库反复出现的事故形态:2026-10 的 outputResolution、2026-09 的 refVideoSilent)。
+               加检查器控件的同一提交里必须同时改这里。 */
+            secondPass: shotData.secondPass,
           };
 
       setNodes((ns) => ns.map((x) => (x.id === nodeId ? { ...x, badge: '已入队 · 等待槽位…', running: true, ghost: false } : x)));
@@ -4300,6 +4294,22 @@ export default function CanvasPage({
         toastMsg('分镜表缺少表格块 · 无法铺节点');
         return;
       }
+      const tableShapeIssue = storyboardTableShapeIssue(tb);
+      if (tableShapeIssue) {
+        toastMsg(tableShapeIssue);
+        return;
+      }
+      const storedTarget = Number((sbNode.data ?? {}).targetSeconds);
+      const targetSeconds = Number.isFinite(storedTarget) && storedTarget > 0
+        ? storedTarget
+        : parseTotalDurationHint(String((sbNode.data ?? {}).markdown ?? ''));
+      const schemaIssues = checkStoryboardSchema({ head: tb.head, rows: tb.rows, targetSeconds });
+      const schemaError = storyboardSchemaGateMessage(schemaIssues);
+      if (schemaError) {
+        toastMsg(schemaError);
+        return;
+      }
+      const schemaWarning = storyboardSchemaGateMessage(schemaIssues, 'warning');
       const characterIssues = checkStoryboardCharacterGate({
         head: tb.head,
         rows: tb.rows,
@@ -4334,16 +4344,24 @@ export default function CanvasPage({
         toastMsg('当前行均已铺出 · 新增行后可追加铺');
         return;
       }
+      /* 段(2026-10-30 第 4 步):同段多行 = 一次生成里的多个切 → 一个 shot。
+         段是原子单位,半铺出的段拒铺(与主进程同口径)。 */
+      const grouping = groupMaterializeSegments({ head: tb.head, rows: tb.rows, plans, doneRows: done });
+      if (grouping.blocked.length) {
+        toastMsg(blockedSegmentMessage(grouping.blocked));
+        return;
+      }
+      const segments = grouping.segments;
       const base = String((sbNode.data ?? {}).basePrompt ?? '');
       const size = SB_SIZE[aspect] ?? SB_SIZE['16:9']!;
       const prior = nodesRef.current.filter((n) => storyboardLinkOf(n.data)?.nodeId === sbNode.id);
       const placedRows = placeMaterializeRows(
         nodesRef.current.map(occupantOfLocal),
         occupantOfLocal(sbNode),
-        plans.map((plan, batchRow) => ({
+        segments.map((seg, batchRow) => ({
           row: batchRow,
-          shotKey: `shot-${plan.rowNo}`,
-          imageKey: plan.createKeyframe ? `img-${plan.rowNo}` : undefined,
+          shotKey: `shot-${seg.rowNos[0]}`,
+          imageKey: seg.plan.createKeyframe ? `img-${seg.rowNos[0]}` : undefined,
           mediaWidth: size.width,
           mediaHeight: size.height,
         })),
@@ -4362,25 +4380,48 @@ export default function CanvasPage({
         })),
         sbNode.id,
       );
-      for (const plan of plans) {
-        const r = plan.rowNo - 1;
-        const row = tb.rows[r] ?? [];
+      for (const seg of segments) {
+        const firstRowNo = seg.rowNos[0]!;
+        const lastRowNo = seg.rowNos[seg.rowNos.length - 1]!;
+        const firstRow = tb.rows[firstRowNo - 1] ?? [];
+        const cutRows = seg.rowNos.map((rowNo) => tb.rows[rowNo - 1] ?? []);
         const shotId = makeNodeId('shot');
-        const p = assembleH3Prompt(row, tb.head, base, plan.subjects);
+        const segPlans = seg.rowNos
+          .map((rowNo) => plans.find((pl) => pl.rowNo === rowNo))
+          .filter((pl): pl is NonNullable<typeof pl> => !!pl);
+        /* 段参考素材 = 各切选中卡并集;顺序即连线顺序 = <Picture n> 编号 */
+        const refIds: string[] = [];
+        const subjects: PromptSubject[] = [];
+        for (const segPlan of segPlans) {
+          for (const refId of segPlan.refNodeIds) if (!refIds.includes(refId)) refIds.push(refId);
+          for (const subject of segPlan.subjects) {
+            const key = `${subject.kind}:${subject.name}`;
+            if (!subjects.some((sbj) => `${sbj.kind}:${sbj.name}` === key)) subjects.push(subject);
+          }
+        }
+        const p = assembleH3SegmentPrompt(
+          cutRows.map((row, i) => ({ row, seconds: seg.cuts[i]?.seconds ?? 0 })),
+          tb.head,
+          base,
+          subjects,
+        );
         const sec = resolveMaterializeSeconds(
-          rowSeconds(row, tb.head),
-          rowCell(row, tb.head, '画面描述'),
-          rowCell(row, tb.head, '提示词(可选)'),
+          seg.seconds,
+          cutRows.map((row) => rowCell(row, tb.head, '画面描述')).join('\n'),
+          cutRows.map((row) => rowCell(row, tb.head, '提示词(可选)')).filter(Boolean).join('\n'),
           p.text,
         );
+        const shotTitle = seg.rowNos.length > 1
+          ? `镜头 ${pad2(firstRowNo)}–${pad2(lastRowNo)}`
+          : `镜头 ${pad2(firstRowNo)}`;
         const dur = normalizeShotDuration(
           { prompt: p.text, seconds: sec || undefined },
-          { label: `镜头 ${pad2(plan.rowNo)}`, prompt: p.text },
+          { label: shotTitle, prompt: p.text },
         );
-        const shotAt = placedAt(`shot-${plan.rowNo}`);
+        const shotAt = placedAt(`shot-${firstRowNo}`);
         created.push({
           id: shotId,
-          title: `镜头 ${pad2(plan.rowNo)}`,
+          title: shotTitle,
           w: shotAt?.width ?? 250,
           x: shotAt?.x ?? (sbNode.x ?? 60),
           y: shotAt?.y ?? (sbNode.y ?? 80),
@@ -4388,46 +4429,41 @@ export default function CanvasPage({
           ghost: true,
           kind: 'shot',
           tag: NODE_TYPES.find((t) => t.id === 'shot'),
-          data: {
-            // 分镜表铺出的镜头必须走真实 h3，不能沿用骨架期 mock：
-            // renderMode=real 时 mock 只产出 1 秒占位 MP4，用户视角就是「视频没生成」。
-            engine: 'h3c',
-            mode: plan.shotMode,
-            ...(plan.modeOverride ? { modeOverride: true } : {}),
+          data: materializedShotData({
             prompt: p.text,
+            plan: seg.plan,
             width: size.width,
             height: size.height,
-            seconds: dur.data.seconds,
-            frames: dur.data.frames,
-            steps: 30,
-            layers: 50,
-            reuse: 1,
+            seconds: Number(dur.data.seconds),
+            frames: Number(dur.data.frames),
             tier,
-            seed: 42 + r,
-            refs: [],
-            ...storyboardLinkFields(sbNode.id, plan.rowNo),
-          },
+            seed: 42 + (firstRowNo - 1),
+            storyboardId: sbNode.id,
+            rows: seg.rowNos,
+            segment: seg.cuts.length > 1 ? { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } : undefined,
+          }),
         } as CanvasNode);
         newEdges.push({ from: sbNode.id, to: shotId, cls: '', label: 'prompt' });
-        shotIdByRow.set(plan.rowNo, shotId);
+        for (const rowNo of seg.rowNos) shotIdByRow.set(rowNo, shotId);
 
-        if (plan.strategy === 'continue' && plan.continueFromRow != null) {
-          const prevId = shotIdByRow.get(plan.continueFromRow);
+        if (seg.plan.strategy === 'continue' && seg.plan.continueFromRow != null) {
+          const prevId = shotIdByRow.get(seg.plan.continueFromRow);
           if (prevId) newEdges.push({ from: prevId, to: shotId, cls: '', label: 'first-frame' });
         }
-        for (const refId of plan.refNodeIds) {
+        for (const refId of refIds) {
           if (nodesRef.current.some((n) => n.id === refId) || created.some((n) => n.id === refId)) {
             newEdges.push({ from: refId, to: shotId, cls: '', label: 'ref-image' });
           }
         }
-        if (plan.createKeyframe) {
+        if (seg.plan.createKeyframe) {
           imgs++;
           const imgId = makeNodeId('img');
-          const z = assembleZImagePrompt(row, tb.head, base);
-          const imgAt = placedAt(`img-${plan.rowNo}`);
+          /* 段内只为首切建静帧(v1):逐切关键帧要接「Picture k 对齐切点」,留后续 */
+          const z = assembleZImagePrompt(firstRow, tb.head, base);
+          const imgAt = placedAt(`img-${firstRowNo}`);
           created.push({
             id: imgId,
-            title: `图片生成 · 分镜静帧 ${pad2(plan.rowNo)}`,
+            title: `图片生成 · 分镜静帧 ${pad2(firstRowNo)}`,
             w: imgAt?.width ?? 232,
             x: imgAt?.x ?? (sbNode.x ?? 60),
             y: imgAt?.y ?? (sbNode.y ?? 80),
@@ -4445,14 +4481,15 @@ export default function CanvasPage({
               height: size.height,
               guidance: 1.0,
               seeds: [42],
-              ...storyboardLinkFields(sbNode.id, plan.rowNo),
+              ...(seg.cuts.length > 1 ? { segment: { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } } : {}),
+              ...storyboardLinkFields(sbNode.id, firstRowNo, seg.rowNos),
             },
           } as CanvasNode);
-          const port = keyframeEdgeLabel(plan);
+          const port = keyframeEdgeLabel(seg.plan);
           newEdges.push({ from: sbNode.id, to: imgId, cls: '', label: 'prompt' });
           newEdges.push({ from: imgId, to: shotId, cls: '', label: port });
           if (port === 'ref-image') {
-            for (const refId of plan.refNodeIds) {
+            for (const refId of refIds) {
               newEdges.push({ from: refId, to: imgId, cls: '', label: 'ref-image' });
             }
           }
@@ -4467,7 +4504,7 @@ export default function CanvasPage({
       commitEdit('分镜表铺节点');
       if (ids[0]) setSelectedIds([ids[0]]);
       toastMsg(
-        `已铺 ${summarizeMaterializePlans(plans)} · ${plans.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销`,
+        `已铺 ${summarizeMaterializeSegments(segments)} · ${segments.length + imgs} 个节点 · 未触发运行 · ⌘Z 可整体撤销${schemaWarning ? `\n${schemaWarning}` : ''}`,
       );
     },
     [makeNodeId, sbMaterializedRows, sbTableOf, setNodes, setEdges, setSelectedIds, toastMsg, commitEdit, activeSkillId],

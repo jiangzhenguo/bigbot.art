@@ -247,10 +247,10 @@ interface DownloadState {
 }
 
 /** 模型下载列表里可下载的条目(按 .mdl-row 顺序) */
-const MODEL_IDS = ['qwen-image-2.1', 'qwen-image-2.1-turbo', 'qwen-image-2.1-uncensored', 'qwen-image-edit', 'flux2-klein-9b', 'seedvr2-3b', 'qwen3-vl-8b-caption'] as const;
+const MODEL_IDS = ['qwen-image-2.1', 'qwen-image-2.1-turbo', 'qwen-image-2.1-turbo-heretic', 'qwen-image-2.1-uncensored', 'qwen-image-edit', 'flux2-klein-9b', 'seedvr2-3b', 'qwen3-vl-8b-caption'] as const;
 
 /** 无应用内下载通道的条目(本地构建包):不渲染下载按钮,只显示就绪状态 */
-const MANUAL_IMAGE_IDS = new Set<string>(['qwen-image-2.1-uncensored']);
+const MANUAL_IMAGE_IDS = new Set<string>(['qwen-image-2.1-turbo-heretic', 'qwen-image-2.1-uncensored']);
 
 /** 模型 id → huggingface repo(mlxgen download 参数,与主进程白名单同口径) */
 const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> = {
@@ -260,6 +260,8 @@ const MODEL_REPO: Record<'z-image-turbo' | (typeof MODEL_IDS)[number], string> =
   'qwen-image-2.1': 'Qwen/Qwen-Image-2.1',
   // Turbo:8 步蒸馏版,官方 HF 仓库 + MS 直连,可应用内下载
   'qwen-image-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  // Heretic:本地转换组装包,repoId 即目录名;原始社区包不能直接用,无下载通道
+  'qwen-image-2.1-turbo-heretic': 'Qwen-Image-2.1-Turbo-Heretic',
   // Uncensored:repoId 即本地目录名,仅作与主进程 KNOWN_MODELS 对齐的标识,无下载通道
   'qwen-image-2.1-uncensored': 'Qwen-Image-2.1-Uncensored-MLX',
   'qwen-image-edit': 'mlx-community/Qwen-Image-Edit-8bit',
@@ -1028,6 +1030,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
 
   /* ---- 模型下载(mlxgen 真实下载:spawn mlxgen download + 进度轮询) ---- */
   const [downloads, setDownloads] = useState<Record<string, DownloadState>>({});
+  const [deletingModel, setDeletingModel] = useState<string | null>(null);
+  const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   /** 已下载状态:id → 已就绪(主进程按 HF 缓存目录探测) */
   const [mlxReady, setMlxReady] = useState<Record<string, boolean>>({});
   const refreshMlxModels = (): void => {
@@ -1123,6 +1127,38 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         stopPolling(id);
         setDownloads((d) => ({ ...d, [id]: { status: 'cancelled', jobId, error: t('已取消') } }));
       });
+  };
+
+  /** 删除已就绪模型：用户明确确认后由主进程删除白名单内的本地目录，再刷新就绪状态。 */
+  const deleteModel = (id: 'z-image-turbo' | (typeof MODEL_IDS)[number], name: string): void => {
+    if (deletingModel) return;
+    const confirmed = window.confirm(
+      t('确定删除「{name}」吗？\n\n将永久删除该模型的本地文件（包括应用缓存及检测到的本地 / LM Studio 副本），此操作不可恢复。需要时可重新下载。', { name }),
+    );
+    if (!confirmed) return;
+    setDeletingModel(id);
+    setDeleteErrors((errors) => ({ ...errors, [id]: '' }));
+    void window.bigbotart
+      .mlxgenDelete(MODEL_REPO[id])
+      .then((result) => {
+        if (!result.ok) {
+          setDeleteErrors((errors) => ({ ...errors, [id]: result.error ?? t('删除失败') }));
+          refreshMlxModels(); // 部分删除失败时也以磁盘真实状态为准
+          return;
+        }
+        setMlxReady((ready) => ({ ...ready, [id]: false }));
+        setDownloads((current) => {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
+        refreshMlxModels();
+      })
+      .catch((error: unknown) => {
+        console.error(`删除模型失败 ${id}`, error);
+        setDeleteErrors((errors) => ({ ...errors, [id]: t('删除失败，请查看日志后重试') }));
+      })
+      .finally(() => setDeletingModel(null));
   };
 
   /* ---- 🧩 h3 模型包(加速 / 风格 / 风格加速)---- */
@@ -2220,6 +2256,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                   'z-image-turbo': { name: 'Z-Image-Turbo', desc: t('文生图 · 推荐 · ~11GB') },
                   'qwen-image-2.1': { name: 'Qwen-Image-2.1 (bf16 全量)', desc: t('文生图 / 参考编辑 1-10 张 · ~33GB') },
                   'qwen-image-2.1-turbo': { name: 'Qwen-Image-2.1 Turbo (8步蒸馏)', desc: t('文生图 / 参考编辑 · 采样表锁 8 步 · 快 · ~33GB(本地 4bit ~13GB)') },
+                  'qwen-image-2.1-turbo-heretic': { name: 'Qwen-Image-2.1-Turbo-Heretic', desc: t('文生图 / 图生图 / 参考编辑 · 采样表锁 8 步 · 本地转换组装') },
                   'qwen-image-2.1-uncensored': { name: 'Qwen-Image-2.1 Uncensored (MLX 8bit)', desc: t('文生图 / 图生图 · ~22GB · 本地构建包(mlx-gen tools/build_qwen21_uncensored_package.sh)') },
                   'qwen-image-edit': { name: 'Qwen Image Edit', desc: t('指令编辑 / Inpaint · 推荐 · 37.5GB') },
                   'flux2-klein-9b': { name: 'FLUX.2 Klein 9B', desc: t('多参考生成(首图定构图)/编辑 · Outpaint · ~18GB') },
@@ -2236,6 +2273,11 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       <div className="sub mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
                         {m.desc}
                       </div>
+                      {deleteErrors[id] && (
+                        <div className="mut" style={{ fontSize: 11, color: 'var(--danger)' }}>
+                          {deleteErrors[id]}
+                        </div>
+                      )}
                       {dl.status === 'failed' && (
                         <div className="mut" style={{ fontSize: 11, color: 'var(--danger)' }}>
                           {dl.error ?? t('下载失败')}
@@ -2243,10 +2285,22 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       )}
                     </div>
                     {ready ? (
-                      <span className="badge ok">{t('已就绪')}</span>
+                      <div className="row g8" style={{ flex: 'none' }}>
+                        <span className="badge ok">{t('已就绪')}</span>
+                        <button
+                          className="btn btn-g btn-sm model-delete"
+                          type="button"
+                          data-od-id={`settings-model-delete-${id}`}
+                          data-delete-model={id}
+                          disabled={deletingModel !== null}
+                          onClick={() => deleteModel(id, m.name)}
+                        >
+                          {deletingModel === id ? t('删除中…') : t('删除')}
+                        </button>
+                      </div>
                     ) : MANUAL_IMAGE_IDS.has(id) ? (
-                      // 本地构建包(如 Uncensored):无下载通道,不渲染下载按钮
-                      <span className="badge" title={t('由 mlx-gen tools/build_qwen21_uncensored_package.sh 本地转换构建,详见引擎仓库')}>
+                      // 本地转换/组装包:无下载通道,不渲染下载按钮
+                      <span className="badge" title={t('由 mlx-gen 按对应模型文档在本地转换或组装,详见引擎仓库')}>
                         {t('手动构建')}
                       </span>
                     ) : dl.status === 'idle' ? (

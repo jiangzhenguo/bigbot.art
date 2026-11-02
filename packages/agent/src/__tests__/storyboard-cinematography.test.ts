@@ -16,7 +16,7 @@ function tableOf(result: PlanStoryboardResult) {
 }
 
 describe('planStoryboardDeterministic — 扩展列兜底', () => {
-  it('每行都按完整 22 列表头落盘;扩展列留空而不挤占核心列', () => {
+  it('每行都按完整 23 列表头落盘;扩展列留空而不挤占核心列', () => {
     const result = planStoryboardDeterministic({
       brief: '她推门。她看到桌上的信。她停下呼吸。',
       autoMaterialize: true,
@@ -25,7 +25,7 @@ describe('planStoryboardDeterministic — 扩展列兜底', () => {
     expect(table.head).toEqual([...STORYBOARD_HEAD]);
     expect(table.rows.length).toBeGreaterThan(0);
     for (const row of table.rows) {
-      expect(row).toHaveLength(22);
+      expect(row).toHaveLength(23);
       expect(rowCell(row, table.head, '景别')).toBe('中景');
       expect(rowCell(row, table.head, '运镜')).toBe('固定');
       expect(rowCell(row, table.head, '焦段')).toBe('');
@@ -81,7 +81,7 @@ describe('PiPlanner.toStoryboardPlanResult — LLM 扩展字段映射', () => {
     const table = tableOf(result);
     expect(table.rows).toHaveLength(1);
     const row = table.rows[0]!;
-    expect(row).toHaveLength(22);
+    expect(row).toHaveLength(23);
     const expected: Record<string, string> = {
       画面描述: '女主推开门，看到桌上的信',
       '对白/旁白': '别回头',
@@ -128,10 +128,33 @@ describe('PiPlanner.toStoryboardPlanResult — LLM 扩展字段映射', () => {
     const result = planner.toStoryboardPlanResult({ brief: 'ignored' }, out);
     const table = tableOf(result);
     const row = table.rows[0]!;
-    expect(row).toHaveLength(22);
+    expect(row).toHaveLength(23);
     expect(rowCell(row, table.head, '景别')).toBe('中景');
     expect(rowCell(row, table.head, '运镜')).toBe('固定');
     expect(rowCell(row, table.head, '焦段')).toBe('');
     expect(rowCell(row, table.head, '声景')).toBe('');
+  });
+
+  it('P0:LLM 单元格含换行时落盘仍能按行回读，铺节点数量与行数一致', () => {
+    const out: LlmStoryboardOutput = {
+      title: '多行分镜',
+      intro: '两个镜头',
+      report: '',
+      rows: [
+        { 画面描述: '第一行动作\n第二行连续性衔接', 衔接: '硬切', 时长: 5 },
+        { 画面描述: '第三行动作\n第四行资产锁定', 衔接: '接尾帧', 时长: 4 },
+      ],
+    };
+    const planner = new PiPlanner() as unknown as {
+      toStoryboardPlanResult(params: PlanStoryboardParams, output: LlmStoryboardOutput): PlanStoryboardResult;
+    };
+    const result = planner.toStoryboardPlanResult(
+      { brief: 'ignored', autoMaterialize: true },
+      out,
+    );
+    const table = tableOf(result);
+    expect(table.rows).toHaveLength(2);
+    expect(rowCell(table.rows[0]!, table.head, '画面描述')).toBe('第一行动作\n第二行连续性衔接');
+    expect(result.shots).toHaveLength(2);
   });
 });

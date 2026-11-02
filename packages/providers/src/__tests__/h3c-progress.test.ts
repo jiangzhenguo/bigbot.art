@@ -17,6 +17,8 @@ import {
   stallMessage,
   STALL_SUSPECT_MS,
   STALL_LIKELY_DEAD_MS,
+  H3_PHASE_WEIGHTS,
+  H3_PHASE_ORDER,
 } from '../h3c-progress.js';
 
 describe('A · parseProgressLine', () => {
@@ -273,5 +275,91 @@ describe('C · 停滞判定', () => {
     const s = stallMessage('suspect', 'denoise 5/8', 130_000)!;
     expect(s).toContain('疑似');
     expect(s).not.toContain('卡死');
+  });
+});
+
+
+/**
+ * 二采(second pass)阶段 —— h3 在主 denoise 之后 emit `second pass prepare`(0/1→1/1)
+ * 与 `second pass`(n/N)。
+ *
+ * 为什么必须登记权重:未登记时它们落进 H3_UNKNOWN_PHASE_WEIGHT(1)兜底桶,
+ * 总进度会在 denoise 结束点(~72%)附近**几乎不动**地停很久,而二采还要跑 20~50% 时间。
+ * 用户看到的是「进度条卡住、任务像死了」—— 与 2026-09「爬到 99% 干等」同一种误导,
+ * 只是停的位置从中段换到了尾段。
+ */
+describe('B · 二采阶段(second pass)', () => {
+  it('权重已登记(不能落到未知兜底桶)', () => {
+    expect(H3_PHASE_WEIGHTS['second pass prepare']).toBeGreaterThan(0);
+    expect(H3_PHASE_WEIGHTS['second pass']).toBeGreaterThan(0);
+    // 二采是新的一整段重采样,权重应明显大于「未知」桶,否则等于没登记
+    expect(H3_PHASE_WEIGHTS['second pass']).toBeGreaterThan(H3_PHASE_WEIGHTS['video VAE load']!);
+  });
+
+  it('执行顺序:denoise → second pass prepare → second pass → FFmpeg', () => {
+    const iDenoise = H3_PHASE_ORDER.indexOf('denoise');
+    const iPrepare = H3_PHASE_ORDER.indexOf('second pass prepare');
+    const iSecond = H3_PHASE_ORDER.indexOf('second pass');
+    const iFfmpeg = H3_PHASE_ORDER.indexOf('FFmpeg');
+    expect(iPrepare).toBeGreaterThan(iDenoise);
+    expect(iSecond).toBeGreaterThan(iPrepare);
+    expect(iFfmpeg).toBeGreaterThan(iSecond);
+  });
+
+  it('denoise 8/8 → prepare → second pass → FFmpeg 全程单调递增,末尾到 100%', () => {
+    const seq = [
+      { phase: 'denoise', done: 8, total: 8 },
+      { phase: 'second pass prepare', done: 0, total: 1 },
+      { phase: 'second pass prepare', done: 1, total: 1 },
+      { phase: 'second pass', done: 0, total: 4 },
+      { phase: 'second pass', done: 2, total: 4 },
+      { phase: 'second pass', done: 4, total: 4 },
+      { phase: 'FFmpeg', done: 124, total: 124 },
+    ];
+    const vals = seq.map(phaseWeightedProgress);
+    for (let i = 1; i < vals.length; i += 1) {
+      expect(vals[i]!, `第 ${i} 步(${seq[i]!.phase})不应回退`).toBeGreaterThanOrEqual(vals[i - 1]!);
+    }
+    // 二采开工必须比 denoise 结束时明显靠后(否则等于没登记权重)
+    const afterDenoise = phaseWeightedProgress({ phase: 'denoise', done: 8, total: 8 });
+    const secondPassStart = phaseWeightedProgress({ phase: 'second pass', done: 0, total: 4 });
+    expect(secondPassStart).toBeGreaterThan(afterDenoise);
+    expect(vals[vals.length - 1]).toBeCloseTo(1, 5);
+  });
+
+  it('二采阶段内按 done/total 细分推进(不是一整块跳过去)', () => {
+    const p0 = phaseWeightedProgress({ phase: 'second pass', done: 0, total: 4 });
+    const p2 = phaseWeightedProgress({ phase: 'second pass', done: 2, total: 4 });
+    const p4 = phaseWeightedProgress({ phase: 'second pass', done: 4, total: 4 });
+    expect(p0).toBeLessThan(p2);
+    expect(p2).toBeLessThan(p4);
+  });
+
+  it('ProgressTracker 在二采期间同样单调(乱序/重复行不回退)', () => {
+    const t = new ProgressTracker(0);
+    t.pushLine('denoise 8/8', 1000);
+    const atDenoiseEnd = t.progress;
+    t.pushLine('second pass prepare 1/1', 2000);
+    const atPrepare = t.progress;
+    t.pushLine('second pass 1/4', 3000);
+    const atSecond1 = t.progress;
+    // 乱序来的旧阶段行不得把进度拽回去
+    t.pushLine('denoise 4/8', 4000);
+    expect(t.progress).toBe(atSecond1);
+    t.pushLine('second pass 4/4', 5000);
+    expect(t.progress).toBeGreaterThan(atSecond1);
+    expect(atPrepare).toBeGreaterThanOrEqual(atDenoiseEnd);
+    expect(atSecond1).toBeGreaterThanOrEqual(atPrepare);
+    // stageText 如实反映当前阶段(UI 能看出「在跑二采」)
+    expect(t.stageText).toBe('second pass 4/4');
+  });
+
+  it('未知阶段仍走兜底桶且不虚报(二采登记没有放宽兜底)', () => {
+    const unknown = phaseWeightedProgress({ phase: 'some brand new phase', done: 1, total: 2 });
+    expect(unknown).toBeGreaterThanOrEqual(0);
+    expect(unknown).toBeLessThanOrEqual(1);
+    // 同 done 下,已登记的二采阶段必须明显高于未知兜底(说明权重真的生效)
+    const second = phaseWeightedProgress({ phase: 'second pass', done: 1, total: 2 });
+    expect(second).toBeGreaterThan(unknown);
   });
 });

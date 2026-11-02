@@ -263,7 +263,7 @@ export const NODE_KIND_GUIDE = [
   ['image-upscale', '图片增强(超分)'],
   ['frame-grab', '视频裁切取帧(纯 ffmpeg,不推理:从视频截取一帧导出为**图片资源**并自动导入资产库)。这是「视频 → 图片」的唯一合法通道——图片编辑/增强的 input 端口要的是静帧,视频**不能**直连图片编辑(会被校验拒绝)。输入连 shot 成片 / video-upscale 产物 / 视频 asset(input-video 端口,单值);参数 data={mode:first|last|at, seconds}(at 需非负秒数);产物 PNG 可再连给 image-edit / image-upscale 的 input 或 shot 的 first-frame/ref-image'],
   ['video-upscale', '视频增强(超分 + 合修脸):本地后处理,不走推理队列。三阶段可独立开关——去块(ffmpeg deblock)/ 超分(Real-ESRGAN,真人用 realesrgan-x4plus)/ 修脸(GFPGAN 或 CodeFormer)。输入连 shot 成片或视频 asset(input 端口),产物 mp4 接时间线入轨或作下游镜头参考。参数:data={scale, srModel, faceModel, faceWeight, deblock, device}'],
-  ['shot', '视频镜头(h3.c:文生/首帧/尾帧/首尾帧/参考图/参考视频;参考视频端口 ref-video 可接视频 asset、上游镜头成片、视频增强产物,默认连同源片音轨一起参考(节点 data.refVideoSilent=true 改走 --ref-silent-video 只取画面);支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数)'],
+  ['shot', '视频镜头(h3.c:文生/首帧/尾帧/首尾帧/参考图/参考视频;参考视频端口 ref-video 可接视频 asset、上游镜头成片、视频增强产物,默认连同源片音轨一起参考(节点 data.refVideoSilent=true 改走 --ref-silent-video 只取画面);支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数);支持 🎯 二采(second pass):data.secondPass=true 走同画布精修(重跑去噪尾部 0.15,构图不变、约 +15~20% 时间),data.secondPass={enabled:true, mode:"refine"|"canvas", fraction}(canvas = 画布二采 Hires:第一遍小画布定构图、第二遍大画布重采样,自动配 --render-* + --second-pass-canvas;画布/比例由 shared 的 planSecondPass 统一推算,别自己拼参数)'],
   ['timeline', '时间线/剪辑(FFmpeg 导出;导出成片后自身也是**视频产物源**:可连 frame-grab 取帧 / video-upscale 再增强 / shot 的 ref-video·ref-audio / audio-ref 抽音轨 / 另一条 timeline 入轨,下游从 data.resultPath 读成片)'],
   ['audio-ref', '音频参考(--ref-audio):把音频资产作 shot 的音轨参考,产物带声直出'],
 ] as const;

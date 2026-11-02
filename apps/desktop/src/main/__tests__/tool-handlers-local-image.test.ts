@@ -230,6 +230,25 @@ describe('buildImageSubmitParams · 工具模型缺省解析(2026-09-29 v1)', ()
       expect(String(r.params.__modelHealNote)).toContain('不支持参考编辑');
     }
   });
+
+  it('image-gen 显式 Heretic + 有 ref-image → 保持 Heretic(新版转换包支持参考编辑)', async () => {
+    const { buildImageSubmitParams } = await import('../tool-handlers');
+    const canvas = {
+      nodes: [
+        node('ref', 'image-gen', { resultPath: '/o/ref.png' }),
+        node('g', 'image-gen', { prompt: '姿势静帧', model: 'Qwen-Image-2.1-Turbo-Heretic' }),
+      ],
+      edges: [edge('ref', 'g', 'ref-image')],
+    };
+    const r = buildImageSubmitParams(canvas, canvas.nodes[1]!, assets({}), {
+      image: { 'image.instruction': 'Qwen/Qwen-Image-2.1-Turbo' },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.params.model).toBe('Qwen-Image-2.1-Turbo-Heretic');
+      expect(r.params.__modelHealedFrom).toBeUndefined();
+    }
+  });
 });
 
 describe('buildImageSubmitParams(image 类节点提交参数)', () => {

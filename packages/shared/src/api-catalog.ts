@@ -35,6 +35,7 @@ export const API_CATALOG = [
   rpc('mlxgenDownloadStatus', 'mlxgen-download-status'),
   rpc('mlxgenDownloadActive', 'mlxgen-download-active'),
   rpc('mlxgenDownloadCancel', 'mlxgen-download-cancel'),
+  rpc('mlxgenDelete', 'mlxgen-delete', ['long']),
   rpc('savePngAsset', 'save-png-asset', ['large']),
   rpc('checkProviders', 'check-providers'),
   rpc('submitRender', 'submit-render'),

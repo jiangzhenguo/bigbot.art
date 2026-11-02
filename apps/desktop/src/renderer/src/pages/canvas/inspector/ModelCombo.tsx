@@ -14,6 +14,8 @@ export interface ModelItem {
   alias?: string;
   desc: string;
   ico: string;
+  /** 本地转换/组装包:不就绪时显示「手动构建」,不发起下载 */
+  manualOnly?: boolean;
 }
 
 /** 与 packages/providers capabilities().models 同口径的已知图片模型(大小 = HF 官方清单实测 2026-09) */
@@ -25,9 +27,12 @@ export const IMAGE_MODELS: ModelItem[] = [
   // Turbo(2026-10 接入):2.1 的 8 步蒸馏版,全量带 vision tower(参考编辑可做);
   // 采样表内置 checkpoint(sample_sigmas),步数锁定 8,--steps 被引擎忽略
   { id: 'qwen-image-2.1-turbo', name: 'Qwen-Image-2.1 Turbo', repoId: 'Qwen/Qwen-Image-2.1-Turbo', alias: 'qwen-image-2.1-turbo', desc: '文生图 / 参考编辑 · 8步蒸馏 · 快', ico: 'Q-T' },
+  // Heretic 本地组装包:复用 Turbo 的 8 步采样表;新版转换保留 vision tower,
+  // 支持文生图/latent 图生图/qwen21.edit 参考编辑。原始社区包需按引擎文档转换组装。
+  { id: 'qwen-image-2.1-turbo-heretic', name: 'Qwen-Image-2.1-Turbo-Heretic', repoId: 'Qwen-Image-2.1-Turbo-Heretic', alias: 'qwen-image-2.1-turbo-heretic', desc: '文生图 / 图生图 / 参考编辑 · 8步 · 本地包', ico: 'Q-H', manualOnly: true },
   // Uncensored 本地包(2026-10 接入):纯文生图/图生图(text_encoder 无 vision tower,
   // 做不了参考编辑);无应用内下载通道,由 mlx-gen 构建脚本产出,就绪徽章按本地目录探测
-  { id: 'qwen-image-2.1-uncensored', name: 'Qwen-Image-2.1 Uncensored', repoId: 'Qwen-Image-2.1-Uncensored-MLX', alias: 'qwen-image-2.1-uncensored', desc: '文生图 / 图生图 · 8bit · ~22 GB · 本地包', ico: 'Q-U' },
+  { id: 'qwen-image-2.1-uncensored', name: 'Qwen-Image-2.1 Uncensored', repoId: 'Qwen-Image-2.1-Uncensored-MLX', alias: 'qwen-image-2.1-uncensored', desc: '文生图 / 图生图 · 8bit · ~22 GB · 本地包', ico: 'Q-U', manualOnly: true },
   { id: 'qwen-image-edit', name: 'Qwen Image Edit', repoId: 'mlx-community/Qwen-Image-Edit-8bit', alias: 'qwen-image-edit', desc: '指令编辑 / mask · 8bit ~37.5 GB', ico: 'Q-E' },
   { id: 'flux2-klein-9b', name: 'Flux.2 Klein 9B', repoId: 'AbstractFramework/flux.2-klein-9b-8bit', desc: '多参考编辑 / outpaint · ~18 GB', ico: 'F-K' },
   { id: 'seedvr2-3b', name: 'SeedVR2 3B', repoId: 'AbstractFramework/seedvr2-3b-8bit', desc: '超分修复 · ~4.7 GB', ico: 'S-V' },
@@ -116,6 +121,8 @@ export function ModelCombo({
         {cur ? (
           ready[cur.repoId] ? (
             <span className="badge ok">已下载</span>
+          ) : cur.manualOnly ? (
+            <span className="badge">手动构建</span>
           ) : curDl?.pct != null && curDl.pct < 100 ? (
             <span className="badge dl">下载中 {curDl.pct}%</span>
           ) : (
@@ -147,6 +154,8 @@ export function ModelCombo({
                 </span>
                 {ready[m.repoId] ? (
                   <span className="badge ok">已下载</span>
+                ) : m.manualOnly ? (
+                  <span className="badge" title="按 mlx-gen 对应模型文档在本地转换或组装">手动构建</span>
                 ) : dl && dl.pct != null && dl.pct < 100 ? (
                   <span className="badge dl" onClick={(e) => { e.stopPropagation(); }}>下载中 {Math.round(dl.pct)}%</span>
                 ) : (

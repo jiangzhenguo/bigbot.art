@@ -62,6 +62,10 @@ export const MODEL_CAPABILITIES: Record<string, ImageCapability[]> = {
   // 全量 checkpoint 带 vision tower(text_encoder 750 张量含 351 个 visual.*)→ 参考编辑可做,
   // 能力面与 bf16 相同;与 Uncensored(纯语言塔)截然相反。
   'Qwen/Qwen-Image-2.1-Turbo': ['image.generate', 'image.img2img', 'image.instruction'],
+  // Qwen-Image-2.1-Turbo-Heretic(2026-10 接入;2026-11 开放参考编辑):本地转换组装包,
+  // 复用 Turbo DiT 与 sample_sigmas(锁 8 步)。新版转换保留 model.visual.* 并规范化 config,
+  // 引擎 verify --route edit 全组件通过,因此与官方 Turbo 一样支持 qwen21.edit。
+  'Qwen-Image-2.1-Turbo-Heretic': ['image.generate', 'image.img2img', 'image.instruction'],
 };
 
 /**
@@ -102,6 +106,9 @@ const MODEL_ID_ALIASES: Record<string, string> = {
   'qwen-2.1-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
   'qwen-image-21-turbo': 'Qwen/Qwen-Image-2.1-Turbo',
   'Qwen-Image-2.1-Turbo': 'Qwen/Qwen-Image-2.1-Turbo',
+  // Heretic 本地组装包:独立标识,不能归一化到官方 Turbo(text encoder 与能力不同)
+  'qwen-image-2.1-turbo-heretic': 'Qwen-Image-2.1-Turbo-Heretic',
+  'Qwen-Image-2.1-Turbo-Heretic': 'Qwen-Image-2.1-Turbo-Heretic',
 };
 
 /** 该模型是否支持某能力(查询前先归一化;未知模型一律 false,由提交层防呆兜底) */
@@ -199,4 +206,19 @@ export function defaultGenerateSteps(model: string | undefined): number {
   if (/qwen.*2\.1.*turbo/i.test(m)) return 8;
   if (/qwen.*2\.1/i.test(m)) return 40;
   return 24;
+}
+
+/** 图片编辑(参考编辑)缺省采样步数;Turbo 采样表内置且引擎锁 8。 */
+export const DEFAULT_EDIT_STEPS = 30;
+export const TURBO_EDIT_STEPS = 8;
+
+/**
+ * 图片编辑默认步数的唯一来源。
+ *
+ * provider 与检查器都调它,禁止再各写一份三元式:
+ * - Turbo(本地目录/短别名都命中)→ 8(引擎锁 8,UI/日志说真话)
+ * - 其余 → 30
+ */
+export function defaultEditSteps(model: string | undefined): number {
+  return /qwen.*2\.1.*turbo/i.test(String(model ?? '')) ? TURBO_EDIT_STEPS : DEFAULT_EDIT_STEPS;
 }

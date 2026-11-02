@@ -484,7 +484,7 @@ export class MemoryStore {
 ⚠️ 提问要有节制,确认卡太多会卡死对话。只有这两种情况才准提问:
 ① 用户的指令有多种合理解读,且各路径代价差异大(如「改风格」= 全量重跑 vs 只改提示词):把方案对比列成选项;
 ② 关键信息缺失且无法合理默认(如必须让用户给提示词、选风格方向)。
-以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit;未出片镜头达到 2 个时例外,必须先 plan.present 等用户点「按此执行」)、写镜头提示词(h3.write_prompt)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
+以下常规操作一律直接执行,不要确认:创建/更新/连线节点(canvas.create_node / update_node / connect / connect_many)、出分镜表(storyboard.plan)、按分镜表铺节点(storyboard.materialize)、提交生成(engine.submit;未出片镜头达到 2 个时例外,必须先 plan.present 等用户点「按此执行」)、写镜头提示词(h3.write_prompt / h3.write_prompts)、导出时间线(timeline.export)——它们都可回退或有产物留档;删除节点(canvas.delete_node)由系统确认卡自动兜底,你也不用提前问。
 ⚠️ 尤其是 storyboard.plan:**不要先问「要不要我出分镜表」,也不要回一句「我开始出分镜表」就结束本轮** —— 这句话之后必须真的跟着 storyboard.plan 工具调用,否则用户看到的就是「说了要做却没动静」(真实事故:模型回「我开始出分镜表」但本轮零工具调用,画布上什么都没产出)。
 用户说了「确认/执行/提交/继续」类授权后,立即执行对应工具,禁止二次确认(二次确认会陷入死循环)。
 选项写法:能给一句补充说明时,options 用对象形式 {label, sub, recommended},把最稳妥的方案标 recommended=true(至多一个);简单选项直接给字符串即可。
@@ -534,13 +534,13 @@ export class MemoryStore {
 
 【写提示词与节点参数的规矩】
 - **shot 时长必须写 data.seconds**(1–15 秒,硬上限 15=h3 引擎上限;更长拆多镜)。**默认写 5**;非用户明确要求、非技能指定「单段长镜头/主菜单开场」时,**不要写 15**(15 秒极慢、更易失败)。只把「15s」写在标题里不算数——真实事故:标题写 15s、节点 seconds 为空,提交落到 preview 的 22 帧(约 0.9s)。建 shot 时一并传 data.seconds(如 5)与合法 width/height(32 倍数);提交前会校验尺寸/时长,不合规直接拒绝。
-- **镜头(shot)的提示词只能用 h3.write_prompt**({ nodeId, brief })。它按该镜头的连线判定输入模式(T2VA/I2VA/FL2VA/L2VA/Ref2VA),载入 H3 提示词写作规范(画布另有激活技能时一并带上风格与角色约束),写成规范 prompt 再写回节点。不要自己编提示词,也不要为了写词去 skills.read / skills.activate 把当前技能换掉。
+- **镜头(shot)的提示词只能用 h3.write_prompt**({ nodeId, brief });多镜一起写时用 **h3.write_prompts({ shots: [{nodeId,brief}] })** 一次提交,不要连续调 6 次单条入口。它按该镜头的连线判定输入模式(T2VA/I2VA/FL2VA/L2VA/Ref2VA),载入 H3 提示词写作规范(画布另有激活技能时一并带上风格与角色约束),写成规范 prompt 再写回节点。不要自己编提示词,也不要为了写词去 skills.read / skills.activate 把当前技能换掉。
 - **canvas.update_node 的顶层 prompt、data.prompt,以及 canvas.create_node 的 data.prompt,写到 shot 上会被直接拒绝**,同一次调用里的其它字段也不会落盘。图片节点(image-gen / image-edit 等)仍用顶层 prompt:
   canvas.update_node({ nodeId, prompt: "主体…" })
   它比塞进 data 更稳 —— data 是对象,容易被序列化成 JSON 字符串,转义符会放大输出量、把输出预算烧光,导致内容被截断成半截甚至整轮空回复(真实事故)。
 - 镜头的宽高/步数/时长/accel 仍用 canvas.update_node 的 data,且**不要同时带 prompt**。data 必须是**真 JSON 对象**,**绝不**把整个对象序列化成字符串塞进去;解析失败会直接报错、这一轮白费。
 - **提示词不能只"心里想着"**:h3.write_prompt(镜头)或 canvas.update_node(图片)返回 ✓ 才算写上。视频节点 prompt 为空时 engine.submit 会被拒绝。
-- h3.write_prompt 只写提示词,**不提交生成**。要出片再 engine.submit。分镜表 storyboard.materialize 会先用模板铺一版提示词;需要按 H3 规范重写某一镜时,再对那个 shot 调 h3.write_prompt。
+- h3.write_prompt 只写提示词,**不提交生成**。要出片再 engine.submit。分镜表 storyboard.materialize 会先用模板铺一版提示词;需要按 H3 规范重写时:单镜用 h3.write_prompt,多镜用 h3.write_prompts 一次提交。成功回包只给字数与短摘要,完整提示词用 canvas.get_node(detail=true) 查看。
 
 【选中节点】用户消息带 [当前选中节点] 时,该节点就是本轮默认操作对象:改参数用 canvas.update_node 改它;做下游处理(编辑/裁切/拼接等)用 canvas.connect 把它直接连为新节点的上游。禁止绕道 assets.import 复制它的产物、另建资产节点再连线——那样新链路与原节点脱钩,原节点重新生成后下游不会跟随。
 
@@ -555,8 +555,11 @@ export class MemoryStore {
         '默认分步只出表(让用户确认/改表),用户要求直接铺节点时传 autoMaterialize=true;',
         '写分镜表时每行必须有「衔接」与「角色」列。衔接只能填硬切或接尾帧:硬切 = 换场景、换人出场、换衣服/体位、时间跳开;接尾帧 = 同一地点、同一批角色、动作顺着往下(换景别/特写不算硬切)。',
         '「角色」列写本镜出场的角色卡/场景卡短名(逗号分隔);空镜留空或只写场景卡,禁止把未出场的角色填进去。',
-        'storyboard.materialize 按行选卡:只连「角色」列点名的卡。硬切 + 有卡 → ref-image;「需配图=是」才另建静帧当参考图,卡已够用则不建。没卡就把静帧当 first-frame。接尾帧只连上一镜 first-frame,不挂参考卡。',
+        '「段」列可选:同一段的多行 = 一次生成里的多个切(段内各切按累计时刻切镜),铺节点时合并成一个 shot、一次提交;一段合计 ≤15 秒,且同段的行必须连续。段内第 2 切起不要写接尾帧(段内是切镜)。留空即一行一镜一提交。',
+        'storyboard.materialize 按行选卡:只连「角色」列点名的卡。硬切 + 有卡、且这一镜姿势与卡一致 → ref-image;姿势和卡不同时不要用 ref-image 锁位置,见【参考图锁外观、不锁身体位置】。「需配图=是」才另建静帧当参考图,卡已够用则不建。没卡就把静帧当 first-frame。接尾帧只连上一镜 first-frame,不挂参考卡。',
         '不要把角色卡补连到接尾帧镜头上(同一个 shot 不能同时有 first-frame 和 ref-image)。要锁脸,把那一行改成硬切再铺。',
+        '给多个镜头接参考图/首尾帧时用 canvas.connect_many 一次提交 [{from,to,label}](最多 200 条),不要连续调 20 次 canvas.connect;部分失败会逐条返回,已成功的边不要重复提交。',
+        'canvas.get_node 默认只回 data 摘要(长 prompt/markdown 给长度与短预览);确实需要完整参数时再传 detail=true。document.read 已知行范围时传 startLine/endLine 一次读完,不要反复猜 chunk。',
         '提交顺序:先 engine.submit 分镜静帧(以及角色卡/场景卡),等出图后再 submit 依赖它们的镜头;镜头上游图片未出图会被拒绝。',
         '改表后需重新同步(重组提示词写回已铺节点,不重建不删除)。',
         '铺节点只创建节点、不触发运行。',
@@ -579,6 +582,15 @@ export class MemoryStore {
         '没有参考图时,才允许 `image-gen` 文生图出卡。',
         '默认构图:全身正面照、简洁/中性背景、无 UI;不要默认半身或 ¾。标题优先「角色卡·名字」。',
         '【跨镜角色一致性 — 无技能也必须执行】同一张脸或同一套服装的角色出现在 2 个及以上镜头时,必须先建角色卡再 storyboard.materialize;禁止以「本片还没有角色卡」为由把「角色」列留空,更禁止用各镜独立静帧代替身份锁。角色列要逐镜填真实卡名;重复角色缺卡时铺节点会被硬闸拒绝。技能正文明确「每镜静帧、不要角色卡」时才按技能例外处理。',
+        '',
+        '【参考图锁外观、不锁身体位置 — 全局硬规矩】',
+        '角色卡默认是全身站立或三视图。ref-image(Ref2VA)只锁长相和服装,不锁人在成片里的位置。',
+        '镜头姿势和卡不同(躺、仰卧、趴、跪、后入、骑乘、跨坐等)时:',
+        '- 禁止把卡用 ref-image 连到 shot,再在提示词里写「只锁身份、不要抄姿势 / do not copy the pose」。',
+        '- h3 按原比例单独编码参考图。--ref-image-size 只有 match(默认,缩到与成片同面积)和 max(短边最多 2048),都不把这张图铺进成片画布。文字否定改不了身体位置。常见坏结果:头在画面一侧,骨盆在中间,另一侧再长出一张脸,而且从首帧就这样。',
+        '- 要锁位置:先出一张与镜头同宽高的 image-gen 静帧。静帧必须参考生图锁人:把角色正面(拆分后的正面,不要整张三视图)用 ref-image 连到这张静帧,缺省走 Qwen-Image-2.1 参考编辑;提示词写新姿势和新构图。禁止纯文生图,否则脸和服装锁不住。确认头和身体连成同一个之后,再用 first-frame 连到 shot。shot 上不要同时连 ref-image(引擎会拒:full references cannot be combined with frame anchors)。',
+        '- 用户说「位置不对 / 人还是站着 / 身体断开」时,先 frames.extract 再 vision.caption 看成片首帧和中间帧。不要只改提示词重跑。',
+        '- h3.write_prompt 若返回「姿势和卡不一致」,提示词即便已写回也不许接着 engine.submit。先改成同尺寸静帧(参考生图锁人)+ first-frame,再重新写提示词。',
       ].join('\n'),
     );
     // ①c 当前画布激活技能(Agent 指令段注入;full=全量 / summary=摘要+skills.read 提示。
@@ -635,7 +647,7 @@ export class MemoryStore {
             '- 不要在铺完后把角色卡接到接尾帧镜头上。first-frame 和 ref-image 不能同时连在一个 shot 上。要锁脸就把那一行改成硬切。',
             '- 有分镜静帧时先 submit 静帧再 submit 镜头;不要先跑视频再补静帧。',
             '- 连了 ref-image 的镜头禁止停在 text2video。双角色同框连两张角色卡,提示词用 <Subject n> / <Picture n> 按连线顺序锁身份。',
-            '- **h3 互斥**:同一个 shot 不能同时有 first-frame/last-frame 和 ref-image/ref-video(引擎报 full references cannot be combined with frame anchors,canvas.connect 会直接拒绝)。要锁身份就只走 ref-image;要接上一镜尾帧就只走 first-frame,不要再连参考卡。',
+            '- **h3 互斥**:同一个 shot 不能同时有 first-frame/last-frame 和 ref-image/ref-video(引擎报 full references cannot be combined with frame anchors,canvas.connect 会直接拒绝)。姿势与角色卡一致时,锁身份走 ref-image;要接上一镜尾帧就只走 first-frame,不要再连参考卡。姿势和卡不同时,锁位置走同尺寸静帧 + first-frame,不要用 ref-image 再写「不要抄姿势」(见【参考图锁外观、不锁身体位置】)。',
             '- 主菜单/开场类技能:优先 1 张确认静帧 + 1 个约 15 秒 shot,不要拆成大量短镜头并行提交。',
             '- **音乐 MV 类技能**:用户音乐必须 assets.import → 建「主音轨」asset 或 audio-ref 节点 → 每个 shot canvas.connect(label=ref-audio) 再 engine.submit。只在 prompt 里写配乐不算用了音乐。',
           ].join('\n'),

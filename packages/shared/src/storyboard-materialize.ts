@@ -14,7 +14,7 @@
  *
  * 渲染层 / Agent tool-handlers / 确定性 plan 三处必须同口径调用本模块。
  */
-import { rowCell, rowNeedsImage, type PromptSource, type PromptSubject } from './prompt.js';
+import { rowCell, rowNeedsImage, rowSeconds, type PromptSource, type PromptSubject } from './prompt.js';
 
 /** 可当参考卡的图片节点 kind(含拼图角色卡) */
 const CARD_KINDS = new Set(['image-gen', 'image-edit', 'asset', 'image-stitch']);
@@ -172,6 +172,152 @@ export function cardsToSubjects(cards: MaterializeCard[]): PromptSubject[] {
   });
 }
 
+/**
+ * 「段」列的各种写法(命中第一个非空即可)。
+ *
+ * 段 = 一次生成调用:同段的多行是**同一条视频里的多个切**,提交时只调一次 engine。
+ * 为什么用中文列名做主键:分镜表是给人读的表,用户在表格视图里手填 `1` `2` 这类
+ * 数字最自然;命名空间上也不与「镜号」冲突。
+ */
+export const SEGMENT_COLUMNS = ['段', '段号', '分组', 'segment'] as const;
+
+/** 该行属于哪一段(空串 = 没分段,即「一行一镜一提交」的旧行为) */
+export function rowSegmentKey(row: string[] | undefined, head: string[]): string {
+  for (const column of SEGMENT_COLUMNS) {
+    const value = rowCell(row, head, column).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+/** 段内一个切的快照(提示词与时长都从这一行来) */
+export interface MaterializeCutPlan {
+  rowNo: number;
+  /** 该切时长(秒,列值;上限由结构门核对) */
+  seconds: number;
+  size: string;
+  move: string;
+}
+
+/**
+ * 一个段的铺节点计划。
+ *
+ * `plan` 只保留**首行**的连线策略:整段共用一套参考图/首帧,段内后续切不是独立的
+ * 画布节点,不能各自再连一遍卡(那会把同一张图重复喂给 h3)。
+ */
+export interface MaterializeSegmentPlan {
+  segmentNo: number;
+  rowNos: number[];
+  plan: MaterializeRowPlan;
+  cuts: MaterializeCutPlan[];
+  /** 段总时长 = 各切之和(调用方仍要过一次 normalizeShotDuration) */
+  seconds: number;
+  segmentKey: string;
+}
+
+/** 已部分铺出、只能人工处理的段 */
+export interface MaterializeBlockedSegment {
+  segmentKey: string;
+  rowNos: number[];
+  doneRowNos: number[];
+}
+
+export interface MaterializeSegmentGrouping {
+  segments: MaterializeSegmentPlan[];
+  /** 段是原子单位:已铺了一部分就既不能补铺也不能重铺,必须人先删 */
+  blocked: MaterializeBlockedSegment[];
+}
+
+/**
+ * 把「按行计划」合成「按段计划」(调研改造第 4 步)。
+ *
+ * 三种情况:
+ *  1. 该行没写「段」→ 自成一段、单切(与旧行为逐字一致);
+ *  2. 整段的行都还没铺 → 合成一段,多切一次生成;
+ *  3. 段里有行已铺、有行未铺 → **拒绝**(blocked),不猜、不补半段。
+ *
+ * 注意:这里不做连续性校验(那是 `checkStoryboardSchema` 的 segment 门的职责),
+ * 只按段键聚合。两处分工是刻意的——门负责「报错给人看」,这里负责「怎么铺」。
+ */
+export function groupMaterializeSegments(opts: {
+  head: string[];
+  rows: string[][];
+  plans: MaterializeRowPlan[];
+  doneRows?: Iterable<number>;
+}): MaterializeSegmentGrouping {
+  const { head, rows, plans } = opts;
+  const done = new Set(opts.doneRows ?? []);
+  /* 段键 → 该段的所有表行号(含已铺行),用来判断「整段是否已铺完」 */
+  const rowsByKey = new Map<string, number[]>();
+  rows.forEach((row, index) => {
+    const key = rowSegmentKey(row, head);
+    if (!key) return;
+    const list = rowsByKey.get(key);
+    if (list) list.push(index + 1);
+    else rowsByKey.set(key, [index + 1]);
+  });
+
+  const blocked: MaterializeBlockedSegment[] = [];
+  const blockedKeys = new Set<string>();
+  const byKey = new Map<string, MaterializeSegmentPlan>();
+  const segments: MaterializeSegmentPlan[] = [];
+  for (const plan of plans) {
+    const row = rows[plan.rowNo - 1];
+    const key = rowSegmentKey(row, head);
+    const cut: MaterializeCutPlan = {
+      rowNo: plan.rowNo,
+      seconds: rowSeconds(row, head),
+      size: rowCell(row, head, '景别'),
+      move: rowCell(row, head, '运镜'),
+    };
+    if (!key) {
+      segments.push({
+        segmentNo: segments.length + 1,
+        rowNos: [plan.rowNo],
+        plan,
+        cuts: [cut],
+        seconds: Math.max(0, cut.seconds),
+        segmentKey: '',
+      });
+      continue;
+    }
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.cuts.push(cut);
+      existing.rowNos.push(plan.rowNo);
+      existing.seconds += Math.max(0, cut.seconds);
+      continue;
+    }
+    /* 半铺出的段:补铺会把剩下的切当成新的一段(提示词/秒数/切点全变),
+       重铺又会与已铺节点重复 —— 两个方向都是错的,所以这里只报不铺。 */
+    const allRows = rowsByKey.get(key) ?? [plan.rowNo];
+    const doneRows = allRows.filter((r) => done.has(r));
+    if (doneRows.length && doneRows.length < allRows.length) {
+      /* 同段的每个未铺行都会走到这里,按段键去重,别把同一个段报 3 遍 */
+      if (!blockedKeys.has(key)) {
+        blockedKeys.add(key);
+        blocked.push({ segmentKey: key, rowNos: allRows, doneRowNos: doneRows });
+      }
+      continue;
+    }
+    const seg: MaterializeSegmentPlan = {
+      segmentNo: segments.length + 1,
+      rowNos: [plan.rowNo],
+      plan,
+      cuts: [cut],
+      seconds: Math.max(0, cut.seconds),
+      segmentKey: key,
+    };
+    byKey.set(key, seg);
+    segments.push(seg);
+  }
+  /* 段序号按首行重排,保证与表格阅读顺序一致(聚合时先插入的是首行) */
+  segments.forEach((seg, i) => {
+    seg.segmentNo = i + 1;
+  });
+  return { segments, blocked };
+}
+
 /** 「角色」列拆成名字列表 */
 export function parseRoleTokens(cell: string): string[] {
   return String(cell ?? '')
@@ -264,28 +410,37 @@ export function keyframeEdgeLabel(plan: Pick<MaterializeRowPlan, 'keyframeAs'>):
 /**
  * 铺节点时写入下游的归属。`promptFrom` 会被边分派按文档边重写,
  * `storyboardId` / `storyboardRow` 留下来,整理和已铺行统计仍认得出。
+ *
+ * 段内多切(2026-10-30 第 4 步):一个节点覆盖多行时写 `storyboardRows`,
+ * 否则「已铺行」只认首行,重新铺会把其余切当成新行重复铺出来。
  */
-export function storyboardLinkFields(nodeId: string, row: number): {
+export function storyboardLinkFields(nodeId: string, row: number, rows?: number[]): {
   promptFrom: PromptSource;
   storyboardId: string;
   storyboardRow: number;
+  storyboardRows?: number[];
 } {
+  const all = [...new Set([row, ...(rows ?? [])].filter((r) => Number.isFinite(r)))];
   return {
     promptFrom: { nodeId, mode: 'row', row },
     storyboardId: nodeId,
     storyboardRow: row,
+    ...(all.length > 1 ? { storyboardRows: all } : {}),
   };
 }
 
 /**
  * 节点属于哪张分镜表的哪一行。
  * 先看边分派清不掉的 storyboardId / storyboardRow,没有再退回 promptFrom(mode=row)。
+ *
+ * 段内多切时 `rows` 给出该节点覆盖的**全部**行(含首行);单行节点不返回该字段。
  */
-export function storyboardLinkOf(data: unknown): { nodeId: string; row?: number } | undefined {
+export function storyboardLinkOf(data: unknown): { nodeId: string; row?: number; rows?: number[] } | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const d = data as {
     storyboardId?: unknown;
     storyboardRow?: unknown;
+    storyboardRows?: unknown;
     promptFrom?: { nodeId?: unknown; mode?: unknown; row?: unknown };
   };
   const fromField = typeof d.storyboardId === 'string' && d.storyboardId ? d.storyboardId : undefined;
@@ -296,12 +451,18 @@ export function storyboardLinkOf(data: unknown): { nodeId: string; row?: number 
   const nodeId = fromField ?? fromPrompt;
   if (!nodeId) return undefined;
   const row = fromField ? fieldRow ?? (fromPrompt === nodeId ? promptRow : undefined) : promptRow;
-  return typeof row === 'number' ? { nodeId, row } : { nodeId };
+  const extraRows = Array.isArray(d.storyboardRows)
+    ? d.storyboardRows.filter((r): r is number => typeof r === 'number' && Number.isFinite(r))
+    : [];
+  const allRows = [...new Set([...(typeof row === 'number' ? [row] : []), ...extraRows])].sort((a, b) => a - b);
+  const base = typeof row === 'number' ? { nodeId, row } : { nodeId };
+  return allRows.length > 1 ? { ...base, rows: allRows } : base;
 }
 
 /**
  * 从已铺节点反查「行号 → shot id」(追加铺时用来接续上一镜)。
  * 只认 kind=shot,且 storyboardId / promptFrom 指向该分镜表某行。
+ * 段内多切:该 shot 覆盖的每一行都指向同一个 id。
  */
 export function existingShotByRow(
   nodes: MaterializeNodeLike[],
@@ -311,7 +472,8 @@ export function existingShotByRow(
   for (const n of nodes) {
     if (String(n.kind ?? '') !== 'shot') continue;
     const link = storyboardLinkOf(n.data);
-    if (link?.nodeId === storyboardId && typeof link.row === 'number') m.set(link.row, n.id);
+    if (link?.nodeId !== storyboardId) continue;
+    for (const row of link.rows ?? (typeof link.row === 'number' ? [link.row] : [])) m.set(row, n.id);
   }
   return m;
 }
@@ -403,6 +565,37 @@ export function planStoryboardMaterializeRows(opts: {
     coveredRows.add(rowNo);
   }
   return plans;
+}
+
+/** 人类可读摘要(工具返回 / toast)——按段口径 */
+export function summarizeMaterializeSegments(segments: MaterializeSegmentPlan[]): string {
+  if (!segments.length) return '无新行';
+  const cuts = segments.reduce((n, s) => n + s.cuts.length, 0);
+  const multi = segments.filter((s) => s.cuts.length > 1).length;
+  const refs = segments.filter((s) => s.plan.strategy === 'ref').length;
+  const cont = segments.filter((s) => s.plan.strategy === 'continue').length;
+  const stills = segments.filter((s) => s.plan.createKeyframe).length;
+  const text = segments.filter((s) => s.plan.strategy === 'text').length;
+  const parts = [`${segments.length} shot · ${cuts} 切`];
+  if (multi) parts.push(`${multi} 段多切一次生成`);
+  if (stills) parts.push(`${stills} 静帧`);
+  if (refs) parts.push(`${refs} 段绑定参考卡`);
+  if (cont) parts.push(`${cont} 段接续上一镜尾帧`);
+  if (text) parts.push(`${text} 段纯文生`);
+  return parts.join(' · ');
+}
+
+/** 半铺出段的拒铺文案(两个入口共用,避免措辞漂移) */
+export function blockedSegmentMessage(blocked: MaterializeBlockedSegment[]): string {
+  const lines = blocked.map(
+    (b) =>
+      `段「${b.segmentKey}」覆盖第 ${b.rowNos.join('、')} 镜,其中第 ${b.doneRowNos.join('、')} 镜已经铺出。` +
+      `段是一次生成的原子单位,不能只补铺剩下的切(切点时刻与段总时长都会变,重铺又会与已铺节点重复)。`,
+  );
+  return (
+    `拒绝铺节点:${lines.join(' ')}\n` +
+    `处理方式:删掉该段已铺出的镜头节点(它同时覆盖该段全部行)后重新铺,或把该段在表里拆成两段。`
+  );
 }
 
 /** 人类可读摘要(工具返回 / toast) */

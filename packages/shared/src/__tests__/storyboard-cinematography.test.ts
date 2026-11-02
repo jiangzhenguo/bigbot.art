@@ -45,18 +45,18 @@ function cinematicRow(): { head: string[]; row: string[] } {
 }
 
 describe('STORYBOARD_HEAD — 扩展列与旧表兼容', () => {
-  it('核心 10 列顺序不变，扩展 12 列只追加在尾部', () => {
-    expect(STORYBOARD_HEAD).toHaveLength(22);
+  it('核心 10 列顺序不变，扩展 13 列只追加在尾部', () => {
+    expect(STORYBOARD_HEAD).toHaveLength(23);
     expect([...STORYBOARD_HEAD.slice(0, 10)]).toEqual([...STORYBOARD_CORE_HEAD]);
     expect([...STORYBOARD_HEAD.slice(10)]).toEqual([...STORYBOARD_EXTENDED_HEAD]);
   });
 
-  it('新分镜默认表的表头与数据行都是 22 列，核心默认值不漂移', () => {
+  it('新分镜默认表的表头与数据行都是 23 列，核心默认值不漂移', () => {
     const table = parseGfmTable(defaultStoryboardMarkdown());
     expect(table).not.toBeNull();
-    expect(table!.head).toHaveLength(22);
+    expect(table!.head).toHaveLength(23);
     expect(table!.rows).toHaveLength(1);
-    expect(table!.rows[0]).toHaveLength(22);
+    expect(table!.rows[0]).toHaveLength(23);
     expect(rowCell(table!.rows[0], table!.head, '镜号')).toBe('1');
     expect(rowCell(table!.rows[0], table!.head, '时长(s)')).toBe('5');
     expect(rowCell(table!.rows[0], table!.head, '需配图')).toBe('是');

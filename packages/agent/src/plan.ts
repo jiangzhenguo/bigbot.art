@@ -7,9 +7,10 @@
  * - 连线 Brief → 各镜头
  * - plan-storyboard:把需求拆成一张分镜表(表格),默认只出表(分步),autoMaterialize 时同时铺节点
  */
-import type { CanvasEdge, CanvasNode, LlmSource } from '@bigbotart/shared';
+import type { CanvasEdge, CanvasNode, LlmSource, PromptSubject } from '@bigbotart/shared';
 import {
   assembleH3Prompt,
+  assembleH3SegmentPrompt,
   assembleZImagePrompt,
   rowNeedsImage,
   rowSeconds,
@@ -22,6 +23,8 @@ import {
   SB_SIZE,
   planStoryboardMaterializeRows,
   keyframeEdgeLabel,
+  groupMaterializeSegments,
+  storyboardLinkFields,
 } from '@bigbotart/shared';
 import type { PlanParams, PlanResult, PlanStoryboardParams, PlanStoryboardResult } from './protocol.js';
 
@@ -123,29 +126,53 @@ export function buildStoryboardMaterialized(
     canvasNodes: canvasNodes ?? [],
   });
   const shotIdByRow = new Map<number, string>();
-  for (const plan of plans) {
-    const r = plan.rowNo - 1;
-    const row = rows[r] ?? [];
-    const promptText = assembleH3Prompt(row, head, basePrompt, plan.subjects).text;
+  /* 段(2026-10-30 第 4 步):同段的多行是一次生成里的多个切,按段建一个 shot。
+     与主进程 storyboard.materialize / 渲染层同口径(groupMaterializeSegments)。 */
+  const { segments } = groupMaterializeSegments({ head, rows, plans });
+  for (const seg of segments) {
+    const firstRowNo = seg.rowNos[0]!;
+    const lastRowNo = seg.rowNos[seg.rowNos.length - 1]!;
+    const r = firstRowNo - 1;
+    const firstRow = rows[r] ?? [];
+    const cutRows = seg.rowNos.map((rowNo) => rows[rowNo - 1] ?? []);
+    const refIds: string[] = [];
+    const subjects: PromptSubject[] = [];
+    for (const rowNo of seg.rowNos) {
+      const segPlan = plans.find((pl) => pl.rowNo === rowNo);
+      if (!segPlan) continue;
+      for (const refId of segPlan.refNodeIds) if (!refIds.includes(refId)) refIds.push(refId);
+      for (const subject of segPlan.subjects) {
+        const key = `${subject.kind}:${subject.name}`;
+        if (!subjects.some((sbj) => `${sbj.kind}:${sbj.name}` === key)) subjects.push(subject);
+      }
+    }
+    const promptText = assembleH3SegmentPrompt(
+      cutRows.map((row, i) => ({ row, seconds: seg.cuts[i]?.seconds ?? 0 })),
+      head,
+      basePrompt,
+      subjects,
+    ).text;
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const shotLabel = seg.rowNos.length > 1 ? `镜头 ${pad2(firstRowNo)}–${pad2(lastRowNo)}` : `镜头 ${pad2(firstRowNo)}`;
     const sec = resolveMaterializeSeconds(
-      rowSeconds(row, head),
-      rowCell(row, head, '画面描述'),
-      rowCell(row, head, '提示词(可选)'),
+      seg.seconds,
+      cutRows.map((row) => rowCell(row, head, '画面描述')).join('\n'),
+      cutRows.map((row) => rowCell(row, head, '提示词(可选)')).filter(Boolean).join('\n'),
       promptText,
     );
     const dur = normalizeShotDuration(
       { prompt: promptText, seconds: sec || undefined },
-      { label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`, prompt: promptText },
+      { label: shotLabel, prompt: promptText },
     );
     const shot: CanvasNode = {
       id: nid('shot'),
       kind: 'shot',
       position: { x: 880, y: 80 + r * 186 },
-      label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`,
+      label: shotLabel,
       data: {
         engine: 'mock',
-        mode: plan.shotMode,
-        ...(plan.modeOverride ? { modeOverride: true } : {}),
+        mode: seg.plan.shotMode,
+        ...(seg.plan.modeOverride ? { modeOverride: true } : {}),
         prompt: promptText,
         width: size.width,
         height: size.height,
@@ -157,49 +184,51 @@ export function buildStoryboardMaterialized(
         tier: 'default',
         seed: 42 + r,
         refs: [],
-        promptFrom: { nodeId: storyboardId, mode: 'row', row: plan.rowNo },
+        ...(seg.cuts.length > 1 ? { segment: { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } } : {}),
+        ...storyboardLinkFields(storyboardId, firstRowNo, seg.rowNos),
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     shots.push(shot);
-    shotIdByRow.set(plan.rowNo, shot.id);
+    for (const rowNo of seg.rowNos) shotIdByRow.set(rowNo, shot.id);
     edges.push({ id: nid('edge'), source: storyboardId, target: shot.id, label: 'prompt' });
 
-    if (plan.strategy === 'continue' && plan.continueFromRow != null) {
-      const prevId = shotIdByRow.get(plan.continueFromRow);
+    if (seg.plan.strategy === 'continue' && seg.plan.continueFromRow != null) {
+      const prevId = shotIdByRow.get(seg.plan.continueFromRow);
       if (prevId) edges.push({ id: nid('edge'), source: prevId, target: shot.id, label: 'first-frame' });
     }
-    for (const refId of plan.refNodeIds) {
+    for (const refId of refIds) {
       edges.push({ id: nid('edge'), source: refId, target: shot.id, label: 'ref-image' });
     }
-    if (plan.createKeyframe) {
+    if (seg.plan.createKeyframe) {
       const img: CanvasNode = {
         id: nid('img'),
         kind: 'image-gen',
         position: { x: 620, y: 80 + r * 186 },
-        label: `图片生成 · 分镜静帧 ${String(plan.rowNo).padStart(2, '0')}`,
+        label: `图片生成 · 分镜静帧 ${pad2(firstRowNo)}`,
         data: {
           engine: 'mlxgen',
           // 🆕 不写 model(2026-09-29 v1 工具模型)/ steps(2026-10-14 按模型缺省,Turbo=8):
           // 留给提交期按「节点显式值 > 设置页工具模型 > 内置默认」解析;
           // 这里写死 z-image+24 会让设置页配置与 Turbo 锁步全部失效
-          prompt: assembleZImagePrompt(row, head, basePrompt).text,
+          prompt: assembleZImagePrompt(firstRow, head, basePrompt).text,
           width: size.width,
           height: size.height,
           guidance: 1.0,
           seeds: [42],
-          promptFrom: { nodeId: storyboardId, mode: 'row', row: plan.rowNo },
+          ...(seg.cuts.length > 1 ? { segment: { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } } : {}),
+          ...storyboardLinkFields(storyboardId, firstRowNo, seg.rowNos),
         },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
       images.push(img);
-      const port = keyframeEdgeLabel(plan);
+      const port = keyframeEdgeLabel(seg.plan);
       edges.push({ id: nid('edge'), source: storyboardId, target: img.id, label: 'prompt' });
       edges.push({ id: nid('edge'), source: img.id, target: shot.id, label: port });
       if (port === 'ref-image') {
-        for (const refId of plan.refNodeIds) {
+        for (const refId of refIds) {
           edges.push({ id: nid('edge'), source: refId, target: img.id, label: 'ref-image' });
         }
       }

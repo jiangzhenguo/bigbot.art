@@ -61,6 +61,8 @@ export interface BigBotArtApi {
   mlxgenDownloadActive(): Promise<Array<{ id: string; jobId: string; pct: number | null }>>;
   /** 取消进行中的下载;保留 .part/.incomplete 支持断点续传,取消后任务释放、可重新下载 */
   mlxgenDownloadCancel(jobId: string): Promise<{ ok: boolean; error?: string }>;
+  /** 删除已下载模型的本地文件（HF 缓存及检测到的本地副本）；下载中拒绝删除 */
+  mlxgenDelete(repoId: string): Promise<{ ok: boolean; error?: string }>;
   /** base64 dataURL PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用);返回新资产 id */
   savePngAsset(input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }): Promise<{ ok: boolean; assetId?: string; error?: string }>;
   // Provider / 渲染任务
@@ -463,8 +465,10 @@ export * from './tool-models.js';
 export * from './project-package.js';
 export * from './style-model.js';
 export * from './shot-duration.js';
+export * from './second-pass.js';
 export * from './storyboard-materialize.js';
 export * from './storyboard-character-gate.js';
+export * from './storyboard-schema.js';
 export * from './skill-params.js';
 export * from './agent-task.js';
 export * from './opencode-go.js';

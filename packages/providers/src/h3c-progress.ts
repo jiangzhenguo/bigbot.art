@@ -62,6 +62,18 @@ export const H3_PHASE_WEIGHTS: Record<string, number> = {
   //    给它极小权重(仅表示"已进入去噪期"),并放在 denoise **之前**的位置语义上;
   //    实际单调性由 ProgressTracker 兜底 clamp。
   'denoise enqueue': 0.5,
+  // ── 二采(second pass)──
+  // h3 在主 denoise 之后重跑 sigma 网格尾部,emit 两个阶段:
+  //   `second pass prepare`(0/1 → 1/1,准备:重新加噪到第 round(steps*(1-F)) 步)
+  //   `second pass`        (n/N,真正的尾部重采样)
+  // 为什么要显式登记:此前它们落在 H3_UNKNOWN_PHASE_WEIGHT(1)兜底桶,
+  // 总进度会在 denoise 结束点(~72%)附近**几乎不动**地趴很久,而二采还要多跑 20~50% 时间。
+  // 用户看到的是「进度条卡住、任务像死了」—— 与 2026-09 那次「爬到 99% 干等」同一类误导,
+  // 只是位置从中段换成了尾段。
+  // 权重取值依据:二采只跑尾部 F 步(F=0.4~0.55 实测),耗时约为完整 denoise 的
+  // 55% → 30;prepare 只是一次重加噪 + 装载,2 足够。
+  'second pass prepare': 2,
+  'second pass': 30,
   FFmpeg: 5,
 };
 
@@ -193,6 +205,10 @@ export const H3_PHASE_ORDER: string[] = [
   'audio VAE encoder',
   'video VAE encoder',
   'denoise',
+  // 二采必须排在 denoise 之后、FFmpeg 之前(引擎真实 emit 顺序):
+  // 排错位置会让「已走过哪些阶段」的推断整体错位,进度在二采期间算出来反而低于 denoise 末尾。
+  'second pass prepare',
+  'second pass',
   'FFmpeg',
 ];
 

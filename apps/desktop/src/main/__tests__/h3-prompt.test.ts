@@ -9,6 +9,7 @@ import {
   buildH3WriteMessages,
   classifyH3PromptMode,
   describeInboundRefs,
+  standingCardPoseWarning,
   extractPromptText,
   rejectDirectShotPrompt,
   requestH3PromptCompletion,
@@ -39,6 +40,34 @@ describe('classifyH3PromptMode', () => {
     expect(classifyH3PromptMode([{ label: 'ref-video' }])).toBe('Ref2VA');
     expect(classifyH3PromptMode([{ label: 'ref-audio' }])).toBe('Ref2VA');
     expect(classifyH3PromptMode([{ label: 'first-frame' }, { label: 'ref-image' }])).toBe('Ref2VA');
+  });
+});
+
+describe('standingCardPoseWarning', () => {
+  const cardRefs = '- ref-image「拆分 · 新娘白丝正面」→ <Picture 1>';
+
+  it('站立卡 + 躺/后入 → 警告,并禁止接着提交', () => {
+    const w = standingCardPoseWarning('Ref2VA', cardRefs, '女子仰卧在床上,男子后入');
+    expect(w).toContain('姿势和卡不一致');
+    expect(w).toContain('禁止接着 engine.submit');
+    expect(w).toContain('first-frame');
+  });
+
+  it('角色卡标题 + 跪姿 → 警告', () => {
+    const w = standingCardPoseWarning('Ref2VA', '- ref-image「角色卡·新娘」→ <Picture 1>', '她赤裸跪在床上');
+    expect(w).toContain('姿势和卡不一致');
+  });
+
+  it('站立卡但姿势是走进房间 → 不警告', () => {
+    expect(standingCardPoseWarning('Ref2VA', cardRefs, '她侧身走进房间')).toBeNull();
+  });
+
+  it('已经是首帧模式 → 不警告', () => {
+    expect(standingCardPoseWarning('I2VA', cardRefs, '女子仰卧')).toBeNull();
+  });
+
+  it('参考不是角色卡 → 不警告', () => {
+    expect(standingCardPoseWarning('Ref2VA', '- ref-image「酒店套房」→ <Picture 1>', '女子仰卧')).toBeNull();
   });
 });
 

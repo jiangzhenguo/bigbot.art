@@ -169,3 +169,171 @@ describe('validateParams · C:reuse 配极少步数(与 h3 warning 同口径)', 
     expect(issues.some((i) => i.includes('layers'))).toBe(true);
   });
 });
+
+/**
+ * 二采(second pass)参数面 —— 对应 `packages/shared/src/second-pass.ts` 的全链真源。
+ *
+ * 两条引擎硬规则(h3.c `h3_valid_params`):
+ *  1. `--second-pass-canvas` 必须配 `--second-pass F`,只给画布 → exit 2
+ *     "a second-pass canvas needs a fraction in (0, 1)"(且发生在**入队之后**);
+ *  2. `--render-width/--render-height` 必须成对,只给一边引擎不会用,第一遍仍在输出尺寸跑。
+ * 构建器的职责是「宁可一个 flag 都不输出」,而不是拼出半套参数 —— 半套参数只会得到
+ * 「提交成功、跑完没有二采效果」的假成功。
+ */
+describe('buildH3Args · 二采 refine(同画布精修)', () => {
+  it('① 只输出 --second-pass,不带画布、不带渲染画布', () => {
+    const args = buildH3Args({ ...base, secondPass: 0.15 });
+    expect(valueOf(args, '--second-pass')).toBe('0.15');
+    expect(args).not.toContain('--second-pass-canvas');
+    expect(args).not.toContain('--render-width');
+    expect(args).not.toContain('--render-height');
+  });
+
+  it('F 原样保留精度(0.125 不能被 toFixed(2) 改成 0.13 —— 那会改变重跑步数)', () => {
+    const args = buildH3Args({ ...base, secondPass: 0.125 });
+    expect(valueOf(args, '--second-pass')).toBe('0.125');
+  });
+});
+
+describe('buildH3Args · 二采 canvas(Hires)', () => {
+  it('② render 画布 + F + 二采画布三组齐全,画布格式 WxH', () => {
+    const args = buildH3Args({
+      ...base,
+      width: 576,
+      height: 1024,
+      renderWidth: 288,
+      renderHeight: 512,
+      secondPass: 0.4,
+      secondPassCanvas: { width: 576, height: 1024 },
+    });
+    expect(valueOf(args, '--render-width')).toBe('288');
+    expect(valueOf(args, '--render-height')).toBe('512');
+    expect(valueOf(args, '--second-pass')).toBe('0.4');
+    expect(valueOf(args, '--second-pass-canvas')).toBe('576x1024');
+  });
+
+  it('③ 只有 secondPassCanvas、没有 secondPass → 二采 flag 一个都不输出(引擎否则 exit 2)', () => {
+    const args = buildH3Args({
+      ...base,
+      secondPassCanvas: { width: 576, height: 1024 },
+    });
+    expect(args).not.toContain('--second-pass');
+    expect(args).not.toContain('--second-pass-canvas');
+    expect(args).not.toContain('--render-width');
+    expect(args).not.toContain('--render-height');
+  });
+
+  it('④ 非法 F(0 / 1 / NaN / 负数 / Infinity)→ 不输出 --second-pass,画布也一并丢掉', () => {
+    for (const f of [0, 1, Number.NaN, -0.2, Number.POSITIVE_INFINITY]) {
+      const args = buildH3Args({
+        ...base,
+        secondPass: f,
+        secondPassCanvas: { width: 576, height: 1024 },
+      });
+      expect(args, `F=${String(f)} 不应产出 --second-pass`).not.toContain('--second-pass');
+      expect(args).not.toContain('--second-pass-canvas');
+    }
+  });
+
+  it('⑤ render 画布只给一边 / 非正整数 → 两个都不输出(半对参数会被引擎静默无视)', () => {
+    const patches: Array<Partial<H3CliOptions>> = [
+      { renderWidth: 288 },
+      { renderHeight: 512 },
+      { renderWidth: 0, renderHeight: 512 },
+      { renderWidth: 288, renderHeight: Number.NaN },
+      { renderWidth: 288.5, renderHeight: 512 },
+    ];
+    for (const patch of patches) {
+      const args = buildH3Args({ ...base, ...patch });
+      expect(args, JSON.stringify(patch)).not.toContain('--render-width');
+      expect(args).not.toContain('--render-height');
+    }
+  });
+
+  it('⑥ 与首/尾帧、参考图、参考视频、参考音频共存,互不挤占,prompt 仍收尾', () => {
+    const args = buildH3Args({
+      ...base,
+      width: 576,
+      height: 1024,
+      firstFrame: '/refs/first.png',
+      lastFrame: '/refs/last.png',
+      refImages: ['/refs/a.png'],
+      refVideo: '/refs/prev.mp4',
+      refAudio: '/refs/voice.wav',
+      renderWidth: 288,
+      renderHeight: 512,
+      secondPass: 0.4,
+      secondPassCanvas: { width: 576, height: 1024 },
+    });
+    expect(valueOf(args, '--first-frame')).toBe('/refs/first.png');
+    expect(valueOf(args, '--last-frame')).toBe('/refs/last.png');
+    expect(args.filter((a) => a === '--ref-image')).toHaveLength(1);
+    expect(valueOf(args, '--ref-video')).toBe('/refs/prev.mp4');
+    expect(valueOf(args, '--ref-audio')).toBe('/refs/voice.wav');
+    expect(valueOf(args, '--render-width')).toBe('288');
+    expect(valueOf(args, '--second-pass')).toBe('0.4');
+    expect(valueOf(args, '--second-pass-canvas')).toBe('576x1024');
+    // -p 必须在 -o 之前且紧跟提示词:二采 flag 不能把提示词挤到错误位置
+    const pIdx = args.indexOf('-p');
+    expect(args[pIdx + 1]).toBe(base.prompt);
+    expect(args[args.indexOf('-o') + 1]).toBe(base.outputPath);
+  });
+
+  it('不开二采时一个二采 flag 都不出现(存量行为零变化)', () => {
+    const args = buildH3Args({ ...base });
+    expect(args).not.toContain('--second-pass');
+    expect(args).not.toContain('--second-pass-canvas');
+    expect(args).not.toContain('--render-width');
+    expect(args).not.toContain('--render-height');
+  });
+});
+
+describe('validateParams · E:二采脏值(直接调用方的最后一道闸)', () => {
+  const base = { steps: 30, layers: 50, reuse: 1, frames: 124, width: 576, height: 1024, seconds: 5 };
+
+  it('合法组合(refine / canvas)→ 通过', () => {
+    expect(validateParams({ ...base, secondPass: 0.15 })).toEqual([]);
+    expect(
+      validateParams({
+        ...base,
+        secondPass: 0.4,
+        secondPassCanvas: { width: 576, height: 1024 },
+        renderWidth: 288,
+        renderHeight: 512,
+      }),
+    ).toEqual([]);
+  });
+
+  it('⑦ F 越界 → 中文拒绝,说明 0/1 为什么不合法并给推荐值', () => {
+    for (const f of [0, 1, -0.5, 2, Number.NaN]) {
+      const msg = validateParams({ ...base, secondPass: f }).join(' ');
+      expect(msg).toContain('二采比例');
+      expect(msg).toContain('0<F<1');
+      expect(msg).toContain('0.4');
+    }
+  });
+
+  it('⑦ 只给二采画布 → 拒绝并引用引擎原话(入队后才 exit 2 是最坏形态)', () => {
+    const msg = validateParams({ ...base, secondPassCanvas: { width: 576, height: 1024 } }).join(' ');
+    expect(msg).toContain('a second-pass canvas needs a fraction in (0, 1)');
+    expect(msg).toContain('--second-pass');
+  });
+
+  it('⑦ render 画布不成对 / 非正整数 → 拒绝(否则引擎静默无视,画布二采白花一遍时间)', () => {
+    for (const patch of [
+      { renderWidth: 288 },
+      { renderHeight: 512 },
+      { renderWidth: 0, renderHeight: 512 },
+      { renderWidth: 288.5, renderHeight: 512 },
+    ]) {
+      const msg = validateParams({ ...base, secondPass: 0.4, ...patch }).join(' ');
+      expect(msg).toContain('--render-width');
+      expect(msg).toContain('成对');
+    }
+  });
+
+  it('合法 F + 合法渲染画布不误伤(provider 走 planSecondPass,传过来永远合法)', () => {
+    expect(validateParams({ ...base, secondPass: 0.05, renderWidth: 288, renderHeight: 512 })).toEqual([]);
+    expect(validateParams({ ...base, secondPass: 0.9999 })).toEqual([]);
+  });
+});

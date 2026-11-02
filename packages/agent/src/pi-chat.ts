@@ -36,7 +36,18 @@ const MAX_TOOL_ROUNDS = 20;
  * 本机 35B 模型一轮真实规模请求实测 78 秒,主进程看门狗只能盲等。取 15 秒:
  * 远小于看门狗默认值(600s),又不会把心跳刷得太密(每轮只多发几条 stdout 行)。
  */
-const LLM_HEARTBEAT_MS = Number(process.env.BIGBOTART_AGENT_HEARTBEAT_MS ?? 15_000);
+export const DEFAULT_HEARTBEAT_MS = 15_000;
+
+/** env 解析:非正数/非法值回退默认,避免 NaN 让 setInterval 变成 0ms 热循环。 */
+export function resolveHeartbeatMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.BIGBOTART_AGENT_HEARTBEAT_MS;
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_HEARTBEAT_MS;
+}
+
+const LLM_HEARTBEAT_MS = resolveHeartbeatMs();
 
 /**
  * 轮询抑制闸(结构兜底,与 system prompt 的「提交即收尾」规则同口径)。

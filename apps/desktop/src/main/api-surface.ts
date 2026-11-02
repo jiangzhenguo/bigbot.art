@@ -91,6 +91,7 @@ import {
   mlxgenDownloadStatus,
   mlxgenDownloadActive,
   mlxgenDownloadCancel,
+  mlxgenDelete,
 } from './mlxgen-models';
 import { installRuntime } from './runtime-install';
 import { runSelfCheck } from './selfcheck';
@@ -255,12 +256,13 @@ ipcMain.handle('install-runtime', (_e, id: string) => installRuntime(id, logger)
 // 引擎自检(引导向导第 4 步):轻量真探测,不加载大模型、不触发真实推理
 ipcMain.handle('run-selfcheck', () => runSelfCheck(logger));
 
-// ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询 / 取消) ----------
+// ---------- IPC:mlxgen 图片模型(已下载探测 / 真实下载 / 进度轮询 / 取消 / 删除) ----------
 ipcMain.handle('mlxgen-models', () => mlxgenModelInfo(logger));
 ipcMain.handle('mlxgen-download', (_e, repoId: string) => mlxgenDownload(repoId, logger));
 ipcMain.handle('mlxgen-download-status', (_e, jobId: string) => mlxgenDownloadStatus(jobId));
 ipcMain.handle('mlxgen-download-active', () => mlxgenDownloadActive());
 ipcMain.handle('mlxgen-download-cancel', (_e, jobId: string) => mlxgenDownloadCancel(jobId, logger));
+ipcMain.handle('mlxgen-delete', (_e, repoId: string) => mlxgenDelete(repoId, logger));
 // base64 PNG/JPEG/WebP → 资产库(检查器画遮罩生成 mask 用)
 ipcMain.handle('save-png-asset', (_e, input: { name: string; dataUrl: string; projectId?: string; tags?: string[] }) => {
   const r = assets.importFromDataUrl(input);

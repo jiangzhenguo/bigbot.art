@@ -20,6 +20,22 @@ export interface TableBlock {
 
 export type TableMatrix = { head: string[]; body: string[][] };
 
+/**
+ * 分镜表铺节点/落盘前的形状预检。
+ * 返回 null = 可继续;返回字符串 = 直接给人/模型看的可执行错误。
+ * 典型拦截:表头存在但数据行为 0(多行单元格未编码 —— 不能假报「均已铺出」)。
+ */
+export function storyboardTableShapeIssue(
+  table: Pick<TableBlock, 'head' | 'rows'> | null | undefined,
+): string | null {
+  if (!table) return '分镜表缺少表格块,无法处理。';
+  if (!table.head.length) return '分镜表缺少表头,无法处理。';
+  if (!table.rows.length) {
+    return '分镜表有表头但包含 0 个有效数据行,无法处理。请检查是否存在未编码的多行单元格,并修正表格后重试。';
+  }
+  return null;
+}
+
 /** 该行是否形如 | … |(管道表格行) */
 export function isPipeLine(l: string): boolean {
   return /^\s*\|.*\|\s*$/.test(l);
@@ -37,7 +53,8 @@ export function splitRow(l: string): string[] {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
     .split('|')
-    .map((c) => c.trim());
+    // GFM 单元格里的 <br> 是标准换行写法;读回时还原,调用方看到的仍是原始多行文本。
+    .map((c) => c.trim().replace(/<br\s*\/?>/gi, '\n'));
 }
 
 /** 从 markdown 提取首个表格块;没有返回 null */
@@ -58,15 +75,40 @@ export function parseGfmTable(md: string): TableBlock | null {
   return null;
 }
 
-/** TableData → GFM 表格文本(单元格内 | 替换为 ·) */
+/** TableData → GFM 表格文本(单元格内 | 替换为 ·;换行编码为 <br>,保证一行 = 一条数据) */
 export function tableToGfm(head: string[], rows: string[][]): string {
-  const cl = (v: unknown) => String(v == null ? '' : v).replace(/\|/g, '·');
+  const cl = (v: unknown) => String(v == null ? '' : v).replace(/\|/g, '·').replace(/\r\n?|\n/g, '<br>');
   const out = [
     `| ${head.map(cl).join(' | ')} |`,
     `|${head.map(() => '---').join('|')}|`,
   ];
   rows.forEach((r) => out.push(`| ${r.map(cl).join(' | ')} |`));
   return out.join('\n');
+}
+
+/**
+ * 序列化自检:写出后必须能按预期行/列读回。
+ * 返回 null = 通过;返回字符串 = 给人/模型看的可执行错误。
+ * 典型拦截:单元格裸换行导致数据行跨行(生成 N 行、回读 0 行)。
+ */
+export function verifyGfmTableRoundTrip(
+  markdown: string,
+  expectedRows: number,
+  expectedColumns?: number,
+): string | null {
+  const table = parseGfmTable(markdown);
+  if (!table) return '分镜表序列化后无法回读为表格块。请检查表头/分隔行是否完整。';
+  if (table.rows.length !== expectedRows) {
+    return `分镜表序列化回读不一致:生成 ${expectedRows} 行、回读 ${table.rows.length} 行。常见原因是单元格含未编码换行,请把换行写成 <br> 后重试。`;
+  }
+  if (expectedColumns !== undefined && table.head.length !== expectedColumns) {
+    return `分镜表表头列数不一致:生成 ${expectedColumns} 列、回读 ${table.head.length} 列。`;
+  }
+  const badRow = table.rows.findIndex((row) => row.length !== table.head.length);
+  if (badRow >= 0) {
+    return `分镜表第 ${badRow + 1} 行有 ${table.rows[badRow]!.length} 个单元格,与表头 ${table.head.length} 列不一致。请检查单元格内是否有多余的 |。`;
+  }
+  return null;
 }
 
 /** 用新 GFM 表格替换 markdown 中的首个表格块(无表格块则追加到末尾) */

@@ -1012,6 +1012,9 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 .pg-settings .btn-s:hover{border-color:var(--meta)}
 .pg-settings .btn-g{color:var(--fg-2)}
 .pg-settings .btn-g:hover{background:color-mix(in oklab,var(--fg) 6%,transparent)}
+.pg-settings .btn-g.model-delete{color:var(--danger)}
+.pg-settings .btn-g.model-delete:hover{background:color-mix(in oklab,var(--danger) 8%,transparent)}
+.pg-settings .model-delete:disabled{opacity:.48;cursor:not-allowed;transform:none}
 .pg-settings .btn-sm{padding:5px 11px;font-size:var(--text-xs);border-radius:var(--radius-sm)}
 .pg-settings .chip{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border:1px solid var(--border);border-radius:var(--radius-pill);font-size:var(--text-xs);color:var(--fg);background:var(--bg);cursor:pointer;white-space:nowrap;user-select:none;transition:border-color var(--motion-fast),background var(--motion-fast),color var(--motion-fast)}
 .pg-settings .chip:hover{border-color:var(--meta)}

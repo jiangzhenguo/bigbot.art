@@ -47,7 +47,18 @@ export const WORKER_ENTRY = resolveWorkerEntry();
  * 连「你好」这种极小请求都要 30 秒;多步任务动辄 5-10 轮,原 180s 会在任务正常推进中判死,
  * 表现为「agent 无响应」的**假失败**(模型其实还在算,画布改动也可能已生效)。
  */
-const SILENT_TIMEOUT_MS = Number(process.env.BIGBOTART_AGENT_SILENT_TIMEOUT_MS ?? 600_000);
+export const DEFAULT_SILENT_TIMEOUT_MS = 600_000;
+
+/** env 解析:非正数/非法值回退默认,避免 NaN 让看门狗立即触发。 */
+export function resolveSilentTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.BIGBOTART_AGENT_SILENT_TIMEOUT_MS;
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SILENT_TIMEOUT_MS;
+}
+
+const SILENT_TIMEOUT_MS = resolveSilentTimeoutMs();
 
 export interface AgentManagerOptions {
   /** 覆盖 worker 脚本路径(指向 pi 入口或自定义 worker) */

@@ -3,6 +3,7 @@
  * 领域设计参考 H3Mise(story/shot/take/continuity/timeline),独立实现。
  */
 import type { PromptSource } from './prompt.js';
+import type { ShotSecondPassParams } from './second-pass.js';
 
 /** 画布节点类型(节点-连线工作流图) */
 export type NodeKind =
@@ -216,6 +217,8 @@ export interface StoryboardData {
   aspect?: '16:9' | '9:16' | '1:1';
   /** 铺节点默认档位 */
   tier?: QualityTier;
+  /** 可选:用户声明的成片目标秒数;结构门据此核对全表合计(±15%) */
+  targetSeconds?: number;
 }
 
 /**
@@ -652,6 +655,13 @@ export interface ShotParams {
   seed: number;
   /** 🚀 模型包:开启则提交时换用所选包目录(-d)+ 包步数(见 ShotAccel;accel 加速 / style 风格互斥) */
   accel?: ShotAccel;
+  /**
+   * 二采(second pass):h3 重跑 sigma 网格尾部、甚至换大画布重采样一遍。
+   * 解析规则(比例夹取、第一遍 render 画布、同比例 32 倍数画布)全在
+   * `packages/shared/src/second-pass.ts` 的 `planSecondPass`,**禁止在别处再推一遍**。
+   * Agent 直接写 `true` 表示「同画布精修(0.15)」也可被 `normalizeSecondPass` 接住。
+   */
+  secondPass?: ShotSecondPassParams;
   /** 引用绑定:资产 id 或直连文件路径 → 角色(映射 --ref-image / --first-frame / --ref-video 等)
    *  - assetId:资产中心的引用(由连线自动注入或手动添加)
    *  - path:直连文件路径(如上游 shot 抽出的尾帧 PNG),优先于 assetId 解析 */

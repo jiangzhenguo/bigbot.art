@@ -1,6 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { RenderJob, Asset, ShotTakeHistory, AccelPack } from '@bigbotart/shared';
-import { VIDEO_ASPECTS, VIDEO_ASPECT_LABEL, type VideoAspect } from '@bigbotart/shared';
+import {
+  VIDEO_ASPECTS,
+  VIDEO_ASPECT_LABEL,
+  planSecondPass,
+  normalizeSecondPass,
+  type ShotSecondPassMode,
+  type VideoAspect,
+} from '@bigbotart/shared';
+import {
+  secondPassHint,
+  secondPassNote,
+  secondPassTailHint,
+  secondPassPctText,
+  secondPassRatioOptions,
+  secondPassFractionForMode,
+  isSecondPassRatioActive,
+} from './second-pass-view';
 import type { CanvasNode } from '../types';
 import {
   SHOT_ASPECTS,
@@ -118,6 +134,19 @@ export function ShotInspector({
   // 节点 data 为权威:有 width/height 就尊重(选择 chips 已同步写入);否则回退推导
   const width = Number(d.width ?? derived.width);
   const height = Number(d.height ?? derived.height);
+  /*
+   * 🪄 二采(second pass)计划 —— 解析走 shared 的**唯一真源** `planSecondPass`。
+   * ⚠️ 必须传上面这两个 width/height(即提交时用的同一份派生值):它们才是
+   * `runNode` 塞进 `params.width/height` 的值。若这里另算一套(比如只用档位预设值),
+   * 检查器就会显示「第一遍 224×384 → 第二遍 448×768」而实际提交的是 544×960 ——
+   * 推算画布与实际提交不符,用户看到的档位说明直接是假话。
+   */
+  const secondPassPlan = planSecondPass({ width, height, secondPass: d.secondPass });
+  /** 当前节点的二采原始参数(写回时用 spread,避免把未知字段冲掉) */
+  const secondPassCur = normalizeSecondPass(d.secondPass);
+  /** 落盘:enabled/mode/fraction 三项都走同一入口,保证与 planSecondPass 的读口径一致 */
+  const setSecondPass = (patch: Partial<{ enabled: boolean; mode: ShotSecondPassMode; fraction: number }>) =>
+    setData({ secondPass: { ...secondPassCur, ...patch } });
 
   // 当前运行/排队任务
   const job = jobs.find((j) => j.nodeId === node.id && (j.status === 'queued' || j.status === 'running'));
@@ -588,6 +617,103 @@ export function ShotInspector({
           </>
         ) : (
           <div className="f-hint">模型包 = 换 -d 模型目录:⚡ 加速包(蒸馏 + 4/8 步,省 60-80% 时间)/ 🎨 风格包(画风融合,如 mystic,20/30 步,不提速)/ 🎨⚡ 风格加速包(双融合,如 mystic-turbo,4/8 步提速且带画风)· 需设置页装有模型包</div>
+        )}
+      </div>
+
+      {/* ── 🪄 二采(second pass):h3 重跑去噪尾部;画布二采还能换更小的第一遍画布(Hires) ── */}
+      <div className="f-sec" data-od-id="shot-second-pass">
+        <div className="lbl">🪄 二采(second pass)</div>
+        <label
+          className="f-hint"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+        >
+          <input
+            type="checkbox"
+            data-od-id="shot-second-pass-toggle"
+            checked={secondPassPlan.enabled}
+            onChange={(e) => setSecondPass({ enabled: e.target.checked })}
+          />
+          开启二采(用同一提示词再精修一遍)
+        </label>
+        {secondPassPlan.enabled ? (
+          <>
+            {/* 模式:同画布精修(--second-pass F)/ 画布二采(--render-* + --second-pass-canvas) */}
+            <div className="f-row">
+              <span className="f-lbl">模式</span>
+              <div className="f-chips">
+                {(
+                  [
+                    ['refine', '同画布精修'],
+                    ['canvas', '画布二采 Hires'],
+                  ] as ReadonlyArray<[ShotSecondPassMode, string]>
+                ).map(([m, label]) => (
+                  <span
+                    key={m}
+                    className={`chip${secondPassPlan.mode === m ? ' on' : ''}`}
+                    data-od-id={`shot-second-pass-mode-${m}`}
+                    title={
+                      m === 'refine'
+                        ? '重跑尾部少量步数:构图/动作不变,只重合成纹理与表情(约 +15~20% 时间)'
+                        : '第一遍用小画布定构图 → 第二遍放大重采样:更锐但完整重跑一遍管线(约 +30~60% 时间)'
+                    }
+                    onClick={() =>
+                      // 切模式必须同时把 F 落到该模式默认值 —— 两个模式的 F 语义不同,
+                      // 沿用另一模式的比例会「切一次模式就意外改了强度」(见 second-pass-view.ts)
+                      setSecondPass({ mode: m, fraction: secondPassFractionForMode(m) })
+                    }
+                  >
+                    {label}
+                  </span>
+                ))}
+              </div>
+            </div>
+            {/* 比例 F:选中态按 plan.fraction(已夹取的实际值)比,不用 data 原值 */}
+            <div className="f-row">
+              <span className="f-lbl">重跑比例</span>
+              <div className="f-chips">
+                {secondPassRatioOptions(secondPassPlan.mode).map((o) => (
+                  <span
+                    key={o.value}
+                    className={`chip${isSecondPassRatioActive(secondPassPlan, o.value) ? ' on' : ''}`}
+                    data-od-id={`shot-second-pass-ratio-${o.value}`}
+                    onClick={() => setSecondPass({ fraction: o.value })}
+                  >
+                    {secondPassPctText(o.value)}
+                    {o.recommended ? ' · 推荐' : ''}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="f-hint" data-od-id="shot-second-pass-hint">
+              {secondPassHint(secondPassPlan)}
+            </div>
+            {/* 尾部步数告警:加速包把步数压到 4~8 时,F=15%~40% 可能只重跑 1~3 步 —— */}
+            {/* 「开了二采但画面没变」是最容易被当成「没生效」的形态,这里提前说清。 */}
+            {secondPassTailHint(secondPassPlan, effSteps) ? (
+              <div
+                className="f-hint"
+                data-od-id="shot-second-pass-tail-warn"
+                style={{ color: 'var(--warn)' }}
+              >
+                ⚠️ {secondPassTailHint(secondPassPlan, effSteps)}
+              </div>
+            ) : null}
+            {/* 降级/夹取说明(如「输出画布没有更小的同比例画布 → 已改回同画布精修」),
+                与主提示行分开渲染:warn 色代表「你选的被改了」,不是「二采在跑」 */}
+            {secondPassNote(secondPassPlan) ? (
+              <div
+                className="f-hint"
+                data-od-id="shot-second-pass-note"
+                style={{ color: 'var(--warn)' }}
+              >
+                ⚠️ {secondPassNote(secondPassPlan)}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div className="f-hint" data-od-id="shot-second-pass-hint">
+            {secondPassHint(secondPassPlan)}
+          </div>
         )}
       </div>
 

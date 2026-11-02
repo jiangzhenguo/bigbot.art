@@ -254,6 +254,16 @@ describe('MemoryStore.buildContext 注入激活技能指令(@当前技能」段)
   });
 
   /* 2026-10-22:建卡分流曾只挂在激活技能块 → 无技能时「根据图片生成角色图」仍走 image-gen+ref-image */
+  it('未激活技能时仍注入参考图不锁身体位置', () => {
+    const pid = `p-pose-lock-${Date.now()}`;
+    const ctx = store.buildContext(pid, 'cA', '位置不对');
+    expect(ctx.systemPrompt).toContain('【参考图锁外观、不锁身体位置');
+    expect(ctx.systemPrompt).toContain('不要抄姿势');
+    expect(ctx.systemPrompt).toContain('姿势和卡不一致');
+    expect(ctx.systemPrompt).toContain('vision.caption');
+    expect(ctx.systemPrompt).toContain('参考生图');
+  });
+
   it('未激活技能时仍注入角色图建卡分流(有参考→image-edit)', () => {
     const pid = `p-card-path-global-${Date.now()}`;
     const ctx = store.buildContext(pid, 'cA', '根据图片生成角色图');

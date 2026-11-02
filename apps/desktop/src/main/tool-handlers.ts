@@ -5,7 +5,7 @@
  * 八域:canvas / engine / assets / web / skills / timeline / memory / continuity
  * 设计原则:每个工具返回 { ok, result(人读摘要), nodeId? } — 渲染层据此画工具卡
  */
-import type { CanvasNode, CanvasEdge, CanvasSnapshot } from '@bigbotart/shared';
+import type { CanvasNode, CanvasEdge, CanvasSnapshot, PromptSubject } from '@bigbotart/shared';
 import {
   connectorSummary,
   nodeKindGuide,
@@ -14,6 +14,7 @@ import {
   parseGfmTable,
   tableToGfm,
   assembleH3Prompt,
+  assembleH3SegmentPrompt,
   assembleZImagePrompt,
   rowSeconds,
   resolveMaterializeSeconds,
@@ -22,11 +23,16 @@ import {
   planStoryboardMaterializeRows,
   checkStoryboardCharacterGate,
   storyboardCharacterGateMessage,
+  checkStoryboardSchema,
+  storyboardSchemaGateMessage,
+  storyboardTableShapeIssue,
   keyframeEdgeLabel,
   existingShotByRow,
   storyboardLinkOf,
   storyboardLinkFields,
-  summarizeMaterializePlans,
+  summarizeMaterializeSegments,
+  groupMaterializeSegments,
+  blockedSegmentMessage,
   chunkText,
   chunkNav,
   validateEdge,
@@ -44,9 +50,11 @@ import {
   capabilityOf,
   resolveImageModel,
   healModelForRefImages,
-  defaultShotAspectForRole,
-  SHOT_SIZES,
+  VIDEO_ASPECTS,
+  VIDEO_TIERS,
+  resolveShotSpecForRole,
   normalizeShotDuration,
+  parseTotalDurationHint,
   snapShotDimensions,
   validateShotSubmitParams,
   type VideoAspect,
@@ -75,6 +83,7 @@ import {
   classifyH3PromptMode,
   describeInboundRefs,
   extractPromptText,
+  standingCardPoseWarning,
   rejectDirectShotPrompt,
   shotCreateCarriesPrompt,
   type CompleteH3Prompt,
@@ -123,6 +132,38 @@ const kindFromPath = (p: string): 'image' | 'video' | 'audio' | undefined =>
 
 const basenameOf = (p: string) => (p.split(/[\\/]/).pop() ?? p);
 
+/**
+ * 节点 data 的 Agent 默认摘要(P1)。
+ * 为什么:canvas.get_node 曾被 Agent 用来反复读 4–8 千字 prompt / 整份分镜表,
+ * 每次结果都完整回注上下文。默认只给长度 + 短预览,长内容必须显式 detail=true。
+ */
+function summarizeNodeDataForAgent(data: unknown): string {
+  const source = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === 'string') {
+      if (value.length <= 160) {
+        out[key] = value;
+        continue;
+      }
+      const lines = value.split('\n').length;
+      out[key] = `${value.length} 字 / ${lines} 行 · 摘要:${value.replace(/\s+/g, ' ').slice(0, 120)}${value.length > 120 ? '…' : ''}`;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      out[key] = `[${value.length} 项]`;
+      continue;
+    }
+    if (value && typeof value === 'object') {
+      const json = JSON.stringify(value);
+      out[key] = json.length > 240 ? `[对象 · ${json.length} 字符]` : value;
+      continue;
+    }
+    out[key] = value;
+  }
+  return JSON.stringify(out, null, 1);
+}
+
 /** 可选数字参数:缺省 / 空串 / 非数字 → undefined,不把 NaN 写进坐标 */
 function finiteNum(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
@@ -170,6 +211,7 @@ const BOOLEAN_DATA_FIELDS = [
   'specOverride', // shot:用户手动改过画幅/档位
   'manualOrder', // timeline:用户手动排过序
   'refVideoSilent', // shot:参考视频只取画面(忽略音轨)
+  'secondPass', // shot:二采开关(可写 true;详细参数是对象 {enabled,mode,fraction})
   'ssdStreaming', // shot:SSD 流式读权重
   'specFrom', // 仅作删除标记用,不参与布尔语义
 ] as const;
@@ -707,9 +749,10 @@ export class ToolHandlers {
         .filter((e) => e.source === nodeId)
         .map((e) => `  → 「${idToLabel.get(e.target) ?? e.target}」${e.label ? ` [${e.label}]` : ''}`)
         .join('\n');
-      const dataJson = JSON.stringify(node.data ?? {}, null, 1);
-      const dataTrunc =
-        dataJson.length > 1600 ? `${dataJson.slice(0, 1600)}\n…(内容截断,完整内容在检查器/表格编辑)` : dataJson;
+      const detail = a.detail === true;
+      const dataJson = detail
+        ? JSON.stringify(node.data ?? {}, null, 1)
+        : summarizeNodeDataForAgent(node.data);
       // 资源节点:把资产库里的名称/文案一并注入(Agent 读画布就能拿到,不必再 assets.get)
       let assetNote = '';
       if (node.kind === 'asset') {
@@ -725,7 +768,8 @@ export class ToolHandlers {
           `节点「${node.label}」 [${node.kind}] (id=${nodeId})\n` +
           `位置 (${node.position.x}, ${node.position.y}) · 卡片约 ${Math.round(card.w)}×${Math.round(card.h)}\n入边:\n${ins || '  (无)'}\n出边:\n${outs || '  (无)'}` +
           assetNote +
-          `\ndata:\n${dataTrunc}`,
+          `\ndata${detail ? '(完整)' : '(摘要)'}:\n${dataJson}` +
+          (detail ? '' : '\n需要完整 data 时用 canvas.get_node(nodeId=…, detail=true)。'),
       };
     },
     'canvas.connectors': async () => ({
@@ -744,8 +788,44 @@ export class ToolHandlers {
       }
       const md = String((node.data as { markdown?: unknown } | undefined)?.markdown ?? '');
       if (!md.trim()) return { ok: false, result: `文档节点「${node.label}」内容为空(markdown 未填写)` };
+      const lines = md.split('\n');
+      const totalLines = lines.length;
+      const totalChars = md.length;
+      /* P1:行范围读取。长分镜文档按 S01–S07 逐块读会烧多次往返;
+         一次给 startLine/endLine 直接取目标区间,不再受 chunk 边界限制。 */
+      if (a.startLine !== undefined || a.endLine !== undefined) {
+        const parseLine = (value: unknown, name: string): number | string => {
+          const n = Number(value);
+          if (!Number.isInteger(n) || n < 1) return `${name} 必须是 ≥1 的整数(1-based 行号)`;
+          return n;
+        };
+        const start = parseLine(a.startLine, 'startLine');
+        if (typeof start === 'string') return { ok: false, result: start };
+        const end = a.endLine === undefined
+          ? Math.min(totalLines, start + 199)
+          : parseLine(a.endLine, 'endLine');
+        if (typeof end === 'string') return { ok: false, result: end };
+        if (start > end) return { ok: false, result: `startLine(${start})不能大于 endLine(${end})` };
+        if (end > totalLines) {
+          return { ok: false, result: `endLine(${end})超出文档行数(共 ${totalLines} 行);请把 endLine 改为 ≤${totalLines}` };
+        }
+        const segment = lines.slice(start - 1, end).join('\n');
+        if (segment.length > 20000) {
+          return { ok: false, result: `所选范围 ${start}–${end} 有 ${segment.length} 字符,超过单次上限 20000;请缩小行范围或分段读取。` };
+        }
+        const tail = end < totalLines
+          ? `\n---\n[继续读下一段] document.read(nodeId=${nodeId}, startLine=${end + 1}, endLine=${Math.min(totalLines, end + 200)})`
+          : '\n---\n[本段已到文档末尾]';
+        return {
+          ok: true,
+          result:
+            `文档「${node.label}」(${node.kind})· ${totalLines} 行 / ${totalChars} 字符 · 行 ${start}–${end}(共 ${end - start + 1} 行)\n` +
+            `===== 行 ${start}–${end} =====\n${segment}${tail}`,
+          nodeId,
+        };
+      }
       const size = Number(a.size ?? 0) > 0 ? Number(a.size) : 4000;
-      const { chunks, totalChars, totalLines } = chunkText(md, { maxChars: size });
+      const { chunks } = chunkText(md, { maxChars: size });
       if (chunks.length === 0) return { ok: false, result: `文档节点「${node.label}」无内容可读` };
       let idx = Number.isInteger(a.chunk) ? Number(a.chunk) : 0;
       if (idx < 0) idx = 0;
@@ -801,7 +881,27 @@ export class ToolHandlers {
       const now = new Date().toISOString();
       const sb = res.storyboard;
       const autoMaterialize = a.autoMaterialize === true;
+      const explicitTarget = a.targetSeconds === undefined ? undefined : Number(a.targetSeconds);
+      if (explicitTarget !== undefined && (!Number.isFinite(explicitTarget) || explicitTarget <= 0)) {
+        return { ok: false, result: 'targetSeconds 必须是正数(秒)' };
+      }
+      const targetSeconds = explicitTarget ?? parseTotalDurationHint(brief);
+      if (targetSeconds !== undefined) {
+        sb.data = { ...(sb.data as Record<string, unknown>), targetSeconds } as CanvasNode['data'];
+      }
       const plannedTable = parseGfmTable(String((sb.data as Record<string, unknown>).markdown ?? ''));
+      const plannedShapeIssue = storyboardTableShapeIssue(plannedTable);
+      if (plannedShapeIssue) {
+        return {
+          ok: false,
+          result: `${plannedShapeIssue}不要手工逐镜补节点,修正表格后重试。`,
+        };
+      }
+      const plannedRows = plannedTable!;
+      const plannedSchemaIssues = checkStoryboardSchema({ head: plannedRows.head, rows: plannedRows.rows, targetSeconds });
+      const plannedSchemaError = storyboardSchemaGateMessage(plannedSchemaIssues);
+      if (plannedSchemaError) return { ok: false, result: plannedSchemaError };
+      const plannedSchemaWarning = storyboardSchemaGateMessage(plannedSchemaIssues, 'warning');
       /* LLM 规划可能耗时数十秒,进入工具时加载的快照早已被渲染层/队列顶版。
        * 绝不能持旧快照整体保存后不看结果:2026-10-28「剧本生成测试」实测工具返回了新 sb id,
        * 但保存被版本防护拒绝,画布上根本没有该节点;Agent 随后只能手工改写旧 10 列表,
@@ -809,10 +909,10 @@ export class ToolHandlers {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const cur = this.store.loadProjectCanvases(ctx.projectId).canvases.find((c) => c.id === ctx.canvasId);
         if (!cur) return { ok: false, result: '画布不存在' };
-        if (autoMaterialize && plannedTable) {
+        if (autoMaterialize) {
           const issues = checkStoryboardCharacterGate({
-            head: plannedTable.head,
-            rows: plannedTable.rows,
+            head: plannedRows.head,
+            rows: plannedRows.rows,
             canvasNodes: cur.nodes,
             activeSkillId: this.memory.getActiveSkillId?.(ctx.projectId, ctx.canvasId),
           });
@@ -843,7 +943,7 @@ export class ToolHandlers {
           res.shots.length || res.images.length
             ? ` · 已铺 ${res.shots.length} shot + ${res.images.length} image-gen${droppedEdges ? ` · 已丢弃 ${droppedEdges} 条非法连线(端口/媒体不匹配)` : ''}`
             : '';
-        return { ok: true, result: `${res.report}${extra}`, nodeId: sb.id };
+        return { ok: true, result: `${res.report}${extra}${plannedSchemaWarning ? `\n${plannedSchemaWarning}` : ''}`, nodeId: sb.id };
       }
       return {
         ok: false,
@@ -887,8 +987,20 @@ export class ToolHandlers {
       }
       const nodeId = sb.id;
       const sd = (sb.data ?? {}) as Record<string, unknown>;
+      const explicitTarget = a.targetSeconds === undefined ? undefined : Number(a.targetSeconds);
+      if (explicitTarget !== undefined && (!Number.isFinite(explicitTarget) || explicitTarget <= 0)) {
+        return { ok: false, result: 'targetSeconds 必须是正数(秒)' };
+      }
+      const storedTarget = finiteNum(sd.targetSeconds);
+      const targetSeconds = explicitTarget ?? (storedTarget && storedTarget > 0 ? storedTarget : undefined) ?? parseTotalDurationHint(String(sd.markdown ?? ''));
       const tb = parseGfmTable(String(sd.markdown ?? ''));
       if (!tb) return { ok: false, result: '分镜表缺少表格块 · 无法铺节点' };
+      const tableShapeIssue = storyboardTableShapeIssue(tb);
+      if (tableShapeIssue) return { ok: false, result: tableShapeIssue };
+      const schemaIssues = checkStoryboardSchema({ head: tb.head, rows: tb.rows, targetSeconds });
+      const schemaError = storyboardSchemaGateMessage(schemaIssues);
+      if (schemaError) return { ok: false, result: schemaError };
+      const schemaWarning = storyboardSchemaGateMessage(schemaIssues, 'warning');
       const characterIssues = checkStoryboardCharacterGate({
         head: tb.head,
         rows: tb.rows,
@@ -897,10 +1009,13 @@ export class ToolHandlers {
       });
       if (characterIssues.length) return { ok: false, result: storyboardCharacterGateMessage(characterIssues) };
       // 已铺行:storyboardRow 优先(边分派清不掉),否则 promptFrom。与渲染层同口径
+      /* 段内多切:一个 shot 覆盖多行,要把 rows 全部记进来 —— 只记首行的话,
+         重新铺时其余切会被当成「未铺的新行」再铺一遍(同一段生成两条视频)。 */
       const doneRows = new Set<number>();
       for (const n of cur.nodes) {
         const link = storyboardLinkOf(n.data);
-        if (link?.nodeId === nodeId && typeof link.row === 'number') doneRows.add(link.row);
+        if (link?.nodeId !== nodeId) continue;
+        for (const row of link.rows ?? (typeof link.row === 'number' ? [link.row] : [])) doneRows.add(row);
       }
       const base = String(sd.basePrompt ?? '');
       const aspect = String(a.aspect ?? sd.aspect ?? '16:9');
@@ -924,6 +1039,11 @@ export class ToolHandlers {
         canvasNodes: cur.nodes,
       });
       if (!plans.length) return { ok: true, result: '当前行均已铺出 · 新增行后可追加铺' };
+      /* 段(2026-10-30 第 4 步):同段的多行是**一次生成里的多个切**,按段建一个 shot。
+         段是原子单位,半铺出的段直接拒铺(不猜半段,见 groupMaterializeSegments)。 */
+      const grouping = groupMaterializeSegments({ head: tb.head, rows: tb.rows, plans, doneRows });
+      if (grouping.blocked.length) return { ok: false, result: blockedSegmentMessage(grouping.blocked) };
+      const segments = grouping.segments;
       /* 整批当一块矩形来放:行距按卡片高(9:16 比 16:9 高),批内用本批序号而不是表行号 r。
          追加铺时接在这张表已有镜头的下方,不再按 r*186 跳到很远或叠回原处。
          两张表锚点靠近时,后一张的整块会避开前一张已经占住的区域。 */
@@ -932,10 +1052,10 @@ export class ToolHandlers {
       const placed = placeMaterializeRows(
         cur.nodes.map((n) => this.occupantOf(n)),
         this.occupantOf(sb),
-        plans.map((plan, batchRow) => ({
+        segments.map((seg, batchRow) => ({
           row: batchRow,
-          shotKey: `shot-${plan.rowNo}`,
-          imageKey: plan.createKeyframe ? `img-${plan.rowNo}` : undefined,
+          shotKey: `shot-${seg.rowNos[0]}`,
+          imageKey: seg.plan.createKeyframe ? `img-${seg.rowNos[0]}` : undefined,
           mediaWidth: size.width,
           mediaHeight: size.height,
         })),
@@ -946,25 +1066,49 @@ export class ToolHandlers {
         return hit ?? { x: sbBox.x + sbBox.w + PLACE_GAP, y: sbBox.y, width: 236, height: 220 };
       };
       const shotIdByRow = existingShotByRow(cur.nodes, nodeId);
-      for (const plan of plans) {
-        const r = plan.rowNo - 1;
-        const row = tb.rows[r] ?? [];
+      const pad2 = (n: number) => String(n).padStart(2, '0');
+      for (const seg of segments) {
+        const firstRowNo = seg.rowNos[0]!;
+        const lastRowNo = seg.rowNos[seg.rowNos.length - 1]!;
+        const firstRow = tb.rows[firstRowNo - 1] ?? [];
+        const cutRows = seg.rowNos.map((rowNo) => tb.rows[rowNo - 1] ?? []);
         const shotId = nid('shot');
-        const p = assembleH3Prompt(row, tb.head, base, plan.subjects);
-        /* 时长:列值与画面/提示词里的总时长标记取大(技能4:列写 4、文案写单镜15秒 → 15) */
+        const segPlans = seg.rowNos
+          .map((rowNo) => plans.find((p) => p.rowNo === rowNo))
+          .filter((p): p is NonNullable<typeof p> => !!p);
+        /* 段的参考素材 = 各切选中卡的并集。顺序即连线顺序 = <Picture n> 编号,
+           与 assembleH3SegmentPrompt 的 subjects 必须是同一份。 */
+        const refIds: string[] = [];
+        const subjects: PromptSubject[] = [];
+        for (const segPlan of segPlans) {
+          for (const refId of segPlan.refNodeIds) if (!refIds.includes(refId)) refIds.push(refId);
+          for (const subject of segPlan.subjects) {
+            const key = `${subject.kind}:${subject.name}`;
+            if (!subjects.some((s) => `${s.kind}:${s.name}` === key)) subjects.push(subject);
+          }
+        }
+        const p = assembleH3SegmentPrompt(
+          cutRows.map((row, i) => ({ row, seconds: seg.cuts[i]?.seconds ?? 0 })),
+          tb.head,
+          base,
+          subjects,
+        );
+        /* 时长:段总秒数 = 各切之和;列值与画面/提示词里的总时长标记取大(技能4:
+           列写 4、文案写单镜15秒 → 15)。单切时与加「段」之前逐字等价。 */
         const sec = resolveMaterializeSeconds(
-          rowSeconds(row, tb.head),
-          rowCell(row, tb.head, '画面描述'),
-          rowCell(row, tb.head, '提示词(可选)'),
+          seg.seconds,
+          cutRows.map((row) => rowCell(row, tb.head, '画面描述')).join('\n'),
+          cutRows.map((row) => rowCell(row, tb.head, '提示词(可选)')).filter(Boolean).join('\n'),
           p.text,
         );
+        const label = seg.rowNos.length > 1 ? `镜头 ${pad2(firstRowNo)}–${pad2(lastRowNo)}` : `镜头 ${pad2(firstRowNo)}`;
         const dur = normalizeShotDuration(
           { engine: 'h3c', prompt: p.text, seconds: sec || undefined },
-          { label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`, prompt: p.text },
+          { label, prompt: p.text },
         );
-        const shotSpot = at(`shot-${plan.rowNo}`);
+        const shotSpot = at(`shot-${firstRowNo}`);
         cur.nodes.push({
-          id: shotId, kind: 'shot', label: `镜头 ${String(plan.rowNo).padStart(2, '0')}`,
+          id: shotId, kind: 'shot', label,
           position: { x: shotSpot.x, y: shotSpot.y }, width: shotSpot.width, height: shotSpot.height,
           data: {
             /* ⚠️ engine 必须与渲染层「+」弹层建 shot 同口径(h3c)。这里曾长期写死 'mock',
@@ -972,55 +1116,60 @@ export class ToolHandlers {
                事故:8 个镜头全部落 outputs/mock/,用户以为在跑真模型,实际上没走 h3。
                演示态由 settings.renderMode 决定(mock 只在 demo 模式启用),节点不该自己写死。 */
             engine: 'h3c',
-            mode: plan.shotMode,
-            ...(plan.modeOverride ? { modeOverride: true } : {}),
+            mode: seg.plan.shotMode,
+            ...(seg.plan.modeOverride ? { modeOverride: true } : {}),
             prompt: p.text,
             width: size.width, height: size.height,
             seconds: Number(dur.data.seconds),
             frames: Number(dur.data.frames),
-            steps: 30, layers: 50, reuse: 1, tier, seed: 42 + r, refs: [],
+            steps: 30, layers: 50, reuse: 1, tier, seed: 42 + (firstRowNo - 1), refs: [],
+            /* 段内多切:把切表写进节点,检查器/审阅能看出「一次生成里有几个切、各自多长」 */
+            ...(seg.cuts.length > 1 ? { segment: { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } } : {}),
             ...(defaultAccel ? { accel: defaultAccel } : {}),
-            ...storyboardLinkFields(nodeId, plan.rowNo),
+            ...storyboardLinkFields(nodeId, firstRowNo, seg.rowNos),
           } as CanvasNode['data'],
           createdAt: now, updatedAt: now,
         });
         cur.edges.push({ id: nid('edge'), source: nodeId, target: shotId, label: 'prompt' });
         created++;
-        shotIdByRow.set(plan.rowNo, shotId);
+        for (const rowNo of seg.rowNos) shotIdByRow.set(rowNo, shotId);
 
-        if (plan.strategy === 'continue' && plan.continueFromRow != null) {
-          const prevId = shotIdByRow.get(plan.continueFromRow);
+        if (seg.plan.strategy === 'continue' && seg.plan.continueFromRow != null) {
+          const prevId = shotIdByRow.get(seg.plan.continueFromRow);
           if (prevId) {
             cur.edges.push({ id: nid('edge'), source: prevId, target: shotId, label: 'first-frame' });
           }
         }
-        for (const refId of plan.refNodeIds) {
+        for (const refId of refIds) {
           if (cur.nodes.some((n) => n.id === refId)) {
             cur.edges.push({ id: nid('edge'), source: refId, target: shotId, label: 'ref-image' });
           }
         }
-        if (plan.createKeyframe) {
+        if (seg.plan.createKeyframe) {
           imgs++;
           const imgId = nid('img');
-          const z = assembleZImagePrompt(row, tb.head, base);
-          const imgSpot = at(`img-${plan.rowNo}`);
+          /* 段内只为首切建静帧(v1):多切的逐切关键帧要连「Picture k 对齐切点」那一段,
+             比这条链路大一档,留到后续版本;这里不假装支持。 */
+          const z = assembleZImagePrompt(firstRow, tb.head, base);
+          const imgSpot = at(`img-${firstRowNo}`);
           cur.nodes.push({
-            id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${String(plan.rowNo).padStart(2, '0')}`,
+            id: imgId, kind: 'image-gen', label: `图片生成 · 分镜静帧 ${pad2(firstRowNo)}`,
             position: { x: imgSpot.x, y: imgSpot.y }, width: imgSpot.width, height: imgSpot.height,
             data: {
               // 🆕 不写 model(2026-09-29 v1 工具模型):留给提交时缺省解析
               // 🆕 不写 steps(2026-10-14):缺省按模型走 defaultGenerateSteps(Turbo=8)
               engine: 'mlxgen', prompt: z.text,
               width: size.width, height: size.height, guidance: 1.0, seeds: [42],
-              ...storyboardLinkFields(nodeId, plan.rowNo),
+              ...(seg.cuts.length > 1 ? { segment: { rows: seg.rowNos, seconds: seg.seconds, cuts: seg.cuts } } : {}),
+              ...storyboardLinkFields(nodeId, firstRowNo, seg.rowNos),
             } as CanvasNode['data'],
             createdAt: now, updatedAt: now,
           });
-          const port = keyframeEdgeLabel(plan);
+          const port = keyframeEdgeLabel(seg.plan);
           cur.edges.push({ id: nid('edge'), source: nodeId, target: imgId, label: 'prompt' });
           cur.edges.push({ id: nid('edge'), source: imgId, target: shotId, label: port });
           if (port === 'ref-image') {
-            for (const refId of plan.refNodeIds) {
+            for (const refId of refIds) {
               if (cur.nodes.some((n) => n.id === refId)) {
                 cur.edges.push({ id: nid('edge'), source: refId, target: imgId, label: 'ref-image' });
               }
@@ -1036,8 +1185,9 @@ export class ToolHandlers {
       return {
         ok: true,
         result:
-          `已从分镜表铺出 ${summarizeMaterializePlans(plans)}(共 ${created + imgs} 节点)· 未触发运行 · ` +
-          `「衔接=硬切」按「角色」列挂卡;需配图=是才建静帧。「接尾帧」接上一镜尾帧。改表后需「重新同步」`,
+          `已从分镜表铺出 ${summarizeMaterializeSegments(segments)}(共 ${created + imgs} 节点)· 未触发运行 · ` +
+          `「衔接=硬切」按「角色」列挂卡;需配图=是才建静帧。「接尾帧」接上一镜尾帧。改表后需「重新同步」` +
+          `${schemaWarning ? `\n${schemaWarning}` : ''}`,
       };
     },
     'canvas.create_node': async (a, ctx) => {
@@ -1149,7 +1299,8 @@ export class ToolHandlers {
        * ⚠️ **分辨率一律由档位决定,绝不用图片尺寸**(2026-10 修正):
        * 曾经这里会把上游图片的宽高直接当视频尺寸写进 data —— 那等于让 4K 参考图
        * 把「预览档」顶成 4K 出片,用户选的档位失效、耗时与显存失控。
-       * 现在:本函数只补**比例**(aspect),像素值一律查 `SHOT_SIZES[aspect][tier]`。
+       * 现在:预设比例查 `SHOT_SIZES[aspect][tier]`；非预设首帧比例保留为 custom，
+       * 由同一档位的尺寸预算生成合法宽高(与渲染层共用 `resolveShotSpecForRole`)。
        *
        * 只在 data **缺 width/height** 时补,且档位取 data.tier(缺省 default)。
        */
@@ -1162,7 +1313,10 @@ export class ToolHandlers {
         const explicitW = Number(dd.width ?? 0);
         const explicitH = Number(dd.height ?? 0);
         if (explicitW <= 0 || explicitH <= 0) {
-          const tier = (String(dd.tier ?? 'default') || 'default') as 'preview' | 'draft' | 'default' | 'reference';
+          const rawTier = String(dd.tier ?? 'default') || 'default';
+          const tier = (VIDEO_TIERS as readonly string[]).includes(rawTier)
+            ? (rawTier as 'preview' | 'draft' | 'default' | 'reference')
+            : 'default';
           // 角色:Agent 可能已表达首帧/参考意图(data.mode)或经 refs;拿不到就不干预
           const role = String(dd.mode ?? '');
           const upstreamSize = (() => {
@@ -1178,12 +1332,12 @@ export class ToolHandlers {
             const h = Number(ud.height ?? 0);
             return w > 0 && h > 0 ? { width: w, height: h } : undefined;
           })();
-          const roleAspect = defaultShotAspectForRole(role, upstreamSize);
-          const aspect = roleAspect ?? (String(dd.aspect ?? '') || '16:9');
-          const size = SHOT_SIZES[aspect as VideoAspect]?.[tier];
-          if (size) {
-            data = { engine: 'h3c', aspect, width: size.width, height: size.height, tier, ...dd } as Record<string, unknown>;
-          }
+          const rawAspect = String(dd.aspect ?? '') || '16:9';
+          const selectedAspect = (VIDEO_ASPECTS as readonly string[]).includes(rawAspect)
+            ? (rawAspect as VideoAspect)
+            : '16:9';
+          const spec = resolveShotSpecForRole(role, selectedAspect, tier, upstreamSize);
+          data = { engine: 'h3c', ...spec, tier, ...dd } as Record<string, unknown>;
         }
         // 显式尺寸规整:模型常照抄参考图尺寸(实测 2752×1536 直接进 data),
         // 创建不规整 → 提交才被 validateShotSubmitParams 拒,白烧往返(2026-10-15「骑士小猫」)
@@ -1434,11 +1588,47 @@ export class ToolHandlers {
       if (written !== extracted.text) {
         return { ok: false, result: '提示词写回后校验失败,节点上的 prompt 与生成结果不一致。' };
       }
+      const poseWarn = standingCardPoseWarning(mode, describeInboundRefs(inbounds), brief);
       return {
         ok: true,
         result:
-          `已按 ${mode} 写回镜头「${savedNode.label || savedNode.id}」的提示词(${written.length} 字)。尚未提交生成;需要出片时再 engine.submit。\n\n${written}`,
+          (poseWarn ? `${poseWarn}\n` : '') +
+          `已按 ${mode} 写回镜头「${savedNode.label || savedNode.id}」的提示词(${written.length} 字)。` +
+          `摘要:${written.replace(/\s+/g, ' ').slice(0, 120)}${written.length > 120 ? '…' : ''}\n` +
+          `完整提示词用 canvas.get_node(nodeId=${savedNode.id}, detail=true) 查看;尚未提交生成,需要出片时再 engine.submit。`,
         nodeId: savedNode.id,
+      };
+    },
+    'h3.write_prompts': async (a, ctx) => {
+      const shots = Array.isArray(a.shots) ? a.shots : [];
+      if (shots.length === 0) return { ok: false, result: 'shots 不能为空:请传 [{nodeId,brief?}] 数组。' };
+      if (shots.length > 50) return { ok: false, result: '单次最多 50 个镜头;请分批调用。' };
+      const single = this.handlers['h3.write_prompt'];
+      if (!single) return { ok: false, result: 'h3.write_prompt 未注册,无法批量写提示词。' };
+      let okCount = 0;
+      const failures: string[] = [];
+      const summaries: string[] = [];
+      for (let i = 0; i < shots.length; i += 1) {
+        const item = (shots[i] ?? {}) as Record<string, unknown>;
+        const nodeId = String(item.nodeId ?? '');
+        if (!nodeId) {
+          failures.push(`第 ${i + 1} 个:nodeId 必填`);
+          continue;
+        }
+        const r = await single({ nodeId, brief: item.brief }, ctx);
+        if (!r.ok) {
+          failures.push(`第 ${i + 1} 个「${nodeId}」:${r.result}`);
+          continue;
+        }
+        okCount += 1;
+        summaries.push(`- ${r.result.split('\n')[0]!.slice(0, 180)}`);
+      }
+      return {
+        ok: failures.length === 0,
+        result:
+          `${okCount} 条成功${failures.length ? `,${failures.length} 条失败` : ''}` +
+          (summaries.length ? `:\n${summaries.join('\n')}` : '') +
+          (failures.length ? `\n失败明细:\n${failures.map((f) => `- ${f}`).join('\n')}\n成功的镜头提示词已写回,不要重复生成。` : ''),
       };
     },
     'canvas.delete_node': async (a, ctx) => {
@@ -1480,6 +1670,49 @@ export class ToolHandlers {
         result: `删除未落盘(快照被拒绝,已重试 ${DELETE_RETRY} 次)。节点仍在画布上,请再 canvas.list_nodes 确认后重试。`,
       };
     },
+    'canvas.connect_many': async (a, ctx) => {
+      const rawEdges = Array.isArray(a.edges) ? a.edges : [];
+      if (rawEdges.length === 0) return { ok: false, result: 'edges 不能为空:请传 [{from,to,label}] 数组。' };
+      if (rawEdges.length > 200) return { ok: false, result: '单次最多 200 条连线;请分批调用。' };
+      const pc = this.store.loadProjectCanvases(ctx.projectId);
+      const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
+      if (!cur) return { ok: false, result: '画布不存在' };
+      let accepted = 0;
+      let changed = 0;
+      const failures: string[] = [];
+      rawEdges.forEach((raw, index) => {
+        const item = (raw ?? {}) as Record<string, unknown>;
+        const from = String(item.from ?? '');
+        const to = String(item.to ?? '');
+        const label = String(item.label ?? '');
+        if (!from || !to) {
+          failures.push(`第 ${index + 1} 条:from / to 必填`);
+          return;
+        }
+        const r = this.applyConnect(cur, from, to, label);
+        if (!r.ok) {
+          failures.push(`第 ${index + 1} 条 ${from} → ${to}${label ? `[${label}]` : ''}:${r.result}`);
+          return;
+        }
+        accepted += 1;
+        if (r.changed) changed += 1;
+      });
+      if (changed > 0) {
+        cur.updatedAt = new Date().toISOString();
+        cur.version += 1;
+        const saved = this.store.saveCanvasSnapshot(cur);
+        if (saved && saved.ok === false) {
+          return { ok: false, result: `批量连线未落盘(快照被拒绝),画布未改变。已校验 ${accepted} 条,请刷新后重试。` };
+        }
+      }
+      const head = `${accepted} 条成功${changed !== accepted ? `(其中 ${accepted - changed} 条原本已存在)` : ''}${failures.length ? `,${failures.length} 条失败` : ''}`;
+      return {
+        ok: failures.length === 0,
+        result: failures.length
+          ? `${head}:\n${failures.map((f) => `- ${f}`).join('\n')}\n成功的连线已保存;不要重复提交这些边。`
+          : head,
+      };
+    },
     'canvas.connect': async (a, ctx) => {
       const rawFrom = String(a.from ?? '');
       const rawTo = String(a.to ?? '');
@@ -1487,52 +1720,16 @@ export class ToolHandlers {
       const pc = this.store.loadProjectCanvases(ctx.projectId);
       const cur = pc.canvases.find((c) => c.id === ctx.canvasId);
       if (!cur) return { ok: false, result: '画布不存在' };
-      // id 优先、标题兜底(模型常把 list_nodes 的标题当 id 传回;见 resolveNodeRef)
-      const srcHit = resolveNodeRefOrError(cur.nodes, rawFrom, '源节点');
-      if (!srcHit.ok) return { ok: false, result: srcHit.error };
-      const dstHit = resolveNodeRefOrError(cur.nodes, rawTo, '目标节点');
-      if (!dstHit.ok) return { ok: false, result: dstHit.error };
-      const from = srcHit.node.id;
-      const to = dstHit.node.id;
-      if (cur.edges.some((e) => e.source === from && e.target === to)) return { ok: true, result: '连线已存在' };
-      // 方案 A:写入点强制校验(端口合法性 + 媒体匹配 + 单值端口基数)
-      const v = validateEdge(
-        cur.nodes,
-        cur.edges,
-        { source: from, target: to, label },
-        { resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind },
-      );
-      if (!v.ok) {
-        const replaced = v.errors.find((e) => e.replaceable)?.replacedEdge;
-        if (replaced) {
-          // 方案 B:单值端口冲突 ⇒ 替换语义(旧边让位,新边生效;下游失效标记由渲染层 stale 机制承担)
-          cur.edges = cur.edges.filter(
-            (e) => !(e.source === replaced.source && e.target === replaced.target && e.label === replaced.label),
-          );
-          cur.edges.push({ id: nid('edge'), source: from, target: to, label });
-          const dstNode = cur.nodes.find((n) => n.id === to);
-          const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
-            ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
-            : '';
-          cur.updatedAt = new Date().toISOString();
-          cur.version += 1;
-          this.store.saveCanvasSnapshot(cur);
-          return {
-            ok: true,
-            result: `已连线 ${from} → ${to}[${label}] · ⚠️ 单值端口冲突,已自动替换旧边 ${replaced.source} → ${replaced.target}[${replaced.label ?? ''}](旧来源不再生效,下游受影响节点会标记 stale)${modeNote}`,
-          };
-        }
-        return { ok: false, result: `连线被拒绝:${v.errors[0]!.message}` };
-      }
-      cur.edges.push({ id: nid('edge'), source: from, target: to, label });
-      const dstNode = cur.nodes.find((n) => n.id === to);
-      const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
-        ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
-        : '';
+      const r = this.applyConnect(cur, rawFrom, rawTo, label);
+      if (!r.ok) return { ok: false, result: r.result };
+      if (!r.changed) return { ok: true, result: r.result };
       cur.updatedAt = new Date().toISOString();
       cur.version += 1;
-      this.store.saveCanvasSnapshot(cur);
-      return { ok: true, result: `已连线 ${from} → ${to}[${label}]${modeNote}` };
+      const saved = this.store.saveCanvasSnapshot(cur);
+      if (saved && saved.ok === false) {
+        return { ok: false, result: `连线未落盘(快照被拒绝),画布未改变。请刷新后重试。` };
+      }
+      return { ok: true, result: r.result };
     },
     'canvas.disconnect': async (a, ctx) => {
       const from = String(a.from ?? '');
@@ -2505,6 +2702,58 @@ export class ToolHandlers {
     } catch (e) {
       return { ok: false, result: `工具执行异常:${(e as Error).message}` };
     }
+  }
+
+  /**
+   * 单条连线的纯画布写入(不落盘)。单条与批量入口共用,保证端口校验、
+   * 单值端口替换、shot mode 同步三条语义完全一致。
+   */
+  private applyConnect(
+    cur: CanvasSnapshot,
+    rawFrom: string,
+    rawTo: string,
+    label: string,
+  ): { ok: boolean; changed: boolean; result: string } {
+    const srcHit = resolveNodeRefOrError(cur.nodes, rawFrom, '源节点');
+    if (!srcHit.ok) return { ok: false, changed: false, result: srcHit.error };
+    const dstHit = resolveNodeRefOrError(cur.nodes, rawTo, '目标节点');
+    if (!dstHit.ok) return { ok: false, changed: false, result: dstHit.error };
+    const from = srcHit.node.id;
+    const to = dstHit.node.id;
+    if (cur.edges.some((e) => e.source === from && e.target === to)) {
+      return { ok: true, changed: false, result: '连线已存在' };
+    }
+    const v = validateEdge(
+      cur.nodes,
+      cur.edges,
+      { source: from, target: to, label },
+      { resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind },
+    );
+    if (!v.ok) {
+      const replaced = v.errors.find((e) => e.replaceable)?.replacedEdge;
+      if (!replaced) {
+        return { ok: false, changed: false, result: `连线被拒绝:${v.errors[0]!.message}` };
+      }
+      cur.edges = cur.edges.filter(
+        (e) => !(e.source === replaced.source && e.target === replaced.target && e.label === replaced.label),
+      );
+      cur.edges.push({ id: nid('edge'), source: from, target: to, label });
+      const dstNode = cur.nodes.find((n) => n.id === to);
+      const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
+        ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
+        : '';
+      return {
+        ok: true,
+        changed: true,
+        result: `已连线 ${from} → ${to}[${label}] · ⚠️ 单值端口冲突,已自动替换旧边 ${replaced.source} → ${replaced.target}[${replaced.label ?? ''}](旧来源不再生效,下游受影响节点会标记 stale)${modeNote}`,
+      };
+    }
+    cur.edges.push({ id: nid('edge'), source: from, target: to, label });
+    const dstNode = cur.nodes.find((n) => n.id === to);
+    const modeNote = dstNode && applyShotModeSyncOnConnect(dstNode, cur.edges, label)
+      ? ` · 已同步 mode=${String((dstNode.data as { mode?: string }).mode)}`
+      : '';
+    return { ok: true, changed: true, result: `已连线 ${from} → ${to}[${label}]${modeNote}` };
   }
 
   /**

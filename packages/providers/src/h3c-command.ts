@@ -37,6 +37,16 @@ export interface H3CliOptions {
   /** 参考视频是否忽略源片内嵌音轨:true → --ref-silent-video,false/缺省 → --ref-video(连音轨一起注入) */
   refVideoSilent?: boolean;
   refAudio?: string;
+  /**
+   * 二采(second pass)重跑 sigma 网格尾部的比例 F,必须 0<F<1。
+   * ⚠️ 由 shared `planSecondPass` 解析后传入,**这里不再夹取**(夹取规则只有一份)。
+   */
+  secondPass?: number;
+  /** 画布二采的第二遍画布(`--second-pass-canvas`);**必须与 secondPass 同时给**,否则引擎 exit 2 */
+  secondPassCanvas?: { width: number; height: number };
+  /** 画布二采第一遍的内部渲染画布(`--render-width/--render-height`);两值必须成对 */
+  renderWidth?: number;
+  renderHeight?: number;
   /** 加速选项(骨架期不开放) */
   extra?: string[];
 }
@@ -194,6 +204,55 @@ export function outputSeconds(opts: Pick<H3CliOptions, 'frames' | 'seconds'>): n
   return (opts.frames ?? 0) / H3_FPS;
 }
 
+/* ───────────────────────── 二采(second pass)参数面 ───────────────────────── */
+
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v > 0;
+}
+
+/**
+ * 二采比例是否可用:h3 只认 0<F<1。
+ *
+ * 依据 `h3.c` 的 `h3_valid_params`(以及 `--second-pass-canvas` 的报错文案
+ * "a second-pass canvas needs a fraction in (0, 1)"):F=0 表示一步都不重跑
+ * (等于开关没生效),F=1 表示整段重画(构图会变),两者都不是「二采」的语义。
+ * NaN / ±Infinity / 负数同样拒收 —— 生成环境变量的字符串数字时很容易漏掉这层。
+ */
+export function isValidSecondPassFraction(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1;
+}
+
+/**
+ * 第一遍的内部渲染画布:**成对且为正整数**才成立。
+ *
+ * 引擎要求 `--render-width` / `--render-height` 成对;只给一边时它不会用你的画布,
+ * 第一遍照旧在输出尺寸跑 —— 画布二采于是「花两遍时间却没有额外细节」,
+ * 属于最典型的假成功(用户看不出哪里不对,只觉得慢)。所以宁可一个 flag 都不输出。
+ */
+export function resolveRenderCanvas(
+  opts: Pick<H3CliOptions, 'renderWidth' | 'renderHeight'>,
+): { width: number; height: number } | undefined {
+  const { renderWidth, renderHeight } = opts;
+  if (!isPositiveInt(renderWidth) || !isPositiveInt(renderHeight)) return undefined;
+  return { width: renderWidth, height: renderHeight };
+}
+
+/**
+ * 第二遍画布 `--second-pass-canvas`:**只有 F 合法时才允许出现**。
+ *
+ * 引擎硬约束:只给画布不给 F 会直接 exit 2
+ * ("a second-pass canvas needs a fraction in (0, 1)"),而这个失败发生在
+ * **任务入队后**——用户以为提交成功了,等几分钟才看到失败。构建器因此绝不输出裸 flag。
+ */
+export function resolveSecondPassCanvas(
+  opts: Pick<H3CliOptions, 'secondPass' | 'secondPassCanvas'>,
+): { width: number; height: number } | undefined {
+  if (!isValidSecondPassFraction(opts.secondPass)) return undefined;
+  const canvas = opts.secondPassCanvas;
+  if (!canvas || !isPositiveInt(canvas.width) || !isPositiveInt(canvas.height)) return undefined;
+  return { width: canvas.width, height: canvas.height };
+}
+
 /**
  * 参数组合统一防呆(提交前调用,返回所有违规说明;空数组 = 安全)。
  *
@@ -203,7 +262,9 @@ export function outputSeconds(opts: Pick<H3CliOptions, 'frames' | 'seconds'>): n
  *     并给出「忽略音轨」这条绕法(--ref-silent-video 不走 truncate 分支,短时长合法);
  *  ③ reuse 配极少步数:模型新鲜评估太少,画质/多样性下降 —— **警告**(沿用 h3 自己的判断);
  *  ④ 尺寸/时长硬约束(32 倍数、面积上限、单段 ≤15s / 帧 5..362)—— **拒绝**
- *     (shared.validateShotSubmitParams;传入 width/height 时生效)。
+ *     (shared.validateShotSubmitParams;传入 width/height 时生效);
+ *  ⑤ 二采参数脏值(F 不在 (0,1) / 只给二采画布不给 F / render 画布不成对)—— **拒绝**
+ *     (只拦**直接调用方**;provider 走 shared 的 planSecondPass,传过来的永远合法)。
  *
  * ② 为什么必须拦:带音轨的 ref-video 端口现在已经全链路打通(asset / 上游镜头 / 视频增强都可连),
  * 而 preview 档只有 22 帧(≈0.92s)—— 组合起来必炸,且 h3 的报错发生在**入队之后**,
@@ -213,7 +274,7 @@ export function validateParams(
   // width/height 可选(H3CliOptions 里是必填,Pick 会继承必填 ⇒ 老用例只传 steps/frames 会编译失败;
   // 运行时本就以 `width != null` 判生效,类型口径对齐成 Partial)
   opts: Pick<H3CliOptions, 'steps' | 'layers' | 'reuse' | 'frames' | 'seconds' | 'refVideo' | 'refVideoSilent'> &
-    Pick<Partial<H3CliOptions>, 'width' | 'height'>,
+    Pick<Partial<H3CliOptions>, 'width' | 'height' | 'secondPass' | 'secondPassCanvas' | 'renderWidth' | 'renderHeight'>,
 ): string[] {
   const issues = validateTier(opts);
 
@@ -250,6 +311,43 @@ export function validateParams(
         `(h3 亦会提示 "leaves very few fresh model evaluations")。建议 reuse 1,或把步数提到 ≥8。`,
     );
   }
+
+  // ⑤ 二采比例:防御性闸(只针对**直接调用方**传脏值)。
+  //    provider 走 shared 的 planSecondPass,那里已把 F 夹进合法区间,所以这里永不误伤;
+  //    但 buildH3Args/validateParams 是包级公开 API(脚本/测试会用),
+  //    非法 F 会被构建器静默丢弃 —— 静默丢弃正是本项目反复出现的「假成功」,
+  //    故在提交前明确拒绝并说清 0 与 1 为什么不合法。
+  if (opts.secondPass != null && !isValidSecondPassFraction(opts.secondPass)) {
+    issues.push(
+      `二采比例 --second-pass 必须满足 0<F<1(当前 ${String(opts.secondPass)}):` +
+        `F 是「重跑 sigma 网格尾部的比例」,0 等于不跑(开关形同未开)、1 等于整段重画(构图会变)。` +
+        `同画布精修推荐 0.1~0.2,画布二采推荐 0.4(画布二采下限 0.35,更低会保留上采样鬼影)。`,
+    );
+  }
+
+  // ⑥ 二采画布必须配合法的 F —— 否则 h3 入队后才 exit 2,
+  //    用户视角是「提交成功、等了几分钟才失败」,比提前拒绝糟得多。
+  if (opts.secondPassCanvas != null && !isValidSecondPassFraction(opts.secondPass)) {
+    const c = opts.secondPassCanvas;
+    issues.push(
+      `给了二采画布(--second-pass-canvas ${c?.width}x${c?.height})却没有合法的 --second-pass 比例:` +
+        `h3 会以 "a second-pass canvas needs a fraction in (0, 1)" exit 2。` +
+        `请同时给出 0<F<1(画布二采推荐 0.4),或去掉二采画布。`,
+    );
+  }
+
+  // ⑦ 第一遍渲染画布必须成对:只给一边时引擎不会使用该画布,第一遍仍在输出尺寸跑,
+  //    画布二采等于「多花一遍时间、不多一点细节」。不报错就会被当成已生效。
+  const hasRenderW = opts.renderWidth != null;
+  const hasRenderH = opts.renderHeight != null;
+  if (hasRenderW !== hasRenderH || (hasRenderW && hasRenderH && !resolveRenderCanvas(opts))) {
+    issues.push(
+      `--render-width / --render-height 必须成对给出且为正整数` +
+        `(当前 width=${String(opts.renderWidth)}, height=${String(opts.renderHeight)}):` +
+        `只给一边或给 0/非整数时 h3 不会使用该画布,第一遍仍按输出画布跑,画布二采只会白花一遍时间。`,
+    );
+  }
+
   return issues;
 }
 
@@ -276,6 +374,23 @@ export function buildH3Args(opts: H3CliOptions): string[] {
   args.push('--layers', String(opts.layers));
   args.push('--reuse', String(opts.reuse));
   args.push('--seed', String(opts.seed));
+  // ── 二采(second pass)──
+  // 顺序按 h3c-usage 的推荐配方:第一遍渲染画布 → F → 第二遍画布。
+  // 引擎硬约束(`h3.c` 的 `h3_valid_params`):`--second-pass-canvas` 必须配
+  // `--second-pass F`,只给画布会 "a second-pass canvas needs a fraction in (0, 1)" exit 2。
+  // 因此画布只在 F 合法时才输出。**绝不产出裸 flag** —— 那个失败发生在任务入队之后,
+  // 用户以为提交成功了、等几分钟才看到失败(比提前拒绝误导得多)。
+  const renderCanvas = resolveRenderCanvas(opts);
+  if (renderCanvas) {
+    args.push('--render-width', String(renderCanvas.width), '--render-height', String(renderCanvas.height));
+  }
+  if (isValidSecondPassFraction(opts.secondPass)) {
+    // String(F) 而不是 toFixed:二采的 F 直接换算成重跑步数(round(steps*(1-F))),
+    // 四舍五入会悄悄改变耗时与质感(0.125 → 0.13 就差半步)
+    args.push('--second-pass', String(opts.secondPass));
+    const spCanvas = resolveSecondPassCanvas(opts);
+    if (spCanvas) args.push('--second-pass-canvas', `${spCanvas.width}x${spCanvas.height}`);
+  }
   if (opts.firstFrame) args.push('--first-frame', opts.firstFrame);
   if (opts.lastFrame) args.push('--last-frame', opts.lastFrame);
   for (const img of opts.refImages ?? []) args.push('--ref-image', img);

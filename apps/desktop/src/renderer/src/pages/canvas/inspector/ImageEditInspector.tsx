@@ -13,7 +13,7 @@ import { useTakeResult } from './useTakeResult';
 import { ImagePreview } from './ImagePreview';
 import { KVSection } from './fields';
 import { ModelCombo, matchModel } from './ModelCombo';
-import { capabilityOf, resolveImageModel } from '@bigbotart/shared';
+import { DEFAULT_EDIT_STEPS, capabilityOf, defaultEditSteps, resolveImageModel } from '@bigbotart/shared';
 import { useToolModels } from '../tool-models-store';
 import { GenStatePanel } from './GenState';
 import { UpstreamCard, RefImagesCard, resolveRefImages, ImageStrengthField, OutputResolutionField, OutputSizeField, OutpaintPads, MaskField, ActionBar } from './image-ui';
@@ -46,41 +46,36 @@ const MODE_META: Array<{ key: string; label: string; mono: string }> = [
 ];
 
 /**
- * 图片编辑默认采样步数。
+ * 图片编辑默认采样步数 —— 唯一来源在 shared `defaultEditSteps`。
  *
- * ⚠️ 根因记录(2026-09-29 真实事故「图片编辑不改 step 直接就是 40 步」):
- *   此前这里默认 4,且注释明写「仅作滑块初始值展示——不写回 data」;
- *   而 provider `mlxgen.ts` 的 Qwen-Image-2.1 参考编辑分支又硬兜底 `p.steps ?? 40`。
- *   两套默认互不认识 → **滑块显示 4、实跑 40**,提交参数里压根没有 `steps` 键
- *   (实测 take 存档确认),用户完全无从察觉。2.1 bf16 上 40 步约 4 分钟,
- *   是 6 步版(54-92s)的 6-7 倍耗时。
- *
- * 修法(A 方案,用户 2026-09-29 指定):默认值改 30,且**未设置时显式写回 data**。
- * 硬约束:「滑块显示几步 = 实际跑几步」。provider 侧的 `?? 30` 降级为安全网
- * (历史节点 / Agent 直传 data 未带 steps 时),不再是一套隐藏默认值。
- *
- * ⚠️ 改动本值时必须同步 `packages/providers/src/mlxgen.ts` 参考编辑分支的兜底值
- * (renderer 不能 import providers —— 包边界)。单测 `__tests__/edit-steps-default.test.ts` 锁一致性。
+ * 2026-09-29 事故:检查器默认 4 且不写回 data,provider 硬兜底 40 → 界面 4、实跑 40。
+ * 修法:默认 30、未设置时显式写回 data。2026-10-14 Turbo 补 8。
+ * provider 与这里都调 shared 同一函数,禁止再各写一份三元式。
  */
-export const DEFAULT_EDIT_STEPS = 30;
+export { DEFAULT_EDIT_STEPS };
 
-/**
- * 按当前模型返回「图片编辑」的缺省采样步数(纯函数,供单测)。
- *
- * Qwen-Image-2.1-Turbo(2026-10 接入):8 步蒸馏,采样表内置于 checkpoint
- * (`model_index.json` 的 `sample_sigmas`,8 项),引擎 `Config` 里
- * `len(sigmas)` 覆盖 `num_inference_steps`、**锁步数=8、忽略 --steps**。
- * 此前检查器一刀切写回 30 → Turbo 节点实跑 30、UI 显示 30,引擎再钳到 8 —
- * 表面「无伤」,但「UI 与日志说真话」破,且 data 里多一个被引擎忽略的字段。
- * 故 Turbo 显式给 8;其余走 DEFAULT_EDIT_STEPS(30)。
- *
- * ⚠️ 判定用与 provider `mlxgen.ts` 相同的正则(本地目录路径也命中);
- * 不调 `isQwen21EditModel` —— 那是 provider 私有 API,renderer 不 import。
- */
+/** 补写 steps 的 effect 依赖:只放 nodeId,放大对象/内联 setData 会引发无限重渲染。 */
+export const DEFAULT_STEPS_EFFECT_DEPS = ['nodeId'] as const;
+
+/** 步数滑块区间(必须覆盖 Turbo 8 与其它 30)。 */
+export const EDIT_STEPS_MIN = 4;
+export const EDIT_STEPS_MAX = 50;
+
+/** 检查器侧按当前模型(先解析别名/路径)取默认步数。 */
 export function defaultEditStepsForModel(model: string): number {
   const repo = matchModel(model)?.repoId ?? model;
-  if (/qwen.*2\.1.*turbo/i.test(repo)) return 8;
-  return DEFAULT_EDIT_STEPS;
+  return defaultEditSteps(repo);
+}
+
+/**
+ * 未显式设置 steps 时要写回 data 的 patch;已显式设置返回 null。
+ * 把「写什么」从 effect 里抽出来,避免 UI 显示值与提交值再次分叉。
+ */
+export function defaultEditStepsPatch(
+  model: string,
+  hasExplicitSteps: boolean,
+): { steps: number } | null {
+  return hasExplicitSteps ? null : { steps: defaultEditStepsForModel(model) };
 }
 
 /**
@@ -224,8 +219,8 @@ export function parseSizeInput(raw: string): number | null {
  * 自定义 repoId(matchModel 匹配不到)不自动切换,由用户自行负责。
  */
 const MODE_MODELS: Record<string, { allowed: string[]; recommend: string }> = {
-  instruction: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
-  img2img: { allowed: ['AbstractFramework/z-image-turbo-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1'], recommend: 'AbstractFramework/z-image-turbo-8bit' },
+  instruction: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1', 'Qwen/Qwen-Image-2.1-Turbo', 'Qwen-Image-2.1-Turbo-Heretic'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
+  img2img: { allowed: ['AbstractFramework/z-image-turbo-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'Qwen/Qwen-Image-2.1', 'Qwen/Qwen-Image-2.1-Turbo', 'Qwen-Image-2.1-Turbo-Heretic'], recommend: 'AbstractFramework/z-image-turbo-8bit' },
   inpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit', 'AbstractFramework/z-image-turbo-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
   outpaint: { allowed: ['mlx-community/Qwen-Image-Edit-8bit', 'AbstractFramework/flux.2-klein-9b-8bit'], recommend: 'mlx-community/Qwen-Image-Edit-8bit' },
 };
@@ -428,15 +423,13 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
   hasExplicitStepsRef.current = hasExplicitSteps;
   const nodeId = node.id;
   useEffect(() => {
-    // 已有显式步数(用户调过 / 补写过)不再覆盖
-    if (hasExplicitStepsRef.current) return;
-    // 按当前 model 选默认步数 —— Turbo 给 8(与 engine 锁步数对齐,见
-    // 顶部 defaultEditStepsForModel 注释),其余 30。`model` 变化会让 useMemo/recompute
-    // 拿到新值;但本 effect 依赖只放 nodeId,故**仅在切节点时**补写一次,
+    const patch = defaultEditStepsPatch(model, hasExplicitStepsRef.current);
+    if (!patch) return;
+    // 按当前 model 选默认步数 —— Turbo 给 8,其余 30;依赖只有 nodeId,
     // 切模型不主动重写(避免覆盖用户已调过的滑块)。
-    setDataRef.current({ steps: defaultEditStepsForModel(model) });
+    setDataRef.current(patch);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上方注释:稳定依赖,防止自维持死循环
-  }, [nodeId]);
+  }, DEFAULT_STEPS_EFFECT_DEPS);
   const outpaintSides = (d.outpaintSides as { top: number; right: number; bottom: number; left: number } | undefined)
     ?? { top: 0, right: 0, bottom: 0, left: 0 };
   const frameSrc = d.inputFrameSource as { videoNodeId?: string; at?: 'first' | 'last' } | undefined;
@@ -777,8 +770,8 @@ export function ImageEditInspector(p: ImageEditInspectorProps) {
             <div className="range" style={{ flex: 1, minWidth: 120 }}>
               <input
                 type="range"
-                min={4}
-                max={50}
+                min={EDIT_STEPS_MIN}
+                max={EDIT_STEPS_MAX}
                 value={steps}
                 disabled={running}
                 onChange={(e) => setData({ steps: Number(e.target.value) })}
