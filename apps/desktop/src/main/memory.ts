@@ -558,6 +558,7 @@ export class MemoryStore {
         '「角色」列写本镜出场的角色卡/场景卡短名(逗号分隔);空镜留空或只写场景卡,禁止把未出场的角色填进去。',
         '「段」列可选:同一段的多行 = 一次生成里的多个切(段内各切按累计时刻切镜),铺节点时合并成一个 shot、一次提交;一段合计 ≤15 秒,且同段的行必须连续。段内第 2 切起不要写接尾帧(段内是切镜)。留空即一行一镜一提交。',
         'storyboard.materialize 按行选卡:只连「角色」列点名的卡。硬切 + 有卡、且这一镜姿势与卡一致 → ref-image;姿势和卡不同时不要用 ref-image 锁位置,见【参考图锁外观、不锁身体位置】。「需配图=是」才另建静帧当参考图,卡已够用则不建。没卡就把静帧当 first-frame。接尾帧只连上一镜 first-frame,不挂参考卡。',
+        '⚠️ 但如果这个 shot 还要连音频参考(ref-audio),静帧和上一镜末帧**一律改用 label="ref-image"** —— 引擎里 --ref-audio 与 --first-frame/--last-frame 互斥(见【h3 互斥】)。',
         '不要把角色卡补连到接尾帧镜头上(同一个 shot 不能同时有 first-frame 和 ref-image)。要锁脸,把那一行改成硬切再铺。',
         '给多个镜头接参考图/首尾帧时用 canvas.connect_many 一次提交 [{from,to,label}](最多 200 条),不要连续调 20 次 canvas.connect;部分失败会逐条返回,已成功的边不要重复提交。',
         'canvas.get_node 默认只回 data 摘要(长 prompt/markdown 给长度与短预览);确实需要完整参数时再传 detail=true。document.read 已知行范围时传 startLine/endLine 一次读完,不要反复猜 chunk。',
@@ -652,9 +653,10 @@ export class MemoryStore {
             '- 不要在铺完后把角色卡接到接尾帧镜头上。first-frame 和 ref-image 不能同时连在一个 shot 上。要锁脸就把那一行改成硬切。',
             '- 有分镜静帧时先 submit 静帧再 submit 镜头;不要先跑视频再补静帧。',
             '- 连了 ref-image 的镜头禁止停在 text2video。双角色同框连两张角色卡,提示词用 <Subject n> / <Picture n> 按连线顺序锁身份。',
-            '- **h3 互斥**:同一个 shot 不能同时有 first-frame/last-frame 和 ref-image/ref-video(引擎报 full references cannot be combined with frame anchors,canvas.connect 会直接拒绝)。姿势与角色卡一致时,锁身份走 ref-image;要接上一镜尾帧就只走 first-frame,不要再连参考卡。姿势和卡不同时,锁位置走同尺寸静帧 + first-frame,不要用 ref-image 再写「不要抄姿势」(见【参考图锁外观、不锁身体位置】)。',
+            '- **h3 互斥**:同一个 shot 不能同时有 first-frame/last-frame 和 ref-image/ref-video/**ref-audio**(引擎报 full references cannot be combined with frame anchors,canvas.connect 会直接拒绝)。姿势与角色卡一致时,锁身份走 ref-image;要接上一镜尾帧就只走 first-frame,不要再连参考卡。姿势和卡不同时,锁位置走同尺寸静帧 + first-frame,不要用 ref-image 再写「不要抄姿势」(见【参考图锁外观、不锁身体位置】)。',
             '- 主菜单/开场类技能:优先 1 张确认静帧 + 1 个约 15 秒 shot,不要拆成大量短镜头并行提交。',
             '- **音乐 MV 类技能**:用户音乐必须 assets.import → 建「主音轨」asset 或 audio-ref 节点 → 每个 shot canvas.connect(label=ref-audio) 再 engine.submit。只在 prompt 里写配乐不算用了音乐。',
+            '- **音频参考的两条引擎约束**(--ref-audio 同样算「全参考」,别只当它是声音通道):①同一个 shot 不能同时有 ref-audio 和 first-frame/last-frame;②ref-audio 不能单独存在,必须再连至少一条 ref-image 或 ref-video(引擎报 reference audio requires an image or video reference)。所以**音乐 MV 的镜头一律不连 first-frame/last-frame**,静帧、上一镜末帧全部改用 label="ref-image";要「同一张脸 + 同一个声音」就连 参考图 + 音频参考,提交前确认该 shot 有这两条边。',
           ].join('\n'),
         );
       }

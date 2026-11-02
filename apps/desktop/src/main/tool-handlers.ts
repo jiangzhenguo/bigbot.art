@@ -47,7 +47,7 @@ import {
   openShots,
   shotSubmitAllowed,
   referenceMediaIssues,
-  referenceAnchorConflictIssues,
+  referenceCombinationIssues,
   capabilityOf,
   resolveImageModel,
   healModelForRefImages,
@@ -1915,17 +1915,6 @@ export class ToolHandlers {
           Array.isArray(d.refs) ? (d.refs as DerivedRef[]) : undefined,
           Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : undefined,
         );
-        // 存量脏图(技能4:首帧 + ref-image 已经写进画布)在入队前拒绝。
-        // 渲染层 submit-render 有同一道闸,本工具直连 queue.submit,漏了就会等到 h3 exit 1。
-        const anchorIssues = referenceAnchorConflictIssues(refs);
-        if (anchorIssues.length > 0) {
-          return {
-            ok: false,
-            result:
-              `提交被拒绝:${anchorIssues.map((i) => i.message).join('; ')} ` +
-              `请 canvas.disconnect 去掉其中一侧后再提交。关联生成:环境图/角色卡/手部参考全部改为 label="ref-image",不要留 first-frame。`,
-          };
-        }
         // 愈合存量「有 ref-image 边但 mode 仍文生」(测试技能2);写回节点让 UI/Take 一致
         const healed = healShotModeFromRefs(d, refs);
         if (healed) {
@@ -1993,6 +1982,20 @@ export class ToolHandlers {
         const mediaIssues = referenceMediaIssues(resolved.map((x) => ({ role: x.role, kind: x.asset.kind, path: x.localPath })));
         if (mediaIssues.length > 0) {
           return { ok: false, result: `提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}` };
+        }
+        /* 参考组合守卫(h3 的两条硬校验):放在**逐项校验之后**(资产是否存在、音轨能不能抽出来),
+           因为那些是更具体、更可操作的诊断 ——「这个视频没音轨」比「组合不合法」更能让人下一步。
+           校验顺序 = 逐项 → 媒体类型 → 跨项组合,与渲染层 submit-render 同口径。
+           守卫覆盖两条规则:①references 与 frame anchors 互斥;②--ref-audio 不能单独存在。 */
+        const comboIssues = referenceCombinationIssues(resolved);
+        if (comboIssues.length > 0) {
+          return {
+            ok: false,
+            result:
+              `提交被拒绝:${comboIssues.map((i) => i.message).join('; ')} ` +
+              `请 canvas.disconnect 去掉其中一侧后再提交。关联生成:环境图/角色卡/手部参考全部改为 label="ref-image",不要留 first-frame;` +
+              `要带主音轨(ref-audio)时,必须再连至少一条 ref-image 参考边。`,
+          };
         }
       }
       // image-gen / image-edit:ref-image 连线 → 参考图(多参考生成 / 2.1 多参考编辑;

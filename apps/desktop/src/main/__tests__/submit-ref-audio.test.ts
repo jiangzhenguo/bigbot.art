@@ -50,7 +50,15 @@ function makeQueue() {
   } as unknown as import('../render-queue.js').RenderQueue;
 }
 
-/** 画布:上游镜头(有声/无声)+ 下游镜头,中间连一条 ref-audio 边 */
+/**
+ * 画布:上游镜头(有声/无声)+ 下游镜头,中间连一条 ref-audio 边。
+ *
+ * ⚠️ 下游镜头**另连一条 ref-video**(同一上游成片):h3 要求音频参考必须搭配视觉参考
+ * (h3.c:659 `reference audio requires an image or video reference`,实测 2026-11-02 exit 1),
+ * 只有 ref-audio 的组合是**非法**的。本文件的原意是验证「抽音轨换成 wav」,
+ * 所以场景补足成合法组合,不改变要验的东西。
+ * (用 ref-video 而非 ref-image:ref-image 需要资产库里有资产,本用例的 harness 资产库是空的。)
+ */
 function makeStore(upstreamPath: string) {
   const snapshot = {
     id: CANVAS,
@@ -72,7 +80,10 @@ function makeStore(upstreamPath: string) {
         data: { prompt: '一个美女跳舞', engine: 'h3c', mode: 'text2video', width: 544, height: 544 },
       },
     ],
-    edges: [{ id: 'e1', source: 'up', target: 'down', label: 'ref-audio' }],
+    edges: [
+      { id: 'e1', source: 'up', target: 'down', label: 'ref-audio' },
+      { id: 'e2', source: 'up', target: 'down', label: 'ref-video' },
+    ],
     groups: [],
     updatedAt: new Date().toISOString(),
   };

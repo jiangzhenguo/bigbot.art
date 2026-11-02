@@ -134,7 +134,7 @@ import type {
 import {
   LOCAL_LORA_BUILD_ID,
   referenceMediaIssues,
-  referenceAnchorConflictIssues,
+  referenceCombinationIssues,
 } from '@bigbotart/shared';
 
 export interface DesktopIpcDeps {
@@ -297,9 +297,10 @@ ipcMain.handle('submit-render', (_e, req: RenderRequest) => {
   if (mediaIssues.length > 0) {
     throw new Error(`提交被拒绝:${mediaIssues.map((i) => i.message).join('; ')}`);
   }
-  // h3 互斥:references(--ref-image/--ref-video)不能与 frame anchors(--first-frame/--last-frame)共存。
+  // h3 参考组合规则:①references(--ref-image/--ref-video/--ref-audio)不能与 frame anchors(--first-frame/--last-frame)共存;
+  //   ②--ref-audio 不能单独存在(必须搭配参考图/参考视频)。
   // 入队前拦下,避免 h3 在很久之后才 exit 1 且错误信息看不出画布上的真因(2026-09 真实事故)。
-  const anchorIssues = referenceAnchorConflictIssues(refs as Array<{ role?: string }>);
+  const anchorIssues = referenceCombinationIssues(refs as Array<{ role?: string }>);
   if (anchorIssues.length > 0) {
     throw new Error(`提交被拒绝:${anchorIssues.map((i) => i.message).join('; ')}`);
   }

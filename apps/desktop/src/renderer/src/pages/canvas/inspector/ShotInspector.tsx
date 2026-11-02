@@ -413,7 +413,29 @@ export function ShotInspector({
         <div className="lbl">生成模式</div>
         <div className="f-chips">
           {Object.keys(SHOT_MODE_LABEL).map((m) => (
-            <span key={m} className={`chip${mode === m ? ' on' : ''}`} onClick={() => setData({ mode: m, modeOverride: true, refs: refs.filter((r) => SHOT_REF_ROLES[m]?.some((rd) => rd.role === r.role)) })}>
+            <span
+              key={m}
+              className={`chip${mode === m ? ' on' : ''}`}
+              onClick={() => {
+                /* 切模式会按新模式的角色表筛掉不适用的 refs —— 被筛掉的要**说出来**,
+                   否则用户切一次模式就发现「我的音乐参考不见了」,而画布上没有任何解释。
+                   (静默吞错是本项目明令禁止的:AGENTS.md §1 R6) */
+                const kept = refs.filter((r) => SHOT_REF_ROLES[m]?.some((rd) => rd.role === r.role));
+                const dropped = refs.filter((r) => !SHOT_REF_ROLES[m]?.some((rd) => rd.role === r.role));
+                setData({ mode: m, modeOverride: true, refs: kept });
+                if (dropped.length > 0) {
+                  const names = dropped
+                    .map((r) => SHOT_REF_ROLES[m]?.find((rd) => rd.role === r.role)?.label ?? r.role)
+                    .filter((v, i, arr) => arr.indexOf(v) === i)
+                    .join('、');
+                  toastMsg(
+                    `切到「${SHOT_MODE_LABEL[m]}」后 ${names} 不再适用,已解除绑定` +
+                      `(首/尾帧与音频参考在 h3 里互斥,引擎报 full references cannot be combined with frame anchors)。` +
+                      `要保留音频参考,请切到「参考图」模式并连一张参考图。`,
+                  );
+                }
+              }}
+            >
               {SHOT_MODE_LABEL[m]}
             </span>
           ))}

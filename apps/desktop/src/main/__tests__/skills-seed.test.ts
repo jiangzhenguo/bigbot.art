@@ -30,6 +30,18 @@ const LEGACY_TEXT = readFileSync(
   'utf-8',
 );
 
+/**
+ * 历史出厂版正文(music-video-subtitle,2026-11-02 之前的 9081 字版)。
+ * 取自 git 历史(ff502af),指纹 `fnv1a-1ee6cb65-9081` 与生产代码
+ * LEGACY_BUILTIN_FINGERPRINTS 登记的一致 ——
+ * 这一版正文要求每镜连 ref-audio,却仍写首帧/末帧接续,且只让参考卡「在 prompt 中引用」,
+ * 与引擎的两条硬校验冲突;用它验证升级路径最有说服力。
+ */
+const LEGACY_MVS_TEXT = readFileSync(
+  join(__dirname, 'fixtures', 'music-video-subtitle.legacy-v2.md'),
+  'utf-8',
+);
+
 beforeAll(async () => {
   M = await import('../skills.js');
 });
@@ -228,6 +240,59 @@ describe('SkillStore 内置技能正文升级', () => {
     expect(ins).toContain('禁止首帧 + 参考图混连');
     expect(ins).toContain('label: "ref-image"');
     expect(M.isLegacyBuiltinFingerprint('fnv1a-b7db5dd6-3486')).toBe(true);
+  });
+
+  it('music-video-subtitle 写明音轨参考与帧锚定互斥(2026-11-02 修订)', () => {
+    const store = new M.SkillStore();
+    const ins = store.get('music-video-subtitle')?.instructions ?? '';
+    expect(store.get('music-video-subtitle')?.inject).toBe('full');
+    // ① 引擎两条硬校验要在正文里说成人话,Agent 才知道该连什么、不该连什么
+    expect(ins).toContain('full references cannot be combined with frame anchors');
+    expect(ins).toContain('reference audio requires an image or video reference');
+    expect(ins).toContain('音轨参考与帧锚定互斥');
+    // ② 连线口径:静帧/末帧一律走 ref-image,禁止 first-frame / last-frame
+    expect(ins).toContain('label: "ref-image"');
+    expect(ins).toContain('禁止 `label: "first-frame"` / `label: "last-frame"`');
+    // ③ ref-audio 必须与至少一条 ref-image 同时存在
+    expect(ins).toContain('连了 `ref-audio` 的 shot 必须同时有 `ref-image`');
+    // ④ 分镜表必须带「衔接」「角色」两列,否则铺节点会落成 first-frame
+    expect(ins).toContain('分镜表必须带「衔接」与「角色」两列');
+    // ⑤ 历史出厂版必须在白名单里,否则「没编辑过的老用户」升不上来
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-1ee6cb65-9081')).toBe(true);
+    expect(M.isLegacyBuiltinFingerprint('fnv1a-16230625-7829')).toBe(true);
+    // ⑥ 当前正文已经换成新指纹(不再是 9081 字那一版)
+    expect(M.fingerprintText(ins)).not.toBe('fnv1a-1ee6cb65-9081');
+    expect(M.fingerprintText(ins)).not.toBe('fnv1a-16230625-7829');
+  });
+
+  it('music-video-subtitle 老库(无 fingerprint)持有 9081 字版正文 → 安全升级为新正文', () => {
+    const seed = new M.SkillStore().get('music-video-subtitle')!;
+    // 前置确认:这份 fixture 确实是「历史出厂版」(指纹在白名单里)
+    expect(M.fingerprintText(LEGACY_MVS_TEXT)).toBe('fnv1a-1ee6cb65-9081');
+    expect(M.isLegacyBuiltinFingerprint(M.fingerprintText(LEGACY_MVS_TEXT))).toBe(true);
+    writeFileSync(
+      SKILLS_FILE,
+      JSON.stringify([
+        {
+          id: 'music-video-subtitle',
+          name: seed.name,
+          nodes: [],
+          edges: [],
+          params: [],
+          instructions: LEGACY_MVS_TEXT, // 旧版出厂正文(无 fingerprint 字段)
+          inject: 'full',
+          builtin: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    const store = new M.SkillStore();
+    const s = store.get('music-video-subtitle');
+    expect(s?.instructions).toBe(seed.instructions); // 正文已升级到最新
+    expect(s?.instructions).toContain('full references cannot be combined with frame anchors');
+    expect(s?.instructions).toContain('label: "ref-image"');
+    expect(s?.builtinFingerprint).toBeTruthy(); // 补上指纹,后续可继续升级
   });
 
   it('出厂正文含 h3 参考图能力表(事故修复内容确实在种子文件里)', () => {
