@@ -593,3 +593,36 @@ describe('附件在包内缺失时不假装成功', () => {
     expect(res.ok).toBe(true);
   });
 });
+
+/* ────────────────────────── 8. 节点插件依赖 ────────────────────────── */
+
+describe('项目包记录并检查节点插件依赖', () => {
+  it('导出 requiredPlugins；缺插件时保留节点并明确警告，不自动安装', () => {
+    const { projectId, canvasId } = seedProject();
+    const pc = store.loadProjectCanvases(projectId);
+    const cur = pc.canvases.find((c) => c.id === canvasId)!;
+    cur.nodes.push({
+      id: 'n-plugin-1',
+      kind: 'plugin:acme-media:audio-extract',
+      label: '提取音轨',
+      position: { x: 700, y: 100 },
+      data: { format: 'wav', __plugin: { id: 'acme-media', version: '1.2.3' } },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    store.replaceCanvases(projectId, pc);
+    const built = pkg.buildProjectPackage(projectId, deps);
+    expect(built.payload.requiredPlugins).toEqual([{ id: 'acme-media', version: '1.2.3' }]);
+
+    const res = pkg.materializePackage(built, {
+      ...deps,
+      nodePlugins: { listDefinitions: () => [] },
+    });
+    expect(res.ok).toBe(true);
+    expect(res.warnings?.some((w) => w.includes('acme-media') && w.includes('未安装'))).toBe(true);
+    const imported = store.loadProjectCanvases(res.project!.id).canvases.flatMap((c) => c.nodes)
+      .find((n) => n.id === 'n-plugin-1');
+    expect(imported?.kind).toBe('plugin:acme-media:audio-extract');
+    expect((imported?.data as Record<string, unknown>).format).toBe('wav');
+  });
+});

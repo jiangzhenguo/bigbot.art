@@ -168,6 +168,12 @@ export interface BigBotArtApi {
   }): Promise<{ ok: boolean; assets: import('./domain').Asset[]; error?: string }>;
   /** 列项目画布中「有产物」的节点(「从画布产物导入」弹层的候选项) */
   listArchivableProducts(projectId: string): Promise<Array<{ nodeId: string; name: string; path: string; meta: string }>>;
+  /** 节点插件：公开定义不含安装绝对路径；安装仅允许桌面端用户显式选择文件夹。 */
+  listNodePlugins(): Promise<Array<import('./node-plugin').NodePluginDefinition>>;
+  installNodePlugin(): Promise<{ ok: boolean; canceled?: boolean; error?: string }>;
+  setNodePluginEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+  removeNodePlugin(id: string): Promise<{ ok: boolean; error?: string }>;
+  runNodePlugin(req: import('./node-plugin').NodePluginRunRequest): Promise<import('./node-plugin').NodePluginRunResult>;
   // Skills 库(画布模板 + Agent 指令段双形态;激活状态持久化在 canvasMemory,见 docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md)
   listSkills(): Promise<import('./domain').Skill[]>;
   saveSkill(input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }): Promise<import('./domain').Skill>;
@@ -472,3 +478,4 @@ export * from './storyboard-schema.js';
 export * from './skill-params.js';
 export * from './agent-task.js';
 export * from './opencode-go.js';
+export * from './node-plugin.js';

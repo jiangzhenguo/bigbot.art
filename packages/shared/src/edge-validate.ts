@@ -14,6 +14,7 @@
  */
 
 import { CONNECTOR_MAP, CONNECTOR_OUTPUT_TARGET, PORT_SEMANTICS, SINGLE_VALUE_PORTS } from './connector-map.js';
+import { isPluginNodeKind, type NodePluginDefinition } from './node-plugin.js';
 
 /** 最小节点结构(与 CanvasNode 兼容,便于在 shared 层独立单测) */
 export interface EdgeNodeMin {
@@ -55,6 +56,18 @@ export interface EdgeViolation {
 export interface ValidateEdgeOptions {
   /** 资产节点 → 媒体类型(主进程可传 AssetStore 解析;缺省用节点 data.mediaType,再兜底 image) */
   resolveAssetMedia?: (assetId: string) => 'image' | 'video' | 'audio' | 'document' | undefined;
+  /** 当前已安装插件定义；缺失/停用定义不允许新建连线，但旧边仍可保留在快照中。 */
+  nodePlugins?: NodePluginDefinition[];
+}
+
+function pluginDefinitionOf(kind: string, opts?: ValidateEdgeOptions): NodePluginDefinition | undefined {
+  if (!isPluginNodeKind(kind)) return undefined;
+  return opts?.nodePlugins?.find((d) => d.kind === kind && d.enabled !== false && !d.error);
+}
+
+function pluginSinglePort(targetKind: string, label: string, opts?: ValidateEdgeOptions): boolean {
+  const def = pluginDefinitionOf(targetKind, opts);
+  return def?.inputs.some((p) => p.id === label && p.cardinality === 'single') ?? false;
 }
 
 /** 图片产物类节点(静帧直通;与渲染层 IMAGE_KINDS 同口径)。
@@ -156,6 +169,12 @@ function assetMediaOf(node: EdgeNodeMin, opts?: ValidateEdgeOptions): string {
 
 function sourceMedia(node: EdgeNodeMin, opts?: ValidateEdgeOptions): string | undefined {
   if (node.kind === 'asset') return assetMediaOf(node, opts);
+  if (isPluginNodeKind(node.kind)) {
+    const def = pluginDefinitionOf(node.kind, opts);
+    const primary = def?.outputs.find((o) => o.primary) ?? def?.outputs[0];
+    const stored = String(((node.data ?? {}) as Record<string, unknown>).mediaType ?? '');
+    return primary?.media ?? (stored || undefined);
+  }
   return NODE_OUTPUT_MEDIA[node.kind];
 }
 
@@ -197,11 +216,23 @@ export function allowedPortLabels(
 ): string[] {
   if (targetKind === 'workflow-input') return ['slot-<名称>'];
   if (targetKind === 'workflow-output') {
-    return OUTPUT_COLLECTABLE_KINDS.includes(source.kind) ? ['output'] : [];
+    return OUTPUT_COLLECTABLE_KINDS.includes(source.kind) || isPluginNodeKind(source.kind) ? ['output'] : [];
+  }
+  const targetPlugin = pluginDefinitionOf(targetKind, opts);
+  if (isPluginNodeKind(targetKind)) {
+    if (!targetPlugin) return [];
+    const media = sourceMedia(source, opts);
+    return targetPlugin.inputs
+      .filter((p) => !media || p.media === media)
+      .map((p) => p.id);
   }
   if (source.kind === 'workflow-input') return [];
-  const raw = CONNECTOR_MAP[source.kind]?.[targetKind]
-    ?? CONNECTOR_MAP[source.kind]?.[TARGET_KIND_ALIAS[targetKind] ?? ''];
+  // 插件产物作为上游时复用资产连接矩阵：图片/视频/音频产物与同媒体资产具有相同的下游语义。
+  const sourceConnectorKind = isPluginNodeKind(source.kind)
+    ? (pluginDefinitionOf(source.kind, opts) ? 'asset' : '')
+    : source.kind;
+  const raw = CONNECTOR_MAP[sourceConnectorKind]?.[targetKind]
+    ?? CONNECTOR_MAP[sourceConnectorKind]?.[TARGET_KIND_ALIAS[targetKind] ?? ''];
   if (!raw) return [];
   const labels = splitPorts(raw).filter((label) => {
     const need = PORT_REQUIRED_MEDIA[label];
@@ -317,7 +348,7 @@ export function validateEdge(
   }
 
   // 单值端口基数:同目标、同 label 已有入边(不同源)⇒ 冲突(可替换)
-  if (SINGLE_VALUE_PORTS.has(lbl)) {
+  if (SINGLE_VALUE_PORTS.has(lbl) || pluginSinglePort(dst.kind, lbl, opts)) {
     const conflict = edges.find((e) => e.target === target && e.label === lbl && e.source !== source);
     if (conflict) {
       errors.push({
@@ -359,7 +390,16 @@ export function deriveShotRefsFromEdges(
     const src = byId.get(e.source);
     if (!src) continue;
     const sd = (src.data ?? {}) as Record<string, unknown>;
-    if (src.kind === 'asset') {
+    if (isPluginNodeKind(src.kind)) {
+      // 插件产物与内置产物使用同一套镜头参考语义；插件已把主输出媒体写入 data.mediaType。
+      const resultPath = String(sd.resultPath ?? '');
+      const media = String(sd.mediaType ?? '');
+      if (!resultPath) continue;
+      if (lbl === 'first-frame' && media === 'image') derived.push({ path: resultPath, role: 'first-frame', auto: true });
+      else if (lbl === 'ref-image' && media === 'image') derived.push({ path: resultPath, role: 'ref-image', auto: true });
+      else if (lbl === 'ref-video' && media === 'video') derived.push({ path: resultPath, role: 'ref-video', auto: true });
+      else if (lbl === 'ref-audio' && (media === 'audio' || media === 'video')) derived.push({ path: resultPath, role: 'ref-audio', auto: true });
+    } else if (src.kind === 'asset') {
       const assetId = String(sd.assetId ?? '');
       const role =
         lbl === 'first-frame' ? 'first-frame'
@@ -437,7 +477,10 @@ export function pendingImageUpstreamLabels(
     if (e.target !== shotId) continue;
     if (e.label !== 'ref-image' && e.label !== 'first-frame') continue;
     const src = byId.get(e.source);
-    if (!src || !IMAGE_KINDS.includes(src.kind)) continue;
+    if (!src) continue;
+    const isImagePlugin = isPluginNodeKind(src.kind)
+      && String(((src.data ?? {}) as Record<string, unknown>).mediaType ?? '') === 'image';
+    if (!IMAGE_KINDS.includes(src.kind) && !isImagePlugin) continue;
     const rp = String((src.data as Record<string, unknown> | undefined)?.resultPath ?? '');
     if (!rp) out.push(src.label || src.id);
   }

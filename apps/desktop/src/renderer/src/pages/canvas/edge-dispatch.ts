@@ -16,7 +16,7 @@
  * 可直接单测;CanvasPage 通过 nodesReducer 的 derive-from-edges action 消费它。
  */
 import type { PromptSource } from '@bigbotart/shared';
-import { inferPromptSource, storyboardLinkOf } from '@bigbotart/shared';
+import { inferPromptSource, isPluginNodeKind, storyboardLinkOf } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from './types';
 import { pickShotSpec, IMAGE_KINDS, VIDEO_KINDS } from './connectors';
 import { SHOT_REF_ROLES } from './constants';
@@ -89,13 +89,18 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
     if (!src || !dst) continue;
     const d = (dst.data ?? {}) as Record<string, unknown>;
     const s = (src.data ?? {}) as Record<string, unknown>;
+    const pluginMedia = isPluginNodeKind(src.kind) ? String(s.mediaType ?? '') : '';
+    const imageSource = IMAGE_KINDS.includes(src.kind ?? '') || pluginMedia === 'image';
+    const videoSource = VIDEO_KINDS.includes(src.kind ?? '') || pluginMedia === 'video';
+    const audioSource = pluginMedia === 'audio';
+    const pluginProduct = pluginMedia === 'image' || pluginMedia === 'video' || audioSource;
     switch (dst.kind) {
       case 'shot': {
         const arr = refPatch.get(e.to) ?? [];
         const modeRaw = String(d.mode ?? 'text2video');
         const modeOverridden = d.modeOverride === true;
         const fromShot = src.kind === 'shot';
-        const fromImage = IMAGE_KINDS.includes(src.kind ?? '');
+        const fromImage = imageSource;
         // 只有「首帧端口」入边才自动切 mode(默认文生 → 首帧);
         // ref-image 边不误切首帧 —— h3 的 --ref-image 与 --first-frame 互斥(连接器设计 §10.4)
         const isFirstFrameEdge = e.label === 'first-frame';
@@ -165,7 +170,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
             if (Object.keys(spec).length) specPatch.set(e.to, spec);
           }
           specFromPatch.set(e.to, { nodeId: e.from });
-        } else if (VIDEO_KINDS.includes(src.kind ?? '')) {
+        } else if (videoSource) {
           // 视频产物 → 镜头(如 video-upscale 增强成片):ref-video 参考视频;
           // first-frame 端口不在此注入 —— 端口载荷是静帧,须先经 frames 取帧
           if (e.label === 'ref-video' && !autoBlocked('ref-video')) {
@@ -190,6 +195,9 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
             const img = String(s.resultPath ?? '');
             if (img) arr.push({ path: img, role: 'ref-image', auto: true });
           }
+        } else if (audioSource && e.label === 'ref-audio' && !autoBlocked('ref-audio')) {
+          const audio = String(s.resultPath ?? '');
+          if (audio) arr.push({ path: audio, role: 'ref-audio', auto: true });
         }
         if (arr.length) refPatch.set(e.to, arr);
         // 提示词端口 prompt:document → 下游 prompt(仅自身 prompt 为空时生效,运行期解析)
@@ -211,8 +219,9 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           src.kind === 'shot' ||
           src.kind === 'director' ||
           src.kind === 'audio-ref' ||
-          IMAGE_KINDS.includes(src.kind ?? '') ||
-          VIDEO_KINDS.includes(src.kind ?? '');
+          imageSource ||
+          videoSource ||
+          audioSource;
         if (isClip || asMedia) {
           const arr = timelinePatch.get(e.to) ?? [];
           if (!arr.includes(e.from)) arr.push(e.from);
@@ -235,7 +244,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
           'audio-ref': 'audio',
           asset: String(s.mediaType ?? ''),
         };
-        const kind = kindOf[src.kind ?? ''];
+        const kind = kindOf[src.kind ?? ''] ?? (pluginProduct ? pluginMedia : '');
         if (!kind || kind === 'document') break;
         const outputs = Array.isArray(d.outputs) ? (d.outputs as Array<{ name: string; kind: string }>) : [];
         const mp = outputPatch.get(e.to) ?? {};
@@ -288,7 +297,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         // ⚠️ 派生态 inputImageFrom **不是**检查器显示的充分条件:`data.inputAssetId` 一旦有值,
         //    解析侧(CanvasPage.runNode 与 ImageEditInspector.resolveEditInputImage)会**优先**用它,
         //    填了个查不到的 ID 就等于把连线信息挤掉(2026-10 事故:来源卡在、图是空的)。
-        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (imageSource || src.kind === 'asset') {
           if (e.label === 'ref-image') {
             const arr = editRefPatch.get(e.to) ?? [];
             if (!arr.includes(e.from)) arr.push(e.from);
@@ -309,7 +318,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       case 'image-gen': {
         // 参考图端口 ref-image(多值):与 image-edit 同口径写入 refImageFrom,
         // 供检查器/节点卡缺省模型解析(有参考图 → image.instruction → 2.1)。
-        if ((IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') && e.label === 'ref-image') {
+        if ((imageSource || src.kind === 'asset') && e.label === 'ref-image') {
           const arr = editRefPatch.get(e.to) ?? [];
           if (!arr.includes(e.from)) arr.push(e.from);
           editRefPatch.set(e.to, arr);
@@ -336,14 +345,14 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       }
       case 'image-upscale': {
         // 输入图端口 input(超分源):静帧产物直通 / 素材引用;无条件登记(幂等)
-        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (imageSource || src.kind === 'asset') {
           imageFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
       case 'video-upscale': {
         // 输入**视频**端口 input:镜头成片 / 视频增强产物 / 视频素材;无条件登记(幂等)
-        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (src.kind === 'shot' || videoSource || src.kind === 'asset') {
           videoFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
@@ -351,7 +360,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       case 'frame-grab': {
         // 输入**视频**端口 input-video:镜头成片 / 视频增强产物 / 视频素材(只收视频源)。
         // 这是「视频 → 图片」的唯一合法转换点:产物 PNG 再交给 image-edit/upscale/… 下游。
-        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (src.kind === 'shot' || videoSource || src.kind === 'asset') {
           videoFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
@@ -361,28 +370,28 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
            (见 CanvasPage 的 audioRefSync effect —— 抽音轨有 ffmpeg 副作用,派发保持纯函数)。
            只收**带音轨的视频产物**(shot / video-upscale);音频 asset 不走这条路
            (audio-ref 的 assetId 由检查器或抽取结果直接绑定)。 */
-        if (src.kind === 'shot' || VIDEO_KINDS.includes(src.kind ?? '')) {
+        if (src.kind === 'shot' || videoSource) {
           audioFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
       case 'image-crop': {
         // 输入图端口 input(裁切源):静帧产物直通 / 素材引用;无条件登记(幂等)
-        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (imageSource || src.kind === 'asset') {
           imageFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
       case 'image-split': {
         // 输入图端口 input(拆分源):静帧产物直通 / 素材引用;无条件登记(幂等)
-        if (IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') {
+        if (imageSource || src.kind === 'asset') {
           imageFromPatch.set(e.to, { nodeId: e.from });
         }
         break;
       }
       case 'image-stitch': {
         // 拼接件端口 piece(多值):静帧产物 / 素材;记录源坐标供排序(横排按 x,竖排/网格按 y)
-        if ((IMAGE_KINDS.includes(src.kind ?? '') || src.kind === 'asset') && (e.label ?? '').startsWith('piece')) {
+        if ((imageSource || src.kind === 'asset') && (e.label ?? '').startsWith('piece')) {
           const arr = stitchPatch.get(e.to) ?? [];
           arr.push({ nodeId: e.from, x: src.x, y: src.y });
           stitchPatch.set(e.to, arr);

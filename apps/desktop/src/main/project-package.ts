@@ -44,7 +44,7 @@ import type {
   ProjectPackageStats,
   Take,
 } from '@bigbotart/shared';
-import { PROJECT_PACKAGE_VERSION } from '@bigbotart/shared';
+import { PROJECT_PACKAGE_VERSION, parsePluginNodeKind } from '@bigbotart/shared';
 import { ASSETS_DIR, projectAssetsDir } from './assets.js';
 import type { AssetStore } from './assets.js';
 import type { ProjectStore } from './store.js';
@@ -233,6 +233,19 @@ export function buildProjectPackage(projectId: string, deps: ExportDeps): Projec
     });
   }
 
+  const requiredPlugins = new Map<string, { id: string; version?: string }>();
+  for (const c of canvases.canvases ?? []) {
+    for (const n of c.nodes ?? []) {
+      const parsed = parsePluginNodeKind(n.kind);
+      if (!parsed) continue;
+      const meta = (n.data as Record<string, unknown> | undefined)?.__plugin as { version?: unknown } | undefined;
+      requiredPlugins.set(parsed.pluginId, {
+        id: parsed.pluginId,
+        version: typeof meta?.version === 'string' ? meta.version : undefined,
+      });
+    }
+  }
+
   const payload: ProjectPackage['payload'] = {
     project,
     canvases: {
@@ -244,6 +257,7 @@ export function buildProjectPackage(projectId: string, deps: ExportDeps): Projec
     assets,
     assetCategories: categories,
     media,
+    ...(requiredPlugins.size ? { requiredPlugins: [...requiredPlugins.values()] } : {}),
   };
 
   return {
@@ -330,6 +344,10 @@ export interface ImportDeps {
   assets: AssetStore;
   takes: TakeStore;
   memory: MemoryStore;
+  /** 可选：生产环境用于导入前检查插件依赖；旧测试/无插件环境无需注入。 */
+  nodePlugins?: {
+    listDefinitions(): Array<{ pluginId: string; pluginVersion: string; enabled: boolean }>;
+  };
 }
 
 /**
@@ -345,6 +363,17 @@ export function materializePackage(pkg: ProjectPackage, deps: ImportDeps): Proje
   const warnings: string[] = [];
   const payload = pkg.payload;
   const oldProject = payload.project;
+  if (deps.nodePlugins && payload.requiredPlugins?.length) {
+    const defs = deps.nodePlugins.listDefinitions();
+    for (const req of payload.requiredPlugins) {
+      const installed = defs.filter((d) => d.pluginId === req.id && d.enabled);
+      if (installed.length === 0) {
+        warnings.push(`项目需要节点插件 ${req.id}${req.version ? `@${req.version}` : ''}，当前未安装或已停用；相关节点已保留，但需安装/启用插件后才能运行。`);
+      } else if (req.version && !installed.some((d) => d.pluginVersion === req.version)) {
+        warnings.push(`项目插件 ${req.id} 记录版本为 ${req.version}，当前启用版本不同；节点已保留，运行前请确认插件兼容性。`);
+      }
+    }
+  }
 
   // 1) 建项目(名字撞了也照建,由用户自己去重命名 —— 比偷偷改名可预期)
   const project = deps.store.createProject(oldProject.name || '导入的项目');

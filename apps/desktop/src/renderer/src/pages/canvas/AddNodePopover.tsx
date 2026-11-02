@@ -16,6 +16,7 @@ import {
   type VideoAspect,
 } from '@bigbotart/shared';
 import { resolvePortOptions, hasConnector, PORT_LABEL } from './connectors';
+import { useNodePlugins } from './plugins/NodePluginsContext';
 
 interface AddNodePopoverProps {
   open: boolean;
@@ -49,6 +50,8 @@ export function AddNodePopover({
   onCreate,
   openCount,
 }: AddNodePopoverProps) {
+  const { definitions: nodePlugins, enabledTags } = useNodePlugins();
+  const nodeTypes = [...NODE_TYPES, ...enabledTags];
   /* 弹层本地 UI 状态:搜索 / 选中类型 / 端口角色(多端口组合时) / 画幅 × 档位 */
   const [search, setSearch] = useState('');
   const [sel, setSel] = useState<string | null>(null);
@@ -66,10 +69,10 @@ export function AddNodePopover({
   const q = search.trim().toLowerCase();
   /* 可选下游类型:只列有连接器的(无连接器 ⇒ 不展示),并按搜索词过滤 */
   const visibleTypes = src
-    ? NODE_TYPES.filter((t) => hasConnector(src, t.id)).filter((t) => !q || t.name.toLowerCase().includes(q))
+    ? nodeTypes.filter((t) => hasConnector(src, t.id, nodePlugins)).filter((t) => !q || t.name.toLowerCase().includes(q))
     : [];
   /* 当前选中类型的全部端口选项 + 当前选择(多端口时 UI 可选) */
-  const portOpts = src && sel ? resolvePortOptions(src, sel) : [];
+  const portOpts = src && sel ? resolvePortOptions(src, sel, nodePlugins) : [];
   const chosenPort = portOpts[Math.min(portIdx, portOpts.length - 1)] ?? null;
 
   /*
@@ -93,7 +96,7 @@ export function AddNodePopover({
       ? `输出 ${firstFrameSpec.width}×${firstFrameSpec.height} · 预计 ${VIDEO_TIER_PRESETS[tierKeyOf(tier)].eta}（capabilities）`
       : resLine(effectiveAspect, tier);
   const tip = sel
-    ? `自动连线：${srcLabel} → ${NODE_TYPES.find((t) => t.id === sel)?.name ?? ''}${chosenPort ? ` · 落 ${chosenPort.port} 端口` : ''}`
+    ? `自动连线：${srcLabel} → ${nodeTypes.find((t) => t.id === sel)?.name ?? ''}${chosenPort ? ` · 落 ${chosenPort.port} 端口` : ''}`
     : '选中后自动连线并继承绑定';
   return (
     <div
@@ -155,7 +158,7 @@ export function AddNodePopover({
       </div>
       <div className="ap-list">
         {visibleTypes.map((t) => {
-          const rpOpts = src ? resolvePortOptions(src, t.id) : [];
+          const rpOpts = src ? resolvePortOptions(src, t.id, nodePlugins) : [];
           const rp = rpOpts[0] ?? null;
           const multi = rpOpts.length > 1;
           /* 预览端口:选中行显示当前选择,未选中行显示默认(首个) */

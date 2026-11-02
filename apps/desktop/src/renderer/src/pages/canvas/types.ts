@@ -1,4 +1,4 @@
-import type { NodeKind, CanvasSaveOptions, CanvasSnapshot, ProjectCanvases } from '@bigbotart/shared';
+import type { NodeKind, CanvasSaveOptions, CanvasSnapshot, ProjectCanvases, NodePluginDefinition } from '@bigbotart/shared';
 
 export interface CanvasPageProps {
   onNavigate: (
@@ -92,6 +92,8 @@ export interface NodeTag {
   kind: NodeKind;
   name: string;
   sub: string;
+  /** 动态插件节点的完整定义；内置节点为空。 */
+  definition?: NodePluginDefinition;
 }
 
 export interface NodeInfo {

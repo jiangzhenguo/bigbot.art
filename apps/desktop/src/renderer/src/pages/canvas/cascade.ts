@@ -7,20 +7,34 @@
  * - 传递闭包:重生成上游时给全部受影响下游标 stale(接力跑完逐个刷新)。
  */
 import type { CanvasNode, Edge } from './types';
+import { isPluginNodeKind } from '@bigbotart/shared';
+import type { NodePluginDefinition } from '@bigbotart/shared';
 
 /** 参与接力的生成类节点(可运行节点;文档/分镜/时间线/工作流出入口不接力) */
 export const CASCADE_KINDS = new Set(['shot', 'image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab', 'video-upscale']);
 
+/** 内置生成节点保持原集合；插件必须有当前启用定义才可运行/接力。 */
+export function isCascadeRunnable(node: CanvasNode, nodePlugins: NodePluginDefinition[] = []): boolean {
+  if (CASCADE_KINDS.has(node.kind ?? '')) return true;
+  return isPluginNodeKind(node.kind)
+    && nodePlugins.some((definition) => definition.kind === node.kind && definition.enabled);
+}
+
 /**
  * 直接下游生成节点:sourceId 的所有出边指向的生成类节点(id 去重,保持边序)。
  */
-export function directDownstreamGenIds(sourceId: string, nodes: CanvasNode[], edges: Edge[]): string[] {
+export function directDownstreamGenIds(
+  sourceId: string,
+  nodes: CanvasNode[],
+  edges: Edge[],
+  nodePlugins: NodePluginDefinition[] = [],
+): string[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const out: string[] = [];
   for (const e of edges) {
     if (e.from !== sourceId) continue;
     const t = byId.get(e.to);
-    if (t && CASCADE_KINDS.has(t.kind ?? '')) out.push(e.to);
+    if (t && isCascadeRunnable(t, nodePlugins)) out.push(e.to);
   }
   return [...new Set(out)];
 }
@@ -28,7 +42,12 @@ export function directDownstreamGenIds(sourceId: string, nodes: CanvasNode[], ed
 /**
  * 传递闭包:sourceIds 下游所有生成类节点(BFS,环安全 —— 用 seen 去重,不会死循环;不含源自身)。
  */
-export function allDownstreamGenIds(sourceIds: string[], nodes: CanvasNode[], edges: Edge[]): string[] {
+export function allDownstreamGenIds(
+  sourceIds: string[],
+  nodes: CanvasNode[],
+  edges: Edge[],
+  nodePlugins: NodePluginDefinition[] = [],
+): string[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const seen = new Set<string>(sourceIds);
   const out: string[] = [];
@@ -38,7 +57,7 @@ export function allDownstreamGenIds(sourceIds: string[], nodes: CanvasNode[], ed
     for (const e of edges) {
       if (e.from !== id) continue;
       const t = byId.get(e.to);
-      if (!t || !CASCADE_KINDS.has(t.kind ?? '')) continue;
+      if (!t || !isCascadeRunnable(t, nodePlugins)) continue;
       if (seen.has(e.to)) continue;
       seen.add(e.to);
       out.push(e.to);
@@ -64,8 +83,9 @@ export function pickCascadeTargets(
   nodes: CanvasNode[],
   edges: Edge[],
   opts: CascadeBusyCheck,
+  nodePlugins: NodePluginDefinition[] = [],
 ): string[] {
-  return directDownstreamGenIds(sourceId, nodes, edges).filter((id) => {
+  return directDownstreamGenIds(sourceId, nodes, edges, nodePlugins).filter((id) => {
     if (opts.isBusy(id)) return false;
     const n = nodes.find((x) => x.id === id);
     const d = (n?.data ?? {}) as Record<string, unknown>;

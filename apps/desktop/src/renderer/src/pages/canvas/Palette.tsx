@@ -7,7 +7,8 @@
  */
 import React from 'react';
 import { NODE_TYPES } from './constants';
-import { PALETTE_ICONS } from './icons';
+import { PALETTE_ICONS, ICON_COMFY } from './icons';
+import { useNodePlugins } from './plugins/NodePluginsContext';
 
 interface PaletteProps {
   collapsed: boolean;
@@ -18,6 +19,8 @@ interface PaletteProps {
 }
 
 export function Palette({ collapsed, onCollapse, onExpand, onAddByDoubleClick }: PaletteProps) {
+  const { enabledTags } = useNodePlugins();
+  const nodeTypes = [...NODE_TYPES, ...enabledTags];
   return (
     <>
       <aside className="palette" data-od-id="canvas-palette">
@@ -38,7 +41,7 @@ export function Palette({ collapsed, onCollapse, onExpand, onAddByDoubleClick }:
             </svg>
           </button>
         </div>
-        {NODE_TYPES.map((t) => (
+        {nodeTypes.map((t) => (
           <div
             className="pal-it"
             key={t.id}
@@ -51,7 +54,7 @@ export function Palette({ collapsed, onCollapse, onExpand, onAddByDoubleClick }:
             }}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              {PALETTE_ICONS[t.id]}
+              {PALETTE_ICONS[t.id] ?? (t.definition ? ICON_COMFY : null)}
             </svg>
             <div>
               <b>{t.name}</b>

@@ -93,6 +93,11 @@ const api: BigBotArtApi = {
     categoryId?: string;
   }) => ipcRenderer.invoke(ch('archiveProducts'), input),
   listArchivableProducts: (projectId: string) => ipcRenderer.invoke(ch('listArchivableProducts'), projectId),
+  listNodePlugins: () => ipcRenderer.invoke(ch('listNodePlugins')),
+  installNodePlugin: () => ipcRenderer.invoke(ch('installNodePlugin')),
+  setNodePluginEnabled: (id, enabled) => ipcRenderer.invoke(ch('setNodePluginEnabled'), id, enabled),
+  removeNodePlugin: (id) => ipcRenderer.invoke(ch('removeNodePlugin'), id),
+  runNodePlugin: (req) => ipcRenderer.invoke(ch('runNodePlugin'), req),
   listSkills: () => ipcRenderer.invoke(ch('listSkills')),
   saveSkill: (input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) =>
     ipcRenderer.invoke(ch('saveSkill'), input),

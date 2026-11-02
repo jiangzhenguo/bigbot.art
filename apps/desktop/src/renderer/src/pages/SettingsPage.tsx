@@ -14,6 +14,7 @@ import type {
 } from '@bigbotart/shared';
 import { LOCAL_LORA_BUILD_ID } from '@bigbotart/shared';
 import PageTopBar from '../components/PageTopBar';
+import NodePluginsSettings from '../components/NodePluginsSettings';
 import { ToolModelsSection } from './ToolModelsSection';
 import { setAccelDefaultCache } from './canvas/tool-models-store';
 import { useColorScheme } from '../hooks/useColorScheme';
@@ -31,13 +32,14 @@ interface SettingsPageProps {
   backLabel: string;
 }
 
-type GroupKey = 'general' | 'llm' | 'toolModels' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
+type GroupKey = 'general' | 'llm' | 'toolModels' | 'nodePlugins' | 'engines' | 'queue' | 'storage' | 'models' | 'lora';
 
 /** 面包屑当前组名(与侧栏导航文案一致) */
 const GROUP_LABEL: Record<GroupKey, string> = {
   general: '通用',
   llm: 'LLM 来源',
   toolModels: '工具模型',
+  nodePlugins: '节点插件',
   engines: '引擎(Provider)',
   queue: '队列与资源',
   storage: '存储与项目',
@@ -1410,6 +1412,16 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             >
               {t('工具模型')}
             </a>
+            {isDesktopShell() ? (
+              <a
+                className={`side-link${group === 'nodePlugins' ? ' on' : ''}`}
+                data-panel="nodePlugins"
+                data-od-id="settings-node-plugins-nav"
+                onClick={() => setGroup('nodePlugins')}
+              >
+                {t('节点插件')}
+              </a>
+            ) : null}
             <a
               className={`side-link${group === 'engines' ? ' on' : ''}`}
               data-panel="engines"
@@ -2063,6 +2075,18 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
             <div hidden={group !== 'toolModels'}>
               <ToolModelsSection />
             </div>
+
+            {/* 节点插件仅桌面端可管理；网页端不渲染导航或安装入口。 */}
+            {isDesktopShell() ? (
+              <div
+                className="group"
+                data-group="nodePlugins"
+                data-od-id="settings-node-plugins"
+                hidden={group !== 'nodePlugins'}
+              >
+                <NodePluginsSettings />
+              </div>
+            ) : null}
 
             {/* 引擎 */}
             <div

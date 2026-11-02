@@ -1,0 +1,47 @@
+{
+  "apiVersion": "bigbotart.node-plugin/v1",
+  "id": "bigbotart-examples",
+  "version": "1.0.0",
+  "displayName": "BigBotArt 示例插件",
+  "nodes": [
+    {
+      "kind": "audio-extract",
+      "title": "音频提取",
+      "description": "从视频中提取第一条音轨，生成 16-bit PCM、48kHz 立体声 WAV",
+      "inputs": [
+        {
+          "id": "input-video",
+          "label": "输入视频",
+          "media": "video",
+          "cardinality": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "audio",
+          "label": "音频",
+          "media": "audio",
+          "cardinality": "single",
+          "required": true,
+          "primary": true
+        }
+      ],
+      "defaultData": {
+        "format": "wav"
+      },
+      "parametersSchema": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "title": "音频格式",
+            "enum": ["wav"],
+            "default": "wav"
+          }
+        }
+      },
+      "executor": "runtime/index.js"
+    }
+  ]
+}

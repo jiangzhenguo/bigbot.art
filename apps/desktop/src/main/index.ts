@@ -51,6 +51,7 @@ import {
 import { waitUntilFlightFree } from './flight-turn';
 import { MemoryStore } from './memory';
 import { ToolHandlers } from './tool-handlers';
+import { NodePluginManager } from './node-plugins';
 import { requestH3PromptCompletion } from './h3-prompt';
 import { TakeStore } from './takes';
 import { runDataMigration } from './migrate';
@@ -331,10 +332,12 @@ const exportSvc = new ExportService(takes, (pid, nid) => {
 const queue = new RenderQueue(registry, settings, logger);
 timelineExporter = new TimelineExportCoordinator(store, exportSvc, logger);
 const memory = new MemoryStore();
+const nodePlugins = new NodePluginManager({ store, assets, takes, logger });
 const tools = new ToolHandlers(store, assets, skills, exportSvc, queue, memory, {
   accel,
   takes, // engine.submit 本地图片节点(crop/stitch/split)执行后记 Take
   timelineExporter,
+  nodePlugins,
   // 🆕 工具模型(v1):图片节点缺省模型 + 看图通道,实时从 SettingsStore 读(改设置即生效,免重启)
   getToolModels: () => settings.get().toolModels,
   completeH3Prompt: async (projectId, messages) => {
@@ -741,6 +744,7 @@ const ipcHandlers = registerDesktopIpc({
   skills,
   memory,
   takes,
+  nodePlugins,
   exportSvc,
   settings,
   accel,
@@ -899,7 +903,10 @@ async function executeAgentChat(opts: {
     textForModel,
     (id) => skills.get(id),
     ctxSnap ? { name: ctxSnap.name, nodes: ctxSnap.nodes, edges: ctxSnap.edges } : undefined,
-    historyTokenBudget != null ? { historyTokenBudget } : undefined,
+    {
+      ...(historyTokenBudget != null ? { historyTokenBudget } : {}),
+      nodePlugins: nodePlugins.listDefinitions(),
+    },
   );
   chatKey = `${opts.projectId}:${opts.canvasId}:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   /** 已完成工具摘要的归集键(与 chatKey 不同:按画布归集,跨轮次可累积) */

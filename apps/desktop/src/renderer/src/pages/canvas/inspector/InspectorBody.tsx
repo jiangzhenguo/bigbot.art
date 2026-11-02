@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { RenderJob, Asset, TimelineData, PromptSource } from '@bigbotart/shared';
+import { isPluginNodeKind } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from '../types';
 import { ShotInspector } from './ShotInspector';
 import { TimelineInspector } from './TimelineInspector';
@@ -15,6 +16,8 @@ import { ImageEditInspector } from './ImageEditInspector';
 import { MediaInfoPanel } from './MediaInfoPanel';
 import { AssetInspector } from './AssetInspector';
 import { SaveToLibraryButton } from './SaveToLibraryButton';
+import { PluginNodeInspector } from '../plugins/PluginNodeInspector';
+import { useNodePlugins } from '../plugins/NodePluginsContext';
 
 /** 视频增强进行中的「取消」。成功后由画布收尾提示;这里只在主进程拒绝时提示。 */
 export function VideoPostCancelButton({
@@ -118,12 +121,24 @@ export function InspectorBody({
   onOpenAssetPicker,
   onRefreshAssets,
 }: InspectorBodyProps) {
+  const { definitionFor } = useNodePlugins();
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const setData = (patch: Record<string, unknown> | Partial<TimelineData>) => {
     onCommitEdit?.(`修改「${node.title}」参数`);
     setNodes((ns) => ns.map((n) => (n.id === node.id ? { ...n, data: { ...(n.data ?? {}), ...patch } } : n)));
   };
+  if (isPluginNodeKind(node.kind)) {
+    return (
+      <PluginNodeInspector
+        node={node}
+        definition={definitionFor(node.kind)}
+        setData={setData}
+        runNode={runNode}
+        isRunning={node.running}
+      />
+    );
+  }
   const setTitle = (title: string) => {
     const t = title.trim();
     if (!t || t === node.title) return;

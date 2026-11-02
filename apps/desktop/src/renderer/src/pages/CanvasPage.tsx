@@ -30,6 +30,8 @@ import {
   normalizeShotDuration,
   parseTotalDurationHint,
   validateShotSubmitParams,
+  isPluginNodeKind,
+  validateNodePluginData,
 } from '@bigbotart/shared';
 import type { VideoAspect } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
@@ -113,6 +115,8 @@ import { usePerfMonitor } from './canvas/usePerfMonitor';
 import { QueueBar } from './canvas/QueueBar';
 import { AssetPickerPop } from './canvas/AssetPickerPop';
 import { useAgentChat } from './agent/useAgentChat';
+import { NodePluginsProvider, useNodePlugins } from './canvas/plugins/NodePluginsContext';
+import { pluginRunFailure, pluginRunSuccess } from './canvas/plugins/plugin-run';
 
 /** 节点尚未测得高度时的估算兜底(px):连线端点/预览线首帧用,实测后立即被替换 */
 const UNMEASURED_NODE_H = 72;
@@ -213,7 +217,15 @@ function normalizeView(raw?: { x?: unknown; y?: unknown; z?: unknown } | null): 
   return { x, y, z };
 }
 
-export default function CanvasPage({
+export default function CanvasPage(props: CanvasPageProps) {
+  return (
+    <NodePluginsProvider>
+      <CanvasPageContent {...props} />
+    </NodePluginsProvider>
+  );
+}
+
+function CanvasPageContent({
   onNavigate,
   projectId,
   projectName,
@@ -225,6 +237,8 @@ export default function CanvasPage({
   onRenameCanvas,
   onReady,
 }: CanvasPageProps) {
+  const { definitions: nodePlugins, enabledTags: pluginNodeTags, error: nodePluginsError } = useNodePlugins();
+  const allNodeTypes = useMemo(() => [...NODE_TYPES, ...pluginNodeTags], [pluginNodeTags]);
   const stageRef = useRef<HTMLElement | null>(null);
   const worldRef = useRef<HTMLDivElement | null>(null);
   /** 首帧就绪通知用的 rAF 句柄(卸载/换画布时要撤掉,否则会对已卸载的画布报就绪) */
@@ -442,6 +456,10 @@ export default function CanvasPage({
   }, []);
   /* ── M1:渲染队列(真实任务) + 画布持久化 ── */
   const [jobs, setJobs] = useState<RenderJob[]>([]);
+  const jobsRef = useRef<RenderJob[]>([]);
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
   /** 最近一次发起视频增强的节点 id(null = 无):主进程进度事件据此定位到节点。
    *  用 ref 而非 state —— 进度回调在 effect 闭包里读,state 会拿到过期值。 */
   const videoPostRef = useRef<string | null>(null);
@@ -501,6 +519,9 @@ export default function CanvasPage({
   const toastMsg = useCallback((msg: string) => {
     setToast({ msg, n: Date.now() });
   }, []);
+  useEffect(() => {
+    if (nodePluginsError) toastMsg(`插件定义加载失败:${nodePluginsError}`);
+  }, [nodePluginsError, toastMsg]);
 
   /* ── Agent 聊天「关注节点」列表(与画布选中态解耦,可多选)──
      点按节点只选中(检查器),不绑给聊天窗口;关注节点由右键菜单「添加到聊天窗口」
@@ -936,9 +957,9 @@ export default function CanvasPage({
     const dst = nodesRef.current.find((n) => n.id === id);
     if (!dst) return null;
     const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
-    const port = resolvePort(src, tag.id);
+    const port = resolvePort(src, tag.id, nodePlugins);
     return { id, ok: port !== null };
-  }, []);
+  }, [nodePlugins]);
 
   /** 写边(命中可连节点);port 给定时显式指定端口角色(多端口组合,如 asset 图 → shot) */
   const commitConnectEdge = useCallback((srcId: string, dstId: string, port?: string) => {
@@ -946,12 +967,12 @@ export default function CanvasPage({
     const dst = nodesRef.current.find((n) => n.id === dstId);
     if (!src || !dst) return;
     const tag: NodeTag = dst.tag ?? { id: dst.kind ?? 'plain', kind: (dst.kind ?? 'document') as NodeKind, name: dst.title, sub: '' };
-    const edgeLabel = deriveEdgeLabel(src, tag, port);
+    const edgeLabel = deriveEdgeLabel(src, tag, port, nodePlugins);
     if (edgeLabel === undefined) return; // 无连接器(双重保险)
     // 🛡️ 权威校验闸:渲染层 BY_KIND 与 shared CONNECTOR_MAP 是两份表,可能分叉
     //(事故:video-upscale → image-edit 建出裸边 ⇒ 派生态与写盘广播对拉 ⇒ 节点不停闪烁)。
     // 这里直接复用 shared validateEdge,让两份表共用同一套规则,不在渲染层复制判断。
-    const guard = guardEdge(src, dst, edgeLabel, nodesRef.current, edgesRef.current);
+    const guard = guardEdge(src, dst, edgeLabel, nodesRef.current, edgesRef.current, nodePlugins);
     if (!guard.ok) {
       toastMsg(`无法连线:${guard.message}`);
       return;
@@ -969,7 +990,7 @@ export default function CanvasPage({
     });
     toastMsg(`已连线:${src.title} → ${dst.title}${edgeLabel ? ` · ${edgeLabel}` : ''}`);
     setApOpen(false);
-  }, [toastMsg]);
+  }, [toastMsg, nodePlugins]);
 
   /** 全局 pointermove/up/keydown 处理 connectDrag */
   useEffect(() => {
@@ -1029,7 +1050,7 @@ export default function CanvasPage({
           name: dstN?.title ?? '',
           sub: '',
         };
-        const opts = srcN ? resolvePortOptions(srcN, tag.id) : [];
+        const opts = srcN ? resolvePortOptions(srcN, tag.id, nodePlugins) : [];
         // 多端口组合(asset 图 → shot 首帧/参考图):先弹角色选择,选定后写边;单端口直接连
         if (opts.length > 1) {
           setPortPick({ from: d.sourceId, to: finalHit.id, x: e.clientX, y: e.clientY, options: opts });
@@ -1059,7 +1080,7 @@ export default function CanvasPage({
       window.removeEventListener('keydown', onKey);
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [hitTestNode, commitConnectEdge, markViewportAnimating]);
+  }, [hitTestNode, commitConnectEdge, markViewportAnimating, nodePlugins]);
 
   /* ── 空白处拖拽:框选(marqueeMode)──
    * 2026-10 改:开关**只**管框选 —— 关闭时拖空白不再平移画布(左键拖空白太容易误操作),
@@ -2506,10 +2527,10 @@ export default function CanvasPage({
 
   /** 重生成某节点 ⇒ 全部下游生成节点标 stale(依赖过期;接力跑完逐个刷新,成功即清) */
   const markDownstreamStale = useCallback((nodeId: string) => {
-    const affected = allDownstreamGenIds([nodeId], nodesRef.current, edgesRef.current);
+    const affected = allDownstreamGenIds([nodeId], nodesRef.current, edgesRef.current, nodePlugins);
     if (affected.length === 0) return;
     setNodes((ns) => ns.map((x) => (affected.includes(x.id) ? { ...x, stale: true } : x)));
-  }, []);
+  }, [nodePlugins]);
   useEffect(() => {
     void refreshTakeResults();
   }, [refreshTakeResults]);
@@ -2958,11 +2979,17 @@ export default function CanvasPage({
     async (typeId: string, aspect: string, tier: string, port?: string) => {
       if (!apFrom) return;
       const src = nodesRef.current.find((n) => n.id === apFrom);
-      const t = NODE_TYPES.find((x) => x.id === typeId);
+      const t = allNodeTypes.find((x) => x.id === typeId);
       if (!src || !t) return;
       const id = makeNodeId('new');
-      // 按 kind 初始化 data(写入 CanvasSnapshot;生成时走 RenderQueue)
-      const initData = makeInitialData(t);
+      // 按 kind 初始化 data；插件默认参数先经共享 schema 校验，失败不创建节点。
+      let initData: Record<string, unknown>;
+      try {
+        initData = makeInitialData(t);
+      } catch (error) {
+        toastMsg(error instanceof Error ? error.message : String(error));
+        return;
+      }
 
       /*
        * ── shot 的画幅:把弹层的选择**真正写进 data**(2026-10 P0 修复)──
@@ -3024,12 +3051,12 @@ export default function CanvasPage({
       }
 
       // 按手册 §9 边 label:brief→input-brief / asset→按角色(可显式选首帧/参考图) / wf-input→slot-<name> / 其他不标
-      const edgeLabel = deriveEdgeLabel(src, t, port);
+      const edgeLabel = deriveEdgeLabel(src, t, port, nodePlugins);
       /* 🛡️ 与拖拽建边同口径的权威校验:「+」弹层只列出 resolvePortOptions 认为可连的类型,
          但那仍是渲染层那份表 —— shared 的 validateEdge 可能判它非法(两份表分叉)。
          这里在建节点**之前**拦下,避免留下一个「已新建但连不上」的孤儿节点。 */
       const dstStub = { id, kind: t.kind, data: dataWithSpec } as CanvasNode;
-      const guard = guardEdge(src, dstStub, edgeLabel, [...nodesRef.current, dstStub], edgesRef.current);
+      const guard = guardEdge(src, dstStub, edgeLabel, [...nodesRef.current, dstStub], edgesRef.current, nodePlugins);
       if (!guard.ok) {
         toastMsg(`无法创建连线:${guard.message}`);
         return;
@@ -3055,7 +3082,7 @@ export default function CanvasPage({
       closeAddPop();
     },
     // assetsList 参与依赖:首帧模式要按 assetId 查资产宽高,清单更新后需拿到新引用
-    [apFrom, closeAddPop, commitEdit, assetsList],
+    [apFrom, closeAddPop, commitEdit, assetsList, allNodeTypes, nodePlugins, toastMsg],
   );
 
   /* 左侧面板:双击添加 + 拖拽添加
@@ -3123,7 +3150,7 @@ export default function CanvasPage({
   /** 以视口中心为锚点双击添加 */
   const addFromPaletteDbl = useCallback(
     (typeId: string) => {
-      const t = NODE_TYPES.find((x) => x.id === typeId);
+      const t = allNodeTypes.find((x) => x.id === typeId);
       if (!t) return;
       const id = makeNodeId('pal');
       const w = t.kind === 'storyboard' ? 318 : 224;
@@ -3136,6 +3163,13 @@ export default function CanvasPage({
       const cx = (cw - v.x) / v.z;
       const cy = (ch - v.y) / v.z;
       const spot = findFreeSpot(cx, cy, w, h);
+      let initialData: Record<string, unknown>;
+      try {
+        initialData = makeInitialData(t);
+      } catch (error) {
+        toastMsg(error instanceof Error ? error.message : String(error));
+        return;
+      }
       setNodes((ns) => [
         ...ns,
         {
@@ -3147,18 +3181,18 @@ export default function CanvasPage({
           ghost: true,
           kind: t.kind,
           tag: t,
-          data: makeInitialData(t),
+          data: initialData,
         } as CanvasNode,
       ]);
       commitEdit('从节点库添加节点');
     },
-    [findFreeSpot, commitEdit],
+    [findFreeSpot, commitEdit, allNodeTypes, toastMsg],
   );
 
   /** 拖拽添加(鼠标松开时落到世界坐标,不与现有节点重叠) */
   const dropFromPalette = useCallback(
     (typeId: string, clientX: number, clientY: number) => {
-      const t = NODE_TYPES.find((x) => x.id === typeId);
+      const t = allNodeTypes.find((x) => x.id === typeId);
       if (!t) return;
       const stage = stageRef.current;
       if (!stage) return;
@@ -3170,6 +3204,13 @@ export default function CanvasPage({
       const world = screenToWorld(clientX, clientY);
       const spot = findFreeSpot(world.x, world.y, w, h);
       const id = makeNodeId('pal');
+      let initialData: Record<string, unknown>;
+      try {
+        initialData = makeInitialData(t);
+      } catch (error) {
+        toastMsg(error instanceof Error ? error.message : String(error));
+        return;
+      }
       setNodes((ns) => [
         ...ns,
         {
@@ -3181,12 +3222,12 @@ export default function CanvasPage({
           ghost: true,
           kind: t.kind,
           tag: t,
-          data: makeInitialData(t),
+          data: initialData,
         } as CanvasNode,
       ]);
       commitEdit('从节点库拖入节点');
     },
-    [findFreeSpot, screenToWorld, commitEdit],
+    [findFreeSpot, screenToWorld, commitEdit, allNodeTypes, toastMsg],
   );
 
   /* ══ 右键菜单 ══ */
@@ -3445,6 +3486,63 @@ export default function CanvasPage({
         return;
       }
       const d = (n.data ?? {}) as Record<string, unknown>;
+      // 插件命名空间必须在所有内置图片/视频/h3c 分支之前拦截；malformed kind 也只能报错返回。
+      if (n.kind?.startsWith('plugin:')) {
+        const rejectPlugin = (message: string) => {
+          cascadePendingRef.current.delete(nodeId);
+          toastMsg(message);
+        };
+        const definition = isPluginNodeKind(n.kind)
+          ? nodePlugins.find((item) => item.kind === n.kind)
+          : undefined;
+        if (!definition) {
+          rejectPlugin(`插件节点无效或定义缺失:${n.kind}`);
+          return;
+        }
+        if (!definition.enabled) {
+          rejectPlugin(`插件已停用,不能运行:${definition.title}`);
+          return;
+        }
+        if (!projectId || !activeCanvasId) {
+          rejectPlugin('请先选择项目与画布,再运行插件');
+          return;
+        }
+        if (n.running) {
+          rejectPlugin(`插件正在运行:${n.title}`);
+          return;
+        }
+        const validated = validateNodePluginData(d, definition.parametersSchema);
+        if (!validated.ok) {
+          rejectPlugin(`插件参数无效:${validated.errors.map((issue) => issue.message).join('；')}`);
+          return;
+        }
+        if (d.resultPath) markDownstreamStale(nodeId);
+        setNodes((ns) => ns.map((x) => (
+          x.id === nodeId ? { ...x, running: true, ghost: false, badge: '插件运行中…' } : x
+        )));
+        try {
+          const result = await window.bigbotart.runNodePlugin({ projectId, canvasId: activeCanvasId, nodeId });
+          cascadePendingRef.current.delete(nodeId);
+          if (!result.ok || !result.resultPath) {
+            const message = result.error ?? '执行器未返回主产物';
+            setNodes((ns) => ns.map((x) => (x.id === nodeId ? pluginRunFailure(x, message) : x)));
+            toastMsg(`插件运行失败:${message}`);
+            return;
+          }
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? pluginRunSuccess(x, definition, result) : x)));
+          setEdges((es) => es.map((edge) => (
+            edge.to === nodeId && edge.cls === 'ghost' ? { ...edge, cls: '' as const } : edge
+          )));
+          toastMsg(`插件运行成功 · ${n.title}`);
+          cascadeKickRef.current?.(nodeId, jobsRef.current);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          cascadePendingRef.current.delete(nodeId);
+          setNodes((ns) => ns.map((x) => (x.id === nodeId ? pluginRunFailure(x, message) : x)));
+          toastMsg(`插件运行失败:${message}`);
+        }
+        return;
+      }
       // 重生成(节点已有旧产物)⇒ 下游依赖过期:传递闭包标 stale(接力跑完逐个刷新,成功即清)
       if (CASCADE_KINDS.has(n.kind ?? '') && Boolean(d.resultPath)) markDownstreamStale(nodeId);
       if (n.kind === 'timeline') {
@@ -4205,7 +4303,7 @@ export default function CanvasPage({
     /* ⚠️ assetCache 必须进依赖:它现在是 state 派生值,**每次资产清单变化都是新对象**。
        漏掉它 → runNode 闭包捕获旧缓存 → 「刚导入资产就点运行」会报「需要输入图」
        (旧实现用 ref 读当前值,天然没有这个问题;改成 state 后必须显式声明)。 */
-    [onNavigate, toastMsg, projectId, activeCanvasId, markDownstreamStale, assetCache],
+    [onNavigate, toastMsg, projectId, activeCanvasId, markDownstreamStale, assetCache, nodePlugins],
   );
 
   /* 接力触发(渲染时重绑,引用最新 runNode):上游成功后,把直接下游中「该跑」的依次送入队列。
@@ -4215,7 +4313,7 @@ export default function CanvasPage({
       isBusy: (id) =>
         cascadePendingRef.current.has(id) ||
         jobs.some((j) => j.nodeId === id && (j.status === 'queued' || j.status === 'running')),
-    });
+    }, nodePlugins);
     if (runnable.length === 0) return;
     for (const id of runnable) {
       cascadePendingRef.current.add(id);
@@ -4271,7 +4369,12 @@ export default function CanvasPage({
 
   const [agentRunText, setAgentRunText] = useState('Agent 已规划参数 · 等视频槽位 · 可提前改参');
   const runAll = () => {
-    const ids = nodesRef.current.filter((n) => n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' || n.kind === 'image-upscale' || n.kind === 'image-crop' || n.kind === 'image-stitch' || n.kind === 'image-split').map((n) => n.id);
+    const ids = nodesRef.current
+      .filter((n) =>
+        n.kind === 'shot' || n.kind === 'image-gen' || n.kind === 'image-edit' ||
+        n.kind === 'image-upscale' || n.kind === 'image-crop' || n.kind === 'image-stitch' ||
+        n.kind === 'image-split' || (isPluginNodeKind(n.kind) && nodePlugins.some((d) => d.kind === n.kind && d.enabled)))
+      .map((n) => n.id);
     if (ids.length === 0) {
       toastMsg('画布上没有可运行的生成节点');
       return;

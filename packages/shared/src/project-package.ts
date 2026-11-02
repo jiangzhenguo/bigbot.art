@@ -50,6 +50,8 @@ export interface ProjectPackagePayload {
   assetCategories: import('./domain').AssetCategory[];
   /** 媒体实体(附件与项目资源;产物不入包) */
   media: ProjectPackageMedia[];
+  /** 画布中插件节点依赖；仅作导入检查，不包含或自动执行插件安装包。 */
+  requiredPlugins?: Array<{ id: string; version?: string }>;
 }
 
 export interface ProjectPackage {

@@ -5,8 +5,8 @@
 import type { PromptSource } from './prompt.js';
 import type { ShotSecondPassParams } from './second-pass.js';
 
-/** 画布节点类型(节点-连线工作流图) */
-export type NodeKind =
+/** 内置画布节点类型(节点-连线工作流图) */
+export type BuiltinNodeKind =
   | 'document' // Markdown Brief / 提示词
   | 'asset' // 图片/视频/音频/参考图
   | 'image-gen' // Text→Image
@@ -24,6 +24,12 @@ export type NodeKind =
   | 'storyboard' // 🆕 分镜表(脚本)节点:Markdown 表格为数据载体,一行 = 一个分镜
   | 'workflow-input' // 🆕 v2 工作流入口(资源容器,声明输入槽位)
   | 'workflow-output'; // 🆕 v2 工作流出口(产物汇聚,运行收口)
+
+/**
+ * 画布节点类型 = 内置类型 + 插件命名空间。
+ * 插件 kind 形如 plugin:<插件 id>:<节点名>；版本不进入 kind，避免升级后旧节点失效。
+ */
+export type NodeKind = BuiltinNodeKind | `plugin:${string}`;
 
 /** 画布上一个节点的实例 */
 export interface CanvasNode {
@@ -196,8 +202,8 @@ export interface NodeDataMap {
   };
 }
 
-/** union helper */
-export type NodeData = NodeDataMap[NodeKind];
+/** 内置节点保留既有数据联合；插件节点数据由对应 manifest Schema 在运行时校验。 */
+export type NodeData = NodeDataMap[BuiltinNodeKind] | Record<string, unknown>;
 
 /**
  * 分镜表(脚本)节点数据 — 文档 §4.2

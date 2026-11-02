@@ -1,5 +1,5 @@
-import type { NodeKind } from '@bigbotart/shared';
-import { defaultStoryboardMarkdown } from '@bigbotart/shared';
+import type { NodeKind, NodePluginDefinition } from '@bigbotart/shared';
+import { defaultStoryboardMarkdown, validateNodePluginData } from '@bigbotart/shared';
 import type { CanvasNode, NodeTag, Edge } from './types';
 import { resolvePortOptions } from './connectors';
 
@@ -11,8 +11,13 @@ import { resolvePortOptions } from './connectors';
  *  - 特例:`workflow-input` 作为源时,端口锚定的是**源槽位名**(`slot-<名称>`),
  *    这里能解析出具体槽位;而 asset/document → wf-input 时目标节点尚未创建,
  *    只能给占位 `slot-<名称>`,由 dispatch 按来源媒体类型匹配槽位 */
-export function deriveEdgeLabel(src: CanvasNode, dstTag: NodeTag, portOverride?: string): string | undefined {
-  const opts = resolvePortOptions(src, dstTag.id);
+export function deriveEdgeLabel(
+  src: CanvasNode,
+  dstTag: NodeTag,
+  portOverride?: string,
+  nodePlugins: NodePluginDefinition[] = [],
+): string | undefined {
+  const opts = resolvePortOptions(src, dstTag.id, nodePlugins);
   if (opts.length === 0) return undefined;
   const r = (portOverride !== undefined ? opts.find((o) => o.port === portOverride) : undefined) ?? opts[0]!;
   if (r.port === 'slot-<名称>' && src.kind === 'workflow-input') {
@@ -30,6 +35,19 @@ export function deriveEdgeLabel(src: CanvasNode, dstTag: NodeTag, portOverride?:
   return r.port;
 }
 export function makeInitialData(t: NodeTag): Record<string, unknown> {
+  if (t.definition) {
+    const definition = t.definition;
+    const validated = validateNodePluginData(definition.defaultData, definition.parametersSchema);
+    if (!validated.ok) {
+      throw new Error(`插件默认参数无效:${validated.errors.map((issue) => issue.message).join('；')}`);
+    }
+    const primary = definition.outputs.find((output) => output.primary) ?? definition.outputs[0];
+    return {
+      ...validated.data,
+      ...(primary ? { mediaType: primary.media } : {}),
+      __plugin: { id: definition.pluginId, version: definition.pluginVersion },
+    };
+  }
   switch (t.kind) {
     case 'document':
       return { markdown: '' };

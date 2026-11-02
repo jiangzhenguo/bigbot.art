@@ -7,7 +7,8 @@
  */
 import React from 'react';
 import type { CanvasNode } from './types';
-import { TYPE_ICON } from './icons';
+import { isPluginNodeKind } from '@bigbotart/shared';
+import { ICON_COMFY, TYPE_ICON } from './icons';
 import { NodeBody } from './nodes/NodeBody';
 import type { NodeGroup } from './selection';
 
@@ -138,7 +139,7 @@ function NodeCardInner({
           stroke="currentColor"
           strokeWidth={1.7}
         >
-          {TYPE_ICON[n.kind ?? 'plain']}
+          {TYPE_ICON[n.kind ?? 'plain'] ?? (isPluginNodeKind(n.kind) ? ICON_COMFY : TYPE_ICON.plain)}
         </svg>
         {ameta?.name || n.title}
         {/* 所属分组徽标(点按可选中整组) */}

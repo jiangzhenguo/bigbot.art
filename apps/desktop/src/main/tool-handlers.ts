@@ -9,6 +9,7 @@ import type { CanvasNode, CanvasEdge, CanvasSnapshot, PromptSubject } from '@big
 import {
   connectorSummary,
   nodeKindGuide,
+  NODE_KIND_GUIDE,
   isHiddenNodeKind,
   HIDDEN_NODE_REASONS,
   parseGfmTable,
@@ -57,6 +58,9 @@ import {
   parseTotalDurationHint,
   snapShotDimensions,
   validateShotSubmitParams,
+  isPluginNodeKind,
+  validateNodePluginData,
+  nodePluginAgentSummary,
   type VideoAspect,
   type DerivedRef,
   type ToolModelBinding,
@@ -71,6 +75,7 @@ import { requiredH3Transformer, type AccelStore } from './lora';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
 import type { TimelineExportCoordinator } from './timeline-auto-export';
+import type { NodePluginManager } from './node-plugins';
 import { unlinkSync } from 'node:fs';
 import { cropImage, extractFrame, extractAudio } from './frames';
 import { downloadImage, imageLabelFromUrl, searchWeb, type WebDeps } from './web-fetch';
@@ -622,6 +627,7 @@ export class ToolHandlers {
   private completeH3Prompt?: CompleteH3Prompt;
   /** 时间线导出协调器:手动 timeline.export 与自动拼接共用同一份入轨顺序/回写逻辑 */
   private timelineExporter?: TimelineExportCoordinator;
+  private nodePlugins?: NodePluginManager;
 
   constructor(
     private store: ProjectStore,
@@ -644,6 +650,8 @@ export class ToolHandlers {
       completeH3Prompt?: CompleteH3Prompt;
       /** 时间线成片导出协调器(timeline.export / 全部入轨镜头就绪后的自动拼接) */
       timelineExporter?: TimelineExportCoordinator;
+      /** 节点插件注册与执行；测试不注入时保持内置节点行为不变。 */
+      nodePlugins?: NodePluginManager;
     } = {},
   ) {
     this.planStoryboard = opts.planStoryboard;
@@ -654,6 +662,7 @@ export class ToolHandlers {
     this.webDeps = opts.web ?? {};
     this.completeH3Prompt = opts.completeH3Prompt;
     this.timelineExporter = opts.timelineExporter;
+    this.nodePlugins = opts.nodePlugins;
   }
 
   private webDeps: WebDeps = {};
@@ -774,8 +783,27 @@ export class ToolHandlers {
     },
     'canvas.connectors': async () => ({
       ok: true,
-      result: `节点类型:\n${nodeKindGuide()}\n\n可连线关系与端口语义:\n${connectorSummary()}`,
+      result: `节点类型:\n${nodeKindGuide()}\n\n可连线关系与端口语义:\n${connectorSummary()}` +
+        `\n\n${nodePluginAgentSummary(this.nodePlugins?.listDefinitions() ?? [])}`,
     }),
+    'plugins.list': async () => {
+      const defs = this.nodePlugins?.listDefinitions({ includeDisabled: true }) ?? [];
+      const installed = this.nodePlugins?.listInstalled() ?? [];
+      const states = installed.map((p) =>
+        `- ${p.displayName} [${p.id}@${p.version}] ${p.enabled ? '已启用' : '已停用'}${p.error ? ` · 错误:${p.error}` : ''}`,
+      );
+      return {
+        ok: true,
+        result: `${nodePluginAgentSummary(defs)}${states.length ? `\n\n安装状态:\n${states.join('\n')}` : ''}`,
+      };
+    },
+    'plugins.read': async (a) => {
+      const kind = String(a.kind ?? '');
+      const def = this.nodePlugins?.listDefinitions({ includeDisabled: true }).find((d) => d.kind === kind);
+      if (!def) return { ok: false, result: `插件节点 ${kind || '(空)'} 不存在。请先 plugins.list 获取真实 kind，不要编造。` };
+      if (!def.enabled) return { ok: false, result: `插件节点「${def.title}」已停用或不可用，不能创建/运行。` };
+      return { ok: true, result: JSON.stringify(def, null, 2) };
+    },
     // 分段读取文档节点全文:先看 chunk=0 结构,再按需逐段读(长文档不一次性全量返回)
     'document.read': async (a, ctx) => {
       const nodeId = String(a.nodeId ?? '');
@@ -1209,11 +1237,23 @@ export class ToolHandlers {
           result: `节点类型「${kind}」尚未实现,已下架不可创建:${HIDDEN_NODE_REASONS[kind] ?? '没有执行分支'}。请改用已实现的节点(document/storyboard/asset/image-gen/image-edit/image-upscale/image-crop/image-stitch/image-split/frame-grab/video-upscale/shot/timeline/audio-ref)。`,
         };
       }
+      if (!kind.startsWith('plugin:') && !NODE_KIND_GUIDE.some(([known]) => known === kind)) {
+        return { ok: false, result: `未知节点类型「${kind}」，未创建。内置 kind 以 canvas.connectors 返回为准；插件 kind 必须先经 plugins.list 获取。` };
+      }
       // data 同样容忍字符串化(本地小模型常见退化;旧实现在这里直接当对象用,
       // 传字符串会让 `'refs' in rawData` 抛错或把字符串当 data 存进节点)
       const normCreate = normalizeDataArg((a as { data?: unknown }).data);
       if (!normCreate.ok) return { ok: false, result: normCreate.error };
       const rawData = normCreate.data;
+      const pluginDef = isPluginNodeKind(kind)
+        ? this.nodePlugins?.listDefinitions({ includeDisabled: true }).find((d) => d.kind === kind)
+        : undefined;
+      if (kind.startsWith('plugin:') && !pluginDef) {
+        return { ok: false, result: `插件节点类型「${kind}」格式非法、未安装或未注册。请先 plugins.list 获取真实 kind，禁止凭空创建。` };
+      }
+      if (pluginDef && !pluginDef.enabled) {
+        return { ok: false, result: `插件节点「${pluginDef.title}」已停用或不可用，不能创建。请先启用对应插件。` };
+      }
       // 方案 B:refs 由连线推导,创建时直写 refs 一律忽略
       let refsNote = '';
       let data = rawData;
@@ -1221,6 +1261,18 @@ export class ToolHandlers {
         const { refs: _ignored, ...rest } = rawData;
         data = rest;
         refsNote = ` · refs 由连线推导已忽略(用 canvas.connect 管理参考)`;
+      }
+      if (pluginDef) {
+        const checked = validateNodePluginData({ ...pluginDef.defaultData, ...data }, pluginDef.parametersSchema);
+        if (!checked.ok) {
+          return { ok: false, result: `插件节点「${pluginDef.title}」参数不合法:${checked.errors.map((e) => `${e.path} ${e.message}`).join('; ')}` };
+        }
+        const primary = pluginDef.outputs.find((o) => o.primary) ?? pluginDef.outputs[0];
+        data = {
+          ...checked.data,
+          ...(primary ? { mediaType: primary.media } : {}),
+          __plugin: { id: pluginDef.pluginId, version: pluginDef.pluginVersion },
+        };
       }
       // 图片节点默认 engine/model/mode(与检查器/渲染层默认同口径)——真实事故:Agent 建 image-edit
       // 只写了 prompt,缺省模型落到 z-image 纯文生图,提交时 CLI auto 路由 latent i2i 缺参数报错
@@ -1353,7 +1405,7 @@ export class ToolHandlers {
         if (dur.note) durationNote += ` · ${dur.note}`;
       }
 
-      const finalLabel = resolvedAssetLabel ?? label;
+      const finalLabel = resolvedAssetLabel ?? (pluginDef && (!a.label || label === '新节点') ? pluginDef.title : label);
       const now = new Date().toISOString();
       const place = parsePlace(a.place);
       let mediaWidth: number | undefined;
@@ -1438,6 +1490,20 @@ export class ToolHandlers {
         // (见 BOOLEAN_DATA_FIELDS 注释,2026-10-09 modeOverride 事故)
         const norm = normalizeBooleanFields({ ...(node.data as Record<string, unknown>), ...patch });
         let next = { ...norm };
+        if (isPluginNodeKind(node.kind)) {
+          const def = this.nodePlugins?.listDefinitions({ includeDisabled: true }).find((d) => d.kind === node.kind);
+          if (!def || !def.enabled) {
+            return { ok: false, result: `插件节点「${node.label || node.id}」的定义缺失或已停用，参数保持只读；请重新安装/启用插件后再修改。` };
+          }
+          const unknown = Object.keys(patch).filter((k) => !(k in def.parametersSchema.properties));
+          if (unknown.length > 0) {
+            return { ok: false, result: `插件节点「${def.title}」不接受参数:${unknown.join('、')}。可用字段:${Object.keys(def.parametersSchema.properties).join('、') || '(无)'}` };
+          }
+          const input = Object.fromEntries(Object.keys(def.parametersSchema.properties).map((k) => [k, next[k]]));
+          const checked = validateNodePluginData(input, def.parametersSchema);
+          if (!checked.ok) return { ok: false, result: `插件参数不合法:${checked.errors.map((e) => `${e.path} ${e.message}`).join('; ')}` };
+          next = { ...next, ...checked.data };
+        }
         // 方案 B:refs 由连线推导,直写 refs 一律忽略(消除双写漂移)
         if ('refs' in patch) {
           delete next.refs;
@@ -1784,6 +1850,19 @@ export class ToolHandlers {
         cur.edges,
       );
       if (!gate.ok) return { ok: false, result: gate.reason };
+      if (node.kind.startsWith('plugin:') && !isPluginNodeKind(node.kind)) {
+        return { ok: false, result: `插件节点 kind「${node.kind}」格式非法，拒绝运行；请重新安装插件或修正项目数据。` };
+      }
+      if (isPluginNodeKind(node.kind)) {
+        if (!this.nodePlugins) return { ok: false, result: '节点插件服务未初始化，无法运行该插件节点。' };
+        const ran = await this.nodePlugins.run({ projectId: ctx.projectId, canvasId: ctx.canvasId, nodeId });
+        if (!ran.ok) return { ok: false, result: `插件节点「${node.label || nodeId}」运行失败:${ran.error ?? '未知错误'}`, nodeId };
+        return {
+          ok: true,
+          result: `插件节点「${node.label || nodeId}」已完成${ran.resultPath ? `，产物:${ran.resultPath}` : ''}${ran.takeId ? ` · Take 已归档` : ''}`,
+          nodeId,
+        };
+      }
       if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'frame-grab' || node.kind === 'video-upscale') {
         // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
@@ -2727,7 +2806,10 @@ export class ToolHandlers {
       cur.nodes,
       cur.edges,
       { source: from, target: to, label },
-      { resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind },
+      {
+        resolveAssetMedia: (assetId) => this.assets.get(assetId)?.kind,
+        nodePlugins: this.nodePlugins?.listDefinitions({ includeDisabled: true }) ?? [],
+      },
     );
     if (!v.ok) {
       const replaced = v.errors.find((e) => e.replaceable)?.replacedEdge;

@@ -5,10 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { API_CATALOG, EVENT_CATALOG, RPC_CATALOG } from '../api-catalog.js';
 
 describe('API 目录', () => {
-  it('123 个 RPC + 6 个事件,名字不重复', () => {
-    expect(RPC_CATALOG).toHaveLength(123);
+  it('128 个 RPC + 6 个事件,名字不重复', () => {
+    expect(RPC_CATALOG).toHaveLength(128);
     expect(EVENT_CATALOG).toHaveLength(6);
-    expect(API_CATALOG).toHaveLength(129);
+    expect(API_CATALOG).toHaveLength(134);
     const names = API_CATALOG.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
   });
@@ -35,5 +35,12 @@ describe('API 目录', () => {
     const install = RPC_CATALOG.find((e) => e.name === 'accelInstallLora');
     expect(install?.ipcChannel).toBe('accel-install-lora');
     expect(install?.flags).toEqual(['pathArg', 'long', 'desktopOnly']);
+  });
+
+  it('节点插件安装/启停/移除仅桌面可用，运行为长任务', () => {
+    expect(RPC_CATALOG.find((e) => e.name === 'installNodePlugin')?.flags).toEqual(['dialog', 'desktopOnly', 'long']);
+    expect(RPC_CATALOG.find((e) => e.name === 'setNodePluginEnabled')?.flags).toEqual(['desktopOnly']);
+    expect(RPC_CATALOG.find((e) => e.name === 'removeNodePlugin')?.flags).toEqual(['desktopOnly']);
+    expect(RPC_CATALOG.find((e) => e.name === 'runNodePlugin')?.flags).toEqual(['long']);
   });
 });

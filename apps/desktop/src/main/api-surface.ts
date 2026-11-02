@@ -78,6 +78,7 @@ import {
 } from './memory';
 import type { MemoryStore } from './memory';
 import type { TakeStore } from './takes';
+import type { NodePluginManager } from './node-plugins';
 import { DATA_DIR } from './workspace-paths';
 import type { DebugLogger } from './logger';
 import {
@@ -145,6 +146,7 @@ export interface DesktopIpcDeps {
   skills: SkillStore;
   memory: MemoryStore;
   takes: TakeStore;
+  nodePlugins: NodePluginManager;
   exportSvc: ExportService;
   settings: SettingsStore;
   accel: AccelStore;
@@ -197,6 +199,7 @@ export function registerDesktopIpc(ctx: DesktopIpcDeps): Map<string, IpcHandler>
     skills,
     memory,
     takes,
+    nodePlugins,
     exportSvc,
     settings,
     accel,
@@ -524,6 +527,22 @@ ipcMain.handle('save-canvas', (_e, snapshot) => {
   );
   ipcMain.handle('list-archivable-products', (_e, projectId: string) => listArchivableProducts(store, projectId));
 
+// ---------- IPC:节点插件(可信本地包;安装只能由桌面用户显式选择目录) ----------
+ipcMain.handle('node-plugins-list', () => nodePlugins.listDefinitions({ includeDisabled: true }));
+ipcMain.handle('node-plugins-install', async () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  const opts = { title: '选择节点插件文件夹(须含 manifest.json)', properties: ['openDirectory' as const] };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  if (r.canceled || r.filePaths.length === 0) return { ok: false as const, canceled: true as const };
+  const result = await nodePlugins.installFromFolder(r.filePaths[0]!);
+  if (result.ok) logger.log('info', `[node-plugins] 安装成功 ← ${basename(r.filePaths[0]!)}`);
+  else logger.log('warn', `[node-plugins] 安装失败:${result.error ?? '未知错误'}`);
+  return result;
+});
+ipcMain.handle('node-plugins-set-enabled', (_e, id: string, enabled: boolean) => nodePlugins.setEnabled(id, enabled));
+ipcMain.handle('node-plugins-remove', (_e, id: string) => nodePlugins.remove(id));
+ipcMain.handle('node-plugins-run', (_e, req: import('@bigbotart/shared').NodePluginRunRequest) => nodePlugins.run(req));
+
 // ---------- IPC:Skills(画布模板 + Agent 指令段双形态,激活状态持久化在 canvasMemory) ----------
 ipcMain.handle('list-skills', () => skills.list());
 ipcMain.handle('save-skill', (_e, input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) => {
@@ -685,7 +704,7 @@ ipcMain.handle('import-project-package', async (_e, input?: { path?: string }): 
     if (r.canceled || r.filePaths.length === 0) return { ok: false, canceled: true };
     filePath = r.filePaths[0]!;
   }
-  const res = importProjectFromFile(filePath, { store, assets, takes, memory });
+  const res = importProjectFromFile(filePath, { store, assets, takes, memory, nodePlugins });
   logger.log(
     res.ok ? 'info' : 'error',
     `[project-package] 导入 ${filePath} → ${res.ok ? `新项目 ${res.project?.name}(${res.project?.id})` : res.error}` +

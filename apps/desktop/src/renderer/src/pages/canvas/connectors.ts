@@ -9,7 +9,8 @@
  *   连接器本身对用户不可见(D1);可见的只是「端口语义」。S2 会把 shot 的端口
  *   改为由 ProviderCapabilities.videoModes[].refs 派生,届时本表的 shot 分支退场。
  */
-import { validateEdge } from '@bigbotart/shared';
+import { allowedPortLabels, isPluginNodeKind, validateEdge } from '@bigbotart/shared';
+import type { NodePluginDefinition } from '@bigbotart/shared';
 import type { CanvasNode } from './types';
 
 export interface PortResolution {
@@ -308,6 +309,10 @@ export const KIND_TO_TAGID: Record<string, string> = {
   'workflow-output': 'wf-output',
 };
 
+const TAGID_TO_KIND: Record<string, string> = Object.fromEntries(
+  Object.entries(KIND_TO_TAGID).map(([kind, tagId]) => [tagId, kind]),
+);
+
 /** 拆分节点片数:已跑出产物按实际片数,否则按参数配置推算(上限 16) */
 export function splitPieceCount(n: CanvasNode): number {
   const d = (n.data ?? {}) as Record<string, unknown>;
@@ -324,9 +329,54 @@ export function splitPieceCount(n: CanvasNode): number {
  * 解析:该源 → 该目标类型的所有可用端口选项(首个为默认)。
  * 多数组合只有一个端口;asset(图) → shot 支持「首帧参考 / 参考图参考」两种,由连接时 UI 选择。
  */
-export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortResolution[] {
+export function resolvePortOptions(
+  src: CanvasNode,
+  dstTypeId: string,
+  nodePlugins: NodePluginDefinition[] = [],
+): PortResolution[] {
   // 长 kind(快照加载的节点无 tag,拖拽连线传入 kind)归一为节点库短 id
   dstTypeId = KIND_TO_TAGID[dstTypeId] ?? dstTypeId;
+  const enabledDefinitions = nodePlugins.filter((definition) => definition.enabled);
+  const srcDefinition = isPluginNodeKind(src.kind)
+    ? enabledDefinitions.find((definition) => definition.kind === src.kind)
+    : undefined;
+
+  // 目标是插件：端口 id 直接来自定义，媒体匹配交给共享 allowedPortLabels。
+  if (isPluginNodeKind(dstTypeId)) {
+    const target = enabledDefinitions.find((definition) => definition.kind === dstTypeId);
+    if (!target || (isPluginNodeKind(src.kind) && !srcDefinition)) return [];
+    return allowedPortLabels(
+      { id: src.id, kind: src.kind ?? '', data: src.data },
+      dstTypeId,
+      { nodePlugins },
+    ).map((port) => {
+      const input = target.inputs.find((item) => item.id === port);
+      return {
+        port,
+        desc: input ? `${input.label} · ${input.media}${input.required ? ' · 必填' : ''}` : port,
+      };
+    });
+  }
+
+  // 插件作为上游：共享规则按主输出媒体复用资产矩阵；描述沿用现有内置端口文案。
+  if (isPluginNodeKind(src.kind)) {
+    if (!srcDefinition) return [];
+    const primary = srcDefinition.outputs.find((output) => output.primary) ?? srcDefinition.outputs[0];
+    const mediaType = primary?.media ?? String(src.data?.mediaType ?? 'document');
+    const sharedDstKind = TAGID_TO_KIND[dstTypeId] ?? dstTypeId;
+    const labels = allowedPortLabels(
+      { id: src.id, kind: src.kind ?? '', data: src.data },
+      sharedDstKind,
+      { nodePlugins },
+    );
+    const asAsset: CanvasNode = { ...src, kind: 'asset', data: { ...src.data, mediaType } };
+    const descriptions = resolvePortOptions(asAsset, dstTypeId, nodePlugins);
+    return labels.map((port) => ({
+      port,
+      desc: descriptions.find((item) => item.port === port)?.desc ?? `${PORT_LABEL[port] ?? port} · 插件主产物`,
+    }));
+  }
+
   const byId = BY_ID[src.id]?.[dstTypeId];
   if (byId) {
     const rows: PortRow[] = Array.isArray(byId[0]) ? (byId as PortRow[]) : [byId as PortRow];
@@ -429,13 +479,21 @@ export function resolvePortOptions(src: CanvasNode, dstTypeId: string): PortReso
 }
 
 /** 解析:该源 → 该目标类型是否有可用连接器;有则返回默认(首个)端口锚定 */
-export function resolvePort(src: CanvasNode, dstTypeId: string): PortResolution | null {
-  return resolvePortOptions(src, dstTypeId)[0] ?? null;
+export function resolvePort(
+  src: CanvasNode,
+  dstTypeId: string,
+  nodePlugins: NodePluginDefinition[] = [],
+): PortResolution | null {
+  return resolvePortOptions(src, dstTypeId, nodePlugins)[0] ?? null;
 }
 
 /** 「+」弹窗:该类型是否该列出(只列出有可用连接器的类型) */
-export function hasConnector(src: CanvasNode, dstTypeId: string): boolean {
-  return resolvePortOptions(src, dstTypeId).length > 0;
+export function hasConnector(
+  src: CanvasNode,
+  dstTypeId: string,
+  nodePlugins: NodePluginDefinition[] = [],
+): boolean {
+  return resolvePortOptions(src, dstTypeId, nodePlugins).length > 0;
 }
 
 /* ─────────────────── 写边前的权威校验(与 Agent 侧同口径) ─────────────────── */
@@ -469,6 +527,7 @@ export function guardEdge(
   label: string | undefined,
   nodes: CanvasNode[],
   edges: Array<{ from: string; to: string; label?: string }>,
+  nodePlugins: NodePluginDefinition[] = [],
 ): EdgeGuardResult {
   if (!label?.trim()) {
     // 无端口锚定 = 无可用连接器(resolvePort 已判过);给一句人话而不是放任脏边落盘
@@ -478,6 +537,7 @@ export function guardEdge(
     nodes.map((n) => ({ id: n.id, kind: n.kind ?? '', data: n.data })),
     edges.map((e) => ({ source: e.from, target: e.to, label: e.label })),
     { source: src.id, target: dst.id, label },
+    { nodePlugins },
   );
   if (res.ok) return { ok: true };
   // 单值端口冲突走「替换语义」,由调用方的既有逻辑处理,这里不算非法组合

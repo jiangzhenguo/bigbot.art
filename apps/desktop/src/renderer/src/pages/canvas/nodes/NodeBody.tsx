@@ -13,6 +13,7 @@ import {
   rowNeedsImage,
   capabilityOf,
   resolveImageModel,
+  isPluginNodeKind,
 } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { useToolModels } from '../tool-models-store';
@@ -28,6 +29,8 @@ import { sbMaterializedRows, sbImgCount, sbDirty } from '../storyboard';
 import { basenameOf, outputUrlOf, clamp32, thumbSrc, VideoThumb, VideoPoster, AudioPlayer } from '../media';
 import { TimelineExportPreview } from '../TimelineExportPreview';
 import { SafeImage } from '../../../components/SafeImage';
+import { PluginNodeBody } from '../plugins/PluginNodeBody';
+import { useNodePlugins } from '../plugins/NodePluginsContext';
 
 interface NodeBodyProps {
   node: CanvasNode;
@@ -40,6 +43,7 @@ interface NodeBodyProps {
 }
 
 export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBodyProps) {
+  const { definitionFor } = useNodePlugins();
   const d = (n.data ?? {}) as Record<string, unknown>;
   // 工具模型缺省解析(订阅式,缓存加载后自动重渲染):
   // 节点未显式选模型时,卡片显示与检查器/提交期同口径的缺省模型,不再显示占位词
@@ -47,6 +51,10 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
   /** 产物路径:节点 data 优先,回退 Take 回填 */
   const productOf = (node: CanvasNode) =>
     String((node.data as Record<string, unknown> | undefined)?.resultPath ?? takeResults[node.id] ?? '');
+
+  if (isPluginNodeKind(n.kind)) {
+    return <PluginNodeBody node={n} definition={definitionFor(n.kind)} />;
+  }
 
   switch (n.kind) {
     case 'document': {
