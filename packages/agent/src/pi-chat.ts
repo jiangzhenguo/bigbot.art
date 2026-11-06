@@ -22,12 +22,21 @@ import { fetchImageNeedsConfirm, userCorpusFromChat } from './web-gate.js';
 
 /**
  * 最大工具调用轮数(LLM ↔ 工具往返)。
- * 参考:原生 pi(CLI agent)用 maxTurns 做无限循环保护,生态常见默认 50
- * (pi-subagents 可配置 default max turns;reactLoop maxTurns=50)。
- * 本项目按上下文窗口等比例折算取保守值:32k 窗口原 8 轮 → 100k 窗口 ≈ 25 轮,
- * 留余量取 20(每轮历史线性增长,超窗会让远端拒绝;若遇长任务可手动拆小)。
+ *
+ * 这是失控保护,不是正常任务的预算:默认采用 agent 生态常见的 50 轮,
+ * 可用 BIGBOTART_AGENT_MAX_TOOL_ROUNDS 按模型上下文窗口与任务规模调整。
+ * 提交后的纯轮询、重复确认、只说不做等无进展循环仍由各自的专门闸门提前收尾。
  */
-const MAX_TOOL_ROUNDS = 20;
+export const DEFAULT_MAX_TOOL_ROUNDS = 50;
+
+/** env 解析:只接受正整数;缺省、非正数、小数或非法值回退默认。 */
+export function resolveMaxToolRounds(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.BIGBOTART_AGENT_MAX_TOOL_ROUNDS;
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : DEFAULT_MAX_TOOL_ROUNDS;
+}
 
 /**
  * 轮内心跳间隔(2026-09 补):等待 LLM 返回期间,每隔这么久向主进程报活一次。
@@ -55,7 +64,7 @@ const LLM_HEARTBEAT_MS = resolveHeartbeatMs();
  * 真实事故:用户说「连给 image-gen 的 ref-image」,模型建节点+连线+engine.submit 都做对了,
  * 但提交后开始反复轮询 engine.queue_status / canvas.get_node / canvas.list_nodes
  * 「看看图好了没有」——生成是分钟级后台任务,同步查询永远查不到结果,
- * 20 轮 MAX_TOOL_ROUNDS 被空转烧光,最终以「已达到最大工具调用轮数」收场,
+ * 工具轮次被空转烧光,最终以「已达到最大工具调用轮数」收场,
  * 用户看到的是失败,实际任务已成功入队。
  *
  * 判定:engine.submit 成功后,本轮若继续调用「只读轮询类」工具(白名单见下)累计达阈值,
@@ -861,6 +870,8 @@ export class PiChatSession {
     this.abort = new AbortController();
     const signal = this.abort.signal;
     const toolCalls: ChatResult['toolCalls'] = [];
+    // 每次对话开始时解析,避免在模块加载时固化配置,也便于测试注入。
+    const maxToolRounds = resolveMaxToolRounds();
 
     /**
      * 对话协议(chat = /v1/chat/completions,responses = /v1/responses)。
@@ -975,7 +986,7 @@ export class PiChatSession {
     /** 「用正文提问」已重试次数(第七变体,见 isPlainTextAsk) */
     let plainTextAskRetries = 0;
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    for (let round = 0; round < maxToolRounds; round++) {
       if (signal.aborted) return { reply: '', toolCalls, aborted: true };
       // 轮次心跳:主进程的静默看门狗据此续期。必须在**调用 LLM 之前**发 ——
       // 首轮推理可以长达 30-60 秒(本地 35B 模型),若只在工具调用时才报活,
@@ -1491,7 +1502,12 @@ export class PiChatSession {
         } as never);
       }
     }
-    return { reply: '已达到最大工具调用轮数,请拆小任务继续。', toolCalls };
+    return {
+      reply:
+        `已达到本次对话的工具调用轮数上限(${maxToolRounds} 轮),已执行 ${toolCalls.length} 个工具操作。\n` +
+        '回复「继续」可从当前进度接着执行;也可用 BIGBOTART_AGENT_MAX_TOOL_ROUNDS 调整上限。',
+      toolCalls,
+    };
   }
 
 
