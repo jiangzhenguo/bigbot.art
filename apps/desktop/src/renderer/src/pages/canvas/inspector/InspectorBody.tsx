@@ -13,6 +13,7 @@ import { CropTakePreview } from './CropTakePreview';
 import { previewUrlOf, AudioPlayer } from '../media';
 import { ImageGenInspector } from './ImageGenInspector';
 import { ImageEditInspector } from './ImageEditInspector';
+import { AudioGenInspector } from './AudioGenInspector';
 import { MediaInfoPanel } from './MediaInfoPanel';
 import { AssetInspector } from './AssetInspector';
 import { SaveToLibraryButton } from './SaveToLibraryButton';
@@ -121,7 +122,7 @@ export function InspectorBody({
   onOpenAssetPicker,
   onRefreshAssets,
 }: InspectorBodyProps) {
-  const { definitionFor } = useNodePlugins();
+  const { definitionFor, catalogFor } = useNodePlugins();
   if (!node) return <div className="mut" style={{ fontSize: 12 }}>选中画布上的节点查看与编辑参数</div>;
   const d = (node.data ?? {}) as Record<string, unknown>;
   const setData = (patch: Record<string, unknown> | Partial<TimelineData>) => {
@@ -133,6 +134,7 @@ export function InspectorBody({
       <PluginNodeInspector
         node={node}
         definition={definitionFor(node.kind)}
+        catalog={catalogFor(node.kind)}
         setData={setData}
         runNode={runNode}
         isRunning={node.running}
@@ -1027,6 +1029,24 @@ export function InspectorBody({
           </button>
           <KVSection rows={[['用途', '--ref-audio 带声直出']]} />
         </div>
+      );
+    }
+    case 'video-dub':
+    case 'tts-gen': {
+      return (
+        <AudioGenInspector
+          node={node}
+          setData={setData}
+          nodes={nodes ?? []}
+          assetsList={assetsList}
+          assetCache={assetCache}
+          takeResults={takeResults}
+          running={node.progress !== undefined}
+          runNode={runNode}
+          toastMsg={toastMsg}
+          projectId={projectId}
+          onRefreshAssets={onRefreshAssets}
+        />
       );
     }
     case 'workflow-input': {

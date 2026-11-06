@@ -21,6 +21,7 @@ import { useColorScheme } from '../hooks/useColorScheme';
 import { useI18n, useT } from '../i18n';
 import { isDesktopShell } from '../api/shell';
 import { RemoteAccessSection } from './settings/RemoteAccessSection';
+import { CosyVoiceSettings } from '../components/CosyVoiceSettings';
 
 interface SettingsPageProps {
   onNavigate: (
@@ -2273,6 +2274,8 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                 </div>
                 <span className="badge ok">{t('已就绪')}</span>
               </div>
+              {/* 🆕 语音 / 配音(CosyVoice3):tts-gen / video-dub 节点的引擎就绪状态与准备命令 */}
+              <CosyVoiceSettings />
               {(['z-image-turbo', ...MODEL_IDS] as const).map((id) => {
                 // 模型大小按 HF 官方文件清单实测(2026-09,hf-mirror tree 汇总 / ModelScope 直连清单):
                 //   z-image-turbo-8bit 10.99GB · Qwen-Image-2.1-bf16 ~33GB · qwen-image-edit-8bit 37.5GB · flux.2-klein-9b-8bit ~18GB · seedvr2-3b-8bit 4.72GB · qwen3-vl-8b-caption 5.4GB(本地 LM Studio 那份实测)

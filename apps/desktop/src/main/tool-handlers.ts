@@ -45,6 +45,7 @@ import {
   formatTodoResult,
   validatePlanMarkdown,
   openShots,
+  normalizeVoiceMode,
   shotSubmitAllowed,
   referenceMediaIssues,
   referenceCombinationIssues,
@@ -60,6 +61,7 @@ import {
   validateShotSubmitParams,
   isPluginNodeKind,
   validateNodePluginData,
+  validateNodePluginDataForCreate,
   nodePluginAgentSummary,
   type VideoAspect,
   type DerivedRef,
@@ -95,6 +97,7 @@ import {
 } from './h3-prompt';
 import { stitchImages, splitImage } from './stitch';
 import { videoUpscale, probeVideo, probeVideoPostTooling, normalizeVideoPost, checkToolingFor, planVideoPostStages, estimateVideoPostSeconds } from './video-post';
+import { synthesizeSpeech, estimateAudioSeconds, ensureSampleVoice } from './tts';
 import {
   placeMaterializeRows,
   placeNode,
@@ -218,6 +221,7 @@ const BOOLEAN_DATA_FIELDS = [
   'refVideoSilent', // shot:参考视频只取画面(忽略音轨)
   'secondPass', // shot:二采开关(可写 true;详细参数是对象 {enabled,mode,fraction})
   'ssdStreaming', // shot:SSD 流式读权重
+  'keepWav', // video-dub:保留旁白 wav(布尔;Agent 常写 "true")
   'specFrom', // 仅作删除标记用,不参与布尔语义
 ] as const;
 
@@ -431,6 +435,43 @@ export function resolveSingleVideoInput(
     if (p) return p;
   }
   const assetId = String(d.inputAssetId ?? '');
+  return assetId ? assetPath(assetId) : undefined;
+}
+
+/**
+ * CosyVoice3 的参考音色解析(ref-voice 单值端口 > data.refVoiceFrom > data.refVoiceAssetId)。
+ *
+ * 与 resolveSingleVideoInput 同口径,但音色来源多一类:
+ *  - asset 节点 → 资产本地路径(须为音频;视频会在提交前抽音轨)
+ *  - audio-ref 节点 → 它绑定的音频资产
+ *  - tts-gen 节点 → 它上一次产出的 wav(data.resultPath)
+ *  - video-dub / 其它产物节点 → data.resultPath(允许带人声短视频,提交前抽音轨)
+ */
+export function resolveRefVoicePath(
+  canvas: Pick<CanvasSnapshot, 'nodes' | 'edges'>,
+  node: CanvasNode,
+  assetPath: (assetId: string) => string | undefined,
+): string | undefined {
+  const d = (node.data ?? {}) as Record<string, unknown>;
+  const pathOf = (src: CanvasNode | undefined): string | undefined => {
+    if (!src) return undefined;
+    const sd = (src.data ?? {}) as Record<string, unknown>;
+    if (src.kind === 'asset' || src.kind === 'audio-ref') {
+      return assetPath(String(sd.assetId ?? '')) || undefined;
+    }
+    return String(sd.resultPath ?? '') || undefined;
+  };
+  for (const e of canvas.edges) {
+    if (e.target !== node.id || (e.label ?? '') !== 'ref-voice') continue;
+    const p = pathOf(canvas.nodes.find((n) => n.id === e.source));
+    if (p) return p;
+  }
+  const from = d.refVoiceFrom as { nodeId?: string } | undefined;
+  if (from?.nodeId) {
+    const p = pathOf(canvas.nodes.find((n) => n.id === from.nodeId));
+    if (p) return p;
+  }
+  const assetId = String(d.refVoiceAssetId ?? '');
   return assetId ? assetPath(assetId) : undefined;
 }
 
@@ -1234,7 +1275,7 @@ export class ToolHandlers {
       if (isHiddenNodeKind(kind)) {
         return {
           ok: false,
-          result: `节点类型「${kind}」尚未实现,已下架不可创建:${HIDDEN_NODE_REASONS[kind] ?? '没有执行分支'}。请改用已实现的节点(document/storyboard/asset/image-gen/image-edit/image-upscale/image-crop/image-stitch/image-split/frame-grab/video-upscale/shot/timeline/audio-ref)。`,
+          result: `节点类型「${kind}」尚未实现,已下架不可创建:${HIDDEN_NODE_REASONS[kind] ?? '没有执行分支'}。请改用已实现的节点(document/storyboard/asset/image-gen/image-edit/image-upscale/image-crop/image-stitch/image-split/frame-grab/video-upscale/shot/timeline/audio-ref/video-dub/tts-gen)。`,
         };
       }
       if (!kind.startsWith('plugin:') && !NODE_KIND_GUIDE.some(([known]) => known === kind)) {
@@ -1263,7 +1304,13 @@ export class ToolHandlers {
         refsNote = ` · refs 由连线推导已忽略(用 canvas.connect 管理参考)`;
       }
       if (pluginDef) {
-        const checked = validateNodePluginData({ ...pluginDef.defaultData, ...data }, pluginDef.parametersSchema);
+        // picker 独占的参数建节点时可能还没选（值由用户在检查器里挑），
+        // 不豁免的话 Agent 永远建不出这类节点。
+        const checked = validateNodePluginDataForCreate(
+          { ...pluginDef.defaultData, ...data },
+          pluginDef.parametersSchema,
+          pluginDef.ui,
+        );
         if (!checked.ok) {
           return { ok: false, result: `插件节点「${pluginDef.title}」参数不合法:${checked.errors.map((e) => `${e.path} ${e.message}`).join('; ')}` };
         }
@@ -1294,6 +1341,16 @@ export class ToolHandlers {
           faceModel: 'gfpgan',
           faceWeight: 0.5,
           device: 'mps',
+          ...data,
+        };
+      } else if (kind === 'tts-gen' || kind === 'video-dub') {
+        // 语音节点:默认 clone(CosyVoice3 + 参考音);design(Qwen3-TTS 文字设计音色)由
+        // data.voiceMode='design' + voiceDescription/voiceProfile 显式启用。
+        data = {
+          voiceMode: 'clone',
+          speed: 1,
+          seed: 42,
+          ...(kind === 'video-dub' ? { mixMode: 'replace', origVolume: 0.15, ttsVolume: 1, keepWav: false } : {}),
           ...data,
         };
       }
@@ -1866,6 +1923,10 @@ export class ToolHandlers {
       if (node.kind === 'image-crop' || node.kind === 'image-stitch' || node.kind === 'image-split' || node.kind === 'frame-grab' || node.kind === 'video-upscale') {
         // 本地处理节点:不进渲染队列,主进程同步执行(ffmpeg 秒级;video-upscale 是分钟级长任务),产物回写 + 记 Take
         return this.runLocalImageNode(ctx, cur, node);
+      }
+      if (node.kind === 'tts-gen' || node.kind === 'video-dub') {
+        // 语音合成 / 视频配音(CosyVoice3):本地 CPU 长任务,不进渲染队列;产物回写 + 记 Take
+        return this.runTtsNode(ctx, cur, node);
       }
       /*
        * ── 同节点在途任务预查(2026-10-14「技能5测试」双提交事故)──
@@ -3200,6 +3261,156 @@ export class ToolHandlers {
         `视频增强完成${etaNote}:${basenameOf(res.path)}\n` +
         `执行阶段:${applied.join(' → ')}\n` +
         (res.width && res.height ? `输出 ${res.width}×${res.height} · ${res.durationSec ?? '?'}s` : ''),
+      nodeId: node.id,
+    };
+  }
+
+  /**
+   * tts-gen / video-dub 节点执行路径(CosyVoice3 `mlxgen tts` / `mlxgen dub`)。
+   *
+   * 本地 CPU 长任务,不进 RenderQueue;与渲染层 runNode 同口径(同一份 tts.ts 实现)。
+   * 失败信息带「缺什么、怎么补」的指引(ref-voice 缺失 / 未 prepare / dry-run),
+   * 绝不在没产物时伪造 resultPath。
+   */
+  private async runTtsNode(ctx: ToolContext, cur: CanvasSnapshot, node: CanvasNode): Promise<ToolResult> {
+    const d = (node.data ?? {}) as Record<string, unknown>;
+    const kind = node.kind === 'video-dub' ? 'video-dub' : 'tts-gen';
+    const assetPath = (id: string): string | undefined => (id ? this.assets.get(id)?.localPath : undefined);
+    const text = String(d.text ?? '').trim();
+    if (!text) {
+      return {
+        ok: false,
+        result: `「${node.label || node.id}」的旁白文本为空:请先 canvas.update_node 写 data.text(旁白正文写 text,不是 prompt)`,
+        nodeId: node.id,
+      };
+    }
+    const voiceMode = normalizeVoiceMode(d.voiceMode);
+    const designMode = voiceMode === 'design';
+    const voiceDescription = String(d.voiceDescription ?? '').trim();
+    const voiceProfile = String(d.voiceProfile ?? '').trim();
+    if (designMode && !voiceDescription && !voiceProfile) {
+      return {
+        ok: false,
+        result:
+          `「${node.label || node.id}」是「文字设计音色」模式,但还没有音色描述:请 canvas.update_node 写 data.voiceDescription` +
+          `(如「一位三十多岁的女性,声音温暖沉稳,语速偏慢」),或 data.voiceProfile 选一个内置类型` +
+          `(narrator-male / narrator-female / documentary / news-anchor / warm-female / energetic-young)。` +
+          `该模式不需要 ref-voice。`,
+        nodeId: node.id,
+      };
+    }
+    let refVoicePath = designMode ? undefined : resolveRefVoicePath(cur, node, assetPath);
+    /** 是否因为「用户没给音色」而回落到官方示例音色(结果/参数里注明,不冒充用户音色) */
+    let usedSampleVoice = false;
+    if (!designMode && !refVoicePath) {
+      // 未指定音色 → 官方示例音色(引擎包自带的真实参考音,3.5s)。
+      // 这仍然是一次真实合成;示例音色不可用才拒绝,并给出可执行指引。
+      const sample = ensureSampleVoice();
+      if (!sample.ok || !sample.path) {
+        return {
+          ok: false,
+          result:
+            `「${node.label || node.id}」没有可用的参考音色,官方示例音色也不可用:${sample.error ?? '未知错误'}。` +
+            `请先让用户导入一段 3–30 秒干净人声并连到 ref-voice,或完成 mlxgen prepare --model cosyvoice3。`,
+          nodeId: node.id,
+        };
+      }
+      refVoicePath = sample.path;
+      usedSampleVoice = true;
+      // 顺手登记成项目资源并绑定,让检查器/后续重跑看到同一个音色(而不是每次再复制)
+      try {
+        const imported = await this.assets.importFromPaths([sample.path], { projectId: ctx.projectId });
+        const first = imported.assets[0];
+        if (first) node.data = { ...(node.data as Record<string, unknown>), refVoiceAssetId: first.id } as CanvasNode['data'];
+      } catch {
+        /* 登记失败不影响本次合成(路径已可用) */
+      }
+    }
+    let inputVideoPath: string | undefined;
+    if (kind === 'video-dub') {
+      inputVideoPath = resolveSingleVideoInput(cur, node, assetPath);
+      if (!inputVideoPath) {
+        return {
+          ok: false,
+          result:
+            `「${node.label || node.id}」缺少输入视频:把镜头(shot)成片 / 视频增强 / 时间线成片 / 视频 asset 连到 input-video 端口` +
+            `(或在检查器填输入视频 Asset ID)。`,
+          nodeId: node.id,
+        };
+      }
+    }
+    const res = await synthesizeSpeech({
+      nodeId: node.id,
+      kind,
+      text,
+      voiceMode,
+      voiceDescription: designMode ? voiceDescription : undefined,
+      voiceProfile: designMode ? voiceProfile : undefined,
+      language: designMode ? String(d.language ?? 'auto') : undefined,
+      temperature:
+        designMode && d.temperature != null && Number.isFinite(Number(d.temperature))
+          ? Number(d.temperature)
+          : undefined,
+      refVoicePath,
+      inputVideoPath,
+      refText: typeof d.refText === 'string' ? d.refText : undefined,
+      instruct: typeof d.instruct === 'string' ? d.instruct : undefined,
+      speed: d.speed === undefined ? undefined : Number(d.speed),
+      seed: d.seed === undefined ? undefined : Number(d.seed),
+      mixMode: d.mixMode === 'mix' ? 'mix' : 'replace',
+      origVolume: d.origVolume === undefined ? undefined : Number(d.origVolume),
+      ttsVolume: d.ttsVolume === undefined ? undefined : Number(d.ttsVolume),
+      keepWav: d.keepWav === true,
+    });
+    if (!res.ok || !res.path) {
+      const prefix = res.dryRun ? 'dry-run 未真实合成' : kind === 'video-dub' ? '视频配音失败' : '文生语音失败';
+      return { ok: false, result: `${prefix}:${res.error ?? '未知错误'}`, nodeId: node.id };
+    }
+    const takeId = this.takes?.append(ctx.projectId, {
+      shotNodeId: node.id,
+      status: 'succeeded',
+      resultPath: res.path,
+      params: {
+        kind,
+        text,
+        voiceMode,
+        voiceDescription: designMode ? voiceDescription : undefined,
+        voiceProfile: designMode ? voiceProfile : undefined,
+        language: designMode ? String(d.language ?? 'auto') : undefined,
+        temperature: designMode ? d.temperature : undefined,
+        refVoicePath,
+        inputVideoPath,
+        refText: d.refText,
+        instruct: d.instruct,
+        speed: d.speed,
+        seed: d.seed,
+        mixMode: d.mixMode,
+        origVolume: d.origVolume,
+        ttsVolume: d.ttsVolume,
+        keepWav: d.keepWav,
+        sampleVoice: usedSampleVoice,
+      },
+      durationSec: res.durationSec,
+      elapsedSec: res.elapsedSec,
+    }).id;
+    node.data = {
+      ...(node.data as Record<string, unknown>),
+      resultPath: res.path,
+      narrationPath: res.narrationPath,
+      durationSec: res.durationSec,
+      ...(takeId ? { currentTakeId: takeId } : {}),
+    } as unknown as CanvasNode['data'];
+    cur.updatedAt = new Date().toISOString();
+    cur.version += 1;
+    this.store.saveCanvasSnapshot(cur);
+    const chars = text.replace(/\s/g, '').length;
+    return {
+      ok: true,
+      result:
+        `${kind === 'video-dub' ? '视频配音' : '文生语音'}完成:${basenameOf(res.path)}\n` +
+        `${chars} 字 · ${designMode ? 'Qwen3-TTS 文字设计音色' : `模式 ${res.mode ?? 'cross_lingual'}${usedSampleVoice ? ' · 官方示例音色' : ''}`} · 耗时 ${res.elapsedSec ?? '?'}s` +
+        ` · 音频约 ${res.durationSec ?? estimateAudioSeconds(text)}s` +
+        (res.narrationPath ? `\n旁白 wav:${basenameOf(res.narrationPath)}` : ''),
       nodeId: node.id,
     };
   }

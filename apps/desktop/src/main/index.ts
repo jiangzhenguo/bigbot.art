@@ -216,6 +216,11 @@ protocol.registerSchemesAsPrivileged([
     scheme: 'bba-output',
     privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
   },
+  {
+    // 插件自带素材(缩略图等)只读通道:仅暴露当前已注册版本插件目录内的图片。
+    scheme: 'bba-plugin',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
+  },
 ]);
 
 // 安装包从访达启动,没有 pnpm dev 注入的 BIGBOTART_DRYRUN=0。
@@ -1220,6 +1225,29 @@ app.whenReady().then(async () => {
         if (existsSync(real)) return rangeFileResponse(real, req.headers.get('range'));
       }
       return new Response(`not found: ${name}`, { status: 404 });
+    } catch (e) {
+      return new Response(`error: ${(e as Error).message}`, { status: 500 });
+    }
+  });
+
+  // 注册 bba-plugin:// 协议:读插件自带素材(目前只放行缩略图图片)。
+  // URL 形如 bba-plugin://<pluginId>/<version>/<插件根目录内的相对路径>。
+  // 只服务**当前已注册版本**的插件目录,且必须落在插件根目录内 —— 越界/版本不符一律 403。
+  protocol.handle('bba-plugin', async (req) => {
+    try {
+      const url = new URL(req.url);
+      const pluginId = decodeURIComponent(url.host);
+      const segments = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      if (segments.length < 2) {
+        return new Response(`bad plugin url: ${req.url}`, { status: 400 });
+      }
+      const version = segments[0]!;
+      const relativePath = segments.slice(1).join('/');
+      const file = nodePlugins.resolvePluginAsset(pluginId, version, relativePath);
+      if (!file) {
+        return new Response('forbidden', { status: 403 });
+      }
+      return rangeFileResponse(file, req.headers.get('range'));
     } catch (e) {
       return new Response(`error: ${(e as Error).message}`, { status: 500 });
     }

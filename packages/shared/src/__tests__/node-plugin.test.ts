@@ -4,11 +4,15 @@ import {
   NODE_PLUGIN_API_VERSION,
   isPluginNodeKind,
   nodePluginAgentSummary,
+  nodePluginAssetUrl,
+  nodePluginPickerOwnedParams,
   normalizeNodePluginData,
   parsePluginNodeKind,
   pluginNodeKind,
   publicNodePluginDefinition,
+  validateNodePluginCatalog,
   validateNodePluginData,
+  validateNodePluginDataForCreate,
   validateNodePluginManifest,
   type NodePluginData,
   type NodePluginDefinition,
@@ -365,5 +369,246 @@ describe('nodePluginAgentSummary', () => {
     );
     expect(nodePluginAgentSummary([{ ...definition, enabled: false }])).toBe('当前没有可用的节点插件。');
     expect(nodePluginAgentSummary([])).toBe('当前没有可用的节点插件。');
+  });
+});
+
+describe('受控 UI(picker)声明校验', () => {
+  function uiManifest(): NodePluginManifest {
+    const manifest = validManifest();
+    manifest.nodes[0]!.parametersSchema.properties.pose = { type: 'string', title: '姿势' };
+    manifest.nodes[0]!.parametersSchema.properties.angle = { type: 'string', title: '视角' };
+    manifest.nodes[0]!.ui = {
+      type: 'picker',
+      title: '姿势选择器',
+      valueParam: 'pose',
+      variantParam: 'angle',
+      variantField: 'angle',
+      catalog: 'catalog/poses.json',
+      searchFields: ['id', 'label'],
+      filterFields: ['system', 'category'],
+      tabField: 'angle',
+      thumbnailField: 'thumb',
+    };
+    return manifest;
+  }
+
+  it('接受合法 picker 声明，并在公开定义里透传', () => {
+    const manifest = uiManifest();
+    const result = validateNodePluginManifest(manifest);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    const definition = publicNodePluginDefinition(manifest, manifest.nodes[0]!);
+    expect(definition.ui?.type).toBe('picker');
+    expect(definition.ui?.valueParam).toBe('pose');
+    expect(definition.ui?.catalog).toBe('catalog/poses.json');
+  });
+
+  it('拒绝未知控件类型、缺字段与未声明的参数名', () => {
+    const badType = uiManifest();
+    (badType.nodes[0]!.ui as { type: string }).type = 'canvas';
+    expectIssue(validateNodePluginManifest(badType), 'ui-type');
+
+    const missing = uiManifest();
+    const missingUi = missing.nodes[0]!.ui as unknown as Record<string, unknown>;
+    delete missingUi.valueParam;
+    expectIssue(validateNodePluginManifest(missing), 'required');
+
+    const undeclared = uiManifest();
+    undeclared.nodes[0]!.ui = { ...undeclared.nodes[0]!.ui!, valueParam: 'nope' };
+    expectIssue(validateNodePluginManifest(undeclared), 'ui-param');
+
+    const undeclaredVariant = uiManifest();
+    undeclaredVariant.nodes[0]!.ui = { ...undeclaredVariant.nodes[0]!.ui!, variantParam: 'nope' };
+    expectIssue(validateNodePluginManifest(undeclaredVariant), 'ui-param');
+  });
+
+  it('拒绝越界清单路径与非法字段名', () => {
+    const absolute = uiManifest();
+    absolute.nodes[0]!.ui = { ...absolute.nodes[0]!.ui!, catalog: '/etc/passwd' };
+    expectIssue(validateNodePluginManifest(absolute), 'executor');
+
+    const traversal = uiManifest();
+    traversal.nodes[0]!.ui = { ...traversal.nodes[0]!.ui!, catalog: '../outside/poses.json' };
+    expectIssue(validateNodePluginManifest(traversal), 'executor');
+
+    const badField = uiManifest();
+    badField.nodes[0]!.ui = { ...badField.nodes[0]!.ui!, filterFields: ['系统 体系'] };
+    expectIssue(validateNodePluginManifest(badField), 'ui-field');
+
+    const duplicate = uiManifest();
+    duplicate.nodes[0]!.ui = { ...duplicate.nodes[0]!.ui!, filterFields: ['system', 'system'] };
+    expectIssue(validateNodePluginManifest(duplicate), 'duplicate');
+  });
+
+  it('拒绝 ui 里的未知字段', () => {
+    const extra = uiManifest();
+    (extra.nodes[0]!.ui as unknown as Record<string, unknown>).react = 'X';
+    expectIssue(validateNodePluginManifest(extra), 'unknown-field');
+  });
+});
+
+describe('插件清单(catalog)校验', () => {
+  it('接受 items 数组与裸数组，过滤出附加字段', () => {
+    const wrapped = validateNodePluginCatalog({
+      items: [
+        { id: 'stand-front', label: '站立', system: '人体', category: '站姿', angle: '正面', thumb: 'thumbs/a.png' },
+        { id: 'walk-side', label: '行走', system: '人体', category: '动姿', angle: '侧面', weight: 2 },
+      ],
+    });
+    expect(wrapped.ok, JSON.stringify(wrapped)).toBe(true);
+    if (!wrapped.ok) return;
+    expect(wrapped.catalog.items).toHaveLength(2);
+    expect(wrapped.catalog.items[0]!.fields).toEqual({ system: '人体', category: '站姿', angle: '正面' });
+    expect(wrapped.catalog.items[0]!.thumb).toBe('thumbs/a.png');
+    expect(wrapped.catalog.items[1]!.fields.weight).toBe(2);
+    expect(wrapped.catalog.fields).toContain('angle');
+
+    const bare = validateNodePluginCatalog([{ id: 'a', label: 'A' }]);
+    expect(bare.ok).toBe(true);
+  });
+
+  it('拒绝重复 id、缺 label、越界缩略图与非原始类型字段', () => {
+    const duplicate = validateNodePluginCatalog([
+      { id: 'a', label: 'A' },
+      { id: 'a', label: 'A2' },
+    ]);
+    expect(duplicate.ok).toBe(false);
+    if (duplicate.ok) return;
+    expect(duplicate.errors.some((error) => error.code === 'duplicate')).toBe(true);
+
+    const noLabel = validateNodePluginCatalog([{ id: 'a' }]);
+    expect(noLabel.ok).toBe(false);
+
+    const badThumb = validateNodePluginCatalog([{ id: 'a', label: 'A', thumb: '../secret.png' }]);
+    expect(badThumb.ok).toBe(false);
+
+    const badValue = validateNodePluginCatalog([{ id: 'a', label: 'A', tags: ['x'] }]);
+    expect(badValue.ok).toBe(false);
+
+    const notList = validateNodePluginCatalog({ nope: true });
+    expect(notList.ok).toBe(false);
+  });
+});
+
+describe('插件素材 URL', () => {
+  it('生成 bba-plugin:// 并编码路径段', () => {
+    expect(nodePluginAssetUrl('acme', '1.0.0', 'catalog/thumbs/a.png'))
+      .toBe('bba-plugin://acme/1.0.0/catalog/thumbs/a.png');
+    expect(nodePluginAssetUrl('acme', '1.0.0', '中文 目录/a b.png'))
+      .toBe('bba-plugin://acme/1.0.0/%E4%B8%AD%E6%96%87%20%E7%9B%AE%E5%BD%95/a%20b.png');
+  });
+});
+
+describe('picker 独占参数的建节点校验', () => {
+  const schema: NodePluginParametersSchema = {
+    type: 'object',
+    required: ['pose', 'angle', 'prompt'],
+    properties: {
+      pose: { type: 'string', title: '姿势' },
+      angle: { type: 'string', title: '视角' },
+      prompt: { type: 'string', title: '提示词' },
+    },
+  };
+  const pickerUi = {
+    type: 'picker' as const,
+    title: '姿势选择器',
+    valueParam: 'pose',
+    variantParam: 'angle',
+    variantField: 'angle',
+    catalog: 'catalog/poses.json',
+  };
+
+  it('picker 独占的必填参数建节点时允许为空', () => {
+    const result = validateNodePluginDataForCreate({ prompt: 'hi' }, schema, pickerUi);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.pose).toBeUndefined();
+    expect(result.data.prompt).toBe('hi');
+  });
+
+  it('非 picker 的必填参数缺失仍然拒绝', () => {
+    const result = validateNodePluginDataForCreate({}, schema, pickerUi);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((error) => error.code === 'required' && error.path === '$.prompt')).toBe(true);
+    // picker 独占的 pose 不该被算成缺参
+    expect(result.errors.some((error) => error.path === '$.pose')).toBe(false);
+  });
+
+  it('非法取值照样报错，不因为豁免缺参而放过脏值', () => {
+    const result = validateNodePluginDataForCreate(
+      { prompt: 'hi', count: 99 },
+      {
+        type: 'object',
+        required: ['pose', 'prompt'],
+        properties: {
+          pose: { type: 'string' },
+          prompt: { type: 'string' },
+          count: { type: 'integer', maximum: 5 },
+        },
+      },
+      { ...pickerUi, valueParam: 'pose' },
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((error) => error.code === 'maximum')).toBe(true);
+  });
+
+  it('没有 picker 声明时行为与严格校验一致', () => {
+    const result = validateNodePluginDataForCreate({ prompt: 'hi' }, schema, undefined);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((error) => error.path === '$.pose')).toBe(true);
+    expect(result.errors.some((error) => error.path === '$.angle')).toBe(true);
+  });
+
+  it('运行期校验仍然要求 picker 参数齐全', () => {
+    // 建节点放行 ≠ 运行放行：运行前没选姿势必须拒绝。
+    const result = validateNodePluginData({ prompt: 'hi' }, schema);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((error) => error.code === 'required' && error.path === '$.pose')).toBe(true);
+  });
+
+  it('nodePluginPickerOwnedParams 列出 valueParam 与 variantParam', () => {
+    expect(nodePluginPickerOwnedParams(pickerUi)).toEqual(['pose', 'angle']);
+    expect(nodePluginPickerOwnedParams(undefined)).toEqual([]);
+  });
+});
+
+describe('picker 的 valueField 声明', () => {
+  it('接受 valueField 并在公开定义里透传', () => {
+    const manifest = validManifest();
+    manifest.nodes[0]!.parametersSchema = {
+      type: 'object',
+      properties: { pose: { type: 'string' } },
+    };
+    manifest.nodes[0]!.defaultData = {};
+    manifest.nodes[0]!.ui = {
+      type: 'picker',
+      title: '姿势选择器',
+      valueParam: 'pose',
+      valueField: 'poseValue',
+      catalog: 'catalog/picker-catalog.json',
+    };
+    const result = validateNodePluginManifest(manifest);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    const definition = publicNodePluginDefinition(manifest, manifest.nodes[0]!);
+    expect(definition.ui?.valueField).toBe('poseValue');
+  });
+
+  it('拒绝非法字段名的 valueField', () => {
+    const manifest = validManifest();
+    manifest.nodes[0]!.parametersSchema = {
+      type: 'object',
+      properties: { pose: { type: 'string' } },
+    };
+    manifest.nodes[0]!.ui = {
+      type: 'picker',
+      title: '姿势选择器',
+      valueParam: 'pose',
+      valueField: '../evil',
+      catalog: 'catalog/picker-catalog.json',
+    };
+    expectIssue(validateNodePluginManifest(manifest), 'ui-field');
   });
 });

@@ -5,10 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { API_CATALOG, EVENT_CATALOG, RPC_CATALOG } from '../api-catalog.js';
 
 describe('API 目录', () => {
-  it('128 个 RPC + 6 个事件,名字不重复', () => {
-    expect(RPC_CATALOG).toHaveLength(128);
-    expect(EVENT_CATALOG).toHaveLength(6);
-    expect(API_CATALOG).toHaveLength(134);
+  it('135 个 RPC + 7 个事件,名字不重复', () => {
+    expect(RPC_CATALOG).toHaveLength(135);
+    expect(EVENT_CATALOG).toHaveLength(7);
+    expect(API_CATALOG).toHaveLength(142);
     const names = API_CATALOG.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
   });
@@ -18,6 +18,7 @@ describe('API 目录', () => {
       ['onQueueChanged', 'render-queue-changed'],
       ['onCanvasSnapshotUpdated', 'canvas-snapshot-updated'],
       ['onVideoPostProgress', 'video-post-progress'],
+      ['onTtsProgress', 'tts-progress'],
       ['onStyleModelProgress', 'style-model-progress'],
       ['onAgentEvent', 'agent-event'],
       ['onDebugLog', 'debug-log'],

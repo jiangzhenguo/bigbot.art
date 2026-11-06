@@ -21,6 +21,8 @@ export type BuiltinNodeKind =
   | 'director' // 运镜调度小样(占位)
   | 'timeline' // 时间线/剪辑
   | 'audio-ref' // 音频参考(--ref-audio)
+  | 'video-dub' // 🆕 视频配音(CosyVoice3:成片 + 参考音色 + 旁白 → 带旁白 mp4)
+  | 'tts-gen' // 🆕 文生语音(CosyVoice3:文本 + 参考音色 → wav)
   | 'storyboard' // 🆕 分镜表(脚本)节点:Markdown 表格为数据载体,一行 = 一个分镜
   | 'workflow-input' // 🆕 v2 工作流入口(资源容器,声明输入槽位)
   | 'workflow-output'; // 🆕 v2 工作流出口(产物汇聚,运行收口)
@@ -170,6 +172,10 @@ export interface NodeDataMap {
   director: { prompt: string };
   timeline: TimelineData;
   'audio-ref': { assetId: string };
+  /** 🆕 视频配音(CosyVoice3 dub):成片 + 参考音色 + 旁白 → 带旁白 mp4(replace/mix) */
+  'video-dub': VideoDubParams;
+  /** 🆕 文生语音(CosyVoice3 tts):文本 + 参考音色 → wav */
+  'tts-gen': TtsGenParams;
   /** 🆕 分镜表(脚本)节点:markdown 为唯一真源(标题+说明+GFM 表格块) */
   storyboard: StoryboardData;
   /** 🆕 v2 工作流入口:声明输入槽位,值由用户填充(资产/文件/内联文本) */
@@ -598,6 +604,185 @@ export interface VideoPostTooling {
   seedvr2?: boolean;
   /** 缺失项人读摘要(空数组 = 全部就绪) */
   missing: string[];
+}
+
+/* ────────────── 语音合成 / 视频配音(CosyVoice3 / Qwen3-TTS)────────────── */
+
+/** 音色来源:clone=CosyVoice3 参考音克隆(缺省)/ design=Qwen3-TTS 文字设计音色 */
+export type TtsVoiceMode = 'clone' | 'design';
+
+/** Qwen3-TTS voice-design 支持的语言(与引擎 --language 枚举一致) */
+export type TtsLanguage =
+  | 'auto'
+  | 'chinese'
+  | 'english'
+  | 'german'
+  | 'italian'
+  | 'portuguese'
+  | 'spanish'
+  | 'japanese'
+  | 'korean'
+  | 'french'
+  | 'russian';
+
+/**
+ * 音色合成公共参数(tts-gen 与 video-dub 共用)。
+ *
+ * 引擎事实(~/ai/mlx-gen/docs/cosyvoice3-tts.md):CosyVoice3 **没有预设音色**,
+ * 必须有 `--ref-audio`(3–30 秒干净人声);模式自动选择:
+ * `instruct` → instruct2 / `refText` → zero_shot / 都没有 → cross_lingual。
+ */
+export interface TtsVoiceParams {
+  /** 待合成文本(顶层字段:避免 Agent 把长文塞进 data 对象再序列化截断) */
+  text: string;
+  /**
+   * 音色来源(2026-11 新增 Qwen3-TTS):
+   *  - `clone`(缺省)= CosyVoice3 零样本克隆,需要 ref-voice 参考音(没有则用官方示例音色);
+   *  - `design` = Qwen3-TTS VoiceDesign,**用文字描述直接创造音色**,不需要参考音。
+   */
+  voiceMode?: TtsVoiceMode;
+  /** design 模式:音色描述(如「一位三十多岁的女性,声音温暖沉稳」);与 voiceProfile 二选一 */
+  voiceDescription?: string;
+  /** design 模式:内置音色类型 id(见 shared 的 QWEN3_TTS_PROFILES);设置后忽略 voiceDescription */
+  voiceProfile?: string;
+  /** design 模式:语言(auto/chinese/english/…),缺省 auto */
+  language?: string;
+  /** design 模式:采样温度(缺省用模型默认) */
+  temperature?: number;
+  /** 参考音逐字稿 → zero_shot */
+  refText?: string;
+  /** 风格指令(如「用温柔亲切的语气说」)→ instruct2;与 refText 同时存在时 instruct 优先 */
+  instruct?: string;
+  /** 语速倍率(默认 1.0) */
+  speed?: number;
+  /** 随机种子(默认 42) */
+  seed?: number;
+  /** 参考音色来源(派生态:ref-voice 连线优先) */
+  refVoiceFrom?: { nodeId: string };
+  /** 参考音色资产 id(检查器手绑;连线存在时以连线为准) */
+  refVoiceAssetId?: string;
+  /** 产物路径(tts-gen = wav;video-dub = 带旁白 mp4) */
+  resultPath?: string;
+  /** 产物时长(秒;产物探测回写) */
+  durationSec?: number;
+}
+
+/** 文生语音节点参数(文本 + 参考音色 → wav) */
+export type TtsGenParams = TtsVoiceParams;
+
+/** 视频配音节点参数(成片 + 参考音色 + 旁白 → 带旁白 mp4) */
+export interface VideoDubParams extends TtsVoiceParams {
+  /** 混音策略:replace=替换原声轨(默认)/ mix=叠在原声上 */
+  mixMode?: 'replace' | 'mix';
+  /** mix 模式原声音量(默认 0.15) */
+  origVolume?: number;
+  /** 旁白音量(默认 1.0) */
+  ttsVolume?: number;
+  /** 是否把旁白 wav 另存为 `<output>.wav`(默认 false) */
+  keepWav?: boolean;
+  /** 输入视频来源(派生态:input-video 连线) */
+  inputVideoFrom?: { nodeId: string };
+  /** 输入视频 Asset id(检查器手绑;连线存在时以连线为准) */
+  inputAssetId?: string;
+  /** keepWav 时保留的旁白 wav 路径 */
+  narrationPath?: string;
+}
+
+/** 语音合成 / 配音请求(主进程 IPC 入参;与节点 data 同口径) */
+export interface TtsRequest {
+  /** 发起任务的节点 id(进度事件按此关联到画布节点;缺省不影响执行) */
+  nodeId?: string;
+  /** tts-gen=纯文生音 / video-dub=给成片配旁白 */
+  kind: 'tts-gen' | 'video-dub';
+  text: string;
+  /** clone 模式:参考人声绝对路径(须在允许目录内:产物/资产/项目目录);视频源会在提交前抽音轨 */
+  refVoicePath?: string;
+  /** 音色来源:clone(缺省)/ design(Qwen3-TTS 文字设计音色) */
+  voiceMode?: TtsVoiceMode;
+  /** design 模式:音色描述 */
+  voiceDescription?: string;
+  /** design 模式:内置音色类型 id */
+  voiceProfile?: string;
+  /** design 模式:语言 */
+  language?: string;
+  /** design 模式:采样温度 */
+  temperature?: number;
+  /** video-dub 的待配音视频绝对路径(tts-gen 忽略) */
+  inputVideoPath?: string;
+  refText?: string;
+  instruct?: string;
+  speed?: number;
+  seed?: number;
+  mixMode?: 'replace' | 'mix';
+  origVolume?: number;
+  ttsVolume?: number;
+  keepWav?: boolean;
+  /** 输出文件名前缀(缺省按节点/内容生成) */
+  outputName?: string;
+}
+
+/** 语音合成 / 配音结果 */
+export interface TtsResult {
+  ok: boolean;
+  /** 主产物:tts-gen = wav;video-dub = 带旁白 mp4 */
+  path?: string;
+  /** keepWav 时的旁白 wav 路径 */
+  narrationPath?: string;
+  error?: string;
+  /** 产物时长(秒,ffprobe/引擎事件回读) */
+  durationSec?: number;
+  /** 处理耗时(秒,墙钟) */
+  elapsedSec?: number;
+  /** dry-run 只构造命令、不真实推理(明确告知,不产出假文件) */
+  dryRun?: boolean;
+  /** 引擎实际使用的模式:instruct2 / zero_shot / cross_lingual / voice-design */
+  mode?: string;
+  /** 实际走的音色后端(clone=CosyVoice3 / design=Qwen3-TTS) */
+  voiceMode?: TtsVoiceMode;
+}
+
+/** 语音任务阶段进度(主进程 → 渲染层 push;CPU 合成长任务期间驱动 badge/进度条) */
+export interface TtsProgressEvent {
+  nodeId: string;
+  /** 当前阶段名(人读,如「加载模型」「合成旁白」「混音封装」) */
+  stageLabel: string;
+  /** 阶段内细节(如「已合成 8.6s」「已 12s」) */
+  detail?: string;
+  /** 整体进度 0-1(跨阶段单调递增) */
+  overall: number;
+  /** 当前阶段进度 0-1;未判定时为 undefined → UI 走滚动动画 */
+  stageProgress?: number;
+}
+
+/** 正在运行的语音任务(主进程真源;渲染层挂载时恢复运行态) */
+export interface TtsRun {
+  nodeId: string;
+  startedAt: string;
+  /** 最近一次进度阶段(给人读) */
+  stage?: string;
+}
+
+/** 语音引擎就绪状态(检查器徽标 / 提交前防呆 / 设置页) */
+export interface TtsTooling {
+  /** mlxgen CLI 可执行(需含 tts/dub 子命令) */
+  mlxgen: boolean;
+  mlxgenPath?: string;
+  /** CosyVoice3 prepared package 根目录(探测到的) */
+  packagePath?: string;
+  /** CosyVoice3 包就绪:model/ + runtime/ + venv/bin/python + manifest.json 齐全 */
+  packageReady: boolean;
+  /** Qwen3-TTS VoiceDesign package 根目录(探测到的) */
+  voiceDesignPackagePath?: string;
+  /** Qwen3-TTS 包就绪:model/ + manifest.json 齐全(纯 MLX,无 runtime/venv) */
+  voiceDesignReady: boolean;
+  /** ffmpeg 可用(dub 混音 + 参考视频抽音轨需要) */
+  ffmpeg: boolean;
+  /** 缺失项人读摘要(空数组 = 全部就绪;两套引擎都算) */
+  missing: string[];
+  /** CosyVoice3 准备命令 */
+  prepareHint: string;
+  /** Qwen3-TTS 准备命令 */
+  voiceDesignPrepareHint: string;
 }
 
 /**

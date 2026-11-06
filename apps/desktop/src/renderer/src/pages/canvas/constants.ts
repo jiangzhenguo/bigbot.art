@@ -31,6 +31,8 @@ export const NODE_TYPES: NodeTag[] = [
   { id: 'shot', kind: 'shot', name: '镜头（视频）', sub: 'h3.c · 文生/首帧/首尾帧/参考图/参考视频' },
   { id: 'grab', kind: 'frame-grab', name: '视频裁切取帧', sub: '从视频截一帧 → 导出为图片资源' },
   { id: 'audio', kind: 'audio-ref', name: '音频参考', sub: '--ref-audio 带声直出' },
+  { id: 'dub', kind: 'video-dub', name: '视频配音', sub: 'CosyVoice3 · 成片旁白 · replace/mix' },
+  { id: 'tts', kind: 'tts-gen', name: '文生语音', sub: 'CosyVoice3 · 文本 → wav' },
   { id: 'timeline', kind: 'timeline', name: '时间线 / 剪辑', sub: 'FFmpeg 导出' },
 ];
 

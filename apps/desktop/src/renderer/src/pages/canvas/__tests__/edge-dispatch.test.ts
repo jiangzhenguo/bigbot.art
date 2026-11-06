@@ -451,3 +451,68 @@ describe('分镜表行号不被 prompt 边清掉', () => {
     });
   });
 });
+
+/* ─────────────── CosyVoice3 语音节点(2026-11):ref-voice / input-video 派发 ─────────────── */
+
+describe('入边派发 · video-dub / tts-gen', () => {
+  it('shot → video-dub(input-video)与 audio asset → video-dub(ref-voice)同时写入派生态', () => {
+    const nodes = [
+      node('s1', 'shot', { resultPath: '/tmp/out/shot.mp4' }),
+      node('a1', 'asset', { mediaType: 'audio', assetId: 'asset-audio-1' }),
+      node('d1', 'video-dub'),
+    ];
+    const edges: Edge[] = [
+      { from: 's1', to: 'd1', cls: '', label: 'input-video' },
+      { from: 'a1', to: 'd1', cls: '', label: 'ref-voice' },
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const data = nextNodes.find((n) => n.id === 'd1')!.data as Record<string, unknown>;
+    expect((data.inputVideoFrom as { nodeId: string }).nodeId).toBe('s1');
+    expect((data.refVoiceFrom as { nodeId: string }).nodeId).toBe('a1');
+  });
+
+  it('删边即撤销:inputVideoFrom / refVoiceFrom 都被清掉', () => {
+    const nodes = [
+      node('d1', 'video-dub', { inputVideoFrom: { nodeId: 's1' }, refVoiceFrom: { nodeId: 'a1' } }),
+      node('t1', 'tts-gen', { refVoiceFrom: { nodeId: 'a1' } }),
+    ];
+    const { nextNodes } = computeEdgeDerivations(nodes, []);
+    const dub = nextNodes.find((n) => n.id === 'd1')!.data as Record<string, unknown>;
+    expect(dub.inputVideoFrom).toBeUndefined();
+    expect(dub.refVoiceFrom).toBeUndefined();
+    const tts = nextNodes.find((n) => n.id === 't1')!.data as Record<string, unknown>;
+    expect(tts.refVoiceFrom).toBeUndefined();
+  });
+
+  it('audio-ref → tts-gen(ref-voice)派发;再次计算幂等', () => {
+    const nodes = [node('ar', 'audio-ref', { assetId: 'asset-audio-1' }), node('t1', 'tts-gen')];
+    const edges: Edge[] = [{ from: 'ar', to: 't1', cls: '', label: 'ref-voice' }];
+    const once = computeEdgeDerivations(nodes, edges);
+    const tts = once.nextNodes.find((n) => n.id === 't1')!.data as Record<string, unknown>;
+    expect((tts.refVoiceFrom as { nodeId: string }).nodeId).toBe('ar');
+    const twice = computeEdgeDerivations(once.nextNodes, edges);
+    expect(twice.changed).toBe(false);
+  });
+
+  it('tts-gen → shot(ref-audio)把 wav 路径注入 shot.refs', () => {
+    const nodes = [
+      node('t1', 'tts-gen', { resultPath: '/tmp/out/voice.wav' }),
+      node('s1', 'shot', { mode: 'ref-image', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 't1', to: 's1', cls: '', label: 'ref-audio' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const shot = nextNodes.find((n) => n.id === 's1')!.data as { refs?: Array<{ path?: string; role?: string }> };
+    expect(shot.refs).toEqual([{ path: '/tmp/out/voice.wav', role: 'ref-audio', auto: true }]);
+  });
+
+  it('video-dub → shot(ref-video)按视频产物注入', () => {
+    const nodes = [
+      node('d1', 'video-dub', { resultPath: '/tmp/out/dubbed.mp4' }),
+      node('s1', 'shot', { mode: 'ref-image', refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'd1', to: 's1', cls: '', label: 'ref-video' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const shot = nextNodes.find((n) => n.id === 's1')!.data as { refs?: Array<{ path?: string; role?: string }> };
+    expect(shot.refs).toEqual([{ path: '/tmp/out/dubbed.mp4', role: 'ref-video', auto: true }]);
+  });
+});

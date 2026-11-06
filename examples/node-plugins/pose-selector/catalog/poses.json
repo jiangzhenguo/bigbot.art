@@ -1,0 +1,94 @@
+{
+  "items": [
+    {
+      "id": "stand-front",
+      "label": "站立",
+      "description": "双脚与肩同宽，双手自然下垂，正面平视",
+      "system": "人体",
+      "category": "站姿",
+      "angle": "正面",
+      "thumb": "thumbs/stand-front.png"
+    },
+    {
+      "id": "walk-front",
+      "label": "行走",
+      "description": "正面向前行走，重心偏前脚",
+      "system": "人体",
+      "category": "动姿",
+      "angle": "正面",
+      "thumb": "thumbs/walk-front.png"
+    },
+    {
+      "id": "crouch-front",
+      "label": "半蹲",
+      "description": "屈膝下蹲，重心压低",
+      "system": "人体",
+      "category": "动姿",
+      "angle": "正面",
+      "thumb": "thumbs/crouch-front.png"
+    },
+    {
+      "id": "sit-front",
+      "label": "坐姿",
+      "description": "端坐，双腿前伸，正面平视",
+      "system": "人体",
+      "category": "坐姿",
+      "angle": "正面",
+      "thumb": "thumbs/sit-front.png"
+    },
+    {
+      "id": "cat-sit-front",
+      "label": "猫坐姿",
+      "description": "四足动物的坐姿参考",
+      "system": "动物",
+      "category": "坐姿",
+      "angle": "正面",
+      "thumb": "thumbs/cat-sit-front.png"
+    },
+    {
+      "id": "stand-side",
+      "label": "站立",
+      "description": "侧面站立，展示身体轮廓",
+      "system": "人体",
+      "category": "站姿",
+      "angle": "侧面",
+      "thumb": "thumbs/stand-side.png"
+    },
+    {
+      "id": "sit-side",
+      "label": "坐姿",
+      "description": "侧面端坐，展示坐姿轮廓",
+      "system": "人体",
+      "category": "坐姿",
+      "angle": "侧面",
+      "thumb": "thumbs/sit-side.png"
+    },
+    {
+      "id": "run-side",
+      "label": "奔跑",
+      "description": "侧面奔跑，摆臂与跨步",
+      "system": "人体",
+      "category": "动姿",
+      "angle": "侧面",
+      "thumb": "thumbs/run-side.png"
+    },
+    {
+      "id": "cat-walk-side",
+      "label": "猫行走",
+      "description": "四足动物侧面行走",
+      "system": "动物",
+      "category": "动姿",
+      "angle": "侧面",
+      "thumb": "thumbs/cat-walk-side.png"
+    },
+    {
+      "id": "stand-back",
+      "label": "站立",
+      "description": "背面站立，展示背部轮廓",
+      "system": "人体",
+      "category": "站姿",
+      "angle": "背面",
+      "thumb": "thumbs/stand-back.png"
+    }
+  ]
+}

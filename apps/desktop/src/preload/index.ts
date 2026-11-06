@@ -98,6 +98,7 @@ const api: BigBotArtApi = {
   setNodePluginEnabled: (id, enabled) => ipcRenderer.invoke(ch('setNodePluginEnabled'), id, enabled),
   removeNodePlugin: (id) => ipcRenderer.invoke(ch('removeNodePlugin'), id),
   runNodePlugin: (req) => ipcRenderer.invoke(ch('runNodePlugin'), req),
+  nodePluginCatalog: (kind) => ipcRenderer.invoke(ch('nodePluginCatalog'), kind),
   listSkills: () => ipcRenderer.invoke(ch('listSkills')),
   saveSkill: (input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }) =>
     ipcRenderer.invoke(ch('saveSkill'), input),
@@ -147,6 +148,18 @@ const api: BigBotArtApi = {
     const listener = (_e: unknown, p: unknown) => cb(p as never);
     ipcRenderer.on(ch('onVideoPostProgress'), listener);
     return () => ipcRenderer.removeListener('video-post-progress', listener);
+  },
+  // 🆕 语音合成 / 视频配音(CosyVoice3):CPU 长任务,产物落 outputs/dub/
+  ttsSynthesize: (input) => ipcRenderer.invoke(ch('ttsSynthesize'), input),
+  ttsProbe: () => ipcRenderer.invoke(ch('ttsProbe')),
+  ttsRunning: () => ipcRenderer.invoke(ch('ttsRunning')),
+  ttsLastProgress: () => ipcRenderer.invoke(ch('ttsLastProgress')),
+  ttsCancel: (input) => ipcRenderer.invoke(ch('ttsCancel'), input),
+  ttsSampleVoice: (input) => ipcRenderer.invoke(ch('ttsSampleVoice'), input),
+  onTtsProgress: (cb) => {
+    const listener = (_e: unknown, p: unknown) => cb(p as never);
+    ipcRenderer.on(ch('onTtsProgress'), listener);
+    return () => ipcRenderer.removeListener('tts-progress', listener);
   },
   revealInFinder: (target: { path: string }) => ipcRenderer.invoke(ch('revealInFinder'), target),
   getSettings: () => ipcRenderer.invoke(ch('getSettings')),

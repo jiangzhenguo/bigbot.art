@@ -543,6 +543,17 @@ export class MemoryStore {
 - **提示词不能只"心里想着"**:h3.write_prompt(镜头)或 canvas.update_node(图片)返回 ✓ 才算写上。视频节点 prompt 为空时 engine.submit 会被拒绝。
 - h3.write_prompt 只写提示词,**不提交生成**。要出片再 engine.submit。分镜表 storyboard.materialize 会先用模板铺一版提示词;需要按 H3 规范重写时:单镜用 h3.write_prompt,多镜用 h3.write_prompts 一次提交。成功回包只给字数与短摘要,完整提示词用 canvas.get_node(detail=true) 查看。
 
+【旁白 / 配音的唯一通道 — 不许只写进 prompt】
+- 用户要「念出来 / 配音 / 旁白成声」时,必须建 video-dub(已有成片)或 tts-gen(只要音频)再 engine.submit;**禁止**只把旁白写进 shot.prompt 的 Audio 段就算完成(成片里听不到那句旁白,是错误交付)。
+- 选节点:有现成成片(shot / video-upscale / timeline 产物)→ video-dub;只需要一段音色(wav,给镜头当 ref-audio,或同一音色复用)→ tts-gen。
+- **两种音色来源(2026-11 新增)**:
+  - data.voiceMode="clone"(缺省)= CosyVoice3 参考音克隆:video-dub 需要两条连线 —— 成片节点 → input-video(单值),音频资产 / audio-ref / tts-gen → ref-voice(单值);tts-gen 只连 ref-voice。未连 ref-voice 时自动使用官方示例音色(3.5s),「只给文字」也能出音。
+  - data.voiceMode="design" = **Qwen3-TTS 文字设计音色**:不需要任何参考音,用一句话描述声音;写 data.voiceDescription(如「一位三十多岁的女性,声音温暖沉稳」),或 data.voiceProfile 选内置类型(narrator-male / narrator-female / documentary / news-anchor / warm-female / energetic-young)。可选 data.language(auto/chinese/english/…)与 data.temperature。用户明确说「想要某种音色 / 萝莉音 / 大叔音 / 播音腔 / 文字生成音色」时优先用 design,不要逼用户提供参考音。
+- 旁白正文写在节点 data.text(不是 prompt),参考音逐字稿/instruct 也在 data 里(design 模式忽略 refText/instruct)。
+- 禁止编造 assetId;clone 模式的参考音必须来自真实资产。
+- 提交时若引擎未准备,engine.submit 会返回「请先执行 mlxgen prepare --model cosyvoice3」(clone)或「mlxgen prepare --model qwen3-tts-voice-design」(design);如实转告用户,**不要反复重试、更不要假装合成成功**。
+- 产物:tts-gen = wav;video-dub = mp4(画面不变,replace=换掉原声 / mix=叠在原声上)。要改文案就 canvas.update_node 改 data.text 再 engine.submit。若合成结果注明「示例音色」,如实告诉用户这是官方示例、可换成自己的声音。
+
 【选中节点】用户消息带 [当前选中节点] 时,该节点就是本轮默认操作对象:改参数用 canvas.update_node 改它;做下游处理(编辑/裁切/拼接等)用 canvas.connect 把它直接连为新节点的上游。禁止绕道 assets.import 复制它的产物、另建资产节点再连线——那样新链路与原节点脱钩,原节点重新生成后下游不会跟随。
 
 【称呼规则】对用户说话时用节点标题称呼节点(如「镜头 02」「白底产品图」),禁止把节点 id(如 pal1-levm)直接写进回复正文或 ask.user 的选项;id 只用于工具参数。多个节点同名有歧义时,用「标题 + 关键差异(尺寸/位置/序号)」区分,仍不写裸 id。

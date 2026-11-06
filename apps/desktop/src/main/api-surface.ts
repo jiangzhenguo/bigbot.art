@@ -70,6 +70,14 @@ import {
   listRunningVideoPost,
   lastVideoPostProgress,
 } from './video-post';
+import {
+  synthesizeSpeech,
+  probeTtsTooling,
+  cancelTts,
+  listRunningTts,
+  lastTtsProgress,
+  ensureSampleVoice,
+} from './tts';
 import type { RenderQueue } from './render-queue';
 import type { AutoContinueController } from './auto-continue';
 import {
@@ -121,6 +129,8 @@ import type {
   RecallMessage,
   VideoUpscaleRequest,
   VideoPostProgressEvent,
+  TtsRequest,
+  TtsProgressEvent,
   MediaInfo,
   MediaKind,
   ProjectExportRequest,
@@ -543,6 +553,7 @@ ipcMain.handle('node-plugins-install', async () => {
 ipcMain.handle('node-plugins-set-enabled', (_e, id: string, enabled: boolean) => nodePlugins.setEnabled(id, enabled));
 ipcMain.handle('node-plugins-remove', (_e, id: string) => nodePlugins.remove(id));
 ipcMain.handle('node-plugins-run', (_e, req: import('@bigbotart/shared').NodePluginRunRequest) => nodePlugins.run(req));
+ipcMain.handle('node-plugins-catalog', (_e, kind: string) => nodePlugins.getCatalog(kind));
 
 // ---------- IPC:Skills(画布模板 + Agent 指令段双形态,激活状态持久化在 canvasMemory) ----------
 ipcMain.handle('list-skills', () => skills.list());
@@ -753,6 +764,39 @@ ipcMain.handle('video-post-last-progress', () => lastVideoPostProgress());
 // 检查器「取消」:按节点中止排队或运行中的增强(去块 / SeedVR2 / 修脸子进程一起停)
 ipcMain.handle('video-post-cancel', (_e, input?: { nodeId?: string }) =>
   cancelVideoPost(typeof input?.nodeId === 'string' && input.nodeId ? input.nodeId : undefined));
+
+// ---------- IPC:语音合成 / 视频配音(CosyVoice3;video-dub / tts-gen 节点) ----------
+// 与 video-upscale 同族:主进程本地长任务、不进 RenderQueue;命令是 mlxgen tts / mlxgen dub。
+ipcMain.handle('tts-synthesize', (_e, input: TtsRequest) =>
+  synthesizeSpeech(input, {
+    onProgress: (p) => {
+      publish('tts-progress', { ...p, nodeId: input?.nodeId ?? '' } satisfies TtsProgressEvent);
+    },
+  }));
+// 就绪探测:mlxgen CLI + prepared package(model/runtime/venv/manifest);缺包给可照抄的 prepare 命令
+ipcMain.handle('tts-probe', () => probeTtsTooling());
+ipcMain.handle('tts-running', () => listRunningTts());
+ipcMain.handle('tts-last-progress', () => lastTtsProgress());
+ipcMain.handle('tts-cancel', (_e, input?: { nodeId?: string }) =>
+  cancelTts(typeof input?.nodeId === 'string' && input.nodeId ? input.nodeId : undefined));
+// 示例音色:CosyVoice3 无预设音色,用户第一次用时往往没有 3–30 秒干净人声。
+// 把引擎包自带的官方参考音复制到产物目录并登记成项目资源,检查器一键绑定即可开箱试用。
+ipcMain.handle('tts-sample-voice', async (_e, input?: { projectId?: string }) => {
+  const prep = ensureSampleVoice();
+  if (!prep.ok || !prep.path) return prep;
+  try {
+    const imported = await assets.importFromPaths([prep.path], {
+      projectId: typeof input?.projectId === 'string' ? input.projectId : undefined,
+    });
+    const first = imported.assets[0];
+    if (!first) {
+      return { ok: false, error: imported.failed[0]?.error ?? '示例音色登记资产失败' };
+    }
+    return { ok: true, assetId: first.id, path: prep.path, name: first.name };
+  } catch (e) {
+    return { ok: false, error: `示例音色登记资产失败:${(e as Error).message}` };
+  }
+});
 
 // ---------- IPC:在系统文件管理器中显示(Finder) ----------
 // 右键「在 Finder 中显示」:renderer 解析节点真实产物路径 → 主进程校验白名单后 shell 定位;

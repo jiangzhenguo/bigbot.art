@@ -14,6 +14,8 @@ import {
   capabilityOf,
   resolveImageModel,
   isPluginNodeKind,
+  normalizeVoiceMode,
+  QWEN3_TTS_PROFILES,
 } from '@bigbotart/shared';
 import type { CanvasNode } from '../types';
 import { useToolModels } from '../tool-models-store';
@@ -440,6 +442,90 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
             </div>
           )}
           <div className="nmeta mono">{summary}{applied.length > 1 ? ` · ${applied.length} 阶段` : ''}</div>
+        </div>
+      );
+    }
+    case 'tts-gen': {
+      const text = String(d.text ?? '');
+      const chars = text.replace(/\s/g, '').length;
+      const outWav = productOf(n);
+      const speed = d.speed == null ? 1 : Number(d.speed);
+      const designMode = normalizeVoiceMode(d.voiceMode) === 'design';
+      const voiceFrom = (d.refVoiceFrom as { nodeId?: string } | undefined)?.nodeId;
+      const profileLabel =
+        QWEN3_TTS_PROFILES.find((p) => p.id === String(d.voiceProfile ?? ''))?.label ?? '自定义描述';
+      const voiceState = designMode
+        ? `音色 ← ${String(d.voiceProfile ?? '') ? profileLabel : d.voiceDescription ? '文字描述' : '未填写描述'}`
+        : voiceFrom
+          ? `ref-voice ← 节点 ${voiceFrom.slice(0, 8)}`
+          : d.refVoiceAssetId
+            ? `ref-voice ← 资产 ${String(d.refVoiceAssetId).slice(0, 8)}`
+            : 'ref-voice 未连接';
+      return (
+        <div className="nb">
+          {outWav ? (
+            <AudioPlayer src={outputUrlOf(outWav)} name={basenameOf(outWav)} compact />
+          ) : (
+            <div className="wave">
+              {WAVE_BARS.map((h, i) => (
+                <i key={i} style={{ height: h }} />
+              ))}
+            </div>
+          )}
+          <div className="nparams">
+            {designMode
+              ? `Qwen3-TTS · ${profileLabel} · seed ${Number(d.seed ?? 42)} · wav`
+              : `CosyVoice3 · 语速 ${speed} · seed ${Number(d.seed ?? 42)} · wav`}
+          </div>
+          <div className="nmeta mono" style={{ marginTop: 3 }}>
+            {chars > 0 ? `${chars} 字` : '未填旁白文本'} · {voiceState}
+          </div>
+        </div>
+      );
+    }
+    case 'video-dub': {
+      const text = String(d.text ?? '');
+      const chars = text.replace(/\s/g, '').length;
+      const outMp4 = productOf(n);
+      const mixMode = String(d.mixMode ?? 'replace');
+      const speed = d.speed == null ? 1 : Number(d.speed);
+      const designMode = normalizeVoiceMode(d.voiceMode) === 'design';
+      const vFrom = (d.inputVideoFrom as { nodeId?: string } | undefined)?.nodeId;
+      const voiceFrom = (d.refVoiceFrom as { nodeId?: string } | undefined)?.nodeId;
+      const profileLabel =
+        QWEN3_TTS_PROFILES.find((p) => p.id === String(d.voiceProfile ?? ''))?.label ?? '自定义描述';
+      const linkState = [
+        vFrom ? `input-video ← 节点 ${vFrom.slice(0, 8)}` : 'input-video 未连接',
+        designMode
+          ? `音色 ← ${String(d.voiceProfile ?? '') ? profileLabel : d.voiceDescription ? '文字描述' : '未填写描述'}`
+          : voiceFrom
+            ? `ref-voice ← 节点 ${voiceFrom.slice(0, 8)}`
+            : d.refVoiceAssetId
+              ? `ref-voice ← 资产 ${String(d.refVoiceAssetId).slice(0, 8)}`
+              : 'ref-voice 未连接',
+      ].join(' · ');
+      return (
+        <div className="nb">
+          {outMp4 ? (
+            <VideoThumb src={outputUrlOf(outMp4)} badge={`✓ ${basenameOf(outMp4)}`} />
+          ) : (
+            <div
+              className="nthumb"
+              style={{ aspectRatio: '16/9', display: 'grid', placeItems: 'center', background: 'var(--surface-warm)', border: '1.5px dashed var(--border)', color: 'var(--meta)', fontSize: 11, textAlign: 'center', padding: 6 }}
+            >
+              {designMode ? 'Qwen3-TTS · 待配音' : 'CosyVoice3 · 待配音'}
+              <br />
+              {chars > 0 ? `${chars} 字旁白` : '未填旁白文本'}
+            </div>
+          )}
+          <div className="nparams">
+            {designMode
+              ? `Qwen3-TTS · ${mixMode} · ${profileLabel} · 旁白 ${chars} 字`
+              : `CosyVoice3 · ${mixMode} · 语速 ${speed} · 旁白 ${chars} 字`}
+          </div>
+          <div className="nmeta mono" style={{ marginTop: 3 }}>
+            {linkState}
+          </div>
         </div>
       );
     }

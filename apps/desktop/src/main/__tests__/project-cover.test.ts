@@ -155,6 +155,17 @@ describe('collectCoverCandidates · 只认磁盘上真实存在的文件', () =>
     expect(collectCoverCandidates([c], 'c1', onDisk('/v.mp4'))[0]!.isVideo).toBe(true);
   });
 
+  it('音频产物(tts-gen 的 wav)不当封面候选 —— 否则封面会变成破图', () => {
+    const c = canvas('c1', [
+      node('n-tts', 'tts-gen', { resultPath: '/voice.wav' }),
+      node('n-img', 'image-gen', { resultPath: '/pic.png' }),
+    ]);
+    const got = collectCoverCandidates([c], 'c1', onDisk('/voice.wav', '/pic.png'));
+    expect(got.map((x) => x.path)).toEqual(['/pic.png']);
+    // 只有 wav 时也不选它(返回空 → 渲染层走占位,而不是破图)
+    expect(collectCoverCandidates([canvas('c2', [node('n2', 'tts-gen', { resultPath: '/only.wav' })])], 'c2', onDisk('/only.wav'))).toEqual([]);
+  });
+
   it('无节点/无产物返回空', () => {
     expect(collectCoverCandidates([canvas('c1', [])], 'c1')).toEqual([]);
     expect(collectCoverCandidates([], 'c1')).toEqual([]);

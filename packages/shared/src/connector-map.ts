@@ -18,6 +18,8 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     //(直连会造出「shared 判定无可用端口」的裸边 ⇒ 节点不停闪烁,2026-09 事故)
     'frame-grab': 'input-video', // 从镜头成片裁切取帧 → 图片资源
     'video-upscale': 'input', // 镜头成片 → 视频增强(超分 + 修脸)
+    // 🆕 镜头成片 → 视频配音(CosyVoice3:画面不动,只换/混音轨)
+    'video-dub': 'input-video',
     // 🆕 视频 → 音频参考节点(2026-10-08):把成片的**内嵌音轨**抽出来喂给音频参考节点,
     // 由它再转给下游镜头(--ref-audio)。抽音由 ffmpeg 完成,产物落资产库并自动绑定。
     'audio-ref': 'input-audio',
@@ -62,6 +64,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     shot: 'first-frame/ref-video/ref-audio', // 增强结果 → 首帧直通 / 参考视频(风格/动作)/ 内嵌音轨作声音参考
     'frame-grab': 'input-video', // 从增强成片取帧 → 图片资源
     'audio-ref': 'input-audio', // 增强成片的音轨 → 音频参考节点(同 shot → audio-ref)
+    'video-dub': 'input-video', // 增强成片 → 配音(画面不动)
     timeline: 'clip', // 增强成片入轨
     'video-upscale': 'input', // 链式二次增强
   },
@@ -97,6 +100,9 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
   },
   'audio-ref': {
     shot: 'ref-audio', // 音轨参考(带声直出)
+    // 🆕 音频参考节点绑定的音频资产可作 CosyVoice3 的参考音色(与 asset 音频同语义)
+    'video-dub': 'ref-voice',
+    'tts-gen': 'ref-voice',
     timeline: 'audio-track',
   },
   // 🆕 视频裁切取帧:产物是**图片** → 与其它图片产物同类(视频 → 图片的合法转换点)
@@ -129,6 +135,23 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     timeline: 'sequence',
     doc: 'prompt',
   },
+  /* 🆕 视频配音(CosyVoice3 dub,2026-11):成片 + 参考音色 + 旁白 → 带旁白 mp4。
+     产物与其它视频产物同口径(参考视频 / 抽音轨 / 取帧 / 再增强 / 入轨),
+     另可再接一条 video-dub 改文案重配(画面仍是同一段)。 */
+  'video-dub': {
+    shot: 'ref-video/ref-audio',
+    'frame-grab': 'input-video',
+    'video-upscale': 'input',
+    'audio-ref': 'input-audio',
+    'video-dub': 'input-video',
+    timeline: 'clip',
+  },
+  /* 🆕 文生语音(CosyVoice3 tts,2026-11):文本 + 参考音色 → wav。
+     wav 只有两个合法去处:镜头的 --ref-audio,或另一条配音的参考音色。 */
+  'tts-gen': {
+    shot: 'ref-audio',
+    'video-dub': 'ref-voice',
+  },
   timeline: {
     /* 🆕 成片是视频产物(2026-10 用户反馈:「+」弹层应与其它视频节点同类):
        导出成功后 data.resultPath = 成片绝对路径,下游解析与其它视频产物节点同口径。
@@ -138,6 +161,7 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     'frame-grab': 'input-video', // 从成片裁切取帧 → 图片资源
     'video-upscale': 'input', // 成片再增强(超分/修脸)
     'audio-ref': 'input-audio', // 抽成片的内嵌音轨 → 音频参考节点
+    'video-dub': 'input-video', // 成片 → 配音
     timeline: 'clip', // 成片入另一条时间线
     doc: 'prompt',
   },
@@ -152,6 +176,9 @@ export const CONNECTOR_MAP: Record<string, Record<string, string>> = {
     split: 'input', // 拆分源(图片素材)
     'frame-grab': 'input-video', // 视频素材 → 裁切取帧(视频素材生成静帧的唯一通道)
     'video-upscale': 'input', // 视频素材 → 视频增强(超分 + 修脸)
+    // 视频素材 → 配音(input-video);音频素材 → 参考音色(ref-voice)。媒体不匹配的端口会被过滤。
+    'video-dub': 'input-video/ref-voice',
+    'tts-gen': 'ref-voice', // 音频素材 → 文生语音的参考音色
     timeline: 'clip', // 静帧/视频素材入轨;音频为 audio-track
     doc: 'prompt', // 文档资产 → 文档引用
   },
@@ -170,9 +197,10 @@ export const PORT_SEMANTICS: Record<string, string> = {
   'last-frame': '尾帧条件(FL2VA)',
   'ref-image': '参考图(→ shot 是 Ref2VA 身份/场景锁定;→ image-gen 默认走 Qwen-Image-2.1 参考编辑(1-10 张),显式选 flux.2-klein 才是多参考生成;→ image-edit 是指令/参考编辑)',
   'ref-audio': '音轨参考(带声直出)',
+  'ref-voice': '参考音色(CosyVoice3 零样本克隆;3–30 秒干净人声,无预设音色,必填)',
   'ref-video': '参考视频(风格/动作参考;→ shot 时走 h3 --ref-video,默认连同源片内嵌音轨一起注入,可在检查器勾「忽略音轨」改走 --ref-silent-video)',
   input: '输入图/输入帧(编辑/超分源;→ video-upscale 时是待增强视频)',
-  'input-video': '输入视频(→ video-upscale 待增强;→ frame-grab 待裁切取帧)',
+  'input-video': '输入视频(→ video-upscale 待增强;→ frame-grab 待裁切取帧;→ video-dub 待配音成片)',
   'input-audio': '输入音频(→ audio-ref:从视频抽出的音轨,抽完自动导入资产库并绑定)',
   piece: '拼接件(图片拼接 · 多值端口,按源节点画布位置排序)',
   'piece-N': '取拆分产物第 N 片(piece-1/piece-2/…,替代 input/piece 端口)',
@@ -185,7 +213,7 @@ export const PORT_SEMANTICS: Record<string, string> = {
 
 /** 单值端口:同一目标节点上该端口至多一条入边(多值端口:ref-image/prompt/clip/sequence/output/slot-*)
  *  `input-video`(video-upscale / frame-grab 的视频输入)语义上就是单值 —— 一个节点只能增强/取帧一路视频。 */
-export const SINGLE_VALUE_PORTS = new Set(['first-frame', 'last-frame', 'input', 'input-video', 'ref-audio', 'ref-video']);
+export const SINGLE_VALUE_PORTS = new Set(['first-frame', 'last-frame', 'input', 'input-video', 'ref-audio', 'ref-video', 'ref-voice']);
 
 /**
  * **未实现节点的 kind —— 入口已下架(2026-10-08)**。
@@ -227,7 +255,7 @@ export const HIDDEN_NODE_REASONS: Record<string, string> = {
 /** 人读的连接器能力摘要(给 Agent system prompt / 工具返回) */
 export function connectorSummary(): string {
   const lines: string[] = [];
-  const outRows = ['shot', 'audio-ref', 'image-gen', 'image-edit', 'image-upscale', 'video-upscale', 'asset'];
+  const outRows = ['shot', 'audio-ref', 'video-dub', 'tts-gen', 'image-gen', 'image-edit', 'image-upscale', 'video-upscale', 'asset'];
   for (const [src, targets] of Object.entries(CONNECTOR_MAP)) {
     // 已下架的 kind 不进 Agent 的能力说明 —— 列出来等于在鼓励模型去用它们,
     // 而 canvas.create_node 又会拒绝,白烧一轮往返(见 HIDDEN_NODE_KINDS)。
@@ -246,7 +274,7 @@ export function connectorSummary(): string {
     lines.push(`- ${src}:可连 ${per.join(';')}`);
   }
   lines.push(`- 收口到 ${CONNECTOR_OUTPUT_TARGET}:${outRows.join('/')}`);
-  lines.push('⚠️ 端口基数:first-frame/last-frame/input/ref-audio/ref-video 是单值端口,同一目标节点只允许一条入边;ref-image/prompt/clip/sequence/output 可多条。写边前系统会强制校验,不合法会被拒绝,单值端口重复连会自动替换旧边。');
+  lines.push('⚠️ 端口基数:first-frame/last-frame/input/ref-audio/ref-video/ref-voice 是单值端口,同一目标节点只允许一条入边;ref-image/prompt/clip/sequence/output 可多条。写边前系统会强制校验,不合法会被拒绝,单值端口重复连会自动替换旧边。');
   return lines.join('\n');
 }
 
@@ -266,6 +294,8 @@ export const NODE_KIND_GUIDE = [
   ['shot', '视频镜头(h3.c:文生/首帧/尾帧/首尾帧/参考图/参考视频;参考视频端口 ref-video 可接视频 asset、上游镜头成片、视频增强产物,默认连同源片音轨一起参考(节点 data.refVideoSilent=true 改走 --ref-silent-video 只取画面);支持 🚀 加速 LoRA:data.accel={enabled,packId,steps},packId 经 accel.list 查蒸馏包并沿用其 steps,开启后提交自动用蒸馏包+少步数);支持 🎯 二采(second pass):data.secondPass=true 走同画布精修(重跑去噪尾部 0.15,构图不变、约 +15~20% 时间),data.secondPass={enabled:true, mode:"refine"|"canvas", fraction}(canvas = 画布二采 Hires:第一遍小画布定构图、第二遍大画布重采样,自动配 --render-* + --second-pass-canvas;画布/比例由 shared 的 planSecondPass 统一推算,别自己拼参数)'],
   ['timeline', '时间线/剪辑(FFmpeg 导出;导出成片后自身也是**视频产物源**:可连 frame-grab 取帧 / video-upscale 再增强 / shot 的 ref-video·ref-audio / audio-ref 抽音轨 / 另一条 timeline 入轨,下游从 data.resultPath 读成片)'],
   ['audio-ref', '音频参考(--ref-audio):把音频资产作 shot 的音轨参考,产物带声直出'],
+  ['video-dub', '视频配音(CosyVoice3):给**已有成片**配一条可控音色的旁白,画面 stream-copy 不动,只重编码音轨。本地 CPU 长任务、不进 RenderQueue。端口:input-video(单值,连 shot / video-upscale / timeline 成片 / 视频 asset)、ref-voice(单值,连音频 asset / audio-ref / tts-gen);旁白正文写在 data.text(不是 prompt)。参数:data={text, voiceMode:clone|design, voiceDescription, voiceProfile, language, temperature, mixMode:replace|mix, origVolume, ttsVolume, keepWav, refText, instruct, speed, seed}。音色两种来源:**clone**(缺省,CosyVoice3 参考音/官方示例音色)或 **design**(Qwen3-TTS 用文字描述设计音色,不需要 ref-voice;voiceProfile 可选 narrator-male/narrator-female/documentary/news-anchor/warm-female/energetic-young)'],
+  ['tts-gen', '文生语音(CosyVoice3):文本 + 参考音色 → wav,不绑视频。本地 CPU 任务。端口:ref-voice(单值,音频 asset / audio-ref);正文 data.text。参数补充:data.voiceMode=clone(缺省,CosyVoice3 参考音/官方示例音色)或 design(Qwen3-TTS 文字设计音色,写 data.voiceDescription 或 voiceProfile,不需要 ref-voice,可配 language/temperature)。产物可连 shot 的 ref-audio 或 video-dub 的 ref-voice(同一音色复用)'],
 ] as const;
 
 export function nodeKindGuide(): string {

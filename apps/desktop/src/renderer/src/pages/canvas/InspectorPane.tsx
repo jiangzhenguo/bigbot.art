@@ -26,6 +26,8 @@ const RERUNABLE_KINDS = new Set<NodeKind | 'plain'>([
   'image-split',
   'frame-grab',
   'video-upscale',
+  'video-dub',
+  'tts-gen',
 ]);
 
 interface InspectorPaneProps {
@@ -181,22 +183,39 @@ export function InspectorPane({
                 点了会落到 h3c 视频提交分支);timeline / document 同理 —— 一律不显示按钮,
                 避免给出一个点了没反应(或报错)的假入口。 */}
             {selNode.kind && RERUNABLE_KINDS.has(selNode.kind) &&
-              (running && selNode.kind === 'video-upscale' ? (
+              (running ? (
                 <div className="vpost-rerun">
-                  <button className="btn btn-s rerun-btn" disabled data-od-id="rerun-btn" title="该节点正在增强中">
-                    增强中…
+                  <button className="btn btn-s rerun-btn" disabled data-od-id="rerun-btn" title="该节点正在处理中">
+                    {selNode.kind === 'video-upscale' ? '增强中…' : '合成中…'}
                   </button>
-                  <VideoPostCancelButton nodeId={selNode.id} toastMsg={toastMsg} className="btn btn-s rerun-btn" />
+                  {selNode.kind === 'video-upscale' ? (
+                    <VideoPostCancelButton nodeId={selNode.id} toastMsg={toastMsg} className="btn btn-s rerun-btn" />
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-s rerun-btn"
+                      onClick={() => {
+                        void window.bigbotart
+                          .ttsCancel({ nodeId: selNode.id })
+                          .then((r) => {
+                            if (!r.ok) toastMsg(r.error ?? '取消失败');
+                          })
+                          .catch(() => toastMsg('取消失败'));
+                      }}
+                    >
+                      取消
+                    </button>
+                  )}
                 </div>
               ) : (
                 <button
                   className="btn btn-s rerun-btn"
                   onClick={onRerunSelected}
                   disabled={running}
-                  title={running ? '该节点正在增强中,请等待当前任务完成' : undefined}
+                  title={running ? '该节点正在处理中,请等待当前任务完成' : undefined}
                   data-od-id="rerun-btn"
                 >
-                  {running ? '增强中…' : '仅重跑该节点'}
+                  仅重跑该节点
                 </button>
               ))}
           </>

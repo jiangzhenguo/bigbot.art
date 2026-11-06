@@ -48,6 +48,40 @@ export interface NodePluginParametersSchema {
   required?: string[];
 }
 
+/**
+ * 受控的检查器 UI 声明。首版只有一种控件 `picker`（可视化选择器）：
+ * 宿主按声明渲染通用组件（搜索 / 筛选 / 分组 / 缩略图网格 / 预览），
+ * 插件**不提供** React 代码，UI 能力由宿主统一实现。
+ */
+export interface NodePluginUiDeclaration {
+  type: 'picker';
+  /** 控件标题，例如「姿势选择器」。 */
+  title: string;
+  /** 选中项 id 写入的节点参数名，必须在 parametersSchema.properties 中声明。 */
+  valueParam: string;
+  /** 可选：把清单项的某个字段写入第二个参数（例如 angle）。 */
+  variantParam?: string;
+  /** variantParam 对应的清单项字段名；缺省时用 tabField。 */
+  variantField?: string;
+  /**
+   * 可选：清单项里「值字段」的名字，写入 valueParam 的不是条目 id 而是该字段的值。
+   *
+   * 场景：插件的参数是一个长枚举值（例如「id | 体系 | 分类 | 名称」），
+   * 而清单条目 id 是短 id（full_sexy_P001）。此时用 valueField 指明写哪个字段。
+   */
+  valueField?: string;
+  /** 清单文件（相对插件根目录）的 JSON，含 items 数组。 */
+  catalog: string;
+  /** 搜索命中的字段名；缺省 ['id','label']。 */
+  searchFields?: string[];
+  /** 渲染成下拉筛选的字段名（例如体系、分类）。 */
+  filterFields?: string[];
+  /** 渲染成分组 tab 的字段名（例如视角 angle）。 */
+  tabField?: string;
+  /** 缩略图字段名；其值是相对清单文件所在目录的图片路径。 */
+  thumbnailField?: string;
+}
+
 export interface NodePluginManifestNode {
   /** 插件内局部 kind，不带 plugin: 前缀。 */
   kind: string;
@@ -59,6 +93,8 @@ export interface NodePluginManifestNode {
   parametersSchema: NodePluginParametersSchema;
   /** 相对插件根目录的执行入口，禁止绝对路径与 .. 穿越。 */
   executor: string;
+  /** 可选的受控 UI 声明；缺省走 Schema 自动生成的原生控件。 */
+  ui?: NodePluginUiDeclaration;
 }
 
 export interface NodePluginManifest {
@@ -86,6 +122,8 @@ export interface NodePluginDefinition {
   defaultData: NodePluginData;
   parametersSchema: NodePluginParametersSchema;
   executor: string;
+  /** 受控 UI 声明（白名单拷贝；缺省表示用原生控件）。 */
+  ui?: NodePluginUiDeclaration;
 }
 
 export interface NodePluginRunRequest {
@@ -391,7 +429,7 @@ export function validateNodePluginManifest(input: unknown): ValidateNodePluginMa
         const node = fixedShape(
           rawNode,
           ['kind', 'title', 'description', 'inputs', 'outputs', 'defaultData', 'parametersSchema', 'executor'],
-          [],
+          ['ui'],
           nodePath,
           errors,
         );
@@ -413,6 +451,16 @@ export function validateNodePluginManifest(input: unknown): ValidateNodePluginMa
           issue(errors, `${nodePath}.executor`, 'executor', 'executor 必须是插件根目录内的相对路径，禁止绝对路径、URI、空段与 ..');
         }
         validateParametersSchema(node.parametersSchema, `${nodePath}.parametersSchema`, errors);
+        if (node.ui !== undefined) {
+          validateNodePluginUi(
+            node.ui,
+            `${nodePath}.ui`,
+            errors,
+            isRecord(node.parametersSchema) && isRecord(node.parametersSchema.properties)
+              ? (node.parametersSchema as unknown as NodePluginParametersSchema)
+              : undefined,
+          );
+        }
         if (!isRecord(node.defaultData)) {
           issue(errors, `${nodePath}.defaultData`, 'shape', 'defaultData 必须是对象');
         } else if (isRecord(node.parametersSchema) && isRecord(node.parametersSchema.properties)) {
@@ -490,6 +538,7 @@ export function publicNodePluginDefinition(
     defaultData: { ...node.defaultData },
     parametersSchema,
     executor: node.executor,
+    ...(node.ui ? { ui: { ...node.ui } } : {}),
   };
 }
 
@@ -506,6 +555,55 @@ export function normalizeNodePluginData(data: unknown, schema: NodePluginParamet
   }
   // fromEntries 会把 __proto__ 等键建成普通自有属性，避免原型污染。
   return Object.fromEntries(entries);
+}
+
+/**
+ * picker 独占的参数名集合。
+ *
+ * 这些参数的值**由用户在检查器里选**，建节点那一刻必然还是空的。
+ * 因此建节点阶段不能拿 parametersSchema.required 去卡它们 —— 否则节点永远建不出来，
+ * 检查器也就永远打不开，picker 形同虚设。
+ */
+export function nodePluginPickerOwnedParams(ui: NodePluginUiDeclaration | undefined): string[] {
+  if (!ui) return [];
+  return [ui.valueParam, ui.variantParam].filter((name): name is string => !!name);
+}
+
+/**
+ * 校验节点参数，但**豁免 picker 独占的必填参数**。
+ *
+ * 用于「建节点」这一刻：picker 的值还没选，允许为空；
+ * 其余必填参数仍然必须齐全，非法值照样报错（不静默吞错）。
+ */
+export function validateNodePluginDataForCreate(
+  data: unknown,
+  schema: NodePluginParametersSchema,
+  ui?: NodePluginUiDeclaration,
+): ValidateNodePluginDataResult {
+  const owned = new Set(nodePluginPickerOwnedParams(ui));
+  const errors: NodePluginValidationIssue[] = [];
+  try {
+    validateParametersSchema(schema, '$schema', errors);
+    if (errors.length > 0) return { ok: false, errors };
+    if (!isRecord(data)) {
+      issue(errors, '$', 'type', '节点参数必须是对象');
+      return { ok: false, errors };
+    }
+    const normalized = normalizeNodePluginData(data, schema);
+    for (const key of schema.required ?? []) {
+      // picker 独占参数在建节点时允许为空 —— 它的值由用户在检查器里选。
+      if (owned.has(key)) continue;
+      if (!hasOwn(normalized, key)) issue(errors, `$.${key}`, 'required', `缺少必填参数 ${key}`);
+    }
+    for (const [key, property] of Object.entries(schema.properties)) {
+      if (hasOwn(normalized, key)) validatePrimitive(normalized[key], property, `$.${key}`, errors);
+    }
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, data: normalized };
+  } catch (error) {
+    issue(errors, '$', 'exception', `参数读取失败:${error instanceof Error ? error.message : String(error)}`);
+    return { ok: false, errors };
+  }
 }
 
 /** 先归一化，再校验 object/required/type/enum/minimum/maximum。未知字段默认剔除。 */
@@ -588,4 +686,195 @@ export function nodePluginAgentSummary(definitions: readonly NodePluginDefinitio
     ].join('；');
   });
   return ['可用节点插件(kind 必须原样使用):', ...lines].join('\n');
+}
+
+/* ────────────────────────────── 受控 UI：可视化选择器(picker) ────────────────────────────── */
+
+export interface NodePluginCatalogItem {
+  /** 清单项唯一 id；选中后写入 valueParam。 */
+  id: string;
+  /** 显示名。 */
+  label: string;
+  description?: string;
+  /** 缩略图 URL（bba-plugin://），没有图时缺省。 */
+  thumb?: string;
+  /** 其余字段（体系 / 分类 / 视角…），值只允许 string / number / boolean。 */
+  fields: Record<string, NodePluginPrimitive>;
+}
+
+export interface NodePluginCatalog {
+  items: NodePluginCatalogItem[];
+  /** 清单里出现过的全部附加字段名（供 UI 提示与调试）。 */
+  fields: string[];
+}
+
+export type NodePluginCatalogResult =
+  | { ok: true; catalog: NodePluginCatalog }
+  | { ok: false; error: string };
+
+export type ValidateNodePluginCatalogResult =
+  | { ok: true; catalog: NodePluginCatalog }
+  | { ok: false; errors: NodePluginValidationIssue[] };
+
+/** picker 缩略图 URL：bba-plugin://<pluginId>/<version>/<相对路径>。 */
+export function nodePluginAssetUrl(pluginId: string, version: string, relativePath: string): string {
+  const encoded = relativePath
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `bba-plugin://${pluginId}/${encodeURIComponent(version)}/${encoded}`;
+}
+
+const UI_REQUIRED = ['type', 'title', 'valueParam', 'catalog'] as const;
+const UI_OPTIONAL = ['variantParam', 'variantField', 'valueField', 'searchFields', 'filterFields', 'tabField', 'thumbnailField'] as const;
+
+/** 字段名必须是安全 id；清单项字段名同理，避免污染原型或制造怪异路径。 */
+function safeFieldName(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$/.test(value);
+}
+
+/**
+ * 校验受控 UI 声明。valueParam / variantParam 必须已在 parametersSchema 中声明，
+ * 否则选择结果无处落盘（会被归一化丢掉）——这类错误必须在安装前拦下。
+ */
+export function validateNodePluginUi(
+  value: unknown,
+  path: string,
+  errors: NodePluginValidationIssue[],
+  schema?: NodePluginParametersSchema,
+): void {
+  const ui = fixedShape(value, UI_REQUIRED, UI_OPTIONAL, path, errors);
+  if (!ui) return;
+  if (ui.type !== 'picker') {
+    issue(errors, `${path}.type`, 'ui-type', '首版只支持 type=picker');
+  }
+  if (!nonEmptyText(ui.title, 120)) issue(errors, `${path}.title`, 'shape', 'title 须为 1–120 字符');
+  if (!safeId(ui.valueParam)) {
+    issue(errors, `${path}.valueParam`, 'id', 'valueParam 须为小写字母/数字/连字符组成的参数名');
+  } else if (schema && !hasOwn(schema.properties, ui.valueParam)) {
+    issue(errors, `${path}.valueParam`, 'ui-param', `valueParam ${ui.valueParam} 未在 parametersSchema 中声明`);
+  }
+  if (ui.variantParam !== undefined) {
+    if (!safeId(ui.variantParam)) {
+      issue(errors, `${path}.variantParam`, 'id', 'variantParam 须为小写字母/数字/连字符组成的参数名');
+    } else if (schema && !hasOwn(schema.properties, ui.variantParam)) {
+      issue(errors, `${path}.variantParam`, 'ui-param', `variantParam ${ui.variantParam} 未在 parametersSchema 中声明`);
+    }
+  }
+  if (ui.variantField !== undefined && !safeFieldName(ui.variantField)) {
+    issue(errors, `${path}.variantField`, 'ui-field', 'variantField 须为合法字段名');
+  }
+  if (ui.valueField !== undefined && !safeFieldName(ui.valueField)) {
+    issue(errors, `${path}.valueField`, 'ui-field', 'valueField 须为合法字段名');
+  }
+  if (!safeExecutor(ui.catalog)) {
+    issue(errors, `${path}.catalog`, 'executor', 'catalog 必须是插件根目录内的相对路径，禁止绝对路径、URI、空段与 ..');
+  }
+  for (const key of ['searchFields', 'filterFields'] as const) {
+    const list = ui[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      issue(errors, `${path}.${key}`, 'shape', `${key} 必须是字符串数组`);
+      continue;
+    }
+    const seen = new Set<string>();
+    list.forEach((field, index) => {
+      if (!safeFieldName(field)) {
+        issue(errors, `${path}.${key}[${index}]`, 'ui-field', `${key} 的元素须为合法字段名`);
+        return;
+      }
+      if (seen.has(field)) issue(errors, `${path}.${key}[${index}]`, 'duplicate', `${key} 重复声明 ${field}`);
+      seen.add(field);
+    });
+  }
+  for (const key of ['tabField', 'thumbnailField'] as const) {
+    if (ui[key] !== undefined && !safeFieldName(ui[key])) {
+      issue(errors, `${path}.${key}`, 'ui-field', `${key} 须为合法字段名`);
+    }
+  }
+}
+
+/**
+ * 校验插件清单文件。条目 = id + label + 可选描述/缩略图 + 其余字段；
+ * id 必须唯一；缩略图必须是相对路径（真实文件由主进程在安装/加载时核对）。
+ */
+export function validateNodePluginCatalog(input: unknown): ValidateNodePluginCatalogResult {
+  const errors: NodePluginValidationIssue[] = [];
+  try {
+    const rawItems = Array.isArray(input)
+      ? input
+      : isRecord(input) && Array.isArray(input.items)
+        ? input.items
+        : undefined;
+    if (!rawItems) {
+      issue(errors, '$', 'shape', '清单必须是数组，或包含 items 数组的对象');
+      return { ok: false, errors };
+    }
+    const items: NodePluginCatalogItem[] = [];
+    const seen = new Set<string>();
+    const fieldNames = new Set<string>();
+    rawItems.forEach((rawItem, index) => {
+      const itemPath = `$.items[${index}]`;
+      if (!isRecord(rawItem)) {
+        issue(errors, itemPath, 'shape', '条目必须是对象');
+        return;
+      }
+      const id = rawItem.id;
+      if (typeof id !== 'string' || !id.trim() || id.length > 128) {
+        issue(errors, `${itemPath}.id`, 'shape', 'id 须为 1–128 字符');
+        return;
+      }
+      if (seen.has(id)) {
+        issue(errors, `${itemPath}.id`, 'duplicate', `条目 id 重复:${id}`);
+        return;
+      }
+      seen.add(id);
+      const label = rawItem.label;
+      if (typeof label !== 'string' || !label.trim() || label.length > 120) {
+        issue(errors, `${itemPath}.label`, 'shape', 'label 须为 1–120 字符');
+        return;
+      }
+      const fields: Record<string, NodePluginPrimitive> = {};
+      for (const [key, value] of Object.entries(rawItem)) {
+        if (key === 'id' || key === 'label' || key === 'description' || key === 'thumb') continue;
+        if (!safeFieldName(key)) {
+          issue(errors, `${itemPath}.${key}`, 'ui-field', `字段名 ${key} 非法`);
+          continue;
+        }
+        if (typeof value === 'string' || typeof value === 'boolean') {
+          fields[key] = value;
+        } else if (typeof value === 'number' && Number.isFinite(value)) {
+          fields[key] = value;
+        } else {
+          issue(errors, `${itemPath}.${key}`, 'type', '字段值只允许 string / number / boolean');
+        }
+        fieldNames.add(key);
+      }
+      let thumb: string | undefined;
+      if (rawItem.thumb !== undefined) {
+        if (typeof rawItem.thumb !== 'string' || !safeExecutor(rawItem.thumb)) {
+          issue(errors, `${itemPath}.thumb`, 'shape', 'thumb 必须是相对路径（禁止绝对路径与 ..）');
+        } else {
+          thumb = rawItem.thumb;
+        }
+      }
+      const description = rawItem.description;
+      if (description !== undefined && typeof description !== 'string') {
+        issue(errors, `${itemPath}.description`, 'shape', 'description 必须是字符串');
+      }
+      items.push({
+        id,
+        label,
+        ...(typeof description === 'string' && description ? { description } : {}),
+        ...(thumb ? { thumb } : {}),
+        fields,
+      });
+    });
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, catalog: { items, fields: [...fieldNames].sort() } };
+  } catch (error) {
+    issue(errors, '$', 'exception', `清单读取失败:${error instanceof Error ? error.message : String(error)}`);
+    return { ok: false, errors };
+  }
 }

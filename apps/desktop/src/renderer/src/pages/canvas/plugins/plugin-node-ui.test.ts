@@ -39,15 +39,18 @@ function render<P extends object>(Component: React.FunctionComponent<P>, props: 
 const noop = () => undefined;
 
 describe('PluginNodeBody · 定义投影与主产物', () => {
-  it('显示标题、说明、端口摘要和主输出预览', () => {
+  it('卡片只保留主输出预览，不重复显示标题、说明和端口摘要', () => {
     const html = render(PluginNodeBody, {
       node: node({ data: { resultPath: '/tmp/.bigbotart/outputs/audio/result.wav' } }),
       definition: definition(),
     });
     expect(html).toContain('data-od-id="plugin-node-body"');
-    expect(html).toContain('音频提取');
-    expect(html).toContain('从视频中提取音轨');
-    expect(html).toContain('输入视频 · video · 单值 · 必填');
+    expect(html).not.toContain('data-od-id="plugin-node-title"');
+    expect(html).not.toContain('data-od-id="plugin-node-description"');
+    expect(html).not.toContain('data-od-id="plugin-node-inputs"');
+    expect(html).not.toContain('data-od-id="plugin-node-outputs"');
+    expect(html).not.toContain('从视频中提取音轨');
+    expect(html).not.toContain('输入视频 · video · 单值 · 必填');
     expect(html).toContain('主产物');
     expect(html).toContain('data-od-id="plugin-result-audio"');
     expect(html).toContain('bba-output://audio/result.wav');

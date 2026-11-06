@@ -1,0 +1,53 @@
+{
+  "apiVersion": "bigbotart.node-plugin/v1",
+  "id": "bigbotart-pose-demo",
+  "version": "1.0.0",
+  "displayName": "姿势选择示例",
+  "nodes": [
+    {
+      "kind": "pose-selector",
+      "title": "姿势选择",
+      "description": "用可视化姿势库选择姿势与视角，输出选中姿势的参考图",
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "image",
+          "label": "参考图",
+          "media": "image",
+          "cardinality": "single",
+          "required": true,
+          "primary": true
+        }
+      ],
+      "defaultData": {},
+      "parametersSchema": {
+        "type": "object",
+        "properties": {
+          "pose": {
+            "type": "string",
+            "title": "姿势",
+            "description": "由姿势选择器写入"
+          },
+          "angle": {
+            "type": "string",
+            "title": "视角",
+            "description": "由姿势选择器写入"
+          }
+        },
+        "required": ["pose"]
+      },      "executor": "runtime/index.cjs",
+      "ui": {
+        "type": "picker",
+        "title": "姿势选择器",
+        "valueParam": "pose",
+        "variantParam": "angle",
+        "variantField": "angle",
+        "catalog": "catalog/poses.json",
+        "searchFields": ["id", "label", "description"],
+        "filterFields": ["system", "category"],
+        "tabField": "angle",
+        "thumbnailField": "thumb"
+      }
+    }
+  ]
+}

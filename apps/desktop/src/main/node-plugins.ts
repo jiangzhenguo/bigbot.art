@@ -17,16 +17,20 @@ import {
 } from 'node:fs';
 import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, extname, join, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  nodePluginAssetUrl,
   normalizeNodePluginData,
   parsePluginNodeKind,
   publicNodePluginDefinition,
+  validateNodePluginCatalog,
   validateNodePluginData,
   validateNodePluginManifest,
   type CanvasNode,
   type CanvasSnapshot,
+  type NodePluginCatalog,
+  type NodePluginCatalogResult,
   type NodePluginDefinition,
   type NodePluginInputPort,
   type NodePluginManifest,
@@ -34,6 +38,7 @@ import {
   type NodePluginMedia,
   type NodePluginRunRequest,
   type NodePluginRunResult,
+  type NodePluginUiDeclaration,
   type Take,
 } from '@bigbotart/shared';
 import { OUTPUTS_DIR, type AssetStore } from './assets.js';
@@ -107,6 +112,9 @@ const MEDIA_BY_NODE_KIND: Record<string, NodePluginMedia> = {
   'image-crop': 'image', 'image-stitch': 'image', 'image-split': 'image', 'frame-grab': 'image',
   shot: 'video', 'video-upscale': 'video', timeline: 'video', document: 'document',
 };
+
+/** bba-plugin:// 只放行这些图片后缀（缩略图用途；不开放任意文件类型）。 */
+export const PLUGIN_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -183,6 +191,82 @@ export class NodePluginManager {
     const node = record?.manifest.nodes.find((item) => item.kind === parsed.localKind);
     if (!record || !node) return undefined;
     return this.toDefinition(record, node);
+  }
+
+  /**
+   * 读取插件节点声明的受控 UI 清单（picker 的数据源）。
+   * 清单由插件自带，宿主只做校验与路径收敛，绝不执行清单里的任何代码。
+   */
+  getCatalog(kind: string): NodePluginCatalogResult {
+    const parsed = parsePluginNodeKind(kind);
+    if (!parsed) return { ok: false, error: `不是插件节点 kind: ${kind}` };
+    const record = this.plugins.find((item) => item.manifest.id === parsed.pluginId);
+    if (!record) return { ok: false, error: `插件未安装或已移除: ${parsed.pluginId}` };
+    const node = record.manifest.nodes.find((item) => item.kind === parsed.localKind);
+    if (!node) return { ok: false, error: `插件 ${parsed.pluginId} 未定义节点 ${parsed.localKind}` };
+    if (!node.ui) return { ok: false, error: `节点 ${parsed.localKind} 没有声明受控 UI` };
+    return this.loadCatalog(record, node.ui);
+  }
+
+  private loadCatalog(record: InstalledPluginRecord, ui: NodePluginUiDeclaration): NodePluginCatalogResult {
+    const catalogPath = resolve(record.installPath, ui.catalog);
+    if (!isUnderRoot(catalogPath, record.installPath)) {
+      return { ok: false, error: `清单路径越出插件目录: ${ui.catalog}` };
+    }
+    if (!existsSync(catalogPath) || !statSync(catalogPath).isFile()) {
+      return { ok: false, error: `清单文件缺失: ${ui.catalog}` };
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(catalogPath, 'utf8'));
+    } catch (error) {
+      return { ok: false, error: `清单不是合法 JSON:${errorText(error)}` };
+    }
+    const validated = validateNodePluginCatalog(raw);
+    if (!validated.ok) {
+      return { ok: false, error: `清单校验失败:${this.formatIssues(validated.errors)}` };
+    }
+    const baseDir = dirname(catalogPath);
+    const items = validated.catalog.items.map((item) => {
+      const thumb = this.resolveThumbUrl(record, baseDir, item.thumb);
+      if (!thumb) return { ...item, thumb: undefined };
+      return { ...item, thumb };
+    });
+    const catalog: NodePluginCatalog = { items, fields: validated.catalog.fields };
+    return { ok: true, catalog };
+  }
+
+  /**
+   * 缩略图解析：相对清单文件目录 → 收敛到插件根目录内 → 只放行图片后缀 → 转成 bba-plugin:// URL。
+   * 文件缺失或类型不允许时返回 undefined（该条目降级为纯文字卡片，不伪造图片）。
+   */
+  private resolveThumbUrl(
+    record: InstalledPluginRecord,
+    baseDir: string,
+    thumb: string | undefined,
+  ): string | undefined {
+    if (!thumb) return undefined;
+    const absolute = resolve(baseDir, thumb);
+    if (!isUnderRoot(absolute, record.installPath)) return undefined;
+    if (!PLUGIN_IMAGE_EXTENSIONS.has(extname(absolute).toLowerCase())) return undefined;
+    if (!existsSync(absolute) || !statSync(absolute).isFile()) return undefined;
+    const relativePath = relative(record.installPath, absolute).split(sep).join('/');
+    return nodePluginAssetUrl(record.manifest.id, record.manifest.version, relativePath);
+  }
+
+  /**
+   * bba-plugin:// 的取文件入口：只服务**当前已注册版本**的插件目录内的图片。
+   * 路径越界、版本不匹配或非图片一律拒绝。
+   */
+  resolvePluginAsset(pluginId: string, version: string, relativePath: string): string | undefined {
+    const record = this.plugins.find((item) => item.manifest.id === pluginId);
+    if (!record) return undefined;
+    if (record.manifest.version !== version) return undefined;
+    const target = resolve(record.installPath, relativePath);
+    if (!isUnderRoot(target, record.installPath)) return undefined;
+    if (!PLUGIN_IMAGE_EXTENSIONS.has(extname(target).toLowerCase())) return undefined;
+    if (!existsSync(target) || !statSync(target).isFile()) return undefined;
+    return target;
   }
 
   listInstalled(): NodePluginInstalledSummary[] {
@@ -515,6 +599,16 @@ export class NodePluginManager {
         const realRoot = realpathSync(record.installPath);
         const realExecutor = realpathSync(executor);
         if (!isUnderRoot(realExecutor, realRoot)) return `执行器真实路径越出插件目录: ${node.executor}`;
+        // 受控 UI 节点：清单文件必须随插件一起装进来，缺失即视为不可运行。
+        if (node.ui) {
+          const catalogPath = resolve(record.installPath, node.ui.catalog);
+          if (!isUnderRoot(catalogPath, record.installPath)) {
+            return `节点 ${node.kind} 的清单路径越界: ${node.ui.catalog}`;
+          }
+          if (!existsSync(catalogPath) || !statSync(catalogPath).isFile()) {
+            return `节点 ${node.kind} 的清单文件缺失: ${node.ui.catalog}`;
+          }
+        }
       }
       return undefined;
     } catch (error) {

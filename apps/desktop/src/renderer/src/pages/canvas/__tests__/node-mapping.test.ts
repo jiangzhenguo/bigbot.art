@@ -2,6 +2,7 @@
  * 节点映射测试 — image-crop 初始数据与 shared↔本地 转换
  */
 import { describe, it, expect } from 'vitest';
+import type { NodePluginDefinition } from '@bigbotart/shared';
 import { makeInitialData, fromSharedNode, toSharedNodes, defaultDataFor, contentKey, preserveMeasuredSize } from '../node-mapping.js';
 
 describe('makeInitialData · image-crop', () => {
@@ -162,5 +163,63 @@ describe('preserveMeasuredSize · 已测高度按 id 合并', () => {
   it('非法 h(NaN / 非数字)不参与合并', () => {
     const out = preserveMeasuredSize([{ ...base }] as never, [{ ...base, h: Number.NaN }] as never);
     expect(out[0]!.h).toBeUndefined();
+  });
+});
+
+describe('makeInitialData · 插件节点的 picker 独占参数', () => {
+  const definition: NodePluginDefinition = {
+    kind: 'plugin:pose-tools:pose-selector',
+    localKind: 'pose-selector',
+    pluginId: 'pose-tools',
+    pluginVersion: '1.0.0',
+    pluginDisplayName: '姿势工具',
+    enabled: true,
+    title: '姿势选择',
+    description: '从姿势库中选择姿势与视角',
+    inputs: [],
+    outputs: [{ id: 'image', label: '参考图', media: 'image', cardinality: 'single', required: true, primary: true }],
+    executor: 'runtime/index.cjs',
+    defaultData: {},
+    parametersSchema: {
+      type: 'object',
+      required: ['pose'],
+      properties: {
+        pose: { type: 'string', title: '姿势' },
+        angle: { type: 'string', title: '视角' },
+      },
+    },
+    ui: {
+      type: 'picker',
+      title: '姿势选择器',
+      valueParam: 'pose',
+      variantParam: 'angle',
+      variantField: 'angle',
+      catalog: 'catalog/poses.json',
+    },
+  };
+
+  it('picker 独占的必填参数为空时不阻塞建节点', () => {
+    // 回归：曾经这里抛「缺少必填参数 pose」，节点根本建不出来、检查器也永远打不开。
+    const data = makeInitialData({ id: 'pose', kind: 'plugin:pose-tools:pose-selector', name: '姿势选择', sub: '', definition });
+    expect(data.pose).toBeUndefined();
+    expect(data.mediaType).toBe('image');
+    expect(data.__plugin).toEqual({ id: 'pose-tools', version: '1.0.0' });
+  });
+
+  it('非 picker 的必填参数缺失仍然拒绝建节点', () => {
+    const strict: NodePluginDefinition = {
+      ...definition,
+      ui: undefined,
+      parametersSchema: {
+        type: 'object',
+        required: ['pose', 'prompt'],
+        properties: {
+          pose: { type: 'string', title: '姿势' },
+          prompt: { type: 'string', title: '提示词' },
+        },
+      },
+    };
+    expect(() => makeInitialData({ id: 'pose', kind: 'plugin:pose-tools:pose-selector', name: '姿势选择', sub: '', definition: strict }))
+      .toThrow('插件默认参数无效');
   });
 });

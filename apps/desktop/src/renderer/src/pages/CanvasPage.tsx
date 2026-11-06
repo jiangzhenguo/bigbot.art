@@ -32,6 +32,7 @@ import {
   validateShotSubmitParams,
   isPluginNodeKind,
   validateNodePluginData,
+  normalizeVoiceMode,
 } from '@bigbotart/shared';
 import type { VideoAspect } from '@bigbotart/shared';
 import type { CanvasPageProps, EdgeClass, Edge, CanvasNode, NodeTag, NodeInfo, ConnectDrag } from './canvas/types';
@@ -467,6 +468,11 @@ function CanvasPageContent({
   const videoPostRunningRef = useRef<Set<string>>(new Set());
   /** 运行标记走 state 同步一份,供按钮置灰(仅 ref 改动不会触发重渲染) */
   const [videoPostRunning, setVideoPostRunning] = useState<string[]>([]);
+  /** 最近一次发起语音任务的节点 id(CosyVoice3 进度事件据此定位) */
+  const ttsRef = useRef<string | null>(null);
+  /** 正在跑语音任务的节点集合(防重入闩;全局串行,通常至多 1 个) */
+  const ttsRunningRef = useRef<Set<string>>(new Set());
+  const [ttsRunning, setTtsRunning] = useState<string[]>([]);
   const bootRef = useRef(true); // 挂载期跳过首轮保存(等加载/规划落地)
   /** 本地 nodes/edges 当前代表的画布 id —— 「合法清空」只对已装填的那张画布成立(见 empty-save-guard) */
   const hydratedCanvasRef = useRef<string | null>(null);
@@ -2676,6 +2682,61 @@ function CanvasPageContent({
     return unsub;
   }, [setNodes]);
 
+  /* 语音任务进度订阅(CosyVoice3 · video-dub / tts-gen):CPU 长任务,期间把阶段写进节点 badge。
+     与 video-post 同构:挂载时先从主进程恢复运行态(本地 state 退出画布即丢失),再订阅 push。 */
+  useEffect(() => {
+    void (async () => {
+      try {
+        const runs = await window.bigbotart.ttsRunning();
+        if (runs.length > 0) {
+          ttsRunningRef.current = new Set(runs.map((r) => r.nodeId));
+          setTtsRunning(runs.map((r) => r.nodeId));
+          ttsRef.current = runs[runs.length - 1]!.nodeId;
+          const last = await window.bigbotart.ttsLastProgress();
+          if (last?.nodeId) {
+            setNodes((ns) =>
+              ns.map((n) =>
+                n.id === last.nodeId
+                  ? {
+                      ...n,
+                      badge: undefined,
+                      progress: {
+                        pct: undefined,
+                        text: last.detail ? `${last.stageLabel} · ${last.detail}` : last.stageLabel,
+                        indet: true,
+                      },
+                      ghost: false,
+                    }
+                  : n,
+              ),
+            );
+          }
+        }
+      } catch {
+        /* 主进程不可用/未实现:退回本地态 */
+      }
+    })();
+    const unsub = window.bigbotart.onTtsProgress((p) => {
+      if (!p?.stageLabel) return;
+      const target = p.nodeId || ttsRef.current;
+      if (!target) return;
+      const text = p.detail ? `${p.stageLabel} · ${p.detail}` : p.stageLabel;
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === target
+            ? {
+                ...n,
+                badge: undefined,
+                progress: { pct: p.overall, text, indet: p.stageProgress === undefined },
+                ghost: false,
+              }
+            : n,
+        ),
+      );
+    });
+    return unsub;
+  }, [setNodes]);
+
   /* 渲染队列订阅:主进程变更推送(节流合并)+ 8s 兜底轮询(事件丢包/窗口重载恢复);
      无实质变化(签名相同)时跳过 setJobs,避免 1.2s 全量轮询带来的无谓整树重渲染。
      ⚠️ 队列是「进行中」状态的唯一真源:节点的排队/生成中标签**必须**在这里按队列回填,
@@ -3788,6 +3849,202 @@ function CanvasPageContent({
         );
         setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
         toastMsg(`已拆分 ${pieces.length} 片 · ${n.title}`);
+        return;
+      }
+      // 语音合成 / 视频配音(video-dub / tts-gen):CosyVoice3 本地 CPU 长任务,不进推理队列。
+      // 与 video-upscale 同族:运行中给阶段 badge,完成记一条 Take;产物 wav / mp4 落 outputs/dub/。
+      if (n.kind === 'video-dub' || n.kind === 'tts-gen') {
+        const ttsKind = n.kind === 'video-dub' ? 'video-dub' : 'tts-gen';
+        if (ttsRunningRef.current.has(nodeId)) {
+          toastMsg('该节点正在合成中,请等待当前任务完成');
+          return;
+        }
+        const text = String(d.text ?? '').trim();
+        if (!text) {
+          toastMsg('请先填写旁白文本(检查器里的「旁白文本」)');
+          return;
+        }
+        const voiceMode = normalizeVoiceMode(d.voiceMode);
+        const designMode = voiceMode === 'design';
+        const voiceDescription = String(d.voiceDescription ?? '').trim();
+        const voiceProfile = String(d.voiceProfile ?? '').trim();
+        if (designMode && !voiceDescription && !voiceProfile) {
+          toastMsg('文字设计音色需要音色描述:选一个内置音色类型,或写一句描述');
+          return;
+        }
+        // 参考音色(仅 clone):连线 ref-voice > 派生态 refVoiceFrom > 检查器手绑资产
+        const audioProductOf = (src: CanvasNode | undefined): string | undefined => {
+          if (!src) return undefined;
+          const sd = (src.data ?? {}) as Record<string, unknown>;
+          if (src.kind === 'asset' || src.kind === 'audio-ref') return assetCache[String(sd.assetId ?? '')] || undefined;
+          return String(sd.resultPath ?? '') || undefined;
+        };
+        let refVoicePath: string | undefined;
+        let usedSampleVoice = false;
+        if (!designMode) {
+          const voiceEdge = edgesRef.current.find((e) => e.to === nodeId && (e.label ?? '') === 'ref-voice');
+          if (voiceEdge) refVoicePath = audioProductOf(nodesRef.current.find((x) => x.id === voiceEdge.from));
+          const refFrom = (d.refVoiceFrom as { nodeId?: string } | undefined)?.nodeId;
+          if (!refVoicePath && refFrom) refVoicePath = audioProductOf(nodesRef.current.find((x) => x.id === refFrom));
+          if (!refVoicePath && d.refVoiceAssetId) refVoicePath = assetCache[String(d.refVoiceAssetId)] || undefined;
+          // 未指定音色 → 自动用引擎自带的官方示例音色(真实参考音,3.5s;不是静默兜底,
+          // 结果与 Take 参数会注明 sampleVoice)。这样「只给文字」也能直接出音。
+          if (!refVoicePath) {
+            const sample = await window.bigbotart.ttsSampleVoice({ projectId: projectId ?? undefined });
+            if (!sample.ok || !sample.path) {
+              toastMsg(sample.error ?? '官方示例音色不可用:请导入一段 3–30 秒人声作参考音');
+              return;
+            }
+            refVoicePath = sample.path;
+            usedSampleVoice = true;
+            if (sample.assetId) {
+              setNodes((ns) =>
+                ns.map((x) =>
+                  x.id === nodeId ? { ...x, data: { ...(x.data ?? {}), refVoiceAssetId: sample.assetId } } : x,
+                ),
+              );
+            }
+          }
+        }
+        let inputVideoPath: string | undefined;
+        if (ttsKind === 'video-dub') {
+          const inEdge = edgesRef.current.find((e) => e.to === nodeId && (e.label ?? '') === 'input-video');
+          if (inEdge) inputVideoPath = upstreamVideoPath(nodesRef.current.find((x) => x.id === inEdge.from), assetCache);
+          const vFrom = (d.inputVideoFrom as { nodeId?: string } | undefined)?.nodeId;
+          if (!inputVideoPath && vFrom) inputVideoPath = upstreamVideoPath(nodesRef.current.find((x) => x.id === vFrom), assetCache);
+          if (!inputVideoPath && d.inputAssetId) inputVideoPath = assetCache[String(d.inputAssetId)] || undefined;
+          if (!inputVideoPath) {
+            toastMsg('视频配音需要输入视频:把镜头成片 / 视频增强 / 成片时间线连到 input-video 端口');
+            return;
+          }
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? { ...x, badge: undefined, progress: { text: '准备中…', pct: 0, indet: true }, ghost: false }
+              : x,
+          ),
+        );
+        ttsRef.current = nodeId;
+        ttsRunningRef.current.add(nodeId);
+        setTtsRunning([...ttsRunningRef.current]);
+        toastMsg(
+          designMode
+            ? ttsKind === 'video-dub'
+              ? '配音已开始(Qwen3-TTS · MLX,进度显示在节点与检查器上)'
+              : '语音生成已开始(Qwen3-TTS · MLX,进度显示在节点与检查器上)'
+            : ttsKind === 'video-dub'
+              ? '配音已开始(CPU 合成,进度显示在节点与检查器上)'
+              : '语音合成已开始(CPU,进度显示在节点与检查器上)',
+        );
+        let res: Awaited<ReturnType<typeof window.bigbotart.ttsSynthesize>>;
+        try {
+          res = await window.bigbotart.ttsSynthesize({
+            nodeId,
+            kind: ttsKind,
+            text,
+            voiceMode,
+            voiceDescription: designMode ? voiceDescription : undefined,
+            voiceProfile: designMode ? voiceProfile : undefined,
+            language: designMode ? String(d.language ?? 'auto') : undefined,
+            temperature:
+              designMode && d.temperature != null && Number.isFinite(Number(d.temperature))
+                ? Number(d.temperature)
+                : undefined,
+            refVoicePath,
+            inputVideoPath,
+            refText: typeof d.refText === 'string' ? d.refText : undefined,
+            instruct: typeof d.instruct === 'string' ? d.instruct : undefined,
+            speed: d.speed === undefined ? undefined : Number(d.speed),
+            seed: d.seed === undefined ? undefined : Number(d.seed),
+            mixMode: d.mixMode === 'mix' ? 'mix' : 'replace',
+            origVolume: d.origVolume === undefined ? undefined : Number(d.origVolume),
+            ttsVolume: d.ttsVolume === undefined ? undefined : Number(d.ttsVolume),
+            keepWav: d.keepWav === true,
+          });
+        } finally {
+          ttsRef.current = null;
+          ttsRunningRef.current.delete(nodeId);
+          setTtsRunning([...ttsRunningRef.current]);
+        }
+        if (!res.ok || !res.path) {
+          const cancelled = (res.error ?? '').includes('已取消');
+          setNodes((ns) =>
+            ns.map((x) =>
+              x.id === nodeId
+                ? {
+                    ...x,
+                    progress: undefined,
+                    badge: cancelled
+                      ? '已取消'
+                      : res.dryRun
+                        ? 'dry-run · 未真实合成'
+                        : `${ttsKind === 'video-dub' ? '配音' : '合成'}失败 · ${res.error ?? '未知错误'}`,
+                  }
+                : x,
+            ),
+          );
+          toastMsg(cancelled ? '已取消语音任务' : res.dryRun ? 'dry-run 已跳过真实合成(命令已构造)' : `语音任务失败:${res.error ?? '未知错误'}`);
+          return;
+        }
+        let takeId: string | undefined;
+        if (projectId) {
+          const t = await window.bigbotart.takesCreate(projectId, {
+            shotNodeId: nodeId,
+            status: 'succeeded',
+            resultPath: res.path,
+            params: {
+              kind: ttsKind,
+              text,
+              voiceMode,
+              voiceDescription: designMode ? voiceDescription : undefined,
+              voiceProfile: designMode ? voiceProfile : undefined,
+              language: designMode ? String(d.language ?? 'auto') : undefined,
+              temperature: designMode ? d.temperature : undefined,
+              refVoicePath,
+              inputVideoPath,
+              refText: d.refText,
+              instruct: d.instruct,
+              speed: d.speed,
+              seed: d.seed,
+              mixMode: d.mixMode,
+              origVolume: d.origVolume,
+              ttsVolume: d.ttsVolume,
+              keepWav: d.keepWav,
+              sampleVoice: usedSampleVoice,
+            },
+            durationSec: res.durationSec,
+            elapsedSec: res.elapsedSec,
+          });
+          takeId = t.id;
+        }
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId
+              ? {
+                  ...x,
+                  ghost: false,
+                  stale: false,
+                  badge: undefined,
+                  progress: undefined,
+                  extra: `✓ ${basenameOf(res.path as string)}`,
+                  data: {
+                    ...(x.data ?? {}),
+                    resultPath: res.path,
+                    narrationPath: res.narrationPath,
+                    durationSec: res.durationSec,
+                    currentTakeId: takeId,
+                  },
+                }
+              : x,
+          ),
+        );
+        setEdges((es) => es.map((e) => (e.to === nodeId && e.cls === 'ghost' ? { ...e, cls: '' as const } : e)));
+        toastMsg(
+          `${ttsKind === 'video-dub' ? '配音' : '语音合成'}完成(${res.elapsedSec ?? '?'}s)${
+            designMode ? ' · 文字设计音色' : usedSampleVoice ? ' · 官方示例音色' : ''
+          } · ${n.title}`,
+        );
         return;
       }
       // 视频增强节点(video-upscale):本地后处理(去块 → Real-ESRGAN 超分 → GFPGAN/CodeFormer 合修脸),
@@ -4980,16 +5237,16 @@ function CanvasPageContent({
               commitEdit('移除连线');
               setEdges((es) => es.filter((e) => !(e.from === srcId && e.to === dstId)));
             }}
-            running={!!selected && videoPostRunning.includes(selected)}
+            running={!!selected && (videoPostRunning.includes(selected) || ttsRunning.includes(selected))}
             onRerunSelected={() => {
               if (!selected) return;
-              if (videoPostRunningRef.current.has(selected)) {
-                toastMsg('该节点正在增强中,请等待当前任务完成');
+              if (videoPostRunningRef.current.has(selected) || ttsRunningRef.current.has(selected)) {
+                toastMsg('该节点正在处理中,请等待当前任务完成');
                 return;
               }
-              // 长任务(视频增强)自带「已开始 + 节点进度」提示,这里不再抢着报「已提交重跑」
+              // 长任务(视频增强 / 语音合成)自带「已开始 + 节点进度」提示,这里不再抢着报「已提交重跑」
               const selKind = nodes.find((x) => x.id === selected)?.kind;
-              const isLongTask = selKind === 'video-upscale';
+              const isLongTask = selKind === 'video-upscale' || selKind === 'video-dub' || selKind === 'tts-gen';
               void runNode(selected);
               if (!isLongTask) toastMsg(`已提交重跑 · ${inspectTitle}`);
             }}

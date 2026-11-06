@@ -61,8 +61,10 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
   const imageFromPatch = new Map<string, { nodeId: string } | null>();
   /** 🆕 参考图端口 ref-image(多值):image-edit / image-gen → data.refImageFrom(2.1 edit-reference) */
   const editRefPatch = new Map<string, string[]>();
-  /** 视频输入端口(video-upscale / frame-grab 的输入):只收视频来源(shot/video-upscale/视频 asset) */
+  /** 视频输入端口(video-upscale / frame-grab / video-dub 的输入):只收视频来源(shot/video-upscale/视频 asset) */
   const videoFromPatch = new Map<string, { nodeId: string } | null>();
+  /** 🆕 CosyVoice3 参考音色端口(ref-voice):tts-gen / video-dub 的音色来源(音频 asset / audio-ref / tts-gen) */
+  const refVoicePatch = new Map<string, { nodeId: string } | null>();
   /** 🆕 audio-ref 节点的来源视频(视频 → 音频参考节点;抽取由渲染层副作用完成) */
   const audioFromPatch = new Map<string, { nodeId: string } | null>();
   /** 拼接件入边(image-stitch):label=piece / piece-N;带源节点坐标,写回时按目标 mode 排序 */
@@ -92,7 +94,8 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
     const pluginMedia = isPluginNodeKind(src.kind) ? String(s.mediaType ?? '') : '';
     const imageSource = IMAGE_KINDS.includes(src.kind ?? '') || pluginMedia === 'image';
     const videoSource = VIDEO_KINDS.includes(src.kind ?? '') || pluginMedia === 'video';
-    const audioSource = pluginMedia === 'audio';
+    // audioSource:插件音频产物 / 内置 tts-gen 的 wav(两者都是音频产物,可当镜头 ref-audio 或配音的 ref-voice)
+    const audioSource = pluginMedia === 'audio' || src.kind === 'tts-gen';
     const pluginProduct = pluginMedia === 'image' || pluginMedia === 'video' || audioSource;
     switch (dst.kind) {
       case 'shot': {
@@ -386,6 +389,24 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         }
         break;
       }
+      case 'video-dub': {
+        // 输入视频(单值):镜头成片 / 视频增强 / 时间线成片 / 视频素材
+        if ((e.label ?? '') === 'input-video' && (src.kind === 'shot' || videoSource || src.kind === 'asset')) {
+          videoFromPatch.set(e.to, { nodeId: e.from });
+        }
+        // 参考音色(单值):音频素材 / 音频参考节点 / tts-gen 产物
+        if ((e.label ?? '') === 'ref-voice' && (audioSource || src.kind === 'audio-ref' || src.kind === 'asset')) {
+          refVoicePatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
+      case 'tts-gen': {
+        // 参考音色(单值):音频素材 / 音频参考节点(tts-gen 不接收视频输入)
+        if ((e.label ?? '') === 'ref-voice' && (audioSource || src.kind === 'audio-ref' || src.kind === 'asset')) {
+          refVoicePatch.set(e.to, { nodeId: e.from });
+        }
+        break;
+      }
       case 'image-crop': {
         // 输入图端口 input(裁切源):静帧产物直通 / 素材引用;无条件登记(幂等)
         if (imageSource || src.kind === 'asset') {
@@ -503,11 +524,17 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       if (refs.length) data.refImageFrom = refs.map((id) => ({ nodeId: id }));
       else delete data.refImageFrom;
     }
-    // 视频输入端口(video-upscale / frame-grab):与边同步,删除边即撤销
-    if (n.kind === 'video-upscale' || n.kind === 'frame-grab') {
+    // 视频输入端口(video-upscale / frame-grab / video-dub):与边同步,删除边即撤销
+    if (n.kind === 'video-upscale' || n.kind === 'frame-grab' || n.kind === 'video-dub') {
       const target = videoFromPatch.get(n.id) ?? null;
       if (target) data.inputVideoFrom = target;
       else delete data.inputVideoFrom;
+    }
+    // 🆕 参考音色端口 ref-voice(tts-gen / video-dub):与边同步,删除边即撤销(手动绑定仍保留)
+    if (n.kind === 'tts-gen' || n.kind === 'video-dub') {
+      const target = refVoicePatch.get(n.id) ?? null;
+      if (target) data.refVoiceFrom = target;
+      else delete data.refVoiceFrom;
     }
     /* audio-ref 的来源视频:记录来源节点 id,供渲染层据此抽音轨。
        删边即撤销 —— 同时要把**抽出来的产物绑定**一并清掉(否则会留下一个

@@ -1,5 +1,5 @@
 import type { NodeKind, NodePluginDefinition } from '@bigbotart/shared';
-import { defaultStoryboardMarkdown, validateNodePluginData } from '@bigbotart/shared';
+import { defaultStoryboardMarkdown, validateNodePluginDataForCreate } from '@bigbotart/shared';
 import type { CanvasNode, NodeTag, Edge } from './types';
 import { resolvePortOptions } from './connectors';
 
@@ -37,7 +37,13 @@ export function deriveEdgeLabel(
 export function makeInitialData(t: NodeTag): Record<string, unknown> {
   if (t.definition) {
     const definition = t.definition;
-    const validated = validateNodePluginData(definition.defaultData, definition.parametersSchema);
+    // 建节点这一刻，picker 独占的参数还没选（值由用户在检查器里挑），
+    // 不能拿 required 去卡它 —— 否则节点根本建不出来，检查器也就永远打不开。
+    const validated = validateNodePluginDataForCreate(
+      definition.defaultData,
+      definition.parametersSchema,
+      definition.ui,
+    );
     if (!validated.ok) {
       throw new Error(`插件默认参数无效:${validated.errors.map((issue) => issue.message).join('；')}`);
     }
@@ -119,6 +125,23 @@ export function makeInitialData(t: NodeTag): Record<string, unknown> {
       return { shotNodeIds: [] };
     case 'audio-ref':
       return { assetId: '' };
+    case 'tts-gen':
+      // CosyVoice3 文生语音(无预设音色:ref-voice 必须由连线/资产提供)
+      return { text: '', voiceMode: 'clone', refText: '', instruct: '', speed: 1, seed: 42 };
+    case 'video-dub':
+      // CosyVoice3 视频配音:默认 replace(换掉原声),mix 时才用 origVolume
+      return {
+        text: '',
+        voiceMode: 'clone',
+        refText: '',
+        instruct: '',
+        speed: 1,
+        seed: 42,
+        mixMode: 'replace',
+        origVolume: 0.15,
+        ttsVolume: 1,
+        keepWav: false,
+      };
     case 'workflow-input':
       return { slots: [{ name: '主提示词', accept: ['text'], required: true }] };
     case 'workflow-output':

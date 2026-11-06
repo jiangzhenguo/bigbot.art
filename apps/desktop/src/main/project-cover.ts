@@ -95,6 +95,9 @@ export function collectCoverCandidates(
         if (seen.has(p)) continue;
         seen.add(p);
         if (!exists(p)) continue; // 纸面路径不算候选(见模块头「路径语义」)
+        // 🆕 只有图片/视频能当封面:tts-gen 的 wav、字幕等产物也是 resultPath,
+        // 但渲染层无法把它们显示成封面(会变成破图)。音频产物一律跳过。
+        if (!IMAGE_EXT_RE.test(p) && !VIDEO_EXT_RE.test(p)) continue;
         out.push({
           nodeId: n.id,
           nodeKind: n.kind,

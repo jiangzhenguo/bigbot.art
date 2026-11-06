@@ -63,6 +63,8 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     vupscale: ['input', '输入视频 · 镜头成片增强(超分/修脸)'],
     // 🆕 视频 → 音频参考节点:抽出成片的音轨喂给它(ffmpeg 抽 → 导入资产 → 自动绑定)
     audio: ['input-audio', '输入音频 · 抽成片的音轨'],
+    // 🆕 成片 → 视频配音(CosyVoice3:画面 stream-copy 不动,只换/混音轨)
+    dub: ['input-video', '输入视频 · 待配音成片'],
     timeline: ['clip', '视频片段 · 整段入轨'],
   },
   'image-gen': {
@@ -142,6 +144,7 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     grab: ['input-video', '输入视频 · 从增强成片取帧'],
     vupscale: ['input', '输入视频 · 链式二次增强'],
     audio: ['input-audio', '输入音频 · 抽增强成片的音轨'],
+    dub: ['input-video', '输入视频 · 增强成片配音'],
     timeline: ['clip', '增强成片 · 整段入轨'],
   },
   'image-crop': {
@@ -187,7 +190,29 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
   },
   'audio-ref': {
     shot: ['ref-audio', '音轨参考 · 带声直出'],
+    // 🆕 音频参考节点绑定的音频资产也可作 CosyVoice3 的参考音色
+    dub: ['ref-voice', '参考音色 · 克隆这个音色'],
+    tts: ['ref-voice', '参考音色 · 克隆这个音色'],
     timeline: ['audio-track', '音轨 · 随片导出'],
+  },
+  /* 🆕 视频配音(CosyVoice3 dub):产物 mp4 与其它视频产物同类;
+     也可再接一条 dub 改文案重配(画面仍是同一段)。 */
+  'video-dub': {
+    shot: [
+      ['ref-video', '参考视频 · 配音成片作风格/动作参考'],
+      ['ref-audio', '音频参考 · 配音成片的内嵌旁白'],
+    ],
+    grab: ['input-video', '输入视频 · 从配音成片取帧'],
+    vupscale: ['input', '输入视频 · 配音成片再增强'],
+    audio: ['input-audio', '输入音频 · 抽配音成片的音轨'],
+    dub: ['input-video', '输入视频 · 换一版旁白重配'],
+    timeline: ['clip', '配音成片 · 整段入轨'],
+  },
+  /* 🆕 文生语音(CosyVoice3 tts):wav 只有两个去处 —— 镜头的 --ref-audio,
+     或另一条配音的参考音色(同一音色复用)。 */
+  'tts-gen': {
+    shot: ['ref-audio', '音轨参考 · 合成旁白作镜头音轨'],
+    dub: ['ref-voice', '参考音色 · 用这段合成音色配音'],
   },
   document: {
     image: ['prompt', '提示词 · 全文注入'],
@@ -219,6 +244,7 @@ const BY_KIND: Record<string, Record<string, PortEntry>> = {
     grab: ['input-video', '输入视频 · 从成片取帧'],
     vupscale: ['input', '输入视频 · 成片再增强(超分/修脸)'],
     audio: ['input-audio', '输入音频 · 抽成片的音轨'],
+    dub: ['input-video', '输入视频 · 成片配音'],
     timeline: ['clip', '成片 · 整段入轨'],
     doc: ['prompt', '文档引用'],
   },
@@ -236,11 +262,11 @@ const BY_TARGET: Record<string, PortRow> = {
  *  frame-grab 产出的就是 PNG,故与其它图片产物同类 —— 它正是「视频 → 图片」的合法转换点。 */
 export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-crop', 'image-stitch', 'image-split', 'frame-grab'];
 
-/** 视频产物类节点(视频直通:产物是 mp4,不能当静帧用;timeline 成片同 —— 与 shared VIDEO_KINDS 同口径) */
-export const VIDEO_KINDS = ['video-upscale', 'timeline'];
+/** 视频产物类节点(视频直通:产物是 mp4,不能当静帧用;timeline 成片 / video-dub 配音成片同 —— 与 shared VIDEO_KINDS 同口径) */
+export const VIDEO_KINDS = ['video-upscale', 'timeline', 'video-dub'];
 
 /** 能收口到 workflow-output 的源(必须与 dispatch 的收集逻辑一致,否则弹窗会承诺不存在的边) */
-const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'asset', ...IMAGE_KINDS, ...VIDEO_KINDS];
+const COLLECTABLE_KINDS = ['shot', 'director', 'audio-ref', 'tts-gen', 'asset', ...IMAGE_KINDS, ...VIDEO_KINDS];
 
 /**
  * 镜头**画面规格**:shot → shot 接续时整组从上游继承(比例 + 档位三件套)。
@@ -279,6 +305,8 @@ export const PORT_LABEL: Record<string, string> = {
   'ref-image': '参考图',
   'ref-audio': '音频参考',
   'ref-video': '参考视频',
+  /** CosyVoice3 的参考音色(3–30 秒干净人声;无预设音色,必填) */
+  'ref-voice': '参考音色',
   prompt: '提示词',
   input: '输入图',
   /** 视频增强的输入端口:语义是「待增强的视频」,与图片节点的「输入图」区分 */
@@ -305,6 +333,8 @@ export const KIND_TO_TAGID: Record<string, string> = {
   'frame-grab': 'grab',
   document: 'doc',
   'audio-ref': 'audio',
+  'video-dub': 'dub',
+  'tts-gen': 'tts',
   'workflow-input': 'wf-input',
   'workflow-output': 'wf-output',
 };
@@ -412,10 +442,14 @@ export function resolvePortOptions(
         // 视频素材生成静帧的唯一通道:经「视频裁切取帧」落成图片资源后再用
         grab: ['input-video', '输入视频 · 从素材取帧'],
         vupscale: ['input', '输入视频 · 超分/修脸源'],
+        dub: ['input-video', '输入视频 · 素材配音'],
         timeline: ['clip', '视频素材 · 入轨'],
       },
       audio: {
         shot: ['ref-audio', '音轨参考 · 带声直出'],
+        // 🆕 音频素材 → CosyVoice3 参考音色(3–30 秒干净人声)
+        dub: ['ref-voice', '参考音色 · 克隆这个音色'],
+        tts: ['ref-voice', '参考音色 · 克隆这个音色'],
         timeline: ['audio-track', '音轨 · 随片导出'],
       },
       document: {

@@ -823,3 +823,95 @@ describe('audio-ref 节点 → shot 的 ref-audio 派发(补齐)', () => {
     expect(deriveShotRefsFromEdges(nodes, [edge('ar', 's', 'audio-track')], 's')).toEqual([]);
   });
 });
+
+/* ─────────────── CosyVoice3 语音节点(2026-11):ref-voice / video-dub / tts-gen ─────────────── */
+
+const ttsNode = (id: string, extra: Record<string, unknown> = {}): EdgeNodeMin => ({
+  id,
+  kind: 'tts-gen',
+  data: { text: '旁白', resultPath: `/out/${id}.wav`, ...extra },
+});
+const dubNode = (id: string, extra: Record<string, unknown> = {}): EdgeNodeMin => ({
+  id,
+  kind: 'video-dub',
+  data: { text: '旁白', resultPath: `/out/${id}.mp4`, ...extra },
+});
+
+describe('CosyVoice3 · 端口与媒体门禁', () => {
+  it('audio asset → video-dub ref-voice 合法;image asset 被拒(媒体不匹配)', () => {
+    const au = assetNode('au', 'audio');
+    const img = assetNode('img', 'image');
+    const dub = dubNode('d');
+    expect(validateEdge([au, dub], [], edge('au', 'd', 'ref-voice')).ok).toBe(true);
+    const bad = validateEdge([img, dub], [], edge('img', 'd', 'ref-voice'));
+    expect(bad.ok).toBe(false);
+    expect(bad.errors[0]!.code).toBe('port-not-allowed');
+    expect(bad.errors[0]!.message).toContain('ref-voice');
+  });
+
+  it('渲染层短 id(dub / tts)与主进程长 kind 命中同一行规则', () => {
+    const au = assetNode('au', 'audio');
+    expect(allowedPortLabels(au, 'dub')).toEqual(['ref-voice']);
+    expect(allowedPortLabels(au, 'tts')).toEqual(['ref-voice']);
+    expect(allowedPortLabels(au, 'video-dub')).toEqual(['ref-voice']);
+    expect(allowedPortLabels(au, 'tts-gen')).toEqual(['ref-voice']);
+  });
+
+  it('shot → video-dub input-video 合法;audio asset → input-video 被拒', () => {
+    const dub = dubNode('d');
+    expect(validateEdge([shotNode('s'), dub], [], edge('s', 'd', 'input-video')).ok).toBe(true);
+    const bad = validateEdge([assetNode('au', 'audio'), dub], [], edge('au', 'd', 'input-video'));
+    expect(bad.ok).toBe(false);
+  });
+
+  it('video asset → video-dub input-video / tts-gen 不接视频输入', () => {
+    const v = assetNode('v', 'video');
+    expect(validateEdge([v, dubNode('d')], [], edge('v', 'd', 'input-video')).ok).toBe(true);
+    expect(allowedPortLabels(v, 'tts-gen')).toEqual([]);
+  });
+
+  it('audio-ref → tts-gen / video-dub 的 ref-voice 合法', () => {
+    const ar: EdgeNodeMin = { id: 'ar', kind: 'audio-ref', data: { assetId: 'asset-audio-1' } };
+    expect(allowedPortLabels(ar, 'tts-gen')).toEqual(['ref-voice']);
+    expect(allowedPortLabels(ar, 'video-dub')).toEqual(['ref-voice']);
+  });
+
+  it('ref-voice 是单值端口:已有入边 ⇒ 可替换冲突', () => {
+    const dub = dubNode('d');
+    const existing = [edge('au1', 'd', 'ref-voice')];
+    const res = validateEdge([assetNode('au1', 'audio'), assetNode('au2', 'audio'), dub], existing, edge('au2', 'd', 'ref-voice'));
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]!.code).toBe('single-port-conflict');
+    expect(res.errors[0]!.replaceable).toBe(true);
+    expect(SINGLE_VALUE_PORTS.has('ref-voice')).toBe(true);
+  });
+
+  it('tts-gen / video-dub 的产物媒体正确(音频 / 视频)', () => {
+    expect(allowedPortLabels(ttsNode('t'), 'shot')).toEqual(['ref-audio']);
+    expect(allowedPortLabels(dubNode('d'), 'shot')).toEqual(['ref-video', 'ref-audio']);
+    // video-dub 产物是视频 → 不能进 first-frame(静帧端口)
+    expect(allowedPortLabels(dubNode('d'), 'shot')).not.toContain('first-frame');
+  });
+});
+
+describe('CosyVoice3 · B 层引用推导(Agent/主进程与渲染层同口径)', () => {
+  it('tts-gen → shot ref-audio:推导出 wav 路径', () => {
+    const refs = deriveShotRefsFromEdges([ttsNode('t'), shotNode('s')], [edge('t', 's', 'ref-audio')], 's');
+    expect(refs).toEqual([{ path: '/out/t.wav', role: 'ref-audio', auto: true }]);
+  });
+
+  it('video-dub → shot:ref-video / ref-audio 都指向带旁白 mp4(抽音轨在提交期)', () => {
+    const nodes = [dubNode('d'), shotNode('s')];
+    expect(deriveShotRefsFromEdges(nodes, [edge('d', 's', 'ref-video')], 's')).toEqual([
+      { path: '/out/d.mp4', role: 'ref-video', auto: true },
+    ]);
+    expect(deriveShotRefsFromEdges(nodes, [edge('d', 's', 'ref-audio')], 's')).toEqual([
+      { path: '/out/d.mp4', role: 'ref-audio', auto: true },
+    ]);
+  });
+
+  it('video-dub → audio-ref:可作为音频抽取来源(带音轨视频)', () => {
+    const nodes = [dubNode('d'), { id: 'ar', kind: 'audio-ref', data: {} } as EdgeNodeMin];
+    expect(deriveAudioRefSource(nodes, [edge('d', 'ar', 'input-audio')], 'ar')).toBe('/out/d.mp4');
+  });
+});

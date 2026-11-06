@@ -76,8 +76,9 @@ export const IMAGE_KINDS = ['image-gen', 'image-edit', 'image-upscale', 'image-c
 
 /** 视频产物类节点(视频直通:产物是 mp4,不是静帧)。
  *  timeline 在导出成功后 data.resultPath = 成片绝对路径(2026-10 起由渲染层两处回写),
+ *  video-dub 的产物是「画面 stream-copy、只换音轨」的带旁白 mp4(2026-11),
  *  与其它视频产物节点同口径:可作 ref-video / ref-audio / input-video / input 的源。 */
-export const VIDEO_KINDS = ['video-upscale', 'timeline'];
+export const VIDEO_KINDS = ['video-upscale', 'timeline', 'video-dub'];
 
 /**
  * **带内嵌音轨的视频产物类节点** —— 它们的产物可作 `ref-audio` 的音源
@@ -96,6 +97,8 @@ export const NODE_OUTPUT_MEDIA: Record<string, 'image' | 'video' | 'audio' | 'te
   director: 'video', // 运镜小样
   timeline: 'video',
   'video-upscale': 'video', // 超分/修脸产物是视频
+  'video-dub': 'video', // 配音产物是视频(画面 stream-copy)
+  'tts-gen': 'audio', // 文生语音产物是 wav
   'audio-ref': 'audio',
   'image-gen': 'image',
   'image-edit': 'image',
@@ -115,6 +118,8 @@ export const PORT_REQUIRED_MEDIA: Record<string, 'image' | 'video' | 'audio' | u
   'ref-image': 'image',
   'ref-video': 'video',
   'ref-audio': 'audio',
+  /** CosyVoice3 的参考音色:必须是音频(3–30 秒干净人声);视频源在提交前经 ffmpeg 抽音轨 */
+  'ref-voice': 'audio',
   'audio-track': 'audio',
   input: undefined, // edit/upscale/crop/split 输入:图片直通或视频取帧皆可;video-upscale 输入:视频
   /** 视频裁切取帧的输入端口:必须是视频(mp4),不能把静帧塞进来 */
@@ -147,6 +152,16 @@ const TARGET_KIND_ALIAS: Record<string, string> = {
   'image-split': 'split',
   'frame-grab': 'grab',
   document: 'doc',
+};
+
+/**
+ * 反方向:渲染层传入的是节点库**短 id**(dub/tts),而 CONNECTOR_MAP 里写的是长 kind。
+ * 与 TARGET_KIND_ALIAS 配对使用,让「渲染层短 id」与「主进程长 kind」两种调用都命中同一行规则。
+ * (图片目标历史上存的是短 id,故需要的是正向 alias;视频配音/文生语音存的是长 kind,故需要反向表。)
+ */
+const TARGET_TAG_TO_KIND: Record<string, string> = {
+  dub: 'video-dub',
+  tts: 'tts-gen',
 };
 
 /** 可收口到 workflow-output 的源 kind(与渲染层 COLLECTABLE_KINDS 同口径) */
@@ -232,7 +247,8 @@ export function allowedPortLabels(
     ? (pluginDefinitionOf(source.kind, opts) ? 'asset' : '')
     : source.kind;
   const raw = CONNECTOR_MAP[sourceConnectorKind]?.[targetKind]
-    ?? CONNECTOR_MAP[sourceConnectorKind]?.[TARGET_KIND_ALIAS[targetKind] ?? ''];
+    ?? CONNECTOR_MAP[sourceConnectorKind]?.[TARGET_KIND_ALIAS[targetKind] ?? '']
+    ?? CONNECTOR_MAP[sourceConnectorKind]?.[TARGET_TAG_TO_KIND[targetKind] ?? ''];
   if (!raw) return [];
   const labels = splitPorts(raw).filter((label) => {
     const need = PORT_REQUIRED_MEDIA[label];
@@ -418,6 +434,13 @@ export function deriveShotRefsFromEdges(
       if (lbl === 'ref-audio') {
         const assetId = String(sd.assetId ?? '');
         if (assetId) derived.push({ assetId, role: 'ref-audio', auto: true });
+      }
+    } else if (src.kind === 'tts-gen') {
+      // 文生语音产物 wav → 镜头音轨参考(--ref-audio):与 audio-ref 分支同构,但产物是**路径**
+      // (tts-gen 的 data.resultPath 指向 wav);提交期直接当 ref-audio 音源,不需要再抽音轨。
+      if (lbl === 'ref-audio') {
+        const wav = String(sd.resultPath ?? '');
+        if (wav) derived.push({ path: wav, role: 'ref-audio', auto: true });
       }
     } else if (src.kind === 'shot') {
       // 镜头接续:上游尾帧 → 下游首帧(tailFramePath 就绪后注入;未就绪留待提交期兜底)

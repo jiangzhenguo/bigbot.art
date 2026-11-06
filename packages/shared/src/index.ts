@@ -174,6 +174,8 @@ export interface BigBotArtApi {
   setNodePluginEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
   removeNodePlugin(id: string): Promise<{ ok: boolean; error?: string }>;
   runNodePlugin(req: import('./node-plugin').NodePluginRunRequest): Promise<import('./node-plugin').NodePluginRunResult>;
+  /** 受控 UI(picker)的数据源:读插件自带清单;插件未声明 ui 时返回错误。 */
+  nodePluginCatalog(kind: string): Promise<import('./node-plugin').NodePluginCatalogResult>;
   // Skills 库(画布模板 + Agent 指令段双形态;激活状态持久化在 canvasMemory,见 docs/Agent技能-指令模板与对话自动加载-产品设计与技术方案.md)
   listSkills(): Promise<import('./domain').Skill[]>;
   saveSkill(input: { name: string; projectId: string; canvasId?: string; instructions?: string; inject?: 'full' | 'summary' }): Promise<import('./domain').Skill>;
@@ -293,6 +295,30 @@ export interface BigBotArtApi {
   videoPostLastProgress(): Promise<{ nodeId: string; stageLabel: string; detail?: string } | null>;
   /** 取消进行中的视频增强。给定 nodeId 只停该节点(含已排队尚未启动的那次);不给则停全部。 */
   videoPostCancel(input?: { nodeId?: string }): Promise<{ ok: boolean; error?: string }>;
+  /* 🆕 语音合成 / 视频配音(CosyVoice3,2026-11)——
+     与 video-upscale 同族:主进程本地长任务、不进 RenderQueue,产物落 outputs/dub/。
+     引擎命令是顶层子命令 `mlxgen tts` / `mlxgen dub`(不是 `mlxgen generate` 路由),
+     必须已执行 `mlxgen prepare --model cosyvoice3` 建好隔离包。
+     ⚠️ 阻塞式长任务(CPU、RTF≈1.8):要显示进度必须同时订阅 onTtsProgress。 */
+  /** 语音合成 / 视频配音。kind=tts-gen 出 wav;kind=video-dub 出带旁白 mp4(画面 stream-copy)。 */
+  ttsSynthesize(input: import('./domain').TtsRequest): Promise<import('./domain').TtsResult>;
+  /** CosyVoice3 就绪探测:mlxgen CLI + prepared package(缺包时给可照抄的 prepare 命令) */
+  ttsProbe(): Promise<import('./domain').TtsTooling>;
+  /** 语音任务阶段进度推送(主进程 push;返回退订函数。同一时刻全局只有一个语音任务) */
+  onTtsProgress(cb: (p: import('./domain').TtsProgressEvent) => void): () => void;
+  /** 当前正在跑的语音任务(渲染层挂载时恢复运行态 —— 本地 state 退出画布即丢失) */
+  ttsRunning(): Promise<import('./domain').TtsRun[]>;
+  /** 最近一次进度(挂载时立即恢复显示,不必等下一个 tick;无任务时 null) */
+  ttsLastProgress(): Promise<{ nodeId: string; stageLabel: string; detail?: string } | null>;
+  /** 取消进行中的语音任务。给定 nodeId 只停该节点(含已排队尚未启动的那次);不给则停全部。 */
+  ttsCancel(input?: { nodeId?: string }): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * 使用引擎包自带的官方示例音色(`runtime/zero_shot_prompt.wav`,约 3.5s)。
+   * 复制到产物目录并登记为项目资源,返回 assetId(检查器可直接绑到 `refVoiceAssetId`)。
+   * 存在理由:CosyVoice3 无预设音色,而用户第一次用时往往没有 3–30 秒干净人声 ——
+   * 没有参考音节点完全跑不起来;这是真实参考音(非静默兜底),只是开箱试用入口。
+   */
+  ttsSampleVoice(input?: { projectId?: string }): Promise<{ ok: boolean; assetId?: string; path?: string; name?: string; error?: string }>;
   // 系统 / 文件
   /** 在系统文件管理器中定位路径(Finder 显示;主进程校验白名单后 shell 打开,文件缺失时回退最近存在目录) */
   revealInFinder(target: { path: string }): Promise<{ ok: boolean; revealed: string; error?: string }>;
@@ -479,3 +505,4 @@ export * from './skill-params.js';
 export * from './agent-task.js';
 export * from './opencode-go.js';
 export * from './node-plugin.js';
+export * from './tts-voice.js';

@@ -89,6 +89,20 @@ export const ICON_AUDIO = (
     <circle cx="18.5" cy="15" r="2.5" />
   </>
 );
+/** 文生语音(CosyVoice3):声波条(UI 稿节点面板同款) */
+export const ICON_TTS = (
+  <>
+    <path d="M4 8v8M8 5v14M12 8v8M16 6v12M20 9v6" />
+  </>
+);
+/** 视频配音:播放框 + 声波(与「镜头」的纯播放框区分) */
+export const ICON_DUB = (
+  <>
+    <rect x="2.5" y="5" width="14" height="14" rx="2" />
+    <path d="m8.5 9.5 4 2.5-4 2.5Z" />
+    <path d="M19 8v8M22 10v4" />
+  </>
+);
 export const ICON_TIMELINE = (
   <>
     <rect x="2.5" y="5" width="19" height="14" rx="2" />
@@ -133,6 +147,8 @@ export const PALETTE_ICONS: Record<string, React.ReactNode> = {
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   audio: ICON_AUDIO,
+  dub: ICON_DUB,
+  tts: ICON_TTS,
   timeline: ICON_TIMELINE,
   comfy: ICON_COMFY,
   'wf-input': ICON_WF_INPUT,
@@ -154,6 +170,8 @@ export const TYPE_ICON: Record<string, React.ReactNode> = {
   shot: ICON_SHOT,
   director: ICON_DIRECTOR,
   'audio-ref': ICON_AUDIO,
+  'video-dub': ICON_DUB,
+  'tts-gen': ICON_TTS,
   timeline: ICON_TIMELINE,
   'workflow-input': ICON_WF_INPUT,
   'workflow-output': ICON_WF_OUTPUT,
