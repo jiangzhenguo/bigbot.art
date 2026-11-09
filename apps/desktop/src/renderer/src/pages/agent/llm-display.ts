@@ -16,6 +16,8 @@ export function llmDisplayName(src: LlmSource | null | undefined, settings: AppS
       return `${src.model ?? '默认模型'} · 本地`;
     case 'openai-compatible':
       return `${src.model ?? '默认模型'} · 自定义端点`;
+    case 'cursor-cli':
+      return `${src.model ?? '默认模型'} · Cursor CLI`;
     case 'none':
       return '未配置 LLM';
   }

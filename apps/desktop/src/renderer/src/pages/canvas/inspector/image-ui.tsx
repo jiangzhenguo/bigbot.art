@@ -3,14 +3,21 @@
  * 纯展示 + 受控回调,不触碰 window.bigbotart(容器层负责接线)。
  */
 import { useEffect, useRef, useState } from 'react';
-import { ASPECTS, ratioOf } from './image-aspects';
+import {
+  ASPECTS,
+  BASE_RESOLUTIONS,
+  aspectKeyOf,
+  baseResolutionOf,
+  ratioOf,
+  resizeToBase,
+} from './image-aspects';
 import { previewUrlOf } from '../media';
 import {
   OUTPUT_SIZE_PRESETS,
   parseSizeInput,
 } from './ImageEditInspector';
 
-export { ASPECTS, ratioOf } from './image-aspects';
+export { ASPECTS, ratioOf, BASE_RESOLUTIONS, resizeToBase } from './image-aspects';
 
 export function AspectPresets({
   width,
@@ -23,16 +30,44 @@ export function AspectPresets({
   onChange: (patch: { width: number; height: number }) => void;
   disabled?: boolean;
 }) {
-  const ratio = ratioOf(width, height);
+  // 用容差匹配:换档后宽高四舍五入,精确比例会差 1px,精确匹配会让高亮突然消失
+  const ratio = aspectKeyOf(width, height);
+  const base = baseResolutionOf(width, height);
+  // 每个档位按当前画幅等比缩放后的真实尺寸(直接显示,避免「选了 2K 却不知道出多大」)
+  const previews = BASE_RESOLUTIONS.map((r) => ({ ...r, size: resizeToBase(width, height, r.longEdge) }));
   return (
     <div className="f-sec" data-od-id="field-aspect">
       <div className="f-sec-h"><span className="lbl">画幅</span></div>
+      <div className="f-row" data-od-id="field-base-resolution" style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
+        <span className="f-lbl">基础分辨率</span>
+        <div className="f-chips" style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          {previews.map((r) => (
+            <span
+              key={r.key}
+              className={`chip${base?.key === r.key ? ' on' : ''}`}
+              data-od-id={`base-resolution-${r.key}`}
+              title={`长边 ${r.longEdge}px · 等比缩放当前画幅,不改变比例`}
+              onClick={() => {
+                const size = resizeToBase(width, height, r.longEdge);
+                if (size.w !== width || size.h !== height) onChange({ width: size.w, height: size.h });
+              }}
+            >
+              {r.label}
+              <span className="small mono">{r.size.w}×{r.size.h}</span>
+            </span>
+          ))}
+        </div>
+      </div>
       <div className="aspect" style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
         {ASPECTS.map((a) => (
           <span
             key={a.key}
             className={`ap${ratio === a.key ? ' on' : ''}`}
-            onClick={() => onChange({ width: a.w, height: a.h })}
+            onClick={() => {
+              // 换画幅保持当前分辨率档:选了 2K 再切 9:16 应得 1152×2048,而不是掉回 1K
+              const size = base ? resizeToBase(a.w, a.h, base.longEdge) : { w: a.w, h: a.h };
+              onChange({ width: size.w, height: size.h });
+            }}
           >
             <span className="glyph" style={{ aspectRatio: a.key.replace(':', '/') }} />
             <span className="lbl">{a.label}</span>
@@ -45,6 +80,9 @@ export function AspectPresets({
         <span className="f-lbl">高</span>
         <input className="f-in med mono" type="number" value={height} onChange={(e) => onChange({ width, height: Number(e.target.value) || 0 })} />
         <span className="mut" style={{ fontSize: 10.5 }}>{ratio ? `· ${ratio} 已对齐` : ''}</span>
+      </div>
+      <div className="gs-sub" style={{ fontSize: 10.5 }}>
+        1K / 1.5K / 2K = <b>长边像素</b>,点选后按当前画幅等比缩放(比例不变);宽高也可直接手填
       </div>
     </div>
   );

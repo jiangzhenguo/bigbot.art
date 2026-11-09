@@ -48,8 +48,8 @@ const GROUP_LABEL: Record<GroupKey, string> = {
   lora: '加速 LoRA',
 };
 
-/** LLM 来源单选(设计稿 data-llm 的五档) */
-type LlmKey = 'lmstudio' | 'ollama' | 'pimlx' | 'openai-compat' | 'cloud';
+/** LLM 来源单选(设计稿 data-llm 的六档) */
+type LlmKey = 'lmstudio' | 'ollama' | 'pimlx' | 'openai-compat' | 'cursor-cli' | 'cloud';
 
 /** 本地运行时探测的三种来源 */
 type LocalKind = 'lmstudio' | 'ollama' | 'pimlx';
@@ -61,6 +61,7 @@ const KIND_TO_KEY: Record<LlmSource['kind'], LlmKey> = {
   ollama: 'ollama',
   'mlx-provider': 'pimlx',
   'openai-compatible': 'openai-compat',
+  'cursor-cli': 'cursor-cli',
   none: 'lmstudio',
 };
 
@@ -281,7 +282,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
   /* ---- 分组切换 ---- */
   const [group, setGroup] = useState<GroupKey>('llm');
 
-  /* ---- LLM 单选(五档) ---- */
+  /* ---- LLM 单选(六档) ---- */
   /**
    * 初始 **null = 还不知道用户选的是哪一档**,而不是「默认 LM Studio」。
    * 旧写法 `useState('lmstudio')` 会让首帧先把 LM Studio 那一行点亮,等 getSettings 回来
@@ -308,6 +309,9 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
 
   /* ---- lm-select 弹层(3 个本地来源 + compat 模型选择共用) ---- */
   const [lmPop, setLmPop] = useState<{ kind: LocalKind | 'compat'; anchor: HTMLElement } | null>(null);
+
+  /* ---- Cursor CLI(本机登录态,可选模型) ---- */
+  const [cursorModel, setCursorModel] = useState('');
 
   /* ---- OpenAI 兼容端点(测试连接 → 模型选择 → API Key 存钥匙串) ---- */
   const [compatUrl, setCompatUrl] = useState('');
@@ -553,6 +557,12 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
       .catch(() => setLlmSource(src));
   };
 
+  /** Cursor CLI 模型名:仅在当前选中时持久化,留空使用 Cursor 默认模型 */
+  const persistCursorModel = (): void => {
+    if (llm !== 'cursor-cli') return;
+    persistKind({ kind: 'cursor-cli', model: cursorModel.trim() || undefined });
+  };
+
   /** radio 直接点击:有已加载/已配置模型才持久化,否则仅选中并提示先配置 */
   const onLlmRadio = (key: LlmKey): void => {
     setLlm(key);
@@ -585,6 +595,9 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
         }
         return;
       }
+      case 'cursor-cli':
+        persistKind({ kind: 'cursor-cli', model: cursorModel.trim() || undefined });
+        return;
       case 'openai-compat':
         if (compatModel) {
           persistKind({ kind: 'openai-compatible', baseUrl: compatUrl.trim() || COMPAT_DEFAULT_URL, model: compatModel });
@@ -917,6 +930,7 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
           if (s.llm.baseUrl) setCompatUrl(s.llm.baseUrl);
           if (s.llm.model) setCompatModel(s.llm.model);
         }
+        if (s.llm?.kind === 'cursor-cli') setCursorModel(s.llm.model ?? '');
         const provs = s.cloudProviders ?? [];
         setCloudProviders(provs);
         setPvHostVals(Object.fromEntries(provs.map((p) => [p.id, p.host])));
@@ -1735,6 +1749,34 @@ export default function SettingsPage({ onNavigate, onBack, backLabel }: Settings
                       {compatHint}
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* ── Cursor CLI ── */}
+              <div className="srow" style={{ alignItems: 'flex-start' }}>
+                <span
+                  className={`radio${llm === 'cursor-cli' ? ' on' : ''}`}
+                  onClick={() => onLlmRadio('cursor-cli')}
+                />
+                <div className="grow">
+                  <b>{t('Cursor CLI')}</b>
+                  <div className="sub">{t('使用本机 cursor-agent 登录态 · 无需 API Key · 只读 CLI + BigBotArt 画布工具')}</div>
+                  <div className="row g8" style={{ marginTop: 9 }}>
+                    <span className="input-w mono">
+                      <input
+                        aria-label={t('Cursor CLI 模型名（可选）')}
+                        placeholder={t('模型名（可选，留空使用 Cursor 默认模型）')}
+                        value={cursorModel}
+                        onChange={(e) => setCursorModel(e.target.value)}
+                        onBlur={persistCursorModel}
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter') return;
+                          e.preventDefault();
+                          persistCursorModel();
+                        }}
+                      />
+                    </span>
+                  </div>
                 </div>
               </div>
 

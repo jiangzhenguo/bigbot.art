@@ -857,7 +857,7 @@ async function executeAgentChat(opts: {
     historyTokenBudget = plan.compactAt;
     logger.log(
       'info',
-      `[agent.context] ${placement} · 模型 ${ep.model} · 协议 ${ep.protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'} · 窗口 ${plan.windowTokens} · 本轮工作集 ${plan.compactAt}${loaded ? ` · 已加载 ${loaded}` : ''}`,
+      `[agent.context] ${placement} · 模型 ${ep.model || '(默认)'} · 协议 ${ep.backend === 'cursor-cli' ? 'cursor-agent --mode ask' : ep.protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'} · 窗口 ${plan.windowTokens} · 本轮工作集 ${plan.compactAt}${loaded ? ` · 已加载 ${loaded}` : ''}`,
     );
   } catch (e) {
     if (opts.auto) {

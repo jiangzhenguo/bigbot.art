@@ -84,13 +84,14 @@ export type H3Mode =
  */
 export type LlmProtocol = 'chat' | 'responses';
 
-/** LLM 来源(全局默认 + 项目级覆盖两档;设置页五档单选) */
+/** LLM 来源(全局默认 + 项目级覆盖两档;设置页六档单选) */
 export type LlmSource =
   | { kind: 'cloud'; provider: string; model?: string; protocol?: LlmProtocol } // provider = CloudProviderEntry.id
   | { kind: 'lmstudio'; model?: string }
   | { kind: 'ollama'; model?: string }
   | { kind: 'mlx-provider'; model: string }
   | { kind: 'openai-compatible'; baseUrl: string; apiKey?: string; model?: string; protocol?: LlmProtocol }
+  | { kind: 'cursor-cli'; model?: string } // 本机 cursor-agent 登录态;模型留空用 Cursor 默认
   | { kind: 'none' };
 
 /** 本地运行时发现的模型条目(仅列支持工具调用的) */

@@ -548,6 +548,8 @@ export interface ResolvedLlm {
   label: string; // 日志/报错用(不含 key)
   /** 该模型应使用的对话协议:chat = /v1/chat/completions,responses = /v1/responses */
   protocol: LlmProtocol;
+  /** 非 HTTP 后端;Cursor CLI 使用本机 cursor-agent 登录态,不解析 API Key。 */
+  backend?: 'cursor-cli';
 }
 
 /**
@@ -556,6 +558,7 @@ export interface ResolvedLlm {
  * 新增字段(protocol)时漏一处的表现是「某个入口悄悄退回 chat 协议」——正是本次要消灭的故障形态。
  */
 export function toChatLlm(ep: ResolvedLlm): LlmSource {
+  if (ep.backend === 'cursor-cli') return { kind: 'cursor-cli', model: ep.model || undefined };
   return {
     kind: 'openai-compatible',
     baseUrl: ep.baseUrl,
@@ -587,6 +590,14 @@ export async function resolveLlmEndpoint(
       }
       return { baseUrl: PIMLX_ENDPOINT, model: src.model, label: `pi-mlx(:${PIMLX_PORT})`, protocol: 'chat' };
     }
+    case 'cursor-cli':
+      return {
+        baseUrl: 'cursor-cli://local',
+        model: src.model ?? '',
+        label: 'Cursor CLI(cursor-agent)',
+        protocol: 'chat',
+        backend: 'cursor-cli',
+      };
     case 'openai-compatible':
       return {
         baseUrl: src.baseUrl,

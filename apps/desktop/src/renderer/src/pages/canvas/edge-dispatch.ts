@@ -16,7 +16,7 @@
  * 可直接单测;CanvasPage 通过 nodesReducer 的 derive-from-edges action 消费它。
  */
 import type { PromptSource } from '@bigbotart/shared';
-import { inferPromptSource, isPluginNodeKind, storyboardLinkOf } from '@bigbotart/shared';
+import { inferPromptSource, isPluginNodeKind, isStaleRefImageLock, storyboardLinkOf } from '@bigbotart/shared';
 import type { CanvasNode, Edge } from './types';
 import { pickShotSpec, IMAGE_KINDS, VIDEO_KINDS } from './connectors';
 import { SHOT_REF_ROLES } from './constants';
@@ -84,6 +84,13 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
    * ⚠️ first-frame 优先(与 h3 `--ref-image`/`--first-frame` 互斥一致)。
    */
   const refImageEdgeNodes = new Set<string>();
+  /** 每个目标节点的入边标签。用来识别「ref-image 锁已过期」:参考边拆光、只剩首帧。 */
+  const inboundLabels = new Map<string, string[]>();
+  for (const e of edges) {
+    const labels = inboundLabels.get(e.to) ?? [];
+    if (e.label) labels.push(e.label);
+    inboundLabels.set(e.to, labels);
+  }
 
   for (const e of edges) {
     const src = byId.get(e.from);
@@ -108,11 +115,15 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         // ref-image 边不误切首帧 —— h3 的 --ref-image 与 --first-frame 互斥(连接器设计 §10.4)
         const isFirstFrameEdge = e.label === 'first-frame';
         const hasFrameEdge = (fromShot || fromImage || src.kind === 'asset') && isFirstFrameEdge;
+        /* 铺节点留下的 ref-image 锁,在参考边拆光、只剩首帧之后是过期的。
+           不解开的话 frameOk 为假,静帧连在画布上却不进 refs,提交变成文生视频。 */
+        const staleRefImageLock = isStaleRefImageLock(modeRaw, modeOverridden, inboundLabels.get(e.to) ?? []);
         // 只要存在「首帧端口」入边就登记(与是否需要切换 mode 无关),供删边后收回判断
         if (hasFrameEdge) {
           frameEdgeNodes.add(e.to);
-          // 下游没显式选过模式(仍是默认文生/自动关联)时,自动切「首帧」
-          if ((modeRaw === 'text2video' || modeRaw === 'ref-image') && !modeOverridden) {
+          // 下游没显式选过模式(仍是默认文生/自动关联)时,自动切「首帧」。
+          // 过期的 ref-image 锁同样切:这不是用户手选的文生,是参考边已经不在了。
+          if (staleRefImageLock || ((modeRaw === 'text2video' || modeRaw === 'ref-image') && !modeOverridden)) {
             modePatch.set(e.to, 'first-frame');
           }
         }
@@ -131,7 +142,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         /* 用户手选了模式(modeOverride)时,该模式需要的角色不再被 refsSuppressed 挡住。
            2026-10-13:旧 × 只写停用、不删边。切到「首帧」后清晨阳台仍不出现,
            因为 first-frame 还在停用名单里,和当前模式无关。 */
-        const activeMode = modeOverridden ? modeRaw : effMode;
+        const activeMode = staleRefImageLock ? 'first-frame' : modeOverridden ? modeRaw : effMode;
         const modeRoles = new Set((SHOT_REF_ROLES[activeMode] ?? []).map((rd) => rd.role));
         const autoBlocked = (role: string) =>
           SINGLE_ROLES.includes(role) &&
@@ -452,6 +463,10 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
         else merged.push(r);
       }
       data.refs = merged;
+      // 过期的 ref-image 锁先改回首帧,下面才能按新模式放行被 × 停用的 first-frame。
+      if (isStaleRefImageLock(String(data.mode ?? ''), data.modeOverride === true, inboundLabels.get(n.id) ?? [])) {
+        data.mode = 'first-frame';
+      }
       // 手选模式需要的角色,清掉旧 × 留下的停用标记,避免「模式已切、图仍被藏」
       if (data.modeOverride === true && Array.isArray(data.refsSuppressed)) {
         const keepRoles = new Set((SHOT_REF_ROLES[String(data.mode ?? 'text2video')] ?? []).map((rd) => rd.role));
@@ -469,6 +484,7 @@ export function computeEdgeDerivations(nodes: CanvasNode[], edges: Edge[]): Edge
       if (spec && data.specOverride !== true) Object.assign(data, spec);
       // 模式:入边驱动自动切换;手动选过模式(modeOverride)则不动。
       // 优先级:first-frame 入边 > ref-image 入边 > 收回文生。
+      // 过期 ref-image 锁已在上面改回首帧,这里不再覆盖。
       if (data.modeOverride !== true) {
         if (frameEdgeNodes.has(n.id)) {
           const wantMode = modePatch.get(n.id);

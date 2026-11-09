@@ -19,6 +19,7 @@ import { ThinkTagStreamParser } from './think-stream.js';
 import { PiPlanner } from './pi-planner.js';
 import { toolDefinitions } from '@bigbotart/shared';
 import { fetchImageNeedsConfirm, userCorpusFromChat } from './web-gate.js';
+import { completeCursorCli } from './cursor-cli.js';
 
 /**
  * 最大工具调用轮数(LLM ↔ 工具往返)。
@@ -866,7 +867,12 @@ export class PiChatSession {
   }
 
   async chat(params: ChatParams, onStream?: (event: ChatStreamEvent) => void): Promise<ChatResult> {
-    const ep = this.planner['resolveEndpoint'](params.llm);
+    const cursorSource = params.llm?.kind === 'cursor-cli' ? params.llm : undefined;
+    const cursorCli = !!cursorSource;
+    const cursorModel = cursorSource?.model;
+    const ep = cursorCli
+      ? { baseUrl: 'cursor-cli://local', apiKey: undefined, modelId: cursorModel ?? 'cursor-default', remote: true, protocol: 'chat' as const }
+      : this.planner['resolveEndpoint'](params.llm);
     this.abort = new AbortController();
     const signal = this.abort.signal;
     const toolCalls: ChatResult['toolCalls'] = [];
@@ -900,7 +906,8 @@ export class PiChatSession {
       m.setProvider(provider);
       return m;
     };
-    let models = buildModels();
+    // Cursor CLI 不走 pi-ai Models;保留同一套消息循环与工具桥,只替换每轮推理调用。
+    let models = cursorCli ? null : buildModels();
 
     // 历史消息:pi-ai 的 AssistantMessage.content 必须是块数组(string 会触发 flatMap 错误)
     // 确认闸判定:上一轮挂起了敏感操作确认 → 本轮用户消息若是其中的确认类选项,放行敏感工具
@@ -1000,21 +1007,42 @@ export class PiChatSession {
       // 工具执行本身已由主进程的 tool 请求续期,不需要重复计时。
       const tick = this.onTick ? setInterval(() => this.onTick?.(round), LLM_HEARTBEAT_MS) : null;
       try {
-        const llmOptions = {
-          // 输出预算:见 LLM_MAX_TOKENS(2026-09-28 由 12000 调大到 32000)
-          maxTokens: LLM_MAX_TOKENS,
-          // Kimi k3 等端点只允许 temperature=1:撞上后不再下发该字段(走端点默认)
-          ...(dropTemperature ? {} : { temperature: 0.4 }),
-          apiKey: ep.apiKey ?? 'unused',
-          signal,
-          // OpenCode Go 强制 x-opencode-session(缺则 400 MissingSessionID);canvasId 作会话稳定 id
-          headers: withOpenCodeGoHeaders(ep.baseUrl, params.canvasId),
-        };
-        const model = models.getModel('bigbotart-llm', ep.modelId)!;
-        if (onStream && typeof models.stream === 'function') {
+        if (cursorCli) {
+          // Cursor 的协议 JSON 由适配器解包;这里只接收用户可见文本增量。
+          const cursorTextParser = onStream ? new ThinkTagStreamParser() : null;
+          const emitCursor = (channel: 'text' | 'thinking', delta: string) => {
+            if (delta && !signal.aborted) {
+              onStream?.({ kind: channel === 'text' ? 'text-delta' : 'thinking-delta', round, contentIndex: 0, delta });
+            }
+          };
+          assistant = await completeCursorCli(context, {
+            model: cursorModel,
+            signal,
+            ...(cursorTextParser ? {
+              onTextDelta: (delta: string) => {
+                for (const part of cursorTextParser.push(delta)) emitCursor(part.channel, part.delta);
+              },
+            } : {}),
+          });
+          if (cursorTextParser && !signal.aborted) {
+            for (const part of cursorTextParser.flush()) emitCursor(part.channel, part.delta);
+          }
+        } else {
+          const llmOptions = {
+            // 输出预算:见 LLM_MAX_TOKENS(2026-09-28 由 12000 调大到 32000)
+            maxTokens: LLM_MAX_TOKENS,
+            // Kimi k3 等端点只允许 temperature=1:撞上后不再下发该字段(走端点默认)
+            ...(dropTemperature ? {} : { temperature: 0.4 }),
+            apiKey: ep.apiKey ?? 'unused',
+            signal,
+            // OpenCode Go 强制 x-opencode-session(缺则 400 MissingSessionID);canvasId 作会话稳定 id
+            headers: withOpenCodeGoHeaders(ep.baseUrl, params.canvasId),
+          };
+          const model = models!.getModel('bigbotart-llm', ep.modelId)!;
+          if (onStream && typeof models!.stream === 'function') {
           // pi-ai 的 complete() 本身就是 stream().result();这里改为显式消费同一流,
           // 把增量送到 UI,同时仍以最终 AssistantMessage 跑工具与所有诚实性闸门。
-          const stream = models.stream(model, context, llmOptions);
+          const stream = models!.stream(model, context, llmOptions);
           const textParsers = new Map<number, ThinkTagStreamParser>();
           const emit = (channel: 'text' | 'thinking', contentIndex: number, delta: string) => {
             if (delta) onStream({ kind: channel === 'text' ? 'text-delta' : 'thinking-delta', round, contentIndex, delta });
@@ -1049,7 +1077,8 @@ export class PiChatSession {
           }
         } else {
           // 无监听器/旧测试替身的兼容路径;真实 worker 总是走上面的流式分支。
-          assistant = await models.complete(model, context, llmOptions);
+            assistant = await models!.complete(model, context, llmOptions);
+          }
         }
       } catch (e) {
         if (signal.aborted) return { reply: '', toolCalls, aborted: true };

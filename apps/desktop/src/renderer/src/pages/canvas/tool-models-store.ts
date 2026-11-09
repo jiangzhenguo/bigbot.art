@@ -55,13 +55,17 @@ export async function ensureToolModels(): Promise<ToolModelBinding | undefined> 
  * 返回值语义与 getToolModelsSync 相同(undefined = 未加载 / 未配置 → 走内置默认)。
  */
 export function useToolModels(): ToolModelBinding | undefined {
+  const snapshot = () => cache;
   return useSyncExternalStore(
     (cb) => {
       listeners.add(cb);
       void ensureToolModels(); // 幂等:已加载时立即返回,不发重复 IPC
       return () => listeners.delete(cb);
     },
-    () => cache,
+    snapshot,
+    // SSR / renderToStaticMarkup(节点卡渲染测试)需要第三个参数,缺了会直接抛
+    // "Missing getServerSnapshot"。服务端快照 = 当前缓存(与客户端读同一份)。
+    snapshot,
   );
 }
 

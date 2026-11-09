@@ -135,6 +135,12 @@ export function useAgentChat({ projectId, canvasId, onCanvasMutated, toastMsg, f
           });
       });
       const s = await window.bigbotart.getSettings();
+      const cursorModel = s.llm?.kind === 'cursor-cli' ? s.llm.model : undefined;
+      opts.push({
+        name: `${cursorModel ?? '默认模型'} · Cursor CLI`,
+        sub: '本机 cursor-agent 登录态 · 无需 API Key',
+        source: { kind: 'cursor-cli', model: cursorModel },
+      });
       for (const p of s.cloudProviders ?? []) {
         if (!p.enabled || !p.models.length) continue;
         p.models.forEach((mid) =>

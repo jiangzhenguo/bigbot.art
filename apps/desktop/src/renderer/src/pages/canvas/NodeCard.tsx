@@ -141,7 +141,16 @@ function NodeCardInner({
         >
           {TYPE_ICON[n.kind ?? 'plain'] ?? (isPluginNodeKind(n.kind) ? ICON_COMFY : TYPE_ICON.plain)}
         </svg>
-        {ameta?.name || n.title}
+        {(() => {
+          /* 标题 = 资产名(asset 节点)或节点标题。长串(实测有 64 位 sha256 资产名)
+             必须在**可压缩容器**里省略,否则会顶开卡片:见 CSS `.nh-t` 的 min-width:0。 */
+          const headText = ameta?.name || n.title;
+          return (
+            <span className="nh-t" data-od-id="node-title" title={headText}>
+              {headText}
+            </span>
+          );
+        })()}
         {/* 所属分组徽标(点按可选中整组) */}
         {group ? (
           <span className="st group-tag" data-od-id="node-group-tag" title={`属于「${group.name}」`}>

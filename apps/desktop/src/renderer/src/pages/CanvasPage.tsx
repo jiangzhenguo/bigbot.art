@@ -4349,6 +4349,16 @@ function CanvasPageContent({
             inheritedFrom = up?.title ?? upId ?? null;
           }
         }
+        // 参考图模式却没有任何参考图 ⇒ 拒绝,不退化成文生。
+        // 静帧已改连首帧时,派发会把过期的 ref-image 锁改回首帧,走上面的首帧分支;
+        // 走到这里说明参考图确实没接上(2026-11-09 跳舞项目:提示词写 Picture 1,命令里没图)。
+        if (
+          shotMode === 'ref-image' &&
+          !references.some((r) => (r as { role?: string }).role === 'ref-image')
+        ) {
+          toastMsg('当前是参考图模式,但没有可用的参考图,已取消本次运行。请连上参考图;若改用静帧,把静帧以首帧连上后再生成');
+          return;
+        }
         // 接续意图明确(首帧/首尾帧模式)但拿不到首帧 ⇒ 明确报错,不退化成文生
         const firstResolved = references.some((r) => (r as { role?: string })?.role === 'first-frame');
         if (wantsFrameAnchor && !hasFirst && !firstResolved) {

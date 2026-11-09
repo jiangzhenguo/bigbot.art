@@ -154,6 +154,35 @@ describe('出边派发 · crop 产物 → 下游', () => {
     expect(refs).toEqual([]);
   });
 
+  it('过期的 ref-image 锁:参考边已拆、只剩静帧首帧时,改回首帧并注入静帧', () => {
+    const nodes = [
+      node('still', 'image-edit', { resultPath: '/tmp/out/still.png' }),
+      node('s1', 'shot', { mode: 'ref-image', modeOverride: true, refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'still', to: 's1', cls: '', label: 'first-frame' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const data = nextNodes.find((n) => n.id === 's1')!.data as {
+      mode: string;
+      modeOverride?: boolean;
+      refs: Array<{ path?: string; role: string }>;
+    };
+    expect(data.mode).toBe('first-frame');
+    expect(data.modeOverride).toBe(true);
+    expect(data.refs).toContainEqual({ path: '/tmp/out/still.png', role: 'first-frame', auto: true });
+  });
+
+  it('ref-image 锁还连着参考图时不改成首帧', () => {
+    const nodes = [
+      node('card', 'asset', { assetId: 'card-1', mediaType: 'image' }),
+      node('s1', 'shot', { mode: 'ref-image', modeOverride: true, refs: [] }),
+    ];
+    const edges: Edge[] = [{ from: 'card', to: 's1', cls: '', label: 'ref-image' }];
+    const { nextNodes } = computeEdgeDerivations(nodes, edges);
+    const data = nextNodes.find((n) => n.id === 's1')!.data as { mode: string; refs: Array<{ assetId?: string; role: string }> };
+    expect(data.mode).toBe('ref-image');
+    expect(data.refs).toContainEqual({ assetId: 'card-1', role: 'ref-image', auto: true });
+  });
+
   it('modeOverride=true 时 ref-image 边不改 mode', () => {
     const nodes = [
       node('g1', 'image-gen', { resultPath: '/tmp/out/g1.png' }),

@@ -307,9 +307,12 @@ body{background:radial-gradient(1100px 720px at 92% -10%, color-mix(in oklab,var
 }
 .pg-canvas .nh{display:flex;align-items:center;gap:7px;padding:8px 11px;border-bottom:1px solid var(--border-soft);font-weight:600;font-size:var(--text-xs);background:var(--surface);border-radius:11px 11px 0 0;cursor:grab;user-select:none}
 .pg-canvas .nh svg{width:13px;height:13px;color:var(--fg-2);flex:none}
-.pg-canvas .nh .st{margin-left:auto}
+/* 标题可压缩并省略:资产名可能是 64 位 sha256(实测图片资产),不省略会溢出卡片边缘。
+   min-width:0 是关键 —— flex 子项默认 min-width:auto,长串会顶开容器。 */
+.pg-canvas .nh-t{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pg-canvas .nh .st{margin-left:auto;flex:none}
 .pg-canvas .nb{padding:10px 11px}
-.pg-canvas .nmeta{font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.45}
+.pg-canvas .nmeta{font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.45;overflow-wrap:anywhere;word-break:break-word}
 .pg-canvas .nthumb{border-radius:var(--radius-sm);overflow:hidden;position:relative;background:var(--surface)}
 .img-fail{width:100%;aspect-ratio:16/9;min-height:64px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:var(--surface-warm);color:var(--meta);font-size:11px;line-height:1.3;flex:none;text-align:center}
 .img-fail svg{width:22px;height:22px;flex:none}

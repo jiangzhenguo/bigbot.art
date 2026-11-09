@@ -176,6 +176,11 @@ export class PiPlanner {
 
   /** 解析本次调用的端点:显式 remote > env remote > LM Studio */
   private resolveEndpoint(llm?: LlmSource): LlmEndpoint {
+    if (llm?.kind === 'cursor-cli') {
+      // 单独的画布规划暂不经过 Cursor CLI;不可达探测会让既有规划路径明确走确定性兜底，
+      // 不能静默落到 LM Studio 或 env 里的另一家模型。
+      return { baseUrl: 'cursor-cli://local', modelId: llm.model ?? 'cursor-default', remote: true, protocol: 'chat' };
+    }
     if (llm?.kind === 'openai-compatible') {
       return {
         baseUrl: llm.baseUrl,

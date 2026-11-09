@@ -40,6 +40,7 @@ import {
   PIECE_LABEL_RE,
   deriveShotRefsFromEdges,
   pendingImageUpstreamLabels,
+  isStaleRefImageLock,
   validateRefsForSubmit,
   validateTodoList,
   formatTodoResult,
@@ -507,6 +508,14 @@ export function applyShotModeSyncOnConnect(
 ): boolean {
   if (node.kind !== 'shot') return false;
   const d = (node.data ?? {}) as Record<string, unknown>;
+  const inbound = edges.filter((e) => e.target === node.id).map((e) => e.label ?? '');
+  /* 过期的 ref-image 锁(跳舞项目):参考边已拆、静帧已改连首帧。
+     这把锁是铺节点留下的,不代表用户还要参考图模式。改回首帧后锁保留。 */
+  if (isStaleRefImageLock(String(d.mode ?? ''), d.modeOverride === true, inbound)) {
+    node.data = { ...d, mode: 'first-frame' } as CanvasNode['data'];
+    node.updatedAt = new Date().toISOString();
+    return true;
+  }
   if (d.modeOverride === true) return false;
   const hasFirst = edges.some((e) => e.target === node.id && e.label === 'first-frame');
   const hasRef = edges.some((e) => e.target === node.id && e.label === 'ref-image') || newLabel === 'ref-image';
@@ -540,6 +549,21 @@ export function healShotModeFromRefs(
   else if (!hasFF && hasRI && (mode === 'text2video' || mode === 'first-frame')) next = 'ref-image';
   if (next === mode) return null;
   return { ...data, mode: next };
+}
+
+/**
+ * 提交前解开过期的 ref-image 锁。`healShotModeFromRefs` 见 modeOverride 就停,
+ * 那条锁正是「静帧已改连首帧、图却没进命令」的原因。只在有已解析的首帧、
+ * 且没有任何全参考时改 mode,不碰用户手选的文生。
+ */
+export function healStaleRefImageLock(
+  data: Record<string, unknown>,
+  refs: Array<{ role: string }>,
+): Record<string, unknown> | null {
+  if (!isStaleRefImageLock(String(data.mode ?? ''), data.modeOverride === true, refs.map((r) => r.role))) {
+    return null;
+  }
+  return { ...data, mode: 'first-frame' };
 }
 
 export function resolveRefImagePaths(
@@ -1976,8 +2000,9 @@ export class ToolHandlers {
           Array.isArray(d.refs) ? (d.refs as DerivedRef[]) : undefined,
           Array.isArray(d.refsSuppressed) ? (d.refsSuppressed as string[]) : undefined,
         );
-        // 愈合存量「有 ref-image 边但 mode 仍文生」(测试技能2);写回节点让 UI/Take 一致
-        const healed = healShotModeFromRefs(d, refs);
+        // 愈合存量「有 ref-image 边但 mode 仍文生」(测试技能2),以及过期的 ref-image 锁
+        // (参考边已拆、静帧以首帧连入)。写回节点让 UI/Take 与真正提交的模式一致。
+        const healed = healShotModeFromRefs(d, refs) ?? healStaleRefImageLock(d, refs);
         if (healed) {
           node.data = healed as CanvasNode['data'];
           node.updatedAt = new Date().toISOString();

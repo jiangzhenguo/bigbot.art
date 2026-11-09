@@ -559,6 +559,31 @@ export function deriveAudioRefSource(
 
 /* ───────────────────────── D:提交前防呆 ───────────────────────── */
 
+/**
+ * 铺节点把镜头锁成 ref-image(`modeOverride`)。姿势对不上角色卡时会拆掉全部
+ * 全参考边、改连静帧 `first-frame`,但这把锁不跟着走:派发认为模式仍是参考图,
+ * 首帧图不进 `refs`,提交退化成文生视频(2026-11-09「跳舞」:提示词写着 Picture 1,
+ * 命令里一张图都没有)。
+ *
+ * 锁过期的判据:模式是 ref-image、锁还在、入边里有首帧、已经没有任何全参考
+ * (ref-image / ref-video / ref-audio)。这时应改成 first-frame,锁保留
+ * (新模式同样是显式的)。用户手选的文生、以及参考图还连着的镜头,不在此列。
+ */
+export function isStaleRefImageLock(
+  mode: string | undefined,
+  modeOverride: boolean,
+  rolesOrLabels: Iterable<string>,
+): boolean {
+  if (mode !== 'ref-image' || !modeOverride) return false;
+  let hasFirst = false;
+  let hasFull = false;
+  for (const role of rolesOrLabels) {
+    if (role === 'first-frame') hasFirst = true;
+    if (role === 'ref-image' || role === 'ref-video' || role === 'ref-audio') hasFull = true;
+  }
+  return hasFirst && !hasFull;
+}
+
 /** 提交前校验 refs 引用列表:单值端口多源冲突 / 模式一致性(W004) */
 export function validateRefsForSubmit(
   nodeId: string,
@@ -608,8 +633,10 @@ export function validateRefsForSubmit(
     if (mode === 'ref-image' && !has('ref-image')) {
       out.push({
         code: 'ref-missing',
-        severity: 'warn',
-        message: `${nodeId} mode=ref-image 但缺少 ref-image 参考`,
+        severity: 'error',
+        message:
+          `${nodeId} mode=ref-image 但没有 ref-image 参考,拒绝退化为文生视频。` +
+          `请连上参考图;若已改用静帧,把静帧以 first-frame 连到本镜(参考边都拆掉后模式会改回首帧),再 h3.write_prompt。`,
       });
     }
     if (mode === 'ref-video' && !has('ref-video')) {

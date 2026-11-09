@@ -44,6 +44,20 @@ interface NodeBodyProps {
   assetMeta?: Record<string, { name: string; kind: string; categoryName?: string; src: string | null }>;
 }
 
+/**
+ * 长名称中部省略(保留头尾可辨识片段)。
+ *
+ * 为什么需要:资产的 `name` 可能就是文件名,而 Agent 导入的图片/视频常是
+ * 64 位 sha256(实测 `4003b0b0…66a7a` 顶满整张卡片)。整串渲染既撑破卡片、
+ * 又完全不可读;截断后至少能认出「是哪个文件」,完整值放在 title 里悬停可查。
+ */
+function clipName(s: string, max = 20): string {
+  if (s.length <= max) return s;
+  const head = Math.ceil((max - 1) * 0.65);
+  const tail = max - 1 - head;
+  return `${s.slice(0, head)}…${tail > 0 ? s.slice(-tail) : ''}`;
+}
+
 export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBodyProps) {
   const { definitionFor } = useNodePlugins();
   const d = (n.data ?? {}) as Record<string, unknown>;
@@ -198,8 +212,8 @@ export function NodeBody({ node: n, nodes, takeResults, assetMeta = {} }: NodeBo
                 📄
               </div>
             )}
-            <div className="nmeta mono">
-              {am.name} · {am.kind}
+            <div className="nmeta mono" title={am.name}>
+              {clipName(am.name)} · {am.kind}
               {am.categoryName ? ` · ${am.categoryName}` : ''}
             </div>
           </div>

@@ -14,6 +14,7 @@ import readline from 'node:readline';
 import type { AgentRequest, AgentResponse, ChatStreamNotification, ToolCallRequest, ToolCallResponse } from './protocol.js';
 import { PiPlanner } from './pi-planner.js';
 import { PiChatSession } from './pi-chat.js';
+import { cancelAllCursorCli } from './cursor-cli.js';
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const startedAt = new Date().toISOString();
@@ -134,4 +135,7 @@ rl.on('line', async (line) => {
   }
 });
 
-process.on('SIGTERM', () => process.exit(0));
+process.on('SIGTERM', () => {
+  cancelAllCursorCli();
+  process.exit(0);
+});

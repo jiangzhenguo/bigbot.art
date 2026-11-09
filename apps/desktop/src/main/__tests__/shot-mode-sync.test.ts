@@ -9,6 +9,7 @@ import type { CanvasEdge, CanvasNode } from '@bigbotart/shared';
 import {
   applyShotModeSyncOnConnect,
   healShotModeFromRefs,
+  healStaleRefImageLock,
   syncShotModeForEdgeLabel,
 } from '../tool-handlers';
 
@@ -62,6 +63,21 @@ describe('applyShotModeSyncOnConnect', () => {
     const n = { ...shot({}), kind: 'image-gen' } as CanvasNode;
     expect(applyShotModeSyncOnConnect(n, [], 'ref-image')).toBe(false);
   });
+
+  it('过期的 ref-image 锁:只剩 first-frame 时改回首帧', () => {
+    const n = shot({ mode: 'ref-image', modeOverride: true });
+    const edges: CanvasEdge[] = [{ id: 'e1', source: 'still', target: 's1', label: 'first-frame' }];
+    expect(applyShotModeSyncOnConnect(n, edges, 'first-frame')).toBe(true);
+    expect((n.data as { mode: string; modeOverride?: boolean }).mode).toBe('first-frame');
+    expect((n.data as { modeOverride?: boolean }).modeOverride).toBe(true);
+  });
+
+  it('ref-image 锁还连着参考图时不改', () => {
+    const n = shot({ mode: 'ref-image', modeOverride: true });
+    const edges: CanvasEdge[] = [{ id: 'e1', source: 'card', target: 's1', label: 'ref-image' }];
+    expect(applyShotModeSyncOnConnect(n, edges, 'ref-image')).toBe(false);
+    expect((n.data as { mode: string }).mode).toBe('ref-image');
+  });
 });
 
 describe('healShotModeFromRefs', () => {
@@ -85,6 +101,26 @@ describe('healShotModeFromRefs', () => {
   it('modeOverride 不愈合', () => {
     expect(
       healShotModeFromRefs({ mode: 'text2video', modeOverride: true }, [{ role: 'ref-image' }]),
+    ).toBeNull();
+  });
+});
+
+describe('healStaleRefImageLock', () => {
+  it('锁住的 ref-image 只有首帧时改回 first-frame', () => {
+    const next = healStaleRefImageLock(
+      { mode: 'ref-image', modeOverride: true },
+      [{ role: 'first-frame' }],
+    );
+    expect(next?.mode).toBe('first-frame');
+    expect(next?.modeOverride).toBe(true);
+  });
+
+  it('还有 ref-image 或用户锁的是文生时不动', () => {
+    expect(
+      healStaleRefImageLock({ mode: 'ref-image', modeOverride: true }, [{ role: 'ref-image' }]),
+    ).toBeNull();
+    expect(
+      healStaleRefImageLock({ mode: 'text2video', modeOverride: true }, [{ role: 'first-frame' }]),
     ).toBeNull();
   });
 });

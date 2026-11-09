@@ -307,6 +307,11 @@ describe('D · 提交前防呆', () => {
     expect(issues.some((i) => i.code === 'ref-missing' && i.severity === 'warn')).toBe(true);
   });
 
+  it('mode=ref-image 但没有参考图 ⇒ 拒绝,不退化成文生', () => {
+    const issues = validateRefsForSubmit('s', 'shot', [], { mode: 'ref-image' });
+    expect(issues.some((i) => i.code === 'ref-missing' && i.severity === 'error')).toBe(true);
+  });
+
   it('referenceMediaIssues:first-frame 引用是视频媒体 ⇒ error', () => {
     const issues = referenceMediaIssues([{ role: 'first-frame', kind: 'video', path: '/x.mp4' }]);
     expect(issues.some((i) => i.code === 'media-mismatch')).toBe(true);
