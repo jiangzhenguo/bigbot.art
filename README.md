@@ -12,9 +12,9 @@ Electron desktop app for Apple Silicon. An agent lays out shots and images on an
 
 <!-- AI 可读摘要开始 / AI-READABLE SUMMARY -->
 
-> **AI 摘要**：BigBotArt 是一款本地优先（local-first）的 macOS 无限画布 AI 视频与图片生成 Agent 应用（Electron + TypeScript，面向 Apple Silicon）。用户输入一句话需求、图或文档，Agent 在无限画布上拆出分镜、镜头与图片节点并逐个执行，用本机引擎 h3.c（MiniMax-H3 权重约 144GB，Metal 推理）生成带音轨的镜头级视频，用 mlxgen（MLX）做图片生成与编辑，用 ffmpeg 剪辑并导出。项目、画布、Take 与素材只写入 `~/.bigbotart`，素材不上传云端，无账号、无订阅。运行要求：Apple Silicon Mac、Node.js ≥ 22、pnpm、ffmpeg；模型可后装，缺失时应用以 dry-run 占位运行。许可证 MIT。
+> **AI 摘要**：BigBotArt 是一款本地优先（local-first）的 macOS 无限画布 AI 视频与图片生成 Agent 应用（Electron + TypeScript，面向 Apple Silicon）。用户输入一句话需求、图或文档，Agent 在无限画布上拆出分镜、镜头与图片节点并逐个执行，用本机引擎 h3.c（MiniMax-H3 权重约 144GB，Metal 推理）生成带音轨的镜头级视频，用 mlxgen（MLX）做图片生成与编辑，用 ffmpeg 剪辑并导出。旁白可以用 CosyVoice3 克隆音色或 Qwen3-TTS 文字设计音色，再配进成片；节点面板还可以安装本地插件。Agent 对话可走 LM Studio、OpenAI 兼容端点，或本机已登录的 Cursor CLI。项目、画布、Take 与素材只写入 `~/.bigbotart`，素材不上传云端，无账号、无订阅。运行要求：Apple Silicon Mac、Node.js ≥ 22、pnpm、ffmpeg；模型可后装，缺失时应用以 dry-run 占位运行。许可证 MIT。
 >
-> **AI Summary (EN)**: BigBotArt is a local-first infinite-canvas agent app for macOS (Electron + TypeScript, Apple Silicon) that turns a one-sentence brief into editable, re-runnable, deliverable video and image projects. The agent lays out storyboard, shot, and image nodes on the canvas and executes them on local engines — h3.c (MiniMax-H3 weights, ~144GB, Metal) for shot-level video with audio, mlxgen (MLX) for image generation and editing, and ffmpeg for editing and export. Projects, canvases, takes, and assets stay on your machine under `~/.bigbotart`; nothing is uploaded to a cloud, no account, no subscription. Requirements: an Apple Silicon Mac, Node.js ≥ 22, pnpm, and ffmpeg; models are optional at install time (the app runs in dry-run mode without them). Licensed under MIT.
+> **AI Summary (EN)**: BigBotArt is a local-first infinite-canvas agent app for macOS (Electron + TypeScript, Apple Silicon) that turns a one-sentence brief into editable, re-runnable, deliverable video and image projects. The agent lays out storyboard, shot, and image nodes on the canvas and executes them on local engines — h3.c (MiniMax-H3 weights, ~144GB, Metal) for shot-level video with audio, mlxgen (MLX) for image generation and editing, and ffmpeg for editing and export. Narration can clone a reference voice (CosyVoice3) or design one from a text description (Qwen3-TTS), then dub it onto a finished shot. Extra node types install as local plugins. Agent chat can use LM Studio, any OpenAI-compatible endpoint, or a signed-in local Cursor CLI. Projects, canvases, takes, and assets stay on your machine under `~/.bigbotart`; nothing is uploaded to a cloud, no account, no subscription. Requirements: an Apple Silicon Mac, Node.js ≥ 22, pnpm, and ffmpeg; models are optional at install time (the app runs in dry-run mode without them). Licensed under MIT.
 >
 > 官网 https://www.bigbot.art ・ 下载与更新日志 https://github.com/jiangzhenguo/bigbot.art/releases ・ 产品文档 [`docs/`](docs/) ・ AI 索引 [`llms.txt`](llms.txt)
 
@@ -36,7 +36,25 @@ Electron desktop app for Apple Silicon. An agent lays out shots and images on an
 | **技能** | 把一套做法存成技能。换主题时沿用同一套流程，只改内容。 |
 | **项目可以搬走** | 导出 `.bba` 项目包（画布、对话记忆、用户素材）。生成产物不打包，换机后按参数重跑。 |
 
-节点面板里现在能用的类型：提示词 / 文档、分镜表、资产、图片生成、图片编辑、图片增强、视频增强、裁切、拼接、拆分、镜头、视频取帧、音频参考、时间线。
+节点面板里现在能用的类型：提示词 / 文档、分镜表、资产、图片生成、图片编辑、图片增强、视频增强、裁切、拼接、拆分、镜头、视频取帧、音频参考、视频配音、文生语音、时间线。安装了节点插件之后，插件节点会出现在同一块面板里。
+
+## 新能力
+
+### 旁白和配音
+
+画布上有两种声音节点。**文生语音**把一段文字念成 wav，可以接到镜头的音频参考，也可以接到另一条配音的音色槽。**视频配音**在已有成片上换掉原声，或把旁白叠上去；画面直接拷贝，不重新编码。
+
+音色有两条路。给一段参考人声，用 CosyVoice3 克隆；用文字描述想要的声音，走 Qwen3-TTS，不必先录音。还没指定音色时，会先用引擎自带的短示例音出声，之后再换成自己的。两个模型都在设置页「模型下载」里准备。包没就绪时，任务会写明缺什么。
+
+### 节点插件
+
+内置节点不够用时，在设置里安装一个本地插件目录。应用读取并校验 `manifest.json`，把插件复制进数据目录；源文件夹保持原样。装好之后，插件节点和内置节点一样可以连线、运行、留下 Take，并把产物写回画布。
+
+仓库里带了两个示例，放在 [`examples/node-plugins/`](examples/node-plugins/)：姿势选择（在缩略图里点一个姿势，生成参考图）、从视频抽出音轨。写法见 [节点插件指南](docs/节点插件-使用与开发指南.md)。
+
+### 用 Cursor 登录态对话
+
+Agent 对话可以走本机的 Cursor CLI（`cursor-agent`），用的是这台机器上已经登录的 Cursor 账号，不必再配一把 API Key。在设置里选中 Cursor CLI，再指定一个模型；留空就用 Cursor 的默认模型。BigBotArt 自己的画布工具仍在本应用里执行。
 
 ## 界面
 
@@ -73,7 +91,7 @@ Electron desktop app for Apple Silicon. An agent lays out shots and images on an
 | ffmpeg | 占位视频、裁切、拼接、拆分、抽帧、时间线导出 |
 | [h3.c](https://github.com/antirez/h3) + MiniMax-H3 权重 | 真实出视频。模型约 144GB，预览档也要一两分钟 |
 | `mlxgen`（安装 `mlx-gen-jzg`，不要装上游 `mlx-gen`） | 真实出图、编辑、超分。安装见 [图片引擎文档](docs/mlxgen-图片引擎-安装与模型管理.md) |
-| LM Studio，或任意 OpenAI 兼容端点 | Agent 对话。配了远端就用远端，否则回退本地 `127.0.0.1:1234`，都不可达时用模板拆镜 |
+| LM Studio、任意 OpenAI 兼容端点，或本机 Cursor CLI | Agent 对话。可以走远端端点、本地 `127.0.0.1:1234`，或已登录的 `cursor-agent`。都不可达时用模板拆镜 |
 
 没有模型也能打开应用：dry-run 只构造命令并落占位结果，用来看界面和走流程。
 
@@ -114,6 +132,8 @@ mock Provider 用 ffmpeg 生成带音轨的占位 MP4，不需要模型，适合
 | 文档 | 内容 |
 |---|---|
 | [图片引擎](docs/mlxgen-图片引擎-安装与模型管理.md) | mlxgen 安装、模型下载与本地目录 |
+| [语音与配音](docs/CosyVoice3语音合成与视频配音-产品设计与技术方案.md) | 文生语音、视频配音、克隆音色与文字设计音色 |
+| [节点插件](docs/节点插件-使用与开发指南.md) | 安装插件、写 manifest、示例节点 |
 | [技能怎么写](docs/Agent技能文档-撰写指南与模板.md) | 给 Agent 的操作手册 |
 | [AGENTS.md](AGENTS.md) | 给人和编码代理的仓库约定 |
 
